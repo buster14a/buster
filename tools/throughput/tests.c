@@ -1908,7 +1908,7 @@ static void test_retirement_records(char const* root)
     char const* objects[] = {output};
     CHECK(tp_retirement_batch_output_digest(objects, 1, compiler_output));
     TpRetirementBatchInput batch_input = {"tests/native-execution-1.c", "ok", "driver.none",
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", output, "native-execution-1.o", 1};
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", output, "native-execution-1.o", 1, 6};
     TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", &batch_input, 1, 0};
     size_t metrics_capacity = 1u << 14;
     char* metrics = (char*)malloc(metrics_capacity);
@@ -1925,17 +1925,19 @@ static void test_retirement_records(char const* root)
         process.wall_seconds = (double)interval / 1000000000.0;
         TpRetirementOutput identities = {invocation.kind ? output : executable, command,
             invocation.kind ? output : compiler_output, NULL, 0, 0};
-        TpRetirementMemberSample member = {interval, 65536};
+        /* A distinct arena value per batch keeps every metrics artifact unique. */
+        TpRetirementMemberSample member = {interval, 65536 + invocation.sequence, 6};
         char metrics_digest[65];
         int batch = !invocation.kind && invocation.group == 1;
         if (batch)
         {
-            TestMetricsInput timing = {0, interval, 65536};
+            TestMetricsInput timing = {0, interval, 65536 + invocation.sequence};
             size_t size = test_metrics_render(metrics, metrics_capacity, &contract, interval, &timing,
                                               TEST_METRICS_VALID);
             TpRetirementMemberSample checked;
             CHECK(size && tp_retirement_metrics_check((unsigned char const*)metrics, size, &contract, interval,
-                                                      &checked, 1) && checked.interval_ns == interval);
+                                                      &checked, 1) && checked.interval_ns == interval &&
+                  checked.row == 6);
             Sha256 hash;
             sha256_init(&hash);
             sha256_add(&hash, metrics, (u64)size);

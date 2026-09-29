@@ -92,7 +92,7 @@ static void test_sample_close(TpSampleTest* test)
 enum
 {
     TEST_SAMPLE_VALID, TEST_SAMPLE_WRONG_METRICS, TEST_SAMPLE_MEMBER_COUNT, TEST_SAMPLE_MEMBER_OVERRUN,
-    TEST_SAMPLE_MEMBER_MEMORY
+    TEST_SAMPLE_MEMBER_MEMORY, TEST_SAMPLE_MEMBER_ROW
 };
 
 /* One synthetic invocation. An object batch reports each member's interval
@@ -116,10 +116,12 @@ static int test_sample_observe(TpSampleTest* test, int bypass, unsigned mode)
         TpRetirementMemberSample members[TP_SAMPLE_TEST_OBJECT_MEMBERS + 1];
         unsigned count = object ? group->count : 0;
         for (unsigned i = 0; i < count; ++i)
-            members[i] = (TpRetirementMemberSample){elapsed / (count + 1) - i, 65536 * (i + 1) + invocation.variant};
+            members[i] = (TpRetirementMemberSample){elapsed / (count + 1) - i, 65536 * (i + 1) + invocation.variant,
+                test->rows[test->members[group->first + i]].id};
         if (object && mode == TEST_SAMPLE_MEMBER_COUNT) --count;
         if (object && mode == TEST_SAMPLE_MEMBER_OVERRUN) members[0].interval_ns = elapsed + 1;
         if (object && mode == TEST_SAMPLE_MEMBER_MEMORY) members[0].peak_memory_bytes = 0;
+        if (object && mode == TEST_SAMPLE_MEMBER_ROW) members[0].row = members[count - 1].row + 1;
         int metrics = object != (mode == TEST_SAMPLE_WRONG_METRICS && !invocation.kind);
         TpRetirementOutput output = {hash, hash, hash, metrics ? hash : NULL, metrics ? 1000 : 0, 0};
         ok = bypass ? tp_retirement_transcript_append(&test->transcript, &observed, &process, &output) :
@@ -394,7 +396,7 @@ static void test_retirement_samples(char const* root)
         if (rows_file) CHECK(fclose(rows_file) == 0);
         if (batch_file) CHECK(fclose(batch_file) == 0);
         test_sample_close(test);
-        for (unsigned failure = 0; failure < 23; ++failure)
+        for (unsigned failure = 0; failure < 24; ++failure)
         {
             CHECK(test_sample_open(test, 3));
             TpRetirementShard shard = {0}, manifest = {0};
@@ -417,7 +419,8 @@ static void test_retirement_samples(char const* root)
                 /* The first object batch is group 1's first warmup. */
                 while (test_sample_observe(test, 0, TEST_SAMPLE_VALID) && test->execution.sequence < 4) {}
                 unsigned mode = failure == 19 ? TEST_SAMPLE_MEMBER_COUNT : failure == 20 ?
-                    TEST_SAMPLE_MEMBER_OVERRUN : failure == 21 ? TEST_SAMPLE_MEMBER_MEMORY : TEST_SAMPLE_WRONG_METRICS;
+                    TEST_SAMPLE_MEMBER_OVERRUN : failure == 21 ? TEST_SAMPLE_MEMBER_MEMORY : failure == 23 ?
+                    TEST_SAMPLE_MEMBER_ROW : TEST_SAMPLE_WRONG_METRICS;
                 CHECK(test->execution.sequence == 4 && !test_sample_observe(test, 0, mode));
                 CHECK(test->execution.sequence == 4);
             }

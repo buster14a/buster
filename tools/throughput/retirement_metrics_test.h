@@ -23,7 +23,7 @@ enum
     TEST_METRICS_TRAILING, TEST_METRICS_NO_NEWLINE, TEST_METRICS_WALL, TEST_METRICS_ARENA,
     TEST_METRICS_MEASURED, TEST_METRICS_NOT_RUN, TEST_METRICS_ACTION, TEST_METRICS_SCHEMA,
     TEST_METRICS_DOUBLE_SPACE, TEST_METRICS_TAG, TEST_METRICS_COUNT_MISMATCH, TEST_METRICS_DIGEST_WORD,
-    TEST_METRICS_JOBS, TEST_METRICS_FUNCTION_SIZES,
+    TEST_METRICS_JOBS, TEST_METRICS_FUNCTION_SIZES, TEST_METRICS_PREFIXED_PATH, TEST_METRICS_PARENT_PATH,
     TEST_METRICS_MUTATIONS
 };
 
@@ -100,8 +100,11 @@ static size_t test_metrics_render(char* bytes, size_t capacity, TpRetirementBatc
         if (mutation == TEST_METRICS_OVERLAP && i == 1) start = inputs[0].end_ns - 1;
         uint64_t total = end - start + (mutation == TEST_METRICS_TOTAL && !i ? 1 : 0);
         char path[1024];
-        snprintf(path, sizeof(path), "%s%s", mutation == TEST_METRICS_PATH && !i ? "elsewhere/" : "/checkout/",
-                 mutation == TEST_METRICS_PATH && !i ? "other.c" : input->fixture);
+        /* The exact fixture path; a prefix, a `..` detour or another file is rejected. */
+        snprintf(path, sizeof(path), "%s%s",
+                 !i && mutation == TEST_METRICS_PREFIXED_PATH ? "/checkout/" :
+                 !i && mutation == TEST_METRICS_PARENT_PATH ? "src/../" : "",
+                 !i && mutation == TEST_METRICS_PATH ? "elsewhere/other.c" : input->fixture);
         char const* status = mutation == TEST_METRICS_STATUS && i == count - 1 ?
             (strcmp(input->status, "failed") ? "failed" : "rejected") : input->status;
         test_metrics_put(&text, "CC_METRICS_INPUT version=1 index=%u status=%s error=%s", i, status, input->error);
@@ -162,9 +165,9 @@ static void test_retirement_metrics(char const* root)
     char const* const object = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     char const* const rejected = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     TpRetirementBatchInput inputs[3] = {
-        {"tests/alpha.c", "ok", "driver.none", empty, object, "alpha.o", 1},
-        {"tests/beta.c", "ok", "driver.none", empty, object, "beta.o", 1},
-        {"tests/control.c", "rejected", "driver.analysis", rejected, NULL, NULL, 0}};
+        {"tests/alpha.c", "ok", "driver.none", empty, object, "alpha.o", 1, 3},
+        {"tests/beta.c", "ok", "driver.none", empty, object, "beta.o", 1, 7},
+        {"tests/control.c", "rejected", "driver.analysis", rejected, NULL, NULL, 0, TP_RETIREMENT_BATCH_NO_ROW}};
     TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", inputs, 3, 1};
     CHECK(tp_retirement_batch_contract_valid(&contract));
     TestMetricsInput timings[3];
@@ -176,7 +179,8 @@ static void test_retirement_metrics(char const* root)
     size_t size = text ? test_metrics_render(text, capacity, &contract, 4000, timings, TEST_METRICS_VALID) : 0;
     CHECK(size && tp_retirement_metrics_check((unsigned char const*)text, size, &contract, 5000, members, 2));
     CHECK(members[0].interval_ns == timings[0].end_ns - timings[0].start_ns &&
-          members[0].peak_memory_bytes == 65536 && members[1].peak_memory_bytes == 131072);
+          members[0].peak_memory_bytes == 65536 && members[1].peak_memory_bytes == 131072 &&
+          members[0].row == 3 && members[1].row == 7);
     /* The supervisor's process interval must contain the compiler's window;
      * zero means an untimed batch. */
     CHECK(tp_retirement_metrics_check((unsigned char const*)text, size, &contract, 0, members, 2));
@@ -220,11 +224,30 @@ static void test_retirement_metrics(char const* root)
     changed[0].error = "driver.parse";
     CHECK(!tp_retirement_batch_contract_valid(&bad));
     changed[0] = inputs[0];
+    changed[0].fixture = "tests/../alpha.c";
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[0].fixture = "tests/al\tpha.c";
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[0] = inputs[0];
     changed[1].artifact = "batch.metrics";
     CHECK(!tp_retirement_batch_contract_valid(&bad));
     changed[1] = inputs[1];
     changed[2].status = "not_run";
     CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[2] = inputs[2];
+    /* Members name distinct census rows in ascending order; a control never
+     * repeats a row already in the batch. */
+    changed[0].row = TP_RETIREMENT_BATCH_NO_ROW;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[0].row = 7;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[0].row = 9;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[0] = inputs[0];
+    changed[2].row = 3;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    changed[2].row = 5;
+    CHECK(tp_retirement_batch_contract_valid(&bad));
     changed[2] = inputs[2];
     CHECK(tp_retirement_batch_contract_valid(&bad));
     /* The output digest is the canonical JSON list of per-input objects. */
@@ -242,6 +265,9 @@ static void test_retirement_metrics(char const* root)
     CHECK(!tp_retirement_batch_output_digest(objects, 2, digest) && !digest[0]);
     CHECK(tp_retirement_batch_contract_digest(&contract, contract_digest));
     changed[2].diagnostic_sha256 = empty;
+    CHECK(tp_retirement_batch_contract_digest(&bad, digest) && strcmp(digest, contract_digest));
+    changed[2] = inputs[2];
+    changed[1].row = 8;
     CHECK(tp_retirement_batch_contract_digest(&bad, digest) && strcmp(digest, contract_digest));
     free(text);
 }

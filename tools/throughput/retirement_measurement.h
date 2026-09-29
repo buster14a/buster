@@ -243,6 +243,26 @@ static int tp_retirement_artifact_leaf(char const* name)
     return tp_retirement_metrics_leaf(name);
 }
 
+/* A frozen batch names exactly its group's census rows as members, in layout
+ * order, and no control names a row of the timed projection. */
+static int tp_retirement_batch_rows_match(TpRetirementSamples const* samples,
+    TpRetirementSampleGroup const* group, TpRetirementBatchContract const* batch)
+{
+    unsigned members = 0;
+    int ok = samples && group && batch && batch->inputs;
+    for (unsigned i = 0; ok && i < batch->input_count; ++i)
+    {
+        TpRetirementBatchInput const* input = &batch->inputs[i];
+        if (input->member)
+            ok = members < group->count &&
+                input->row == samples->rows[samples->members[group->first + members++]].id;
+        else
+            ok = input->row == TP_RETIREMENT_BATCH_NO_ROW ||
+                tp_retirement_samples_row(samples, input->row) == TP_RETIREMENT_NONE;
+    }
+    return ok && members == group->count;
+}
+
 static int tp_retirement_output_absent(int directory, char const* leaf)
 {
     struct stat existing;
@@ -308,9 +328,7 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
                 tp_retirement_output_absent(output_directory, batch->metrics);
             for (unsigned i = 0; ok && i < batch->input_count; ++i)
                 ok = !batch->inputs[i].artifact || tp_retirement_output_absent(output_directory, batch->inputs[i].artifact);
-            unsigned members = 0;
-            for (unsigned i = 0; ok && i < batch->input_count; ++i) members += batch->inputs[i].member;
-            ok = ok && members == group->count;
+            ok = ok && tp_retirement_batch_rows_match(samples, group, batch);
         }
         else if (ok)
             ok = !batch && !command->exit_status && tp_retirement_artifact_leaf(command->artifact) &&

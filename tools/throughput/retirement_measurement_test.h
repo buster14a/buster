@@ -35,7 +35,8 @@ static int test_batch_contract(TestBatchFixture* fixture, char const* metrics, c
             snprintf(fixture->artifacts[i], sizeof(fixture->artifacts[i]), "%s.o", words[i] + 1) > 0;
         fixture->inputs[i] = (TpRetirementBatchInput){fixture->fixtures[i], member ? "ok" : "rejected",
             member ? "driver.none" : "driver.analysis", member ? test_batch_empty_digest : test_batch_control_digest,
-            member ? object_sha256 : NULL, member ? fixture->artifacts[i] : NULL, (unsigned)member};
+            member ? object_sha256 : NULL, member ? fixture->artifacts[i] : NULL, (unsigned)member,
+            member ? i : TP_RETIREMENT_BATCH_NO_ROW};
         failures += !member;
     }
     if (ok) fixture->contract = (TpRetirementBatchContract){"x86_64-linux", "none", metrics, fixture->inputs, count,
@@ -512,8 +513,30 @@ static void test_retirement_measurement(char const* executable_path, char const*
     test_retirement_measurement_command_file(root, "retirement-measured-command-batch.json", &batch_command);
     unsigned const batch_ids[] = {0, 1}, batch_metrics[] = {0, 0}, batch_kinds[] = {TP_RETIREMENT_GROUP_OBJECT};
     unsigned const batch_offsets[] = {0, 2}, batch_members[] = {0, 1};
+    {
+        /* Rows 0 and 1 form the group; row 4 is timed elsewhere. */
+        TpRetirementSampleRow rows[3] = {{.id = 0}, {.id = 1}, {.id = 4}};
+        unsigned sample_members[3] = {0, 1, 2};
+        TpRetirementSampleGroup group = {.first = 0, .count = 2, .kind = TP_RETIREMENT_GROUP_OBJECT};
+        TpRetirementSamples layout = {.rows = rows, .members = sample_members, .row_count = 3};
+        TestBatchFixture rows_fixture = batch;
+        rows_fixture.contract.inputs = rows_fixture.inputs;
+        CHECK(tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
+        rows_fixture.inputs[2].row = 3;
+        CHECK(tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
+        rows_fixture.inputs[2].row = 4;
+        CHECK(tp_retirement_batch_contract_valid(&rows_fixture.contract) &&
+              !tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
+        rows_fixture.inputs[2].row = TP_RETIREMENT_BATCH_NO_ROW;
+        rows_fixture.inputs[1].row = 4;
+        CHECK(!tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
+        rows_fixture.inputs[1] = batch.inputs[1];
+        rows_fixture.inputs[1].member = 0;
+        rows_fixture.inputs[1].row = TP_RETIREMENT_BATCH_NO_ROW;
+        CHECK(!tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
+    }
     TpRetirementLayout batch_layout = {2, 1, batch_ids, batch_metrics, batch_kinds, batch_offsets, batch_members};
-    for (unsigned scenario = 0; scenario < 9; ++scenario)
+    for (unsigned scenario = 0; scenario < 10; ++scenario)
     {
         memset(&test, 0, sizeof(test));
         test.stream = tmpfile();
@@ -531,9 +554,11 @@ static void test_retirement_measurement(char const* executable_path, char const*
         TestBatchFixture changed = batch;
         changed.contract.inputs = changed.inputs;
         if (scenario == 7) changed.inputs[1].member = 0, changed.inputs[1].status = "ok";
-        batch_command.batch = scenario == 7 ? &changed.contract : &batch.contract;
+        if (scenario == 9) changed.inputs[1].row = 5; /* A valid contract naming another row. */
+        batch_command.batch = scenario == 7 || scenario == 9 ? &changed.contract : &batch.contract;
         CHECK(tp_retirement_command_hash(&batch_command, batch_command_digest));
         if (scenario == 8) CHECK(test_text(directory, "beta.o", "stale\n"));
+        if (scenario == 9) CHECK(tp_retirement_batch_contract_valid(&changed.contract));
         unsigned runs = scenario ? 1 : 244;
         int run_ok = 1;
         for (unsigned i = 0; run_ok && i < runs; ++i)

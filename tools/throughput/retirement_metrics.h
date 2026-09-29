@@ -28,13 +28,20 @@
 /* Messages and function names are cut here, with their full length recorded. */
 #define TP_RETIREMENT_METRICS_TEXT_LIMIT 1024u
 
+/* One member's per-input sample and the census row it belongs to. */
 typedef struct TpRetirementMemberSample
 {
     uint64_t interval_ns, peak_memory_bytes;
+    unsigned row;
 } TpRetirementMemberSample;
 
-/* One frozen batch input: timed members first (ascending row), then controls.
- * `artifact` is the object leaf in the private output directory. */
+/* A control's `row` when it names no canonical row. */
+#define TP_RETIREMENT_BATCH_NO_ROW 0xffffffffu
+
+/* One frozen batch input: timed members first (ascending census row), then
+ * controls. `artifact` is the object leaf in the private output directory.
+ * A control's `row` is TP_RETIREMENT_BATCH_NO_ROW or a canonical row outside
+ * the timed projection. */
 typedef struct TpRetirementBatchInput
 {
     char const* fixture;
@@ -43,7 +50,7 @@ typedef struct TpRetirementBatchInput
     char const* diagnostic_sha256;
     char const* object_sha256;
     char const* artifact;
-    unsigned member;
+    unsigned member, row;
 } TpRetirementBatchInput;
 
 typedef struct TpRetirementBatchContract
@@ -221,21 +228,34 @@ static inline unsigned tp_retirement_metrics_nibble(char c)
     return c >= 'a' ? (unsigned)(c - 'a' + 10) : (unsigned)(c - '0');
 }
 
-/* A recorded input path is the frozen fixture or ends with `/fixture`. */
+/* Printable ASCII bytes (0x20..0x7e) with no `..` component. */
+static inline int tp_retirement_metrics_clean_path(char const* path, size_t length)
+{
+    int ok = path && length;
+    size_t start = 0;
+    for (size_t i = 0; ok && i <= length; ++i)
+    {
+        if (i == length || path[i] == '/')
+        {
+            ok = !(i - start == 2 && path[start] == '.' && path[start + 1] == '.');
+            start = i + 1;
+        }
+        else ok = (unsigned char)path[i] >= 0x20 && (unsigned char)path[i] <= 0x7e;
+    }
+    return ok;
+}
+
+/* The recorded input path is exactly the frozen fixture path given on the
+ * batch argv: the same rule as the validator, with no prefix or suffix match. */
 static inline int tp_retirement_metrics_input_path(TpRetirementMetricsValue const* value, char const* fixture)
 {
     size_t fixture_length = fixture ? strlen(fixture) : 0;
     size_t length = value && value->length > 1 ? value->length / 2 : 0;
-    int ok = fixture_length && length >= fixture_length;
-    size_t offset = length - fixture_length;
+    int ok = fixture_length && length == fixture_length &&
+        tp_retirement_metrics_clean_path(fixture, fixture_length);
     for (size_t i = 0; ok && i < length; ++i)
-    {
-        unsigned byte = tp_retirement_metrics_nibble(value->text[i * 2]) * 16 +
-            tp_retirement_metrics_nibble(value->text[i * 2 + 1]);
-        ok = byte >= 32 && byte <= 126;
-        if (ok && i >= offset) ok = byte == (unsigned char)fixture[i - offset];
-        if (ok && offset && i + 1 == offset) ok = byte == '/';
-    }
+        ok = tp_retirement_metrics_nibble(value->text[i * 2]) * 16 +
+            tp_retirement_metrics_nibble(value->text[i * 2 + 1]) == (unsigned char)fixture[i];
     return ok;
 }
 
@@ -267,9 +287,8 @@ static inline int tp_retirement_metrics_leaf(char const* name)
 static inline int tp_retirement_metrics_fixture(char const* fixture)
 {
     size_t length = fixture ? strlen(fixture) : 0;
-    int ok = length && length <= 512 && fixture[0] != '/';
-    for (size_t i = 0; ok && i < length; ++i)
-        ok = (unsigned char)fixture[i] > 32 && (unsigned char)fixture[i] <= 126;
+    int ok = length && length <= 512 && fixture[0] != '/' &&
+        tp_retirement_metrics_clean_path(fixture, length);
     return ok;
 }
 
@@ -299,9 +318,15 @@ static inline int tp_retirement_batch_contract_valid(TpRetirementBatchContract c
             (!input->object_sha256 || tp_retirement_metrics_hex_digest(input->object_sha256,
                 strlen(input->object_sha256))) &&
             (!input->artifact || (tp_retirement_metrics_leaf(input->artifact) &&
-                strcmp(input->artifact, contract->metrics)));
+                strcmp(input->artifact, contract->metrics))) &&
+            (!input->member || (input->row != TP_RETIREMENT_BATCH_NO_ROW &&
+                (!i || input->row > contract->inputs[i - 1].row)));
         for (unsigned previous = 0; ok && input->artifact && previous < i; ++previous)
             ok = !contract->inputs[previous].artifact || strcmp(contract->inputs[previous].artifact, input->artifact);
+        /* A control never repeats a member's or another control's row. */
+        for (unsigned previous = 0; ok && !input->member && input->row != TP_RETIREMENT_BATCH_NO_ROW &&
+             previous < i; ++previous)
+            ok = contract->inputs[previous].row != input->row;
         if (ok && input->member) ++members;
         if (ok && !compiled) ++failures;
     }
@@ -392,7 +417,7 @@ static inline int tp_retirement_metrics_check(unsigned char const* bytes, uint64
         {
             ok = member_count < member_capacity && input[TP_METRICS_I_ARENA_PEAK].number > 0;
             if (ok) members[member_count++] = (TpRetirementMemberSample){end - start,
-                input[TP_METRICS_I_ARENA_PEAK].number};
+                input[TP_METRICS_I_ARENA_PEAK].number, expected->row};
         }
         uint64_t functions = ok ? input[TP_METRICS_I_FUNCTION_RECORDS].number : 0;
         for (uint64_t ordinal = 0; ok && ordinal < functions; ++ordinal)
@@ -500,8 +525,10 @@ static inline int tp_retirement_batch_contract_digest(TpRetirementBatchContract 
         for (unsigned i = 0; i < contract->input_count; ++i)
         {
             TpRetirementBatchInput const* input = &contract->inputs[i];
-            unsigned char member = (unsigned char)input->member;
-            sha256_add(&hash, &member, 1);
+            unsigned char member[5] = {(unsigned char)input->member, (unsigned char)input->row,
+                (unsigned char)(input->row >> 8), (unsigned char)(input->row >> 16),
+                (unsigned char)(input->row >> 24)};
+            sha256_add(&hash, member, sizeof(member));
             tp_retirement_batch_contract_text(&hash, input->fixture);
             tp_retirement_batch_contract_text(&hash, input->status);
             tp_retirement_batch_contract_text(&hash, input->error);

@@ -327,8 +327,9 @@ static uint64_t tp_retirement_samples_ordinal(TpRetirementSamples const* samples
 }
 
 /* The transcript alone must not advance when this collector is attached.
- * An object batch supplies each member's (interval, memory) from its checked
- * per-input metrics, in member order; singleton and runtime invocations supply
+ * An object batch supplies each member's (interval, memory, census row) from
+ * its checked per-input metrics, in member order, and each row must be the
+ * layout's row for that member; singleton and runtime invocations supply
  * none. A spool or transcript write failure invalidates the same attempt. No
  * API imports partial samples, skips warmups, retries a cell or resumes. */
 static int tp_retirement_samples_append(TpRetirementSamples* samples,
@@ -359,7 +360,8 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
             for (unsigned i = 0; ok && i < member_count; ++i)
             {
                 ok = members[i].interval_ns && members[i].interval_ns <= wall - total &&
-                    members[i].peak_memory_bytes && members[i].peak_memory_bytes <= UINT64_C(9007199254740991);
+                    members[i].peak_memory_bytes && members[i].peak_memory_bytes <= UINT64_C(9007199254740991) &&
+                    members[i].row == samples->rows[samples->members[group->first + i]].id;
                 if (ok) total += members[i].interval_ns;
             }
         }
