@@ -1240,7 +1240,8 @@ class InvocationEvidenceTests(unittest.TestCase):
                              ("action", "link"), ("target", "aarch64-linux"),
                              ("allocator", "quality"), ("exit_status", 0),
                              ("error", "driver.none"), ("inputs", 3), ("records", 3),
-                             ("rejected", 0), ("not_run", 1), ("schema", "other-metrics")):
+                             ("rejected", 0), ("not_run", 1), ("schema", "other-metrics"),
+                             ("function_sizes", 2)):
             def change(metrics, field=field, value=value):
                 metrics["header"][field] = value
             self.assert_metrics_rejected(change, "header is not one serial",
@@ -1291,6 +1292,27 @@ class InvocationEvidenceTests(unittest.TestCase):
         def unrequested_functions(metrics):
             metrics["header"]["function_sizes"] = 0
         self.assert_metrics_rejected(unrequested_functions, "did not request")
+
+        # Messages and names are cut at 1,024 bytes; the full length and the
+        # flag must agree with the recorded text.
+        limit = binding.CC_METRICS_TEXT_LIMIT
+        for field, value in (("message_truncated", 1), ("message_truncated", 2),
+                             ("message_bytes", 6)):
+            def message(metrics, field=field, value=value):
+                metrics["inputs"][1][field] = value
+            self.assert_metrics_rejected(message, "truncation contradicts")
+        for update in ({"name_bytes": limit + 1, "name_hex": b"n" * limit},
+                       {"name_bytes": limit, "name_truncated": 1, "name_hex": b"n" * limit},
+                       {"name_bytes": limit + 1, "name_truncated": 1, "name_hex": b"n" * (limit + 1)}):
+            def name(metrics, update=update):
+                metrics["functions"][0][0].update(update)
+            self.assert_metrics_rejected(name, "truncation contradicts")
+
+        def cut_name(sequence, metrics):
+            metrics["functions"][0][0].update(name_bytes=limit + 5, name_truncated=1,
+                                               name_hex=b"n" * limit)
+        self.attach(mutate_metrics=cut_name)
+        self.check()
 
     def test_metrics_artifact_parser_rejects_reordered_or_unknown_keys(self):
         event = self.events[self.batch_index()]

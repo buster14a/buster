@@ -2795,11 +2795,14 @@ def _read_jsonl_evidence(root, descriptor, name):
 # `CC_METRICS` header, then per input one `CC_METRICS_INPUT` line followed by
 # its `CC_METRICS_FUNCTION` lines.  Every line is `TAG key=value ...` with the
 # keys in a fixed order; numbers are decimal and strings lowercase hex (`-`
-# when empty).  This pins the revision that adds per-input start/end offsets
-# from the process origin, the diagnostic record count and digest, the
-# `intervals` header field and the `*_truncated` flags.  A later schema is a
-# reviewed validator change, never a reader that skips unknown keys.
+# when empty).  This pins version 1 as published with #1823 (driver.md at
+# 35b6b64): per-input start/end offsets from the origin shared with `wall_ns`,
+# the diagnostic record count and digest, the `intervals` header field, and
+# messages and function names cut at 1,024 bytes with their full length and a
+# `*_truncated` flag.  A later schema is a reviewed validator change, never a
+# reader that skips unknown keys.
 CC_METRICS_VERSION = 1
+CC_METRICS_TEXT_LIMIT = 1024
 CC_METRICS_SCHEMA = "buster-cc-metrics"
 CC_METRICS_HEADER_FIELDS = (
     "version", "schema", "inputs", "records", "ok", "rejected", "failed", "not_run",
@@ -2879,6 +2882,15 @@ def _cc_metrics_line(line, tag, fields, name):
     return values
 
 
+def _check_cc_text(record, prefix, name):
+    """A message or name is cut at the text limit with its full length and flag."""
+    length = record[f"{prefix}_bytes"]
+    truncated = record[f"{prefix}_truncated"]
+    if truncated not in (0, 1) or truncated != (length > CC_METRICS_TEXT_LIMIT) \
+            or len(record[f"{prefix}_hex"]) != min(length, CC_METRICS_TEXT_LIMIT):
+        _fail(f"{name} {prefix} truncation contradicts its recorded length")
+
+
 def _read_cc_metrics(root, descriptor, inputs, name):
     """Strictly parse one bounded compiler metrics artifact.
 
@@ -2912,6 +2924,7 @@ def _read_cc_metrics(root, descriptor, inputs, name):
                                       CC_METRICS_INPUT_FIELDS, f"{name} input {index}")
             if record["index"] != index:
                 _fail(f"{name} inputs do not follow the frozen batch input order")
+            _check_cc_text(record, "message", f"{name} input {index}")
             if record["function_records"] and not header["function_sizes"]:
                 _fail(f"{name} lists functions that the header did not request")
             for ordinal in range(record["function_records"]):
@@ -2920,6 +2933,7 @@ def _read_cc_metrics(root, descriptor, inputs, name):
                                             f"{name} input {index} function {ordinal}")
                 if function["input"] != index or function["ordinal"] != ordinal:
                     _fail(f"{name} function records do not follow their input")
+                _check_cc_text(function, "name", f"{name} input {index} function {ordinal}")
             records.append(record)
         if stream.read(1):
             _fail(f"{name} contains undeclared extra records")
@@ -2975,7 +2989,7 @@ def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status,
             or header["allocator"] != configuration["allocator"]
             or header["compile_jobs"] != 1 or header["compilation_workers"] != 1
             or header["intervals"] != "serial" or header["keep_going"] != 1
-            or not header["wall_ns"]
+            or header["function_sizes"] not in (0, 1) or not header["wall_ns"]
             or (elapsed_ns is not None and header["wall_ns"] > elapsed_ns)):
         _fail(f"{name} header is not one serial continue-on-failure batch of the frozen inputs")
     members = {}
