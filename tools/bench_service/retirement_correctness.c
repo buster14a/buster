@@ -1,10 +1,12 @@
 /* #1020 pre-timing correctness join. begin authenticates the shape of the
  * imported complete population; check and row poison on the first failure;
- * finish seals every source/check/row/output fact; ready checks the seal again.
+ * batches freezes the (A1) object batch-group contracts; finish seals every
+ * source/check/row/output/batch fact; ready checks the seal again.
  * The service must obtain the input and receipt digests from trusted sources
  * and execute/replay their content before calling these private entry points.
  */
 #include "retirement_correctness.h"
+#include <stdlib.h>
 #include <string.h>
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_digest(char const* value)
@@ -46,6 +48,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_side_empty(BqRetirementObserv
     bool ok = bq_retirement_correctness_empty(side->compiler_command_sha256) &&
         bq_retirement_correctness_empty(side->artifact_sha256) &&
         bq_retirement_correctness_empty(side->code_sha256) &&
+        bq_retirement_correctness_empty(side->diagnostic_sha256) &&
         bq_retirement_correctness_empty(side->runtime_command_sha256) &&
         bq_retirement_correctness_empty(side->runtime_output_sha256) && side->code_bytes == 0 &&
         side->semantic_pass == 0 && side->fallback_count == 0 &&
@@ -59,6 +62,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_side_hash(Sha256* hash, BqRet
     bq_retirement_correctness_text(hash, side->compiler_command_sha256);
     bq_retirement_correctness_text(hash, side->artifact_sha256);
     bq_retirement_correctness_text(hash, side->code_sha256);
+    bq_retirement_correctness_text(hash, side->diagnostic_sha256);
     bq_retirement_correctness_text(hash, side->runtime_command_sha256);
     bq_retirement_correctness_text(hash, side->runtime_output_sha256);
     bq_retirement_correctness_number(hash, side->code_bytes);
@@ -68,6 +72,40 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_side_hash(Sha256* hash, BqRet
     bq_retirement_correctness_number(hash, side->out_of_memory);
     bq_retirement_correctness_number(hash, (uint32_t)side->compiler_exit);
     bq_retirement_correctness_number(hash, (uint32_t)side->runtime_exit);
+}
+
+/* The aggregate of every frozen group's per-side contract digest and batch
+ * command, in group order; false when a contract no longer validates. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_batch_digest(BqRetirementCorrectness const* gate,
+    BqRetirementBatchGroup const* groups, uint32_t count, char digest[65])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    static char const domain[] = "bq-retirement-batch-groups-v1";
+    sha256_add(&hash, domain, sizeof(domain) - 1);
+    bq_retirement_correctness_number(&hash, count);
+    bool ok = gate && (!count || groups);
+    for (uint32_t g = 0; ok && g < count; g += 1)
+        for (uint32_t side = 0; ok && side < 2; side += 1)
+        {
+            char contract[65] = {0};
+            ok = tp_retirement_batch_contract_digest(&groups[g].contract[side], contract);
+            bq_retirement_correctness_text(&hash, contract);
+            bq_retirement_correctness_text(&hash, groups[g].command_sha256[side]);
+        }
+    if (ok) sha256_finish_hex(&hash, digest);
+    else memset(digest, 0, 65);
+    return ok;
+}
+
+/* The live groups still match the batches() snapshot (trivially without groups). */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_batches_unchanged(BqRetirementCorrectness const* gate)
+{
+    char live[65];
+    bool ok = !gate->batches_frozen ? !gate->batch_group_count && bq_retirement_correctness_empty(gate->batch_groups_sha256) :
+        bq_retirement_correctness_batch_digest(gate, gate->batch_groups, gate->batch_group_count, live) &&
+        bq_retirement_correctness_equal(live, gate->batch_groups_sha256);
+    return ok;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness const* gate, char digest[65])
@@ -130,6 +168,8 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
         bq_retirement_correctness_number(&hash, row->compiler_eligible);
         bq_retirement_correctness_number(&hash, row->code_obligation);
         bq_retirement_correctness_number(&hash, row->execution_obligation);
+        bq_retirement_correctness_number(&hash, row->batch_control);
+        bq_retirement_correctness_text(&hash, row->batch_key_sha256);
         bq_retirement_correctness_text(&hash, row->identity_sha256);
         bq_retirement_correctness_text(&hash, row->source_sha256);
         bq_retirement_correctness_text(&hash, row->configuration_sha256);
@@ -148,6 +188,14 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
         for (uint32_t side = 0; side < 2; side += 1)
             bq_retirement_correctness_side_hash(&hash, &fact->side[side]);
     }
+    /* (A1, L4) The frozen batch groups as batches() snapshotted them: each
+     * side's complete contract digest (members, controls, objects, leaves,
+     * input list, metrics bound) and batch command. finish and ready require
+     * the live groups to match the snapshot. (M2) The #509 authority flag. */
+    bq_retirement_correctness_number(&hash, gate->batches_frozen);
+    bq_retirement_correctness_number(&hash, gate->batch_group_count);
+    bq_retirement_correctness_text(&hash, gate->batch_groups_sha256);
+    bq_retirement_correctness_number(&hash, gate->batch_authority);
     bq_retirement_correctness_text(&hash, gate->checks_sha256);
     sha256_finish_hex(&hash, digest);
 }
@@ -208,6 +256,11 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
              row->stage >= BQ_RETIREMENT_STAGE_OBJECT && row->stage <= BQ_RETIREMENT_STAGE_SELF_HOST &&
              row->classification >= 1 && row->classification <= 5 &&
              row->compiler_eligible <= 1 && row->code_obligation <= 1 && row->execution_obligation <= 1 &&
+             row->batch_control <= 1 &&
+             (!row->batch_control || (!row->compiler_eligible && row->stage == BQ_RETIREMENT_STAGE_OBJECT &&
+                 row->target == prepared->native_target)) &&
+             (bq_retirement_correctness_empty(row->batch_key_sha256) ||
+              bq_retirement_correctness_digest(row->batch_key_sha256)) &&
              bq_retirement_correctness_digest(row->identity_sha256) &&
              bq_retirement_correctness_digest(row->source_sha256) &&
              bq_retirement_correctness_digest(row->configuration_sha256) &&
@@ -218,7 +271,7 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
         if (ok) ok = native_runtime ? bq_retirement_correctness_digest(row->independent_oracle_sha256) :
             bq_retirement_correctness_empty(row->independent_oracle_sha256);
         for (uint32_t side = 0; ok && side < 2; side += 1)
-            ok = (row->compiler_eligible ?
+            ok = (row->compiler_eligible || row->batch_control ?
                   bq_retirement_correctness_digest(row->compiler_command_sha256[side]) :
                   bq_retirement_correctness_empty(row->compiler_command_sha256[side])) &&
                  (native_runtime ?
@@ -332,12 +385,32 @@ bool bq_retirement_correctness_row(BqRetirementCorrectness* gate, BqRetirementRo
         for (uint32_t side = 0; ok && side < 2; side += 1)
         {
             BqRetirementObservedSide const* facts = &observed->side[side];
-            if (!compiler) ok = bq_retirement_correctness_side_empty(facts);
+            if (!compiler && expected->batch_control)
+            {
+                /* A batch control's standalone observation: its batch command,
+                 * exit status and diagnostic, and an object only when it
+                 * compiled; no code, runtime or semantic facts. */
+                BqRetirementObservedSide control = *facts;
+                ok = bq_retirement_correctness_equal(facts->compiler_command_sha256,
+                         expected->compiler_command_sha256[side]) &&
+                     bq_retirement_correctness_digest(facts->diagnostic_sha256) &&
+                     facts->compiler_exit >= 0 && facts->compiler_exit <= 255 &&
+                     (facts->compiler_exit ? bq_retirement_correctness_empty(facts->artifact_sha256) :
+                                             bq_retirement_correctness_digest(facts->artifact_sha256));
+                memset(control.compiler_command_sha256, 0, 65);
+                memset(control.diagnostic_sha256, 0, 65);
+                memset(control.artifact_sha256, 0, 65);
+                control.compiler_exit = 0;
+                ok = ok && bq_retirement_correctness_side_empty(&control);
+            }
+            else if (!compiler) ok = bq_retirement_correctness_side_empty(facts);
             else
             {
                 ok = bq_retirement_correctness_equal(facts->compiler_command_sha256,
                          expected->compiler_command_sha256[side]) &&
                      bq_retirement_correctness_digest(facts->artifact_sha256) &&
+                     (bq_retirement_correctness_empty(facts->diagnostic_sha256) ||
+                      bq_retirement_correctness_digest(facts->diagnostic_sha256)) &&
                      facts->semantic_pass == 1 && facts->fallback_count == 0 &&
                      facts->compiler_exit == 0 && facts->timed_out == 0 && facts->out_of_memory == 0;
                 if (ok) ok = expected->code_obligation ?
@@ -365,11 +438,154 @@ bool bq_retirement_correctness_row(BqRetirementCorrectness* gate, BqRetirementRo
     return ok;
 }
 
+/* A timed object row: compiler eligible on the native target at the object stage. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_timed_object(BqRetirementCorrectness const* gate, uint32_t row)
+{
+    BqRetirementTrustedRow const* trusted = row < gate->prepared.rows ? &gate->trusted_rows[row] : NULL;
+    bool timed = trusted && trusted->compiler_eligible && trusted->target == gate->prepared.native_target &&
+        trusted->stage == BQ_RETIREMENT_STAGE_OBJECT;
+    return timed;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_text_equal(char const* left, char const* right)
+{
+    bool equal = (!left && !right) || (left && right && !strcmp(left, right));
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_retirement_correctness_key_order(void const* left, void const* right)
+{
+    return strcmp(*(char const* const*)left, *(char const* const*)right);
+}
+
+/* A row control joins the gate's batch control row: native and untimed (by
+ * begin), in the group's key, run with the group's batch command on each
+ * side, with the frozen status, diagnostic and object equal to its facts. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_control(BqRetirementCorrectness const* gate,
+    BqRetirementBatchGroup const* group, uint32_t index, char const* key)
+{
+    uint32_t row = group->contract[0].inputs[index].row;
+    BqRetirementTrustedRow const* trusted = row < gate->prepared.rows ? &gate->trusted_rows[row] : NULL;
+    bool ok = trusted && trusted->batch_control && trusted->target == gate->prepared.native_target &&
+        key && !strcmp(trusted->batch_key_sha256, key);
+    for (uint32_t side = 0; ok && side < 2; side += 1)
+    {
+        TpRetirementBatchInput const* input = &group->contract[side].inputs[index];
+        BqRetirementObservedSide const* facts = &gate->facts[row].side[side];
+        bool compiled = !strcmp(input->status, "ok");
+        ok = bq_retirement_correctness_equal(trusted->compiler_command_sha256[side], group->command_sha256[side]) &&
+            bq_retirement_correctness_equal(facts->compiler_command_sha256, group->command_sha256[side]) &&
+            !strcmp(facts->diagnostic_sha256, input->diagnostic_sha256) && compiled == (facts->compiler_exit == 0) &&
+            (compiled ? input->object_sha256 && !strcmp(facts->artifact_sha256, input->object_sha256) :
+                        !input->object_sha256);
+    }
+    return ok;
+}
+
+bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
+    BqRetirementBatchGroup const* groups, uint32_t count, uint8_t* assigned_workspace, uint32_t workspace_slots)
+{
+    bool ok = gate && !gate->failed && !gate->finished && !gate->batches_frozen &&
+        gate->checks_done == gate->check_count && gate->rows_done == gate->prepared.rows &&
+        (!count || groups) && count <= gate->prepared.rows && assigned_workspace &&
+        workspace_slots >= gate->prepared.rows;
+    uint32_t previous_first = 0, timed_objects = 0, members_total = 0;
+    char const** keys = ok && count ? (char const**)malloc((size_t)count * sizeof(*keys)) : NULL;
+    ok = ok && (!count || keys);
+    if (ok) memset(assigned_workspace, 0, gate->prepared.rows);
+    for (uint32_t g = 0; ok && g < count; g += 1)
+    {
+        BqRetirementBatchGroup const* group = &groups[g];
+        TpRetirementBatchContract const* base = &group->contract[0];
+        TpRetirementBatchContract const* other = &group->contract[1];
+        /* The native target's metrics name (the validator's TARGET_METRICS_NAMES). */
+        ok = tp_retirement_batch_contract_valid(base) && tp_retirement_batch_contract_valid(other) &&
+            base->input_count == other->input_count && base->exit_status == other->exit_status &&
+            base->metrics_bytes_max == other->metrics_bytes_max && !strcmp(base->target, "x86_64-linux") &&
+            !strcmp(other->target, base->target) && !strcmp(other->allocator, base->allocator) &&
+            !strcmp(other->metrics, base->metrics) &&
+            bq_retirement_correctness_digest(group->command_sha256[0]) &&
+            bq_retirement_correctness_digest(group->command_sha256[1]);
+        uint32_t members = 0;
+        char const* key = NULL;
+        for (uint32_t i = 0; ok && i < base->input_count; i += 1)
+        {
+            TpRetirementBatchInput const* left = &base->inputs[i];
+            TpRetirementBatchInput const* right = &other->inputs[i];
+            ok = left->member == right->member && left->row == right->row &&
+                !strcmp(left->fixture, right->fixture) && !strcmp(left->status, right->status) &&
+                !strcmp(left->error, right->error) && !strcmp(left->diagnostic_sha256, right->diagnostic_sha256) &&
+                bq_retirement_correctness_text_equal(left->artifact, right->artifact);
+            if (ok && left->member)
+            {
+                uint32_t row = left->row;
+                ok = bq_retirement_correctness_timed_object(gate, row) && !assigned_workspace[row] &&
+                    (members || !g || row > previous_first) &&
+                    bq_retirement_correctness_digest(gate->trusted_rows[row].batch_key_sha256) &&
+                    (!key || !strcmp(key, gate->trusted_rows[row].batch_key_sha256));
+                if (ok && !key) key = gate->trusted_rows[row].batch_key_sha256;
+                for (uint32_t side = 0; ok && side < 2; side += 1)
+                {
+                    TpRetirementBatchInput const* input = side ? right : left;
+                    ok = bq_retirement_correctness_equal(gate->trusted_rows[row].compiler_command_sha256[side],
+                             group->command_sha256[side]) &&
+                         bq_retirement_correctness_equal(gate->facts[row].side[side].compiler_command_sha256,
+                             group->command_sha256[side]) &&
+                         !strcmp(gate->facts[row].side[side].artifact_sha256, input->object_sha256);
+                }
+                if (ok)
+                {
+                    if (!members) previous_first = row;
+                    assigned_workspace[row] = 1;
+                    members += 1;
+                }
+            }
+            else if (ok && left->row != TP_RETIREMENT_BATCH_NO_ROW)
+            {
+                /* Members precede controls, so the group's key is known. */
+                ok = bq_retirement_correctness_control(gate, group, i, key) && !assigned_workspace[left->row];
+                if (ok) assigned_workspace[left->row] = 2;
+            }
+        }
+        ok = ok && members && key;
+        if (ok) keys[g] = key;
+        members_total += members;
+    }
+    /* No two groups share a configuration and recipe key. */
+    if (ok && count > 1)
+    {
+        qsort(keys, count, sizeof(*keys), bq_retirement_correctness_key_order);
+        for (uint32_t g = 1; ok && g < count; g += 1) ok = strcmp(keys[g - 1], keys[g]) != 0;
+    }
+    free(keys);
+    /* Every batch control row is claimed by exactly one frozen control. */
+    for (uint32_t row = 0; ok && row < gate->prepared.rows; row += 1)
+        if (gate->trusted_rows[row].batch_control) ok = assigned_workspace[row] == 2;
+    for (uint32_t row = 0; ok && row < gate->prepared.rows; row += 1)
+        if (bq_retirement_correctness_timed_object(gate, row))
+        {
+            ok = assigned_workspace[row] == 1;
+            timed_objects += 1;
+        }
+    ok = ok && timed_objects == members_total;
+    char snapshot[65];
+    ok = ok && bq_retirement_correctness_batch_digest(gate, groups, count, snapshot);
+    if (ok)
+    {
+        gate->batch_groups = groups;
+        gate->batch_group_count = count;
+        gate->batches_frozen = 1;
+        memcpy(gate->batch_groups_sha256, snapshot, sizeof(snapshot));
+    }
+    else if (gate) gate->failed = 1;
+    return ok;
+}
+
 bool bq_retirement_correctness_finish(BqRetirementCorrectness* gate)
 {
     bool ok = gate && !gate->failed && !gate->finished &&
         gate->checks_done == gate->check_count && gate->rows_done == gate->prepared.rows &&
-        gate->seen_kinds == gate->required_kinds;
+        gate->seen_kinds == gate->required_kinds && bq_retirement_correctness_batches_unchanged(gate);
     if (ok)
     {
         sha256_finish_hex(&gate->checks_hash, gate->checks_sha256);
@@ -384,7 +600,7 @@ bool bq_retirement_correctness_ready(BqRetirementCorrectness const* gate)
 {
     bool ok = gate && gate->finished && !gate->failed &&
         gate->checks_done == gate->check_count && gate->rows_done == gate->prepared.rows &&
-        gate->seen_kinds == gate->required_kinds;
+        gate->seen_kinds == gate->required_kinds && bq_retirement_correctness_batches_unchanged(gate);
     char digest[65];
     if (ok)
     {

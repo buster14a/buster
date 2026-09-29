@@ -22,15 +22,15 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "repository=buster14a/buster\n"
     "status=blocked\n"
     "contract=docs/native-retirement-performance-contract.md\n"
-    "contract-sha256=67fff9a8b53764792046ba1c1ec104a24cc6e525c4322a6206b218b188a431b0\n"
+    "contract-sha256=cdbf0725653c2fecdee0bc5c1df5e6380d8587f1a455edbf1d8c9309802da275\n"
     "support-declaration=docs/native-retirement-support-v1.tsv\n"
     "support-declaration-sha256=932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82\n"
     "binding-validator=tools/native_retirement_performance_binding.py\n"
-    "binding-validator-sha256=2d3c97e5f31b6af5dc5cdfe7a956b7ea7910fd61a5c71ebab7be29e725ec4d95\n"
+    "binding-validator-sha256=80485acf1e5e0cc9c3ed61bb88a1ac7ad564756c004bbad2f91e1c9000a66773\n"
     "binding-schema=tools/native_retirement_performance_schema.py\n"
     "binding-schema-sha256=e19a5cf1114997ddf4a71cf47f8da4125777b49441d1a48d012bab7f2bb8e6a3\n"
     "statistics=tools/throughput/retirement_stats.h\n"
-    "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
+    "statistics-sha256=b95349118f14456abb9d85191615c6e0b9cd595e7761081c6bc0dacddb8a34dd\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
 
 u32 bq_u32(u8 const* bytes)

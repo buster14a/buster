@@ -457,7 +457,7 @@ class BindingTests(unittest.TestCase):
             "admitted": True, "native_only": True,
             "logical_cpu": 3, "native_target": "x86_64-unknown-linux-gnu",
             "baseline_source_commit": "3" * 40, "baseline_source_tree": "4" * 40,
-            "lease_protocol": binding.LEASE_PROTOCOL,
+            "lease_protocol": binding.LEASE_PROTOCOL, "family_sha256": family["sha256"],
         })
 
         # Independent admission and native-oracle records are the source of
@@ -512,12 +512,15 @@ class BindingTests(unittest.TestCase):
         sample_rounds = 2
         sample_pairs = 60
         object_row_count = len(census_rows)
-        required_records = len(parsed_rows) * sample_rounds * sample_pairs
+        timed_rows = binding._timed_rows(parsed_rows)
+        object_groups = binding._object_groups(binding._batch_groups(parsed_rows))
+        required_records = len(timed_rows) * sample_rounds * sample_pairs
         sample_record = {
             "record_id": "row-0/round-0/pair-0", "row": 0, "round": 0, "pair": 0,
             "measurements": {
                 metric: {"baseline": 1.0, "candidate": 1.0}
-                for metric in binding.METRICS if parsed_rows[0]["metrics"].get(metric, False)
+                for metric in binding.ROW_SAMPLE_METRICS
+                if parsed_rows[0]["metrics"].get(metric, False)
             },
         }
         sample_record_bytes = (json.dumps(sample_record, sort_keys=True,
@@ -530,28 +533,12 @@ class BindingTests(unittest.TestCase):
                         "path": input_shard["path"], "bytes": input_shard["bytes"],
                         "sha256": input_shard["sha256"]}],
         })
-        result_input_plan = json_artifact("results/input-plan.json", {
-            "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-            "source_manifest_sha256": manifest_artifact["sha256"],
-            "source_rows_sha256": rows_artifact["sha256"],
-            "object_row_count": object_row_count,
-            "sample_row_count": len(parsed_rows),
-            "rounds": sample_rounds,
-            "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
-            "pairs_per_round": sample_pairs,
-            "records_per_row": sample_rounds * sample_pairs,
-            "required_records": required_records,
-            "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
-            "manifest_count": 1,
-            "manifests": [{
-                "identity": "result-input-manifest-000",
-                "path": input_manifest["path"], "start_record": 0,
-                "records": required_records,
-            }],
-            "predeclared": True,
-        })
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
+        result_input_plan = json_artifact("results/input-plan.json",
+                                          InvocationEvidenceTests.result_input_plan(
+            manifest_artifact["sha256"], rows_artifact["sha256"], object_row_count,
+            len(timed_rows), len(object_groups), sample_rounds, sample_pairs,
+            row_path=input_manifest["path"], batch_path="results/batch-input-manifest-000.json"))
         adapter_calls = []
         bootstrap_members = sorted(member for member in family["members"]
                                    if member.endswith("/aggregate") or "/slice/" in member)
@@ -595,11 +582,13 @@ class BindingTests(unittest.TestCase):
                 "records": required_records,
                 "input_bytes": input_shard["bytes"] + input_manifest["bytes"],
             }],
+            "batch_result_manifests": [],
             "raw_measurements_sha256": raw_measurements_sha256,
             "member_invocations_sha256": invocation_sha256,
             "member_count": len(family["members"]),
             "scopes_per_member": len(binding.STATISTICAL_SCOPES),
             "adapter_input": adapter_input,
+            "code_records": {**input_shard, "records": 1}, "untimed_batches": None,
             "code_bytes_summary": {
                 "rows": 0, "aggregate_ratio": 1.0,
                 "per_cell_max_ratio": 1.0, "aggregate_pass": True,
@@ -658,7 +647,7 @@ class BindingTests(unittest.TestCase):
             "adapter_build_command": "cc -std=c11 -O2 -Wall -Wextra -Werror",
             "adapter_toolchain_sha256": "b" * 64,
             "adapter_source_sha256": statistics["sha256"],
-            "code_bytes_summary_sha256": "0" * 64,
+            "code_bytes_summary_sha256": "0" * 64, "untimed_batches_sha256": None,
             "publication_id": "published-retirement-bundle-v1",
             "published_bundle_sha256": downloaded_bundle["sha256"],
             "downloaded_bundle_sha256": downloaded_bundle["sha256"],
@@ -825,9 +814,13 @@ class BindingTests(unittest.TestCase):
     def _rules():
         return {
             "thresholds": {
-                "aggregate": {"compiler_wall_time": 1.02, "compiler_peak_rss": 1.02,
+                "aggregate": {"compiler_wall_time": 1.02, "compiler_peak_memory": 1.02,
+                               "compiler_batch_wall_time": 1.02,
+                               "compiler_batch_peak_rss": 1.02,
                                "generated_code_bytes": 1.01, "generated_runtime": 1.03},
-                "per_cell": {"compiler_wall_time": 1.05, "compiler_peak_rss": 1.05,
+                "per_cell": {"compiler_wall_time": 1.05, "compiler_peak_memory": 1.05,
+                              "compiler_batch_wall_time": 1.05,
+                              "compiler_batch_peak_rss": 1.05,
                               "generated_code_bytes": 1.01, "generated_runtime": 1.03},
             },
             "sampling": {"seed": 20260913, "rounds": 2, "pairs_per_round": 60,
@@ -842,14 +835,22 @@ class BindingTests(unittest.TestCase):
                          "retain_all_samples": True},
             "aggregation": {"ratio": "candidate-over-baseline",
                              "wall_time": "median-of-two-pair-block-geometric-means",
-                             "peak_rss": "median-of-two-pair-block-geometric-means",
+                             "peak_memory": "median-of-two-pair-block-geometric-means",
+                             "batch_wall_time": "median-of-two-pair-block-geometric-means",
+                             "batch_peak_rss": "median-of-two-pair-block-geometric-means",
                              "code_bytes": "exact-code-section-sum-ratio",
                              "runtime": "median-of-two-pair-block-geometric-means",
                              "cell_weight": "one-equal-weight-per-required-cell",
                              "denominator": "requested-work-from-manifest",
                              "scope": "both-rounds-and-pooled-analysis",
                              "runtime_eligibility": "independent-native-executable-oracle-only",
-                             "code_bytes_scope": "deterministic-code-section-payload-only"},
+                             "code_bytes_scope": "deterministic-code-section-payload-only",
+                             "timed_population":
+                                 "compiler-eligible-rows-on-x86_64-unknown-linux-gnu",
+                             "sampling_unit": "native-host-batch-group",
+                             "batch_cells": "object-batch-groups",
+                             "code_bytes_measurement":
+                                 "once-per-variant-and-row-on-every-target-with-reproduction"},
             "uncertainty": {
                 "confidence": "one-sided-95-percent-upper-bound", "simultaneous": True,
                 "family_correction": "Bonferroni",
@@ -938,9 +939,10 @@ class BindingTests(unittest.TestCase):
                     "record_id": f"row-{row['row']}/round-{round_number}/pair-{pair}",
                     "row": row["row"], "round": round_number, "pair": pair,
                     "measurements": {
-                        metric: {"baseline": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0),
-                                  "candidate": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0)}
-                        for metric in binding.METRICS if row["metrics"].get(metric, False)
+                        metric: {"baseline": (1 if metric == "compiler_peak_memory" else 1.0),
+                                  "candidate": (1 if metric == "compiler_peak_memory" else 1.0)}
+                        for metric in binding.ROW_SAMPLE_METRICS
+                        if row["metrics"].get(metric, False)
                     },
                 }, sort_keys=True, separators=(",", ":")) + "\n")
         shard_bytes = "".join(lines).encode()
@@ -971,7 +973,8 @@ class BindingTests(unittest.TestCase):
         # Compile the reviewed in-tree adapter and exercise its actual #619
         # CLI with one aggregate and one exact-cell member for each metric.
         # This is intentionally bounded while still covering both call kinds,
-        # all three metrics, and the one-call/all-scopes output contract.
+        # all five metrics (A1 batch pair included), and the one-call/all-
+        # scopes output contract.
         with tempfile.TemporaryDirectory(prefix="retirement-adapter-") as directory:
             root = Path(directory)
             executable, binary_digest, source_digest, toolchain_digest, build_command = \
@@ -980,19 +983,24 @@ class BindingTests(unittest.TestCase):
             self.assertEqual(len(source_digest), 64)
             self.assertEqual(len(toolchain_digest), 64)
             self.assertIn("-std=c11", build_command)
-            metrics = [("compiler_peak_rss", 1, 1.02, 1.05),
-                       ("compiler_wall_time", 0, 1.02, 1.05),
-                       ("generated_runtime", 2, 1.03, 1.03)]
+            metrics = sorted((name, binding.STATISTICAL_METRICS.index(name),
+                              binding.AGGREGATE_THRESHOLDS[name], binding.CELL_THRESHOLDS[name])
+                             for name in binding.STATISTICAL_METRICS)
+            self.assertEqual([index for _name, index, _a, _c in metrics], [4, 3, 1, 0, 2])
             lines = [
-                "version=1 seed=20260913 bootstrap_members=3 cell_members=3 "
-                "pairs=60 resamples=100000 frozen=1 members=6\n"
+                "version=1 seed=20260913 bootstrap_members=5 cell_members=5 "
+                "pairs=60 resamples=100000 frozen=1 members=10\n"
             ]
+
+            def cell_suffix(name):
+                return "/cell/group=0" if name in binding.BATCH_METRICS else "/cell/row=0"
+
             bootstrap_names = sorted(name + "/aggregate" for name, _index, _a, _c in metrics)
-            cell_names = sorted(name + "/cell/row=0" for name, _index, _a, _c in metrics)
+            cell_names = sorted(name + cell_suffix(name) for name, _index, _a, _c in metrics)
             for metric_name, metric_index, aggregate_limit, cell_limit in metrics:
                 for kind, suffix, cells, resamples, limit in (
                         (0, "/aggregate", 1, 100000, aggregate_limit),
-                        (1, "/cell/row=0", 1, 0, cell_limit)):
+                        (1, cell_suffix(metric_name), 1, 0, cell_limit)):
                     member = metric_name + suffix
                     family_index = ((cell_names if kind else bootstrap_names).index(member))
                     lines.append(
@@ -1010,9 +1018,20 @@ class BindingTests(unittest.TestCase):
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(result["schema"],
                              "buster-native-retirement-statistics-replay-v1")
-            self.assertEqual(len(result["members"]), 6)
+            self.assertEqual(len(result["members"]), 10)
             self.assertTrue(all(item["valid"] for item in result["members"]))
             self.assertEqual({item["resamples"] for item in result["members"]}, {0, 100000})
+            self.assertEqual({item["metric"] for item in result["members"]}, {0, 1, 2, 3, 4})
+            # A batch member presented under another metric's seed domain fails.
+            swapped = root / "swapped.series"
+            swapped.write_text("".join(lines).replace(
+                "member=compiler_batch_peak_rss/aggregate metric=4",
+                "member=compiler_batch_peak_rss/aggregate metric=3", 1), encoding="utf-8")
+            rejected = subprocess.run(
+                [str(executable), "retirement-replay", "--input", str(swapped),
+                 "--output", str(root / "swapped.json")],
+                check=False, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
             oversized = root / "oversized.series"
             oversized.write_text(
                 "version=1 seed=20260913 bootstrap_members=1 cell_members=1 "
@@ -1139,7 +1158,7 @@ class BindingTests(unittest.TestCase):
             "diagnostic_obligation": "none", "argv_evidence": "groups/0/none.argv",
             "artifact_stage": "object",
         }
-        metrics = {metric: True for metric in binding.METRICS}
+        metrics = {metric: True for metric in binding.ROW_METRICS}
         parsed = [{"row": 0, "identity": identity, "metrics": metrics,
                    "eligibility": {
                        "compiler_wall_time": True, "compiler_peak_rss": True,
@@ -1157,15 +1176,19 @@ class BindingTests(unittest.TestCase):
         return parsed, family, rules
 
     def _build_small_evidence_fixture(self):
-        """Build one bounded, fully wired workflow for the evidence-path test.
+        """Build one bounded, fully wired A1 workflow for the evidence-path test.
 
-        The production support declaration remains the 77,184-object-row
+        The production support declaration remains the full object-row
         census; the support-output function is patched only in this test so
-        the workflow/seal/replay composition can execute on one object row,
-        one native link row, and 240 streamed #615 records.  The independent
-        schema-2 validator has its own 23-case suite and is not replaced by
-        this bounded wiring check.
+        the workflow/seal/replay composition can execute on one native object
+        row (its own batch group with one frozen rejection control), one
+        native link row (a singleton stage group with runtime), and one
+        cross-target object row that is never timed but still enters the
+        code-byte records with a reproduction digest.  The independent
+        schema-2 validator has its own suite and is not replaced by this
+        bounded wiring check.
         """
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
         record, contents = self.make_record()
 
         def put(path, data):
@@ -1198,6 +1221,8 @@ class BindingTests(unittest.TestCase):
         performance_rows_descriptor = support_files[
             binding.SUPPORT_FILE_ROLES.index("performance_rows")]
         rows_record = json.loads(contents[performance_rows_descriptor["path"]].decode())
+        cross_census_row = next(index for index, item in enumerate(rows_record["rows"])
+                                if item["identity"]["target"] != binding.NATIVE_TIMED_TARGET)
         object_row = copy.deepcopy(rows_record["rows"][0])
         object_row["row"] = 0
         object_row["eligibility"] = {
@@ -1213,28 +1238,43 @@ class BindingTests(unittest.TestCase):
             "generated_runtime": True,
             "runtime_oracle": "independent-native-executable-oracle",
         })
-        rows_record["rows"] = [object_row, runtime_row]
+        cross_row = copy.deepcopy(rows_record["rows"][cross_census_row])
+        cross_row["row"] = 2
+        cross_row["eligibility"] = copy.deepcopy(object_row["eligibility"])
+        rows_record["rows"] = [object_row, runtime_row, cross_row]
         rows_data = json_data(rows_record)
         performance_rows_descriptor.update(put(performance_rows_descriptor["path"], rows_data))
         parsed, axes, family = binding._performance_rows(rows_data)
+        timed = binding._timed_rows(parsed)
+        self.assertEqual([row["row"] for row in timed], [0, 1])
+        groups = binding._batch_groups(parsed)
+        self.assertEqual([(group["kind"], group["rows"]) for group in groups],
+                         [(binding.OBJECT_BATCH_GROUP, [0]),
+                          (binding.SINGLETON_STAGE_GROUP, [1])])
+        self.assertFalse(any("row=2" in member for member in family["members"]))
 
         performance_descriptor = support_files[
             binding.SUPPORT_FILE_ROLES.index("performance_declaration")]
         performance = json.loads(contents[performance_descriptor["path"]].decode())
         performance.update({"performance_rows_sha256": performance_rows_descriptor["sha256"],
-                            "required_row_count": 2, "axes": axes,
+                            "required_row_count": 3, "axes": axes,
                             "statistical_family": family})
         performance_descriptor.update(
             put(performance_descriptor["path"], json_data(performance)))
         record["support"]["root_sha256"] = binding._support_root_digest(
             support_files, record["support"]["validator"], record["support"]["closure"])
         record["population"].update({
-            "required_row_count": 2,
+            "required_row_count": 3,
             "required_rows_sha256": performance_rows_descriptor["sha256"],
             "axes": axes,
             "statistical_family": family,
             "source_digests": binding._artifact_digest_map(record["support"]),
         })
+        # The A/A admission qualifies exactly this bounded family.
+        aa_descriptor = record["execution"]["host"]["aa_admission_receipt"]
+        aa_value = json.loads(contents[aa_descriptor["path"]].decode())
+        aa_value["family_sha256"] = family["sha256"]
+        aa_descriptor.update(put(aa_descriptor["path"], json_data(aa_value)))
         counts = binding._family_member_counts(family)
         record["rules"]["sampling"].update({
             "bootstrap_members_per_scope": counts["bootstrap_members_per_scope"],
@@ -1248,7 +1288,8 @@ class BindingTests(unittest.TestCase):
         for performance_row in parsed:
             item = copy.deepcopy(admission_template)
             stage = performance_row["identity"]["artifact_stage"]
-            item.update({"row": performance_row["row"], "census_row": 0,
+            item.update({"row": performance_row["row"],
+                         "census_row": cross_census_row if performance_row["row"] == 2 else 0,
                          "identity": performance_row["identity"],
                          "artifact_stage": stage,
                          "artifact_kind": ("object" if stage == "object"
@@ -1272,64 +1313,41 @@ class BindingTests(unittest.TestCase):
             oracle["records"].append(item)
         oracle_descriptor.update(put(oracle_descriptor["path"], json_data(oracle)))
 
-        # Stream both canonical rows over both rounds and all 60 pairs.
-        measurement_lines = []
-        for performance_row in parsed:
-            for round_number in range(2):
-                for pair in range(60):
-                    value = {
-                        "record_id": (f"row-{performance_row['row']}/"
-                                      f"round-{round_number}/pair-{pair}"),
-                        "row": performance_row["row"], "round": round_number,
-                        "pair": pair,
-                        "measurements": {
-                            metric: {
-                                "baseline": (1 if metric in ("generated_code_bytes",
-                                                              "compiler_peak_rss") else 1.0),
-                                "candidate": (1 if metric in ("generated_code_bytes",
-                                                               "compiler_peak_rss") else 1.0),
-                            }
-                            for metric in binding.METRICS
-                            if performance_row["metrics"][metric]
-                        },
-                    }
-                    measurement_lines.append(json_data(value))
-        shard_data = b"".join(measurement_lines)
-        shard_descriptor = put("results/input-shard-000.jsonl", shard_data)
-        manifest_value = {
-            "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
-            "identity_field": "record_id",
-            "shards": [{"identity": "result-input-shard-000",
-                        **shard_descriptor}],
-        }
-        manifest_data = json_data(manifest_value)
-        manifest_descriptor = put("results/input-manifest-000.json", manifest_data)
-        plan_value = {
-            "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-            "source_manifest_sha256": support_files[
-                binding.SUPPORT_FILE_ROLES.index("manifest")]["sha256"],
-            "source_rows_sha256": support_files[
-                binding.SUPPORT_FILE_ROLES.index("rows")]["sha256"],
-            "object_row_count": 1, "sample_row_count": 2,
-            "rounds": 2, "identity_field": "record_id",
-            "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
-            "pairs_per_round": 60, "records_per_row": 120,
-            "required_records": 240,
-            "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
-            "manifest_count": 1,
-            "manifests": [{"identity": "result-input-manifest-000",
-                           "path": manifest_descriptor["path"], "start_record": 0,
-                           "records": 240}],
-            "predeclared": True,
-        }
+        # Stream the timed rows and the object batch group over both rounds
+        # and all 60 pairs; the cross-target row has no numeric records.
+        samples, batch_samples = InvocationEvidenceTests.synthetic_samples(timed)
+
+        def records(prefix, values):
+            return b"".join(json_data({
+                "record_id": f"{prefix}-{unit}/round-{round_number}/pair-{pair}",
+                prefix: unit, "round": round_number, "pair": pair,
+                "measurements": measurements,
+            }) for (unit, round_number, pair), measurements in sorted(values.items()))
+
+        shard_data = records("row", samples)
+        batch_shard_data = records("group", batch_samples)
+        manifests = []
+        for name, data in (("input", shard_data), ("batch-input", batch_shard_data)):
+            shard_descriptor = put(f"results/{name}-shard-000.jsonl", data)
+            manifest_data = json_data({
+                "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
+                "identity_field": "record_id",
+                "shards": [{"identity": f"result-{name}-shard-000", **shard_descriptor}]})
+            manifests.append((put(f"results/{name}-manifest-000.json", manifest_data),
+                              len(data) + len(manifest_data)))
+        (manifest_descriptor, input_bytes), (batch_manifest_descriptor, batch_input_bytes) = manifests
+        plan_value = InvocationEvidenceTests.result_input_plan(
+            support_files[binding.SUPPORT_FILE_ROLES.index("manifest")]["sha256"],
+            support_files[binding.SUPPORT_FILE_ROLES.index("rows")]["sha256"],
+            2, 2, 1, row_path=manifest_descriptor["path"],
+            batch_path=batch_manifest_descriptor["path"])
         plan_descriptor = record["workflow"]["records"]["result_input_plan"]
         plan_descriptor.update(put(plan_descriptor["path"], json_data(plan_value)))
 
         # Construct every scope-free logical member and ask the reviewed C
         # adapter to produce the actual result bytes for this small fixture.
         bootstrap_index, cell_index = binding._family_member_indexes(family)
+        family_cells = binding._family_cells(parsed)
         series_lines = [
             f"version=1 seed={record['rules']['sampling']['seed']} "
             f"bootstrap_members={counts['bootstrap_members_per_scope']} "
@@ -1344,21 +1362,27 @@ class BindingTests(unittest.TestCase):
             limit = binding.CELL_THRESHOLDS[metric_name] if is_cell \
                 else binding.AGGREGATE_THRESHOLDS[metric_name]
             if is_cell:
-                selected_rows = [int(member.rsplit("=", 1)[1])]
+                selected = [cell for cell in family_cells[metric_name]
+                            if member.endswith("/cell/" + cell["cell"])]
             elif member.endswith("/aggregate"):
-                selected_rows = [item["row"] for item in parsed
-                                 if item["metrics"][metric_name]]
+                selected = family_cells[metric_name]
             else:
-                dimension, selected = member.split("/slice/", 1)[1].split("=", 1)
-                selected_rows = [item["row"] for item in parsed
-                                 if item["metrics"][metric_name]
-                                 and str(item["identity"][dimension]) == selected]
+                dimension, value = member.split("/slice/", 1)[1].split("=", 1)
+                selected = [cell for cell in family_cells[metric_name]
+                            if str(cell["dimensions"][dimension]) == value]
             series_lines.append(
                 f"member={member} metric={binding.STATISTICAL_METRICS.index(metric_name)} "
                 f"kind={1 if is_cell else 0} family={index} "
-                f"cells={len(selected_rows)} pairs=60 "
+                f"cells={len(selected)} pairs=60 "
                 f"resamples={0 if is_cell else 100000} limit={limit}\n")
-            series_lines.extend("ratio=1.0\n" for _ in range(120 * len(selected_rows)))
+            for cell in selected:
+                table, unit = cell["unit"]
+                source = samples if table == "row" else batch_samples
+                for round_number in range(2):
+                    for pair in range(60):
+                        pair_value = source[(unit, round_number, pair)][metric_name]
+                        ratio = float(str(pair_value["candidate"])) / float(str(pair_value["baseline"]))
+                        series_lines.append(f"ratio={ratio!r}\n")
             series_lines.append("end\n")
         series_data = "".join(series_lines).encode("utf-8")
         adapter_input_descriptor = put("results/statistics-series.txt", series_data)
@@ -1378,23 +1402,7 @@ class BindingTests(unittest.TestCase):
             adapter_result_data = trusted_output.read_bytes()
         adapter_result_descriptor = put("results/statistics-replay.json", adapter_result_data)
 
-        connection = sqlite3.connect(":memory:")
-        try:
-            connection.execute(
-                "CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
-                "metric TEXT, baseline TEXT, candidate TEXT)")
-            for performance_row in parsed:
-                for round_number in range(2):
-                    for pair in range(60):
-                        connection.execute(
-                            "INSERT INTO samples VALUES (?, ?, ?, 'generated_code_bytes', '1', '1')",
-                            (performance_row["row"], round_number, pair))
-            connection.commit()
-            code_summary = binding._code_bytes_summary(
-                parsed, connection, 2, 60)
-        finally:
-            connection.close()
-        raw_measurements_digest = hashlib.sha256(shard_data).hexdigest()
+        raw_measurements_digest = hashlib.sha256(shard_data + batch_shard_data).hexdigest()
         result_bundle_value = {
             "schema": binding.RESULT_BUNDLE_SCHEMA, "version": 1,
             "source_rows_sha256": support_files[
@@ -1402,19 +1410,19 @@ class BindingTests(unittest.TestCase):
             "result_input_plan_sha256": plan_descriptor["sha256"],
             "family_sha256": family["sha256"],
             "result_manifests": [{
-                "identity": "result-input-manifest-000", **manifest_descriptor,
-                "start_record": 0, "records": 240,
-                "input_bytes": len(shard_data) + len(manifest_data),
+                "identity": "rows-0", **manifest_descriptor,
+                "start_record": 0, "records": 240, "input_bytes": input_bytes,
+            }],
+            "batch_result_manifests": [{
+                "identity": "batches-0", **batch_manifest_descriptor,
+                "start_record": 0, "records": 120, "input_bytes": batch_input_bytes,
             }],
             "raw_measurements_sha256": raw_measurements_digest,
             "member_invocations_sha256": binding._family_invocation_digest(family),
             "member_count": len(family["members"]),
             "scopes_per_member": len(binding.STATISTICAL_SCOPES),
             "adapter_input": adapter_input_descriptor,
-            "code_bytes_summary": code_summary,
         }
-        result_bundle_descriptor = put("results/sealed-result.bundle",
-                                      json_data(result_bundle_value))
 
         def phase(path, value):
             return put(path, json_data(value))
@@ -1448,19 +1456,16 @@ class BindingTests(unittest.TestCase):
         # Synthetic service receipt, with its digest supplied independently by
         # this test caller. This exercises the full invocation gate without
         # presenting fixture data as deployed-service or performance evidence.
-        from native_retirement_performance_identity_test import InvocationEvidenceTests
         with tempfile.TemporaryDirectory(prefix="retirement-e2e-execution-") as execution_directory:
             execution_root = Path(execution_directory)
             for name, data in contents.items():
                 target = execution_root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
-            sample_map = {}
-            for line in shard_data.splitlines():
-                item = json.loads(line)
-                sample_map[(item["row"], item["round"], item["pair"])] = item["measurements"]
             execution_plan, execution_receipt, _receipt, events, _digest = (
-                InvocationEvidenceTests.attach_execution(execution_root, record, parsed, sample_map))
+                InvocationEvidenceTests.attach_execution(
+                    execution_root, record, parsed, samples, batch_samples,
+                    {0: [InvocationEvidenceTests.rejection_control()]}))
             pre_value["execution_plan"] = execution_plan
             pre_descriptor = phase("workflow/pre-sample-plan.json", pre_value)
             record["workflow"]["phases"]["pre_sample_plan"] = pre_descriptor
@@ -1472,11 +1477,27 @@ class BindingTests(unittest.TestCase):
                 binding._execution_context(record, raw_measurements_digest))
             execution_descriptor = InvocationEvidenceTests.write_transcript(
                 execution_root, execution_receipt, events)
-            for name in (execution_plan["path"], execution_descriptor["path"],
-                         "execution/invocations.jsonl"):
-                contents[name] = (execution_root / name).read_bytes()
+            code_records = InvocationEvidenceTests.code_records(
+                execution_root, execution_plan, parsed)
+            untimed_batches = InvocationEvidenceTests.untimed_batches(
+                execution_root, execution_plan, parsed, ("production", "reproduction"),
+                record=record, receipt=execution_receipt)
+            self.assertEqual(untimed_batches["records"], 4)
+            for path in sorted((execution_root / "execution").rglob("*")):
+                if path.is_file():
+                    contents[path.relative_to(execution_root).as_posix()] = path.read_bytes()
+            # (M4) Per-batch metrics artifacts live in metrics shards.
+            for path in sorted(execution_root.glob("retirement-metrics-*.txt")):
+                contents[path.name] = path.read_bytes()
+            self.assertEqual(code_records["records"], 3)
             result_bundle_value["execution_receipt"] = execution_descriptor
-            result_bundle_descriptor = put("results/sealed-result.bundle", json_data(result_bundle_value))
+            result_bundle_value["code_records"] = code_records
+            result_bundle_value["untimed_batches"] = untimed_batches
+            code_summary = binding._code_bytes_summary(
+                parsed, {row["row"]: (1, 1) for row in parsed})
+            result_bundle_value["code_bytes_summary"] = code_summary
+            result_bundle_descriptor = put("results/sealed-result.bundle",
+                                          json_data(result_bundle_value))
 
         with tempfile.TemporaryDirectory(prefix="retirement-e2e-seal-") as seal_directory:
             seal_root = Path(seal_directory)
@@ -1489,6 +1510,16 @@ class BindingTests(unittest.TestCase):
                 record["workflow"]["phases"], plan_value,
                 result_bundle_descriptor, result_bundle_value,
                 adapter_result_descriptor)
+        # (M4) The closure seals metrics shards, not one entry per batch: the
+        # 244 object batches fill three 100-artifact shards and the four
+        # untimed batches two 3-artifact shards.
+        self.assertEqual(sum(item["name"].startswith("execution.metrics_shard.")
+                             for item in seal_files), 3)
+        self.assertEqual(sum(item["name"].startswith("untimed.metrics_shard.")
+                             for item in seal_files), 2)
+        self.assertFalse(any(item["name"].startswith(("execution.metrics.", "untimed.metrics."))
+                             for item in seal_files))
+        self.assertIn("workflow.untimed_batches", {item["name"] for item in seal_files})
         seal_value = {
             "schema": "buster-native-retirement-result-seal-v1", "version": 1,
             "files": seal_files,
@@ -1559,6 +1590,7 @@ class BindingTests(unittest.TestCase):
             "adapter_toolchain_sha256": toolchain_digest,
             "adapter_source_sha256": source_closure_digest,
             "code_bytes_summary_sha256": binding._canonical_json_digest(code_summary),
+            "untimed_batches_sha256": untimed_batches["sha256"],
             "publication_id": publication_id,
             "published_bundle_sha256": downloaded_descriptor["sha256"],
             "downloaded_bundle_sha256": downloaded_descriptor["sha256"],
@@ -1583,7 +1615,7 @@ class BindingTests(unittest.TestCase):
         census_rows = binding._tsv(contents[census_rows_path], binding.ROW_FIELDS,
                                    "small census rows")
         support_output = {
-            "manifest": {}, "inputs": [], "rows": census_rows[:1],
+            "manifest": {}, "inputs": [], "rows": census_rows,
             "dependencies": [], "environment": [], "sources": {},
             "axes": axes, "family": family,
             "support_declaration_sha256": support_files[0]["sha256"],
@@ -1591,7 +1623,7 @@ class BindingTests(unittest.TestCase):
             "rows_sha256": support_files[4]["sha256"],
             "performance_rows_sha256": performance_rows_descriptor["sha256"],
             "validator_report_sha256": support_files[8]["sha256"],
-            "object_row_count": 1, "eligible_object_row_count": 1,
+            "object_row_count": 2, "eligible_object_row_count": 2,
             "compiler_eligible_rows": {row["row"] for row in parsed},
             "group_count": 1,
         }
@@ -1633,17 +1665,16 @@ class BindingTests(unittest.TestCase):
         parsed, family, rules = self._series_join_fixture()
         with tempfile.TemporaryDirectory(prefix="retirement-series-join-") as directory:
             root = Path(directory)
-            import sqlite3
             connection = sqlite3.connect(root / "samples.sqlite3")
             try:
-                connection.execute(
-                    "CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
-                    "metric TEXT, baseline TEXT, candidate TEXT)")
+                from native_retirement_performance_identity_test import InvocationEvidenceTests
+                InvocationEvidenceTests.create_sample_tables(connection)
                 for metric in binding.STATISTICAL_METRICS:
+                    table = "batch_samples" if metric in binding.BATCH_METRICS else "samples"
                     for round_number in range(2):
                         for pair in range(60):
                             connection.execute(
-                                "INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
+                                f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?, ?)",
                                 (0, round_number, pair, metric, "1.0", "1.0"))
                 connection.commit()
                 members = []
@@ -1651,6 +1682,7 @@ class BindingTests(unittest.TestCase):
                                            if item.endswith("/aggregate") or "/slice/" in item)
                 cell_members = sorted(item for item in family["members"]
                                       if "/cell/" in item)
+                self.assertIn("compiler_batch_peak_rss/cell/group=0", cell_members)
                 for member in family["members"]:
                     metric = member.split("/", 1)[0]
                     cell = "/cell/" in member
@@ -1661,7 +1693,7 @@ class BindingTests(unittest.TestCase):
                                     1, 0 if cell else 100000, str(limit)))
 
                 def write_series(path, changed_member=None, changed_ratio=False,
-                                 omit_member=None):
+                                 omit_member=None, changed_cells=None):
                     selected = [item for item in members if item[0] != omit_member]
                     lines = [
                         f"version=1 seed={rules['sampling']['seed']} "
@@ -1672,63 +1704,58 @@ class BindingTests(unittest.TestCase):
                     for member, metric, kind, index, cells, resamples, limit in selected:
                         if member == changed_member:
                             limit = "9.0"
+                        if member == changed_cells:
+                            cells = 2
                         lines.append(
                             f"member={member} metric={metric} kind={kind} family={index} "
                             f"cells={cells} pairs=60 resamples={resamples} limit={limit}\n")
-                        for sample_index in range(120):
+                        for sample_index in range(120 * cells):
                             ratio = "1.1" if changed_ratio and sample_index == 0 else "1.0"
                             lines.append(f"ratio={ratio}\n")
                         lines.append("end\n")
                     path.write_text("".join(lines), encoding="utf-8")
 
+                def artifact(path):
+                    return {"path": path.name, "bytes": path.stat().st_size,
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
                 valid = root / "valid.series"
                 write_series(valid)
-                artifact = {"path": valid.name, "bytes": valid.stat().st_size,
-                            "sha256": hashlib.sha256(valid.read_bytes()).hexdigest()}
-                binding._check_adapter_series(root, artifact, family, parsed, rules, connection)
-                widened = root / "widened.series"
-                write_series(widened, changed_member=members[0][0])
-                widened_artifact = {"path": widened.name, "bytes": widened.stat().st_size,
-                                    "sha256": hashlib.sha256(widened.read_bytes()).hexdigest()}
-                with self.assertRaises(ValueError):
-                    binding._check_adapter_series(root, widened_artifact, family, parsed,
-                                                  rules, connection)
-                mismatch = root / "mismatch.series"
-                write_series(mismatch, changed_ratio=True)
-                mismatch_artifact = {"path": mismatch.name, "bytes": mismatch.stat().st_size,
-                                     "sha256": hashlib.sha256(mismatch.read_bytes()).hexdigest()}
-                with self.assertRaises(ValueError):
-                    binding._check_adapter_series(root, mismatch_artifact, family, parsed,
-                                                  rules, connection)
-                omitted = root / "omitted.series"
-                write_series(omitted, omit_member=members[-1][0])
-                omitted_artifact = {"path": omitted.name, "bytes": omitted.stat().st_size,
-                                    "sha256": hashlib.sha256(omitted.read_bytes()).hexdigest()}
-                with self.assertRaises(ValueError):
-                    binding._check_adapter_series(root, omitted_artifact, family, parsed,
+                binding._check_adapter_series(root, artifact(valid), family, parsed, rules,
+                                              connection)
+                cases = (
+                    ("widened", {"changed_member": members[0][0]}),
+                    ("widened-batch", {"changed_member": "compiler_batch_wall_time/aggregate"}),
+                    ("mismatch", {"changed_ratio": True}),
+                    ("omitted", {"omit_member": members[-1][0]}),
+                    # Batch cell population mismatch: a batch aggregate may
+                    # not claim cells beyond the derived object groups.
+                    ("batch-cells", {"changed_cells": "compiler_batch_peak_rss/aggregate"}),
+                )
+                for name, change in cases:
+                    path = root / f"{name}.series"
+                    write_series(path, **change)
+                    with self.subTest(case=name), self.assertRaises(ValueError):
+                        binding._check_adapter_series(root, artifact(path), family, parsed,
+                                                      rules, connection)
+                # A batch member without its own batch samples fails closed.
+                connection.execute("DELETE FROM batch_samples WHERE metric='compiler_batch_peak_rss'")
+                with self.assertRaisesRegex(ValueError, "missing raw samples"):
+                    binding._check_adapter_series(root, artifact(valid), family, parsed,
                                                   rules, connection)
             finally:
                 connection.close()
 
     def test_code_byte_summary_uses_integer_per_cell_gates(self):
         parsed, _family, _rules = self._series_join_fixture()
-        import sqlite3
-        connection = sqlite3.connect(":memory:")
-        try:
-            connection.execute(
-                "CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
-                "metric TEXT, baseline TEXT, candidate TEXT)")
-            for round_number in range(2):
-                for pair in range(60):
-                    connection.execute(
-                        "INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
-                        (0, round_number, pair, "generated_code_bytes", "100", "102"))
-            connection.commit()
-            summary = binding._code_bytes_summary(parsed, connection, 2, 60)
-            self.assertFalse(summary["per_cell_pass"])
-            self.assertFalse(summary["aggregate_pass"])
-        finally:
-            connection.close()
+        summary = binding._code_bytes_summary(parsed, {0: (100, 102)})
+        self.assertFalse(summary["per_cell_pass"])
+        self.assertFalse(summary["aggregate_pass"])
+        summary = binding._code_bytes_summary(parsed, {0: (100, 101)})
+        self.assertTrue(summary["per_cell_pass"] and summary["aggregate_pass"])
+        for facts in ({}, {0: (0, 0)}, {0: (1, -1)}, {0: (1.0, 1)}):
+            with self.subTest(facts=facts), self.assertRaises(ValueError):
+                binding._code_bytes_summary(parsed, facts)
 
     def test_maximum_result_capacity_is_predeclared_without_coordinate_sets(self):
         required = 77184 * 2 * 256
@@ -1743,126 +1770,331 @@ class BindingTests(unittest.TestCase):
         row_ordinal, round_number, pair = 77183, 1, 255
         self.assertEqual(((row_ordinal * 2 + round_number) * 256 + pair), required - 1)
 
+    @staticmethod
+    def _check_result_plan(root, plan, rules, object_rows=1):
+        data = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        target = root / "results" / "input-plan.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        descriptor = {"path": "results/input-plan.json", "bytes": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest()}
+        return binding._result_input_plan(
+            root, descriptor, {"manifest_sha256": "a" * 64, "rows_sha256": "b" * 64,
+                               "object_row_count": object_rows}, {}, rules)
+
     def test_presample_partition_rejects_postmeasurement_descriptors(self):
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
         with tempfile.TemporaryDirectory(prefix="retirement-plan-cycle-") as directory:
             root = Path(directory)
             rules = self._rules()
-            plan = {
-                "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-                "source_manifest_sha256": "a" * 64, "source_rows_sha256": "b" * 64,
-                "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-                "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-                "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
-                "object_row_count": 1, "sample_row_count": 1,
-                "rounds": 2, "pairs_per_round": 60, "records_per_row": 120,
-                "required_records": 120,
-                "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
-                "manifest_count": 1,
-                "manifests": [{"identity": "manifest-0", "path": "results/manifest-0.json",
-                               "start_record": 0, "records": 120}],
-                "predeclared": True,
-            }
-
-            def check(candidate):
-                data = (json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n").encode()
-                target = root / "plan.json"
-                target.write_bytes(data)
-                descriptor = {"path": target.name, "bytes": len(data),
-                              "sha256": hashlib.sha256(data).hexdigest()}
-                return binding._result_input_plan(
-                    root, descriptor,
-                    {"manifest_sha256": "a" * 64, "rows_sha256": "b" * 64,
-                     "object_row_count": 1}, {}, rules)
-
-            accepted = check(plan)
-            self.assertEqual(accepted["manifests"], plan["manifests"])
-            for field, value in (("bytes", 1), ("sha256", "c" * 64), ("input_bytes", 1)):
+            plan = InvocationEvidenceTests.result_input_plan("a" * 64, "b" * 64, 1, 1, 1)
+            accepted = self._check_result_plan(root, plan, rules)
+            self.assertEqual(accepted["populations"], plan["populations"])
+            for kind in ("rows", "batches"):
+                for field, value in (("bytes", 1), ("sha256", "c" * 64), ("input_bytes", 1)):
+                    candidate = copy.deepcopy(plan)
+                    candidate["populations"][kind]["manifests"][0][field] = value
+                    with self.subTest(kind=kind, field=field), self.assertRaises(ValueError):
+                        self._check_result_plan(root, candidate, rules)
+            # The A1 population tokens and target are bound, not descriptive.
+            for change in (
+                    lambda value: value.update(timed_target="aarch64-unknown-linux-gnu"),
+                    lambda value: value["populations"]["batches"].update(
+                        coordinate_schema="row-round-pair-v1"),
+                    lambda value: value["populations"]["rows"].update(
+                        sample_population="trusted-census-eligible-performance-rows-with-required-metrics"),
+                    lambda value: value["populations"].pop("batches"),
+                    lambda value: value["populations"]["batches"]["manifests"][0].update(
+                        path=value["populations"]["rows"]["manifests"][0]["path"])):
                 candidate = copy.deepcopy(plan)
-                candidate["manifests"][0][field] = value
-                with self.subTest(field=field), self.assertRaises(ValueError):
-                    check(candidate)
+                change(candidate)
+                with self.assertRaises(ValueError):
+                    self._check_result_plan(root, candidate, rules)
 
     def test_sealed_manifest_must_match_frozen_partition(self):
-        plan = {"manifests": [{"identity": "manifest-0",
-                                "path": "results/manifest-0.json",
-                                "start_record": 0, "records": 120}]}
+        planned = [{"identity": "manifest-0", "path": "results/manifest-0.json",
+                    "start_record": 0, "records": 120}]
         descriptor = {"identity": "manifest-0", "path": "results/manifest-0.json",
                       "bytes": 1, "sha256": "a" * 64,
                       "start_record": 0, "records": 120, "input_bytes": 1}
-        self.assertEqual(binding._result_manifest_descriptors([descriptor], plan),
+        self.assertEqual(binding._result_manifest_descriptors([descriptor], planned),
                          [descriptor])
         for field, value in (("identity", "manifest-1"), ("path", "results/other.json"),
                              ("start_record", 1), ("records", 119)):
             candidate = copy.deepcopy(descriptor)
             candidate[field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
-                binding._result_manifest_descriptors([candidate], plan)
+                binding._result_manifest_descriptors([candidate], planned)
 
-    def test_full_population_plan_fits_ceiling_without_dropping_stage_rows(self):
-        sample_rows = 77184 + 2
-        required = sample_rows * 2 * 254
+    def test_immutable_ceiling_and_partition_bound_cover_both_populations(self):
+        # The 39,518,208-record ceiling and three-partition bound are kept as
+        # limits over the union of the row and batch populations.
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
         cap = binding.RESULT_INPUT_MAX_RECORDS
-        tail = required - 2 * cap
-        self.assertLessEqual(required, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
-        self.assertGreater(sample_rows * 2 * 256,
-                           binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
         with tempfile.TemporaryDirectory(prefix="retirement-cap-plan-") as directory:
             root = Path(directory)
             rules = self._rules()
             rules["sampling"]["pairs_per_round"] = 254
-            support_output = {"manifest_sha256": "a" * 64,
-                              "rows_sha256": "b" * 64,
-                              "object_row_count": 77184}
-            manifests = [{
-                "identity": f"manifest-{index}", "path": f"results/manifest-{index}.json",
-                "start_record": start, "records": records,
-            } for index, (start, records) in enumerate(
-                ((0, cap), (cap, cap), (2 * cap, tail)))]
-
-            def check(candidate):
-                data = (json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n").encode()
-                plan_path = root / "results/input-plan.json"
-                plan_path.parent.mkdir(parents=True, exist_ok=True)
-                plan_path.write_bytes(data)
-                artifact = {"path": "results/input-plan.json", "bytes": len(data),
-                            "sha256": hashlib.sha256(data).hexdigest()}
-                return binding._result_input_plan(root, artifact, support_output,
-                                                  {}, rules)
-
-            plan = {
-                "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-                "source_manifest_sha256": "a" * 64, "source_rows_sha256": "b" * 64,
-                "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-                "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-                "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
-                "object_row_count": 77184, "sample_row_count": sample_rows,
-                "rounds": 2, "pairs_per_round": 254, "records_per_row": 508,
-                "required_records": required, "max_records_per_manifest": cap,
-                "manifest_count": 3, "manifests": manifests, "predeclared": True,
-            }
-            self.assertEqual(check(plan)["manifest_count"], 3)
-            for bad_count in (2, 4):
+            # Two full-cap row partitions plus one batch partition fit.
+            rows = (2 * cap) // (2 * 254)
+            plan = InvocationEvidenceTests.result_input_plan("a" * 64, "b" * 64, 77184,
+                                                             rows, 80, pairs=254)
+            accepted = self._check_result_plan(root, plan, rules, 77184)
+            self.assertEqual([accepted["populations"][kind]["manifest_count"]
+                              for kind in ("rows", "batches")], [2, 1])
+            # The pre-A1 full population at 254 pairs still fits the record
+            # ceiling alone, but a second population cannot add a fourth
+            # partition.
+            full = InvocationEvidenceTests.result_input_plan("a" * 64, "b" * 64, 77184,
+                                                             77184 + 2, 1, pairs=254)
+            self.assertLessEqual((77184 + 2) * 2 * 254 + 508,
+                                 binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
+            with self.assertRaisesRegex(ValueError, "three-partition bound"):
+                self._check_result_plan(root, full, rules, 77184)
+            # A batch population cannot push the union past the record ceiling.
+            over = InvocationEvidenceTests.result_input_plan(
+                "a" * 64, "b" * 64, 77184, 2 * cap // 508, 30000, pairs=254)
+            self.assertGreater((2 * cap // 508 + 30000) * 508,
+                               binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
+            with self.assertRaisesRegex(ValueError, "immutable total-record ceiling"):
+                self._check_result_plan(root, over, rules, 77184)
+            for bad in (lambda value: value["populations"]["rows"]["manifests"][0].update(
+                            records=cap - 1),
+                        lambda value: value["populations"]["rows"]["manifests"][1].update(
+                            start_record=cap + 1),
+                        lambda value: value["populations"]["rows"].update(manifest_count=3)):
                 candidate = copy.deepcopy(plan)
-                candidate["manifest_count"] = bad_count
-                candidate["manifests"] = candidate["manifests"][:bad_count]
+                bad(candidate)
                 with self.assertRaises(ValueError):
-                    check(candidate)
-            for bad_start in (2 * cap - 1, 2 * cap + 1):
-                candidate = copy.deepcopy(plan)
-                candidate["manifests"][2]["start_record"] = bad_start
-                with self.assertRaises(ValueError):
-                    check(candidate)
-            candidate = copy.deepcopy(plan)
-            candidate["manifests"][0]["records"] = cap - 1
-            with self.assertRaises(ValueError):
-                check(candidate)
-            candidate = copy.deepcopy(plan)
-            candidate["pairs_per_round"] = 256
-            candidate["records_per_row"] = 512
-            candidate["required_records"] = sample_rows * 2 * 256
+                    self._check_result_plan(root, candidate, rules, 77184)
             rules["sampling"]["pairs_per_round"] = 256
             with self.assertRaises(ValueError):
-                check(candidate)
+                self._check_result_plan(root, plan, rules, 77184)
+
+    def test_native_population_capacity_is_one_partition_per_population(self):
+        # 411 subjects x 16 native-host configurations plus the stage floor,
+        # and 80 recipe groups, at the 254-pair collection maximum.
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
+        rows = 411 * 16 + len(binding.STAGES) - 1
+        self.assertEqual(411 * 16, 6576)
+        self.assertLess(rows * 2 * 254, binding.RESULT_INPUT_MAX_RECORDS)
+        with tempfile.TemporaryDirectory(prefix="retirement-native-plan-") as directory:
+            rules = self._rules()
+            rules["sampling"]["pairs_per_round"] = 254
+            plan = self._check_result_plan(
+                Path(directory), InvocationEvidenceTests.result_input_plan(
+                    "a" * 64, "b" * 64, 77184, rows, 80, pairs=254), rules, 77184)
+            self.assertEqual(plan["populations"]["rows"]["required_records"], rows * 508)
+            self.assertEqual(plan["populations"]["batches"]["required_records"], 80 * 508)
+
+    def _mixed_target_rows(self):
+        """One native object, one native link and one cross-target object row."""
+        parsed, _family, _rules = self._series_join_fixture()
+        native = parsed[0]
+        native["metrics"]["generated_runtime"] = False
+        native["eligibility"]["generated_runtime"] = False
+        link = copy.deepcopy(native)
+        link["row"] = 1
+        link["identity"]["artifact_stage"] = "link"
+        link["metrics"]["generated_runtime"] = True
+        cross = copy.deepcopy(native)
+        cross["row"] = 2
+        cross["identity"].update(target="aarch64-unknown-linux-gnu", target_abi="aapcs64")
+        return [native, link, cross]
+
+    def test_family_and_batch_groups_are_derived_over_the_native_timed_projection(self):
+        rows = self._mixed_target_rows()
+        self.assertEqual([row["row"] for row in binding._timed_rows(rows)], [0, 1])
+        groups = binding._batch_groups(rows)
+        self.assertEqual([(group["group"], group["kind"], group["rows"], group["object_ordinal"])
+                          for group in groups],
+                         [(0, binding.OBJECT_BATCH_GROUP, [0], 0),
+                          (1, binding.SINGLETON_STAGE_GROUP, [1], None)])
+        family = binding._derive_statistical_family(rows)
+        self.assertEqual(family["metrics"], binding.STATISTICAL_METRICS)
+        self.assertEqual(family["timed_target"], binding.NATIVE_TIMED_TARGET)
+        self.assertEqual(family["cell_counts"], {
+            "compiler_wall_time": 2, "compiler_peak_memory": 2, "generated_runtime": 1,
+            "compiler_batch_wall_time": 1, "compiler_batch_peak_rss": 1})
+        self.assertFalse(any("row=2" in member or "aarch64" in member
+                             for member in family["members"]))
+        self.assertIn("compiler_batch_wall_time/slice/artifact_stage=object", family["members"])
+        self.assertNotIn("compiler_batch_wall_time/slice/artifact_stage=link", family["members"])
+        # Rows sharing configuration, recipe and CPU form one object batch.
+        more = copy.deepcopy(rows[0])
+        more["row"] = 3
+        more["identity"]["fixture"] = "tests/basic_c_other.c"
+        other_cpu = copy.deepcopy(more)
+        other_cpu["row"] = 4
+        other_cpu["identity"]["cpu"] = "haswell"
+        groups = binding._batch_groups(rows + [more, other_cpu])
+        self.assertEqual([group["rows"] for group in groups], [[0, 3], [1], [4]])
+        self.assertEqual([group["object_ordinal"] for group in groups], [0, None, 1])
+
+    def test_batch_group_members_share_frozen_recipe_flags(self):
+        rows = self._mixed_target_rows()
+        more = copy.deepcopy(rows[0])
+        more["row"] = 3
+        more["identity"]["fixture"] = "tests/basic_c_other.c"
+        rows.append(more)
+        inputs = {row["identity"]["fixture"]: {"fixture_flags": ""} for row in rows}
+        binding._check_batch_recipe_flags(rows, inputs)
+        inputs["tests/basic_c_other.c"]["fixture_flags"] = "-std=c23"
+        with self.assertRaisesRegex(ValueError, "disagree on frozen recipe flags"):
+            binding._check_batch_recipe_flags(rows, inputs)
+        # Untimed code-artifact batches use the same one-argv form.
+        inputs["tests/basic_c_other.c"]["fixture_flags"] = ""
+        cross = copy.deepcopy(rows[2])
+        cross["row"] = 4
+        cross["identity"]["fixture"] = "tests/basic_c_cross.c"
+        rows.append(cross)
+        self.assertEqual([group["rows"] for group in binding._untimed_groups(rows)], [[2, 4]])
+        inputs[cross["identity"]["fixture"]] = {"fixture_flags": ""}
+        binding._check_batch_recipe_flags(rows, inputs)
+        inputs[cross["identity"]["fixture"]]["fixture_flags"] = "-std=c23"
+        with self.assertRaisesRegex(ValueError, "untimed batch group 0 members disagree"):
+            binding._check_batch_recipe_flags(rows, inputs)
+
+    def test_cross_target_timing_is_rejected(self):
+        rows = self._mixed_target_rows()
+        # Runtime (a timed metric) on a cross-target row is cross-target timing.
+        rows[2]["metrics"]["generated_runtime"] = True
+        with self.assertRaisesRegex(ValueError, "outside the native-host timed projection"):
+            binding._derive_statistical_family(rows)
+        with self.assertRaisesRegex(ValueError, "outside the native-host timed projection"):
+            list(binding._execution_schedule(rows, self._rules()["sampling"]))
+        rows[2]["metrics"]["generated_runtime"] = False
+        # A numeric record for the cross-target row is outside the population.
+        ordinals = {row["row"]: index for index, row in enumerate(binding._timed_rows(rows))}
+        record = {"record_id": "row-2/round-0/pair-0", "row": 2, "round": 0, "pair": 0,
+                  "measurements": {"compiler_wall_time": {"baseline": 1.0, "candidate": 1.0},
+                                   "compiler_peak_memory": {"baseline": 1, "candidate": 1}}}
+        with self.assertRaisesRegex(ValueError, "outside the complete eligible population"):
+            binding._consume_result_record(record, ordinals, {row["row"]: row for row in rows},
+                                           2, 60, 0, [0], hashlib.sha256())
+        # Code bytes are no longer carried by pair records.
+        record.update(row=0, record_id="row-0/round-0/pair-0")
+        record["measurements"]["generated_code_bytes"] = {"baseline": 1, "candidate": 1}
+        with self.assertRaisesRegex(ValueError, "unknown fields: generated_code_bytes"):
+            binding._consume_result_record(record, ordinals, {row["row"]: row for row in rows},
+                                           2, 60, 0, [0], hashlib.sha256())
+
+    def test_admitted_host_must_be_the_pinned_native_target(self):
+        record, contents = self.make_record()
+        for artifact_name in ("profile", "qualification", "aa_admission"):
+            candidate = copy.deepcopy(record)
+            candidate_contents = dict(contents)
+            if artifact_name == "profile":
+                descriptor = candidate["execution"]["profile"]["descriptor"]
+            elif artifact_name == "qualification":
+                descriptor = candidate["execution"]["host"]["qualification_receipt"]
+            else:
+                descriptor = candidate["execution"]["host"]["aa_admission_receipt"]
+            value = json.loads(candidate_contents[descriptor["path"]].decode())
+            value["native_target"] = "aarch64-unknown-linux-gnu"
+            data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            candidate_contents[descriptor["path"]] = data
+            descriptor.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            if artifact_name == "profile":
+                candidate["execution"]["profile"]["digest"] = descriptor["sha256"]
+            with tempfile.TemporaryDirectory(prefix="retirement-native-target-") as directory:
+                root = Path(directory)
+                self.write_evidence(root, candidate, candidate_contents)
+                with self.subTest(artifact=artifact_name), \
+                        self.assertRaisesRegex(ValueError, "native target"):
+                    binding._check_execution_evidence(root, candidate)
+
+    def test_aa_admission_binds_the_five_metric_family(self):
+        record, contents = self.make_record()
+        with tempfile.TemporaryDirectory(prefix="retirement-aa-family-") as directory:
+            root = Path(directory)
+            self.write_evidence(root, record, contents)
+            binding._check_execution_evidence(root, record)
+        for value in ("e" * 64, "not-a-digest", None):
+            candidate = copy.deepcopy(record)
+            candidate_contents = dict(contents)
+            descriptor = candidate["execution"]["host"]["aa_admission_receipt"]
+            admission = json.loads(candidate_contents[descriptor["path"]].decode())
+            self.assertEqual(admission["family_sha256"],
+                             record["population"]["statistical_family"]["sha256"])
+            if value is None:
+                del admission["family_sha256"]
+            else:
+                admission["family_sha256"] = value
+            data = (json.dumps(admission, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            candidate_contents[descriptor["path"]] = data
+            descriptor.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            with tempfile.TemporaryDirectory(prefix="retirement-aa-family-") as directory:
+                root = Path(directory)
+                self.write_evidence(root, candidate, candidate_contents)
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        ValueError, "statistical family|family_sha256|missing fields"):
+                    binding._check_execution_evidence(root, candidate)
+
+    def test_batch_records_bind_the_group_round_pair_population(self):
+        digest, seen = hashlib.sha256(), [0]
+        record = {"record_id": "group-3/round-1/pair-5", "group": 3, "round": 1, "pair": 5,
+                  "measurements": {
+                      "compiler_batch_wall_time": {"baseline": 0.5, "candidate": 0.6},
+                      "compiler_batch_peak_rss": {"baseline": 4096, "candidate": 4097}}}
+        # Group 3 is the second object group: dense ordinal 1.
+        start = (1 * 2 + 1) * 60 + 5
+        binding._consume_batch_record(record, {0: 0, 3: 1}, 2, 60, start, seen, digest)
+        self.assertEqual(seen, [1])
+        cases = (
+            (lambda value: value["measurements"].pop("compiler_batch_peak_rss"),
+             "missing fields: compiler_batch_peak_rss"),
+            (lambda value: value["measurements"].pop("compiler_batch_wall_time"),
+             "missing fields: compiler_batch_wall_time"),
+            (lambda value: value["measurements"]["compiler_batch_peak_rss"].update(candidate=0),
+             "finite positive"),
+            (lambda value: value.update(group=1, record_id="group-1/round-1/pair-5"),
+             "outside the object batch-group population"),
+            (lambda value: value.update(record_id="row-3/round-1/pair-5"),
+             "not its frozen coordinate"),
+            (lambda value: value.update(pair=6, record_id="group-3/round-1/pair-6"),
+             "disjoint contiguous"),
+            (lambda value: value["measurements"].update(
+                compiler_wall_time={"baseline": 1.0, "candidate": 1.0}), "unknown fields"),
+        )
+        for change, message in cases:
+            candidate = copy.deepcopy(record)
+            change(candidate)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                binding._consume_batch_record(candidate, {0: 0, 3: 1}, 2, 60, start, [0],
+                                              hashlib.sha256())
+
+    def test_batch_limits_and_a1_policy_tokens_are_bound(self):
+        record, _contents = self.make_record()
+        for scope, metric, value in (("aggregate", "compiler_batch_wall_time", 1.03),
+                                     ("aggregate", "compiler_batch_peak_rss", 1.021),
+                                     ("per_cell", "compiler_batch_wall_time", 1.06),
+                                     ("per_cell", "compiler_batch_peak_rss", 1.051),
+                                     ("per_cell", "compiler_peak_memory", 1.06)):
+            candidate = copy.deepcopy(record)
+            candidate["rules"]["thresholds"][scope][metric] = value
+            with self.subTest(scope=scope, metric=metric):
+                self.assert_rejected(candidate)
+        candidate = copy.deepcopy(record)
+        thresholds = candidate["rules"]["thresholds"]["aggregate"]
+        thresholds["compiler_peak_rss"] = thresholds.pop("compiler_peak_memory")
+        self.assert_rejected(candidate)
+        for field, value in (("timed_population", "compiler-eligible-rows-on-every-target"),
+                             ("sampling_unit", "canonical-row"),
+                             ("batch_cells", "diagnostic-only"),
+                             ("code_bytes_measurement", "every-pair"),
+                             ("batch_wall_time", "not-gated")):
+            candidate = copy.deepcopy(record)
+            candidate["rules"]["aggregation"][field] = value
+            with self.subTest(field=field):
+                self.assert_rejected(candidate)
+        candidate = copy.deepcopy(record)
+        candidate["rules"]["uncertainty"]["family"]["metrics"] = \
+            ["compiler_wall_time", "compiler_peak_memory", "generated_runtime"]
+        self.assert_rejected(candidate)
+        candidate = copy.deepcopy(record)
+        candidate["population"]["statistical_family"]["timed_target"] = "aarch64-unknown-linux-gnu"
+        self.assert_rejected(candidate)
 
     def test_mutable_or_short_identity_is_rejected(self):
         record, _contents = self.make_record()
@@ -1934,7 +2166,9 @@ class BindingTests(unittest.TestCase):
 
     def test_pairs_are_even_bounded_and_seeded(self):
         record, _contents = self.make_record()
-        for pairs in (61, 257):
+        # 256 is even and would fit the A1 record ceiling, but the collection
+        # maximum stays 254.
+        for pairs in (58, 61, 256, 257):
             candidate = copy.deepcopy(record)
             candidate["rules"]["sampling"]["pairs_per_round"] = pairs
             with self.subTest(pairs=pairs):
@@ -1953,12 +2187,12 @@ class BindingTests(unittest.TestCase):
 
     def test_statistical_family_rejects_overlong_c_member_identity(self):
         identity = {field: "x" for field in binding.ROW_IDENTITY_FIELDS}
-        identity.update({"target": "x" * 128, "cpu": "baseline",
+        identity.update({"target": binding.NATIVE_TIMED_TARGET, "cpu": "x" * 128,
                          "allocator": "none", "frontend_lowering": "direct-ssa",
                          "PIC": "0", "artifact_stage": "object"})
         row = {"row": 0, "identity": identity,
-               "metrics": {metric: True for metric in binding.STATISTICAL_METRICS}}
-        with self.assertRaises(ValueError):
+               "metrics": {metric: True for metric in binding.ROW_METRICS}}
+        with self.assertRaisesRegex(ValueError, "bounded C adapter member token"):
             binding._derive_statistical_family([row])
 
     def test_workflow_watches_the_complete_trusted_adapter_source_closure(self):

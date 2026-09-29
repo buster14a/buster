@@ -1,11 +1,36 @@
 #!/usr/bin/env python3
-"""Recompute #881 campaign capacity from the pinned current source tree.
+"""Recompute the A1 #881 campaign capacity from the pinned current source tree.
 
-This is arithmetic only. The checked-in support declaration determines the
-raw census dimensions, but the blocked service profile has no authenticated
-#508 rows/inputs pins or validator-derived eligibility/oracle records. The
-report therefore gives a source-derived envelope, never an admitted campaign
-size or host-rate claim.
+This is arithmetic only. Amendment A1 times the native-host batch groups: one
+fresh compiler process per (configuration, recipe) object group compiles every
+fixture of the group, and each link or self-host stage row is a singleton
+group. The checked-in support declaration and the fixture recipe table fix the
+object group shapes; the blocked service profile has no authenticated #508 rows
+or validator-derived eligibility, so object group sizes are a source-derived
+envelope (every supported subject timed, every registered control appended),
+never an admitted campaign size or a host-rate claim.
+
+Stage singletons (native link and self-host rows, timed) and untimed
+singletons (cross-target link and self-host rows) are counted, never assumed:
+from canonical #508 performance rows when ``--performance-rows`` supplies them
+(the validator's own ``_batch_groups``/``_untimed_groups`` partition), and
+otherwise from the declaration-derived minimum the validator enforces (one
+native link and one native self-host row, no cross-target stage row). The
+report also states the declaration's upper envelope for stage rows (both
+stages on every declared object identity) and how many further runtime-eligible
+stage singletons the store could hold, so the minimum is never mistaken for an
+upper bound.
+
+The model mirrors tools/throughput/retirement_campaign.h:
+``(G + U) * 2 * (warmups + rounds * pairs)`` invocations per stage, the
+``row-round-pair`` and ``group-round-pair`` result populations, per-batch
+metrics artifacts packed into metrics shards (at most ``2 * ceil(bytes / cap)``
+shards per writer under greedy rotation), and the untimed cross-target
+code-artifact batches (two variants times production and reproduction).
+The per-input metrics bound and the time bounds are reviewed pins set at
+integration time; the report shows which values fit the store and states the
+largest per-input metrics bound that fits at the 254-pair maximum as an
+explicit assumption the reviewed budget must satisfy, never a measurement.
 """
 
 import argparse
@@ -121,209 +146,381 @@ def verify_committed_inputs(root, relative_paths):
     return verified
 
 
-def store_fit(eligible_rows, runtime_rows, pairs, source):
-    """Mirror tp_retirement_campaign_capacity's collector and store checks."""
-    rounds = source["rounds"]
+REPORT_INPUTS = [
+    "docs/native-retirement-support-v1.tsv",
+    "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
+    "tools/native_retirement_contract.py",
+    "tools/native_retirement_performance_binding.py",
+    "tools/native_retirement_performance_schema.py",
+    "tools/native_retirement_result_input.py",
+    "tools/throughput/retirement_budget.h",
+    "tools/throughput/retirement_campaign.h",
+    "tools/throughput/retirement_capacity.py",
+    "tools/throughput/retirement_command.h",
+    "tools/throughput/retirement_execution.h",
+    "tools/throughput/retirement_metrics.h",
+    "tools/throughput/retirement_samples.h",
+    "tools/throughput/retirement_stats.h",
+    "tools/throughput/retirement_store.h",
+    "tools/throughput/retirement_untimed.h",
+]
+
+# The measured-class figures the contract cites for its estimate (one process
+# compiling 369 host fixtures takes about 1.1 s; x86 process startup about
+# 34 ms, #1295). Illustrative only; the reviewed budget pins its own bounds.
+CONTRACT_ESTIMATE_LARGE_BATCH_NS = 1_100_000_000
+CONTRACT_ESTIMATE_SMALL_BATCH_NS = 34_000_000
+
+
+def source_limits(root):
+    """Every limit the model uses, parsed from the checked-in C sources."""
+    tools = root / "tools/throughput"
+    stats = tools / "retirement_stats.h"
+    execution = tools / "retirement_execution.h"
+    samples = tools / "retirement_samples.h"
+    store = tools / "retirement_store.h"
+    campaign = tools / "retirement_campaign.h"
+    metrics = tools / "retirement_metrics.h"
+    untimed = tools / "retirement_untimed.h"
+    budget = tools / "retirement_budget.h"
+    command = tools / "retirement_command.h"
+    source = {
+        "rounds": source_define(stats, "TP_RETIREMENT_ROUNDS"),
+        "minimum_pairs": source_define(stats, "TP_RETIREMENT_MIN_PAIRS_PER_ROUND"),
+        "maximum_pairs": source_define(execution, "TP_RETIREMENT_EXECUTION_MAX_PAIRS"),
+        "warmups": source_define(execution, "TP_RETIREMENT_WARMUPS"),
+        "campaign_stages": source_define(campaign, "TP_RETIREMENT_CAMPAIGN_STAGES"),
+        "min_external_store_entries": source_define(
+            campaign, "TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES"),
+        "sample_total_records": source_product(samples, "TP_RETIREMENT_SAMPLE_TOTAL_RECORDS"),
+        "sample_partition_records": source_product(samples, "TP_RETIREMENT_SAMPLE_PARTITION_RECORDS"),
+        "sample_partitions": source_define(samples, "TP_RETIREMENT_SAMPLE_PARTITIONS"),
+        "spool_record_bytes": source_define(samples, "TP_RETIREMENT_SAMPLE_RECORD_BYTES"),
+        "sample_records_per_shard": source_product(samples, "TP_RETIREMENT_SAMPLE_SHARD_RECORDS"),
+        "sample_record_bytes_max": source_define(samples, "TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX"),
+        "batch_record_bytes_max": source_define(samples, "TP_RETIREMENT_BATCH_RECORD_BYTES_MAX"),
+        "transcript_records_per_shard": source_define(execution, "TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS"),
+        "transcript_bytes_per_shard": source_product(execution, "TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES"),
+        "transcript_shard_cap": source_define(execution, "TP_RETIREMENT_TRANSCRIPT_SHARDS"),
+        "transcript_record_bytes_max": source_define(execution, "TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX"),
+        "metrics_shard_bytes": source_product(execution, "TP_RETIREMENT_METRICS_SHARD_BYTES"),
+        "metrics_shard_cap": source_define(execution, "TP_RETIREMENT_METRICS_SHARDS"),
+        "metrics_artifact_bytes": source_product(metrics, "TP_RETIREMENT_METRICS_ARTIFACT_BYTES"),
+        "metrics_line_bytes": source_product(metrics, "TP_RETIREMENT_METRICS_LINE_BYTES"),
+        "batch_inputs": source_define(metrics, "TP_RETIREMENT_BATCH_INPUTS"),
+        "input_list_bytes": source_product(metrics, "TP_RETIREMENT_INPUT_LIST_BYTES"),
+        "input_list_arguments": source_define(metrics, "TP_RETIREMENT_INPUT_LIST_ARGUMENTS"),
+        "command_arguments": source_define(command, "TP_RETIREMENT_COMMAND_ARGUMENTS"),
+        "command_bytes": source_define(command, "TP_RETIREMENT_COMMAND_BYTES"),
+        "untimed_record_bytes_max": source_define(untimed, "TP_RETIREMENT_UNTIMED_RECORD_BYTES_MAX"),
+        "untimed_batches_per_group": source_define(budget, "TP_RETIREMENT_BUDGET_UNTIMED_BATCHES"),
+        "store_files": source_define(store, "TP_RETIREMENT_STORE_FILES"),
+        "store_file_bytes": source_product(store, "TP_RETIREMENT_STORE_FILE_BYTES"),
+        "store_total_bytes": source_product(store, "TP_RETIREMENT_STORE_TOTAL_BYTES"),
+    }
+    derivation = re.search(r'#define TP_RETIREMENT_BUDGET_DERIVATION((?:\s*\\\n\s*"[^"]*")+)',
+                           budget.read_text(encoding="utf-8"))
+    if not derivation:
+        raise ValueError("could not read the reviewed-budget derivation from retirement_budget.h")
+    source["budget_derivation"] = "".join(re.findall(r'"([^"]*)"', derivation.group(1)))
+    stage_names = re.search(r'tp_retirement_budget_stage_names\[[A-Z_]+\] = \{\s*([^}]*)\}',
+                            budget.read_text(encoding="utf-8"))
+    if not stage_names:
+        raise ValueError("could not read the reviewed-budget stage names from retirement_budget.h")
+    source["budget_stages"] = re.findall(r'"([^"]*)"', stage_names.group(1))
+    if source["budget_stages"] != ["object", "link", "self-host-stage1"]:
+        raise ValueError("the reviewed budget's stage keys differ from the validator's stages")
+    if source["campaign_stages"] != 2 or source["minimum_pairs"] % 2:
+        raise ValueError("unexpected fixed campaign structure in source")
+    if source["sample_partition_records"] % source["sample_records_per_shard"]:
+        raise ValueError("numeric shards do not divide a full manifest partition")
+    if source["metrics_shard_bytes"] > source["store_file_bytes"] \
+            or source["metrics_artifact_bytes"] > source["metrics_shard_bytes"]:
+        raise ValueError("a metrics shard must be one store file holding at least one artifact")
+    return source
+
+
+def metrics_shard_bound(artifacts, total_bytes, shard_bytes):
+    """Greedy rotation: any two consecutive shards exceed one shard's capacity."""
+    return min(artifacts, 2 * ceil_div(total_bytes, shard_bytes))
+
+
+def metrics_artifact_bound(inputs, per_input, header, source):
+    """The reviewed metrics bound of one object batch of ``inputs`` inputs."""
+    value = header + inputs * per_input
+    if not 0 < inputs <= source["batch_inputs"] or value > source["metrics_artifact_bytes"]:
+        raise ValueError("a batch's reviewed metrics bound exceeds the per-artifact cap")
+    return value
+
+
+def campaign_model(groups, runtime_rows, pairs, untimed, per_input, source, header=4096):
+    """Mirror tp_retirement_campaign_capacity for an A1 campaign.
+
+    ``groups`` lists the timed batch groups as ``{"kind", "inputs", "members"}``
+    (a singleton has one input and member); ``untimed`` lists the untimed
+    code-artifact groups the same way.  ``per_input`` and ``header`` form the
+    reviewed per-artifact metrics bound.
+    """
+    if pairs < source["minimum_pairs"] or pairs > source["maximum_pairs"] or pairs % 2:
+        raise ValueError("pairs must follow the source-locked even sampling range")
+    objects = [group for group in groups if group["kind"] == "object"]
+    singletons = len(groups) - len(objects)
+    if not groups or runtime_rows < 0 or runtime_rows > singletons:
+        raise ValueError("runtime rows must be singleton stage groups of a nonempty campaign")
     stages = source["campaign_stages"]
-    per_row = checked_product(2, source["warmups"] + checked_product(rounds, pairs))
-    invocations_per_stage = checked_product(eligible_rows + runtime_rows, per_row)
-    samples_per_stage = checked_product(eligible_rows, rounds, pairs)
-    transcript_shards_per_stage = ceil_div(invocations_per_stage,
-                                           source["transcript_records_per_shard"])
-    sample_shards_per_stage = ceil_div(samples_per_stage, source["sample_records_per_shard"])
-    shard_files = checked_product(transcript_shards_per_stage + sample_shards_per_stage, stages)
-    transcript_bytes = checked_product(invocations_per_stage,
-                                       source["transcript_record_bytes_max"], stages)
-    sample_bytes = checked_product(samples_per_stage, source["sample_record_bytes_max"], stages)
-    payload_bytes = transcript_bytes + sample_bytes
+    rounds = source["rounds"]
+    per_unit = checked_product(2, source["warmups"] + checked_product(rounds, pairs))
+    rows = sum(group["members"] for group in groups)
+    compiler = checked_product(len(groups), per_unit)
+    runtime = checked_product(runtime_rows, per_unit)
+    invocations = compiler + runtime
+    row_samples = checked_product(rows, rounds, pairs)
+    batch_samples = checked_product(len(objects), rounds, pairs)
+    samples = row_samples + batch_samples
+    partitions = (ceil_div(row_samples, source["sample_partition_records"])
+                  + ceil_div(batch_samples, source["sample_partition_records"]))
+    metrics_per_batch = sum(metrics_artifact_bound(group["inputs"], per_input, header, source)
+                            for group in objects)
+    metrics_artifacts = checked_product(len(objects), per_unit)
+    metrics_bytes = checked_product(metrics_per_batch, per_unit)
+    metrics_shards = metrics_shard_bound(metrics_artifacts, metrics_bytes, source["metrics_shard_bytes"])
+    transcript_shards = ceil_div(invocations, source["transcript_records_per_shard"])
+    sample_shards = (ceil_div(row_samples, source["sample_records_per_shard"])
+                     + ceil_div(batch_samples, source["sample_records_per_shard"]))
+    untimed_objects = [group for group in untimed if group["kind"] == "object"]
+    per_group = source["untimed_batches_per_group"]
+    untimed_batches = checked_product(len(untimed), per_group)
+    untimed_artifacts = checked_product(len(untimed_objects), per_group)
+    untimed_bytes = checked_product(sum(metrics_artifact_bound(group["inputs"], per_input, header, source)
+                                        for group in untimed_objects), per_group)
+    untimed_shards = metrics_shard_bound(untimed_artifacts, untimed_bytes, source["metrics_shard_bytes"])
+    untimed_record_files = 1 if untimed else 0
+    untimed_record_bytes = checked_product(untimed_batches, source["untimed_record_bytes_max"])
+    transcript_bytes = checked_product(invocations, source["transcript_record_bytes_max"])
+    sample_bytes = (checked_product(row_samples, source["sample_record_bytes_max"])
+                    + checked_product(batch_samples, source["batch_record_bytes_max"]))
+    shard_files = stages * (transcript_shards + sample_shards + metrics_shards) + untimed_shards
+    payload_files = shard_files + untimed_record_files
+    payload_bytes = (stages * (transcript_bytes + sample_bytes + metrics_bytes)
+                     + untimed_bytes + untimed_record_bytes)
     entry_cap = source["store_files"] - source["min_external_store_entries"]
     collector_fits = (
-        invocations_per_stage <= checked_product(source["transcript_shard_cap"],
-                                                 source["transcript_records_per_shard"]) and
-        transcript_shards_per_stage <= source["transcript_shard_cap"] and
-        samples_per_stage <= source["samples_per_stage_cap"])
-    entries_fit = shard_files <= entry_cap
-    bytes_fit = payload_bytes <= source["store_total_bytes"]
+        transcript_shards <= source["transcript_shard_cap"]
+        and sample_shards <= source["transcript_shard_cap"]
+        and metrics_shards <= source["metrics_shard_cap"]
+        and untimed_shards <= source["metrics_shard_cap"]
+        and samples <= source["sample_total_records"]
+        and partitions <= source["sample_partitions"])
+    # Before M4 every per-batch metrics artifact was its own store entry.
+    unsharded_files = (stages * (transcript_shards + sample_shards + metrics_artifacts)
+                       + untimed_artifacts + untimed_record_files)
     return {
-        "shard_files_both_stages": shard_files,
-        "shard_file_cap_after_minimum_external_entries": entry_cap,
-        "entries_fit": entries_fit,
-        "transcript_bytes_both_stages_at_proven_max_line": transcript_bytes,
-        "sample_bytes_both_stages_at_proven_max_line": sample_bytes,
-        "worst_case_payload_bytes_both_stages": payload_bytes,
+        "groups": len(groups), "object_groups": len(objects), "singleton_groups": singletons,
+        "timed_rows": rows, "runtime_rows": runtime_rows, "pairs_per_round": pairs,
+        "per_input_metrics_bound_bytes": per_input, "metrics_header_bound_bytes": header,
+        "invocations_per_stage": invocations, "compiler_batches_per_stage": compiler,
+        "runtime_processes_per_stage": runtime,
+        "invocations_both_stages": stages * invocations,
+        "row_samples_per_stage": row_samples, "batch_samples_per_stage": batch_samples,
+        "sample_partitions_per_stage": partitions,
+        "metrics_artifacts_per_stage": metrics_artifacts,
+        "metrics_bytes_per_stage_upper_bound": metrics_bytes,
+        "metrics_shards_per_stage_upper_bound": metrics_shards,
+        "transcript_shards_per_stage": transcript_shards, "sample_shards_per_stage": sample_shards,
+        "untimed_groups": len(untimed), "untimed_batches": untimed_batches,
+        "untimed_metrics_artifacts": untimed_artifacts,
+        "untimed_metrics_bytes_upper_bound": untimed_bytes,
+        "untimed_metrics_shards_upper_bound": untimed_shards,
+        "untimed_record_files": untimed_record_files,
+        "payload_files": payload_files, "payload_bytes_upper_bound": payload_bytes,
+        "entry_cap_after_minimum_external_entries": entry_cap,
         "store_total_bytes": source["store_total_bytes"],
-        "bytes_fit": bytes_fit,
+        "entries_fit": payload_files <= entry_cap,
+        "bytes_fit": payload_bytes <= source["store_total_bytes"],
         "collector_caps_fit": collector_fits,
-        "fits": collector_fits and entries_fit and bytes_fit,
+        "fits": collector_fits and payload_files <= entry_cap
+                and payload_bytes <= source["store_total_bytes"],
+        "entries_if_each_metrics_artifact_were_a_store_file": unsharded_files,
         "external_entries_and_bytes_excluded": True,
     }
 
 
-def maximum_fitting_pairs(eligible_rows, runtime_rows, source):
+def maximum_fitting_per_input(groups, runtime_rows, pairs, untimed, source, header=4096, step=256):
     best = None
-    for pairs in range(source["minimum_pairs"], source["maximum_pairs"] + 1, 2):
-        if store_fit(eligible_rows, runtime_rows, pairs, source)["fits"]:
-            best = pairs
+    per_input = step
+    largest = max(group["inputs"] for group in list(groups) + list(untimed) if group["kind"] == "object")
+    while header + largest * per_input <= source["metrics_artifact_bytes"]:
+        if not campaign_model(groups, runtime_rows, pairs, untimed, per_input, source, header)["fits"]:
+            break
+        best = per_input
+        per_input += step
     return best
 
 
-def campaign_model(eligible_rows, runtime_rows, pairs, source):
-    if eligible_rows <= 0 or runtime_rows < 0 or runtime_rows > eligible_rows:
-        raise ValueError("runtime rows must be within a positive compiler-eligible population")
-    if pairs < source["minimum_pairs"] or pairs > source["maximum_pairs"] or pairs % 2:
-        raise ValueError("pairs must follow the source-locked even sampling range")
-    rounds = source["rounds"]
-    stages = source["campaign_stages"]
-    per_row = checked_product(2, source["warmups"] + checked_product(rounds, pairs))
-    compiler_per_stage = checked_product(eligible_rows, per_row)
-    runtime_per_stage = checked_product(runtime_rows, per_row)
-    invocations_per_stage = compiler_per_stage + runtime_per_stage
-    if invocations_per_stage > (1 << 64) - 1:
-        raise OverflowError("per-stage invocation count exceeds uint64")
-    samples_per_stage = checked_product(eligible_rows, rounds, pairs)
-    if samples_per_stage > source["samples_per_stage_cap"]:
-        raise ValueError("per-stage paired samples exceed the checked-in collector ceiling")
-    transcript_shards_per_stage = ceil_div(invocations_per_stage,
-                                           source["transcript_records_per_shard"])
-    sample_shards_per_stage = ceil_div(samples_per_stage, source["sample_records_per_shard"])
-    if transcript_shards_per_stage > source["transcript_shard_cap"]:
-        raise ValueError("transcript shard count exceeds the checked-in collector ceiling")
-    if sample_shards_per_stage > source["transcript_shard_cap"]:
-        raise ValueError("sample shard count exceeds the checked-in collector ceiling")
-    store = store_fit(eligible_rows, runtime_rows, pairs, source)
-    store["maximum_fitting_pairs_for_these_rows"] = maximum_fitting_pairs(
-        eligible_rows, runtime_rows, source)
+def budget_key(group):
+    """The reviewed budget's key for one group: (kind, stage)."""
+    return (group["kind"], group.get("stage", "object" if group["kind"] == "object" else None))
 
-    total_invocations = checked_product(invocations_per_stage, stages)
-    total_samples = checked_product(samples_per_stage, stages)
-    spool_bytes_per_stage = checked_product(samples_per_stage, source["spool_record_bytes"])
-    total_spool_bytes = checked_product(spool_bytes_per_stage, stages)
-    transcript_bytes_per_stage_upper = checked_product(
-        invocations_per_stage, source["transcript_line_cap"])
-    total_transcript_bytes_upper = checked_product(transcript_bytes_per_stage_upper, stages)
-    typed_records_per_stage_model = checked_product(samples_per_stage,
-                                                     source["typed_record_bytes_model"])
-    typed_records_total_model = checked_product(typed_records_per_stage_model, stages)
-    sample_jsonl_bytes_per_stage_upper = checked_product(
-        samples_per_stage, source["sample_line_cap"])
-    sample_jsonl_bytes_both_stages_upper = checked_product(
-        sample_jsonl_bytes_per_stage_upper, stages)
-    sample_jsonl_full_shard_upper = checked_product(
-        source["sample_records_per_shard"], source["sample_line_cap"])
-    sample_full_shard_proven_upper = checked_product(
-        source["sample_records_per_shard"], source["sample_record_bytes_max"])
-    transcript_full_shard_proven_upper = checked_product(
-        source["transcript_records_per_shard"], source["transcript_record_bytes_max"])
-    deadline_after_cleanup = source["worker_budget_seconds"] - source["cleanup_budget_seconds"]
-    if deadline_after_cleanup <= 0:
-        raise ValueError("cleanup reserve consumes the complete worker budget")
 
+def budget_counts(groups, runtime_rows, pairs, untimed, source):
+    """The counts the reviewed-budget derivation multiplies, keyed as the
+    budget keys its bounds (group kind and stage; untimed groups separately),
+    and the contract's illustrative object-batch estimate (not a reviewed
+    bound; stage singletons have no contract estimate and are excluded)."""
+    per_unit = 2 * (source["warmups"] + source["rounds"] * pairs)
+    per_group = source["campaign_stages"] * per_unit
+    for group in list(groups) + list(untimed):
+        kind, stage = budget_key(group)
+        if (kind, stage) != ("object", "object") and (kind != "singleton" or stage not in
+                                                      source["budget_stages"][1:]):
+            raise ValueError("a group has no reviewed-budget key (kind and stage)")
+
+    def by_key(items, repeats):
+        counts = {}
+        for group in items:
+            key = "/".join(budget_key(group))
+            counts[key] = counts.get(key, 0) + repeats
+        return dict(sorted(counts.items()))
+
+    large = sum(1 for group in groups if group["kind"] == "object" and group["inputs"] > 4)
+    small = sum(1 for group in groups if group["kind"] == "object") - large
+    illustrative_ns = per_group * (large * CONTRACT_ESTIMATE_LARGE_BATCH_NS
+                                   + small * CONTRACT_ESTIMATE_SMALL_BATCH_NS)
     return {
-        "assumptions": {
-            "compiler_eligible_rows": eligible_rows,
-            "runtime_eligible_rows": runtime_rows,
-            "pairs_per_round": pairs,
-            "runtime_rows_are": "scenario only; not authenticated current eligibility",
-            "all_sample_metrics_in_one_row_record": [
-                "compiler_wall_time", "compiler_peak_rss", "generated_code_bytes",
-                "generated_runtime"],
-            "warmups_per_variant_included_in_invocation_count": source["warmups"],
-            "campaign_stages": ["A/A", "A/B"],
-        },
-        "calls": {
-            "compiler_invocations_per_stage": compiler_per_stage,
-            "runtime_invocations_per_stage": runtime_per_stage,
-            "all_invocations_per_stage": invocations_per_stage,
-            "all_invocations_both_stages": total_invocations,
-        },
-        "samples": {
-            "paired_numeric_records_per_stage": samples_per_stage,
-            "paired_numeric_records_both_stages": total_samples,
-            "shards_per_stage_by_record_cap": sample_shards_per_stage,
-            "shards_both_stages_by_record_cap": checked_product(sample_shards_per_stage, stages),
-            "collector_binary_spool_bytes_per_stage": spool_bytes_per_stage,
-            "collector_binary_spool_bytes_both_stages": total_spool_bytes,
-            "jsonl_line_cap_bytes": source["sample_line_cap"],
-            "jsonl_export_bytes_per_stage_if_every_line_hits_cap": sample_jsonl_bytes_per_stage_upper,
-            "jsonl_export_bytes_both_stages_if_every_line_hits_cap": sample_jsonl_bytes_both_stages_upper,
-            "jsonl_bytes_per_full_shard_if_every_line_hits_cap": sample_jsonl_full_shard_upper,
-            "jsonl_full_shard_fits_source_byte_cap":
-                sample_jsonl_full_shard_upper <= source["transcript_bytes_per_shard"],
-            "jsonl_line_cap_is_source_ceiling_not_observed_size": True,
-            "record_cap_per_shard": source["sample_records_per_shard"],
-            "proven_max_line_bytes": source["sample_record_bytes_max"],
-            "bytes_per_full_shard_at_proven_max_line": sample_full_shard_proven_upper,
-            "per_shard_byte_cap_proven":
-                sample_full_shard_proven_upper <= source["transcript_bytes_per_shard"],
-            "typed_result_record_bytes_at_180_each_per_stage_model": typed_records_per_stage_model,
-            "typed_result_record_bytes_at_180_each_both_stages_model": typed_records_total_model,
-            "typed_result_record_size_is_a_model": True,
-        },
-        "transcripts": {
-            "shards_per_stage_by_record_cap": transcript_shards_per_stage,
-            "shards_both_stages_by_record_cap": checked_product(transcript_shards_per_stage, stages),
-            "record_cap_per_shard": source["transcript_records_per_shard"],
-            "byte_cap_per_shard": source["transcript_bytes_per_shard"],
-            "max_line_bytes": source["transcript_line_cap"],
-            "bytes_per_full_shard_if_every_line_hits_max": checked_product(
-                source["transcript_records_per_shard"], source["transcript_line_cap"]),
-            "average_line_budget_at_full_record_cap_bytes":
-                source["transcript_bytes_per_shard"] // source["transcript_records_per_shard"],
-            "actual_serialized_shard_sizes_available": False,
-            "proven_max_line_bytes": source["transcript_record_bytes_max"],
-            "bytes_per_full_shard_at_proven_max_line": transcript_full_shard_proven_upper,
-            "per_shard_byte_cap_proven":
-                transcript_full_shard_proven_upper <= source["transcript_bytes_per_shard"],
-            "bytes_per_stage_if_every_line_hits_max": transcript_bytes_per_stage_upper,
-            "bytes_both_stages_if_every_line_hits_max": total_transcript_bytes_upper,
-            "actual_transcript_and_bundle_fit_proven": False,
-            "upper_bound_is_not_observed_size": True,
-        },
-        "store": store,
-        "deadline": {
-            "worker_budget_seconds": source["worker_budget_seconds"],
-            "bounded_cleanup_reserve_seconds": source["cleanup_budget_seconds"],
-            "remaining_for_all_work_seconds": deadline_after_cleanup,
-            "mean_invocation_budget_ns_if_all_other_work_costs_zero":
-                deadline_after_cleanup * 1_000_000_000 // total_invocations,
-            "materialization_build_correctness_quiet_phase_sealing_and_service_costs_seconds": None,
-            "whole_job_fit_proven": False,
-        },
-        "storage": {
-            "indexed_payload_ceiling_bytes": source["bundle_payload_cap_bytes"],
-            "six_copy_ceiling_reservation_bytes": checked_product(
-                source["bundle_payload_cap_bytes"], source["sealed_copy_count"]),
-            "copies_at_ceiling": source["sealed_copy_count"],
-            "six_copy_value_excludes_archive_headers_and_external_publication": True,
-        },
+        "derivation": source["budget_derivation"],
+        "compiler_batches_both_stages": per_group * len(groups),
+        "compiler_batches_by_kind_and_stage": by_key(groups, per_group),
+        "runtime_processes_both_stages": per_group * runtime_rows,
+        "untimed_batches": source["untimed_batches_per_group"] * len(untimed),
+        "untimed_batches_by_kind_and_stage": by_key(untimed, source["untimed_batches_per_group"]),
+        "singletons_costed_as_one_input_batches": False,
+        "untimed_bounds_are_the_slowest_untimed_target": True,
+        "illustrative_object_batch_hours_at_contract_estimates": round(illustrative_ns / 3.6e12, 2),
+        "illustrative_rates_are_a_reviewed_bound": False,
     }
 
 
-def build_report(root):
-    root = root.resolve()
-    source_paths = [
-        "docs/native-retirement-support-v1.tsv",
-        "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
-        "tools/bench_service/EXPORT.md",
-        "tools/bench_service/README.md",
-        "tools/bench_service/systemd_broker.c",
-        "tools/bench_service/worker_linux.h",
-        "tools/native_retirement_performance_binding.py",
-        "tools/native_retirement_performance_schema.py",
-        "tools/native_retirement_result_input.py",
-        "tools/throughput/retirement_campaign.h",
-        "tools/throughput/retirement_capacity.py",
-        "tools/throughput/retirement_execution.h",
-        "tools/throughput/retirement_samples.h",
-        "tools/throughput/retirement_stats.h",
-        "tools/throughput/retirement_store.h",
-    ]
-    input_digests = verify_committed_inputs(root, source_paths)
-    sys.path.insert(0, str(root / "tools"))
-    import native_retirement_performance_binding as binding
+def maximum_fitting_stage_singletons(groups, runtime_rows, pairs, untimed, per_input, source):
+    """How many further runtime-eligible timed stage singletons still fit."""
+    model = campaign_model(groups, runtime_rows, pairs, untimed, per_input, source)
+    if not model["fits"]:
+        return None
+    low, high = 0, 1
+    extra = {"kind": "singleton", "stage": "link", "inputs": 1, "members": 1}
 
-    support_path = root / binding.SUPPORT_DECLARATION_PATH
-    support_bytes = support_path.read_bytes()
+    def fits(count):
+        return campaign_model(list(groups) + [extra] * count, runtime_rows + count, pairs, untimed,
+                              per_input, source)["fits"]
+    while fits(high):
+        low, high = high, high * 2
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if fits(middle) else (low, middle)
+    return low
+
+
+def stage_rows_from_performance_rows(binding, data):
+    """Count stage singletons from canonical #508 performance rows with the
+    validator's own partition: timed singletons by stage, the runtime-eligible
+    timed rows, and untimed singletons by stage (code-observed cross-target
+    link and self-host rows)."""
+    parsed, _axes, _family = binding._performance_rows(data, "performance_rows")
+    timed = [group for group in binding._batch_groups(parsed)
+             if group["kind"] == binding.SINGLETON_STAGE_GROUP]
+    untimed = [group for group in binding._untimed_groups(parsed)
+               if group["kind"] == binding.SINGLETON_STAGE_GROUP]
+    runtime = sum(1 for row in binding._timed_rows(parsed) if row["metrics"]["generated_runtime"])
+    return ([group["identity"]["artifact_stage"] for group in timed], runtime,
+            [group["identity"]["artifact_stage"] for group in untimed], "census")
+
+
+def stage_rows_from_declaration(binding):
+    """The declaration-derived minimum the validator enforces: a complete
+    stage population has at least one native link and one native self-host
+    row (SUPPORT_MIN_STAGE_ROW_COUNT - SUPPORT_OBJECT_ROW_COUNT stage rows) and
+    needs no cross-target stage row. Runtime eligibility is conditional, so
+    the worst case (every timed stage row runtime-eligible) is used."""
+    minimum = binding.SUPPORT_MIN_STAGE_ROW_COUNT - binding.SUPPORT_OBJECT_ROW_COUNT
+    stages = [stage for stage in binding.STAGES if stage != "object"]
+    if minimum != len(stages):
+        raise ValueError("the validator's minimum stage population is not one row per stage")
+    return stages, minimum, [], "declaration-minimum"
+
+
+def a1_groups(root, binding, contract, stage_rows=None):
+    """Source-derived envelope of the A1 batch groups.
+
+    Per native-host configuration, each fixture recipe of the supported
+    subjects is one object group whose members are those subjects; every
+    compiler-default group also carries the registered non-object controls and
+    rejection fixtures as appended controls (the worst case for inputs and
+    metrics bytes). Link and self-host stage rows are singleton groups counted
+    by ``stage_rows`` (census or declaration minimum). The untimed object
+    groups repeat the object shapes on every cross-target, without controls;
+    the untimed singletons are the counted cross-target stage rows.
+    """
+    support = read_tsv(root / binding.SUPPORT_DECLARATION_PATH)
+    supported = [row["path"] for row in support
+                 if row["role"] == "subject" and row["compile_obligation"] == "supported-object-zero-fallback"]
+    non_object = [row["path"] for row in support
+                  if row["role"] == "subject" and row["compile_obligation"] == "registered-non-object-control"]
+    rejection = [row["path"] for row in support if row["role"] == "negative-diagnostic-fixture"]
+    recipes = {}
+    for path in supported:
+        recipes.setdefault(contract.expected_fixture_recipe(path)[0], []).append(path)
+    configurations = len(binding.ALLOCATORS) * len(binding.FRONTENDS) * len(binding.PIC)
+    per_configuration = []
+    for recipe in sorted(recipes, key=lambda name: (name != "compiler-default", name)):
+        members = recipes[recipe]
+        controls = non_object + rejection if recipe == "compiler-default" else []
+        per_configuration.append({"kind": "object", "recipe": recipe, "members": len(members),
+                                  "inputs": len(members) + len(controls),
+                                  "fixtures": members + controls})
+    timed = [dict(group, stage="object") for _ in range(configurations) for group in per_configuration]
+    timed_stages, runtime, untimed_stages, stage_source = stage_rows or stage_rows_from_declaration(binding)
+    timed.extend({"kind": "singleton", "stage": stage, "recipe": "stage", "members": 1, "inputs": 1,
+                  "fixtures": []} for stage in timed_stages)
+    untimed_targets = len(binding.TARGETS) - 1
+    untimed = [{"kind": "object", "stage": "object", "recipe": group["recipe"], "members": group["members"],
+                "inputs": group["members"], "fixtures": group["fixtures"][:group["members"]]}
+               for _ in range(untimed_targets * configurations) for group in per_configuration]
+    untimed.extend({"kind": "singleton", "stage": stage, "recipe": "stage", "members": 1, "inputs": 1,
+                    "fixtures": []} for stage in untimed_stages)
+    stages = {"source": stage_source, "runtime_rows": runtime,
+              "timed_singletons_by_stage": {stage: timed_stages.count(stage) for stage in binding.STAGES[1:]},
+              "untimed_singletons_by_stage": {stage: untimed_stages.count(stage)
+                                              for stage in binding.STAGES[1:]},
+              "declared_object_identities": binding.SUPPORT_OBJECT_ROW_COUNT,
+              "native_supported_object_identities": configurations * sum(
+                  group["members"] for group in per_configuration)}
+    # Every stage row shares its identity with a declared object row, so both
+    # stages on every declared identity bound the stage rows from above.
+    stages["stage_rows_upper_envelope"] = {
+        "timed": stages["native_supported_object_identities"] * (len(binding.STAGES) - 1),
+        "untimed": (binding.SUPPORT_OBJECT_ROW_COUNT - stages["native_supported_object_identities"])
+        * (len(binding.STAGES) - 1)}
+    return timed, untimed, configurations, per_configuration, stages
+
+
+def input_list_bytes(fixtures):
+    """Canonical response-file size of one batch (validator ``_input_list_bytes``)."""
+    return sum(3 + len(item) + item.count('"') + item.count("\\") for item in fixtures)
+
+
+def build_report(root, require_committed=True, performance_rows=None):
+    root = root.resolve()
+    input_digests = verify_committed_inputs(root, REPORT_INPUTS) if require_committed else {}
+    sys.path.insert(0, str(root / "tools"))
+    import native_retirement_contract as contract
+    import native_retirement_performance_binding as binding
+    stage_rows = None
+    rows_sha256 = None
+    if performance_rows is not None:
+        data = Path(performance_rows).read_bytes()
+        rows_sha256 = hashlib.sha256(data).hexdigest()
+        stage_rows = stage_rows_from_performance_rows(binding, data)
+
+    support_bytes = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes()
     support_sha = hashlib.sha256(support_bytes).hexdigest()
     profile_path = root / "tools/bench_service/profiles/native-retirement-performance-v1.blocked"
     profile = parse_kv(profile_path)
@@ -331,148 +528,77 @@ def build_report(root):
         raise ValueError("blocked profile does not name the checked-in support declaration")
     if profile.get("support-declaration-sha256") != support_sha:
         raise ValueError("support declaration digest differs from the blocked profile pin")
-
-    support_rows = read_tsv(support_path)
-    input_count, subjects, groups, object_rows = binding._approved_support_counts()
-    stage_rows = len(binding.STAGES) - 1
-    obligation_counts = {}
-    subject_count = 0
-    supported_subjects = 0
-    controls = 0
-    for row in support_rows:
-        role = row["role"]
-        obligation = row["compile_obligation"]
-        key = f"{role}:{obligation}"
-        obligation_counts[key] = obligation_counts.get(key, 0) + 1
-        if role == "subject":
-            subject_count += 1
-            if obligation == "supported-object-zero-fallback":
-                supported_subjects += 1
-            elif obligation == "registered-non-object-control":
-                controls += 1
-    expected_controls = controls * len(binding.TARGETS) * len(binding.FRONTENDS) * len(binding.PIC) * len(binding.ALLOCATORS)
-    supported_rows = supported_subjects * len(binding.TARGETS) * len(binding.FRONTENDS) * len(binding.PIC) * len(binding.ALLOCATORS)
-    derived_object_rows = object_rows
-    if (input_count != len(support_rows) or subject_count != subjects or
-            supported_rows + expected_controls != derived_object_rows):
-        raise ValueError("support-source row derivation disagrees with binding dimensions")
-
-    exec_path = root / "tools/throughput/retirement_execution.h"
-    samples_path = root / "tools/throughput/retirement_samples.h"
-    stats_path = root / "tools/throughput/retirement_stats.h"
-    store_path = root / "tools/throughput/retirement_store.h"
-    campaign_path = root / "tools/throughput/retirement_campaign.h"
-    worker_path = root / "tools/bench_service/worker_linux.h"
-    broker_path = root / "tools/bench_service/systemd_broker.c"
-    export_doc = (root / "tools/bench_service/EXPORT.md").read_text(encoding="utf-8")
-    copy_match = re.search(r"At maximum capacity, reserve ([a-z]+) independent copies", export_doc)
-    copy_counts = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
-    if not copy_match or copy_match.group(1) not in copy_counts:
-        raise ValueError("could not derive the sealed-copy count from EXPORT.md")
-    runtime_match = re.search(r"RuntimeMaxSec=([0-9]+)us", broker_path.read_text(encoding="utf-8"))
-    if not runtime_match or int(runtime_match.group(1)) % 1_000_000:
-        raise ValueError("could not derive whole-second worker runtime cap from broker source")
-    cleanup_text = (root / "tools/bench_service/README.md").read_text(encoding="utf-8")
-    cleanup_match = re.search(
-        r"configured ([0-9]+)-second grace, then sends KILL and polls for at\s+most another ([0-9]+) seconds",
-        cleanup_text)
-    if not cleanup_match:
-        raise ValueError("could not derive bounded worker cleanup allowance from service contract")
-
-    source = {
-        "rounds": source_define(stats_path, "TP_RETIREMENT_ROUNDS"),
-        "minimum_pairs": source_define(stats_path, "TP_RETIREMENT_MIN_PAIRS_PER_ROUND"),
-        "maximum_pairs": source_define(exec_path, "TP_RETIREMENT_EXECUTION_MAX_PAIRS"),
-        "warmups": source_define(exec_path, "TP_RETIREMENT_WARMUPS"),
-        "campaign_stages": 2,
-        "samples_per_stage_cap": source_product(samples_path, "TP_RETIREMENT_SAMPLE_TOTAL_RECORDS"),
-        "sample_partition_records": source_product(samples_path, "TP_RETIREMENT_SAMPLE_PARTITION_RECORDS"),
-        "spool_record_bytes": source_define(samples_path, "TP_RETIREMENT_SAMPLE_RECORD_BYTES"),
-        "transcript_records_per_shard": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS"),
-        "transcript_bytes_per_shard": source_product(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES"),
-        "transcript_shard_cap": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARDS"),
-        "transcript_line_cap": source_define(exec_path, "TP_RETIREMENT_EXECUTION_LINE_CAP"),
-        "transcript_record_bytes_max": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX"),
-        "sample_line_cap": source_define(samples_path, "TP_RETIREMENT_SAMPLE_LINE_CAP"),
-        "sample_records_per_shard": source_product(samples_path, "TP_RETIREMENT_SAMPLE_SHARD_RECORDS"),
-        "sample_record_bytes_max": source_define(samples_path, "TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX"),
-        "store_files": source_define(store_path, "TP_RETIREMENT_STORE_FILES"),
-        "store_total_bytes": source_product(store_path, "TP_RETIREMENT_STORE_TOTAL_BYTES"),
-        "min_external_store_entries": source_define(
-            campaign_path, "TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES"),
-        "typed_record_bytes_model": 180,
-        "worker_budget_seconds": int(runtime_match.group(1)) // 1_000_000,
-        "cleanup_budget_seconds": sum(int(value) for value in cleanup_match.groups()),
-        "bundle_payload_cap_bytes": source_product(worker_path, "BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP"),
-        "sealed_copy_count": copy_counts[copy_match.group(1)],
-    }
-    if source["campaign_stages"] != 2 or source["minimum_pairs"] % 2:
-        raise ValueError("unexpected fixed campaign structure in source")
-    if source["sample_partition_records"] % source["sample_records_per_shard"]:
-        raise ValueError("numeric shards do not divide a full manifest partition")
-
-    full_rows_min = object_rows + stage_rows
-    max_eligible = supported_rows + stage_rows
-    if max_eligible > binding.SUPPORT_MIN_STAGE_ROW_COUNT or full_rows_min != binding.SUPPORT_MIN_STAGE_ROW_COUNT:
-        raise ValueError("stage-row derivation disagrees with the performance binding")
-    census_pins_present = "census-inputs-sha256" in profile and "census-rows-sha256" in profile
+    source = source_limits(root)
+    timed, untimed, configurations, per_configuration, stages = a1_groups(root, binding, contract, stage_rows)
+    runtime_rows = stages["runtime_rows"]
+    largest_list = max(input_list_bytes(group["fixtures"]) for group in per_configuration)
+    largest_inputs = max(group["inputs"] for group in per_configuration)
+    if largest_inputs > source["batch_inputs"] or largest_list > source["input_list_bytes"] \
+            or largest_inputs > source["input_list_arguments"]:
+        raise ValueError("a batch's input list exceeds the response-file bounds")
+    scenarios = {}
+    for pairs in (source["minimum_pairs"], source["maximum_pairs"]):
+        for per_input in (4096, 8192, 16384):
+            for runtime in sorted({0, runtime_rows}):
+                model = campaign_model(timed, runtime, pairs, untimed, per_input, source)
+                scenarios[f"pairs-{pairs}/per-input-{per_input}/runtime-{runtime}"] = model
+    maxima = {f"pairs-{pairs}": maximum_fitting_per_input(timed, runtime_rows, pairs, untimed, source)
+              for pairs in (source["minimum_pairs"], source["maximum_pairs"])}
+    maximum_pairs = source["maximum_pairs"]
+    assumption = maxima[f"pairs-{maximum_pairs}"]
+    headroom = {f"per-input-{per_input}": maximum_fitting_stage_singletons(
+                    timed, runtime_rows, maximum_pairs, untimed, per_input, source)
+                for per_input in (4096, 8192)}
     report = {
-        "schema": "buster-native-retirement-capacity-model-v1",
+        "schema": "buster-native-retirement-capacity-model-v2",
         "source": {
-            "commit": git_value(root, "rev-parse", "HEAD"),
-            "tree": git_value(root, "rev-parse", "HEAD^{tree}"),
-            "all_report_inputs_match_head": True,
+            "commit": git_value(root, "rev-parse", "HEAD") if require_committed else None,
+            "tree": git_value(root, "rev-parse", "HEAD^{tree}") if require_committed else None,
+            "all_report_inputs_match_head": require_committed,
             "report_input_sha256": input_digests,
             "support_declaration": binding.SUPPORT_DECLARATION_PATH,
             "support_declaration_sha256": support_sha,
-            "support_pin_matches_blocked_profile": True,
+            "performance_rows_sha256": rows_sha256,
             "profile": str(profile_path.relative_to(root)),
             "profile_status": profile.get("status"),
-            "campaign_code": [
-                "tools/throughput/retirement_campaign.h",
-                "tools/throughput/retirement_execution.h",
-                "tools/throughput/retirement_samples.h",
-                "tools/throughput/retirement_stats.h"],
-            "worker_budget_source": "tools/bench_service/systemd_broker.c RuntimeMaxSec",
-            "cleanup_source": "tools/bench_service/README.md",
-            "typed_result_record_model_source": "tools/bench_service/EXPORT.md (180 bytes per record floor)",
+            "campaign_budget_pinned": "campaign-budget-sha256" in profile,
         },
-        "current_population": {
-            "support_input_count": input_count,
-            "subject_count": subjects,
-            "supported_object_subjects": supported_subjects,
-            "registered_non_object_control_subjects": controls,
-            "support_role_obligation_counts": obligation_counts,
-            "object_rows_including_controls": object_rows,
-            "supported_object_rows": supported_rows,
-            "registered_control_rows": expected_controls,
-            "minimum_extra_link_and_self_host_rows": stage_rows,
-            "minimum_canonical_rows_from_source": full_rows_min,
-            "maximum_compiler_eligible_rows_for_envelope": max_eligible,
-            "actual_validator_derived_eligible_rows": None,
-            "actual_runtime_eligible_rows": None,
+        "population": {
+            "native_host_configurations": configurations,
+            "recipe_groups_per_configuration": [
+                {"recipe": group["recipe"], "members": group["members"], "inputs": group["inputs"]}
+                for group in per_configuration],
+            "timed_object_groups": sum(group["kind"] == "object" for group in timed),
+            "stage_singleton_groups": sum(group["kind"] == "singleton" for group in timed),
+            "stage_rows": stages,
+            "timed_rows_envelope": sum(group["members"] for group in timed),
+            "untimed_groups": len(untimed),
+            "untimed_singleton_groups": sum(group["kind"] == "singleton" for group in untimed),
+            "largest_batch_inputs": largest_inputs,
+            "largest_input_list_bytes": largest_list,
+            "batch_argv_is_constant_in_inputs": True,
             "actual_eligibility_available": False,
-            "eligibility_blocker": (
-                "blocked profile lacks independently authenticated census-inputs-sha256 and "
-                "census-rows-sha256; current validator-derived eligibility, per-row configuration "
-                "identity, and independent oracles are absent" if not census_pins_present else
-                "current execution validator/oracle receipts are not present in this source tree"),
-            "production_ab_authorized": False,
-            "ab_authorization_blocker": "no reviewed current #426 A/A admission receipt",
         },
         "policy_limits": source,
-        "models": {
-            "rows": "maximum compiler-eligible envelope from supported-object rows plus the two required extra stages; not actual eligibility",
-            "pairs": "minimum approved pair count only; current #426 may require more before A/B",
-            "runtime_zero": campaign_model(max_eligible, 0, source["minimum_pairs"], source),
-            "runtime_all_eligible": campaign_model(max_eligible, max_eligible,
-                                                    source["minimum_pairs"], source),
+        "scenarios": scenarios,
+        "maximum_fitting_per_input_metrics_bound": maxima,
+        "measured_bound_assumption": {
+            "pairs_per_round": maximum_pairs,
+            "maximum_per_input_metrics_bytes": assumption,
+            "statement": (f"the reviewed per-input metrics bound must be at most {assumption} bytes per "
+                          f"input at {maximum_pairs} pairs for this population; this is an assumption "
+                          "about measured metrics sizes that integration must confirm, not a measurement"),
+            "measured_here": False,
+        },
+        "additional_runtime_stage_singletons_fitting_at_maximum_pairs": headroom,
+        "reviewed_budget": {
+            **budget_counts(timed, runtime_rows, source["maximum_pairs"], untimed, source),
+            "pinned": "campaign-budget-sha256" in profile,
+            "one_hour_worker_budget_applies": False,
         },
         "evidence": {
             "capacity_is_arithmetic_only": True,
-            "hosted_per_invocation_rate_available": False,
-            "full_job_phase_duration_bounds_available": False,
-            "full_one_hour_feasibility_established": False,
+            "reviewed_bounds_are_integration_pins": True,
             "fixture_or_model_is_acceptance": False,
         },
     }
@@ -480,81 +606,41 @@ def build_report(root):
 
 
 def render_text(report):
-    population = report["current_population"]
-    models = report["models"]
+    population = report["population"]
     lines = [
-        f"CAPACITY_MODEL commit={report['source']['commit']} tree={report['source']['tree']}",
-        f"report_inputs=tracked_byte_identical_to_HEAD count={len(report['source']['report_input_sha256'])}",
-        f"support_sha256={report['source']['support_declaration_sha256']}",
-        f"population objects={population['object_rows_including_controls']} "
-        f"supported={population['supported_object_rows']} controls={population['registered_control_rows']} "
-        f"extra_stage_rows={population['minimum_extra_link_and_self_host_rows']} "
-        f"canonical_min={population['minimum_canonical_rows_from_source']}",
-        "eligibility=UNAVAILABLE actual_compiler_rows=unknown actual_runtime_rows=unknown "
-        "production_AB=BLOCKED #426_receipt=absent",
+        f"CAPACITY_MODEL_A1 commit={report['source']['commit']} tree={report['source']['tree']}",
+        f"support_sha256={report['source']['support_declaration_sha256']} "
+        f"profile={report['source']['profile_status']} "
+        f"campaign_budget_pinned={str(report['source']['campaign_budget_pinned']).lower()}",
+        f"groups object={population['timed_object_groups']} singleton={population['stage_singleton_groups']} "
+        f"stage_source={population['stage_rows']['source']} "
+        f"untimed_singletons={population['untimed_singleton_groups']} "
+        f"configurations={population['native_host_configurations']} "
+        f"timed_rows_envelope={population['timed_rows_envelope']} untimed_groups={population['untimed_groups']} "
+        f"largest_batch_inputs={population['largest_batch_inputs']} "
+        f"largest_input_list_bytes={population['largest_input_list_bytes']}",
     ]
-    for key, label in (("runtime_zero", "runtime_rows=0"),
-                       ("runtime_all_eligible", "runtime_rows=eligible_upper_bound")):
-        model = models[key]
+    for name, model in report["scenarios"].items():
         lines.append(
-            f"{label} eligible_rows={model['assumptions']['compiler_eligible_rows']} "
-            f"pairs={model['assumptions']['pairs_per_round']} "
-            f"compiler_calls={model['calls']['compiler_invocations_per_stage'] * 2} "
-            f"runtime_calls={model['calls']['runtime_invocations_per_stage'] * 2} "
-            f"total_calls={model['calls']['all_invocations_both_stages']} "
-            f"samples_both_stages={model['samples']['paired_numeric_records_both_stages']} "
-            f"spool_bytes_both_stages={model['samples']['collector_binary_spool_bytes_both_stages']} "
-            f"sample_jsonl_cap_both_stages={model['samples']['jsonl_export_bytes_both_stages_if_every_line_hits_cap']} "
-            f"typed_180B_model_both_stages={model['samples']['typed_result_record_bytes_at_180_each_both_stages_model']} "
-            f"transcript_8KiB_upper_bound={model['transcripts']['bytes_both_stages_if_every_line_hits_max']} "
-            f"one_hour_mean_ns_if_every_non_invocation_cost_is_zero="
-            f"{model['deadline']['mean_invocation_budget_ns_if_all_other_work_costs_zero']}"
-        )
-        store = model["store"]
-        lines.append(
-            f"{label} STORE_FIT shard_files={store['shard_files_both_stages']} "
-            f"shard_file_cap={store['shard_file_cap_after_minimum_external_entries']} "
-            f"entries_fit={str(store['entries_fit']).lower()} "
-            f"worst_case_payload_bytes={store['worst_case_payload_bytes_both_stages']} "
-            f"store_total_bytes={store['store_total_bytes']} "
-            f"bytes_fit={str(store['bytes_fit']).lower()} "
-            f"verdict={'fits' if store['fits'] else 'rejected'} "
-            f"max_fitting_pairs={store['maximum_fitting_pairs_for_these_rows']} "
-            "external_entries_and_bytes=caller_reservation"
-        )
-    samples = models["runtime_all_eligible"]["samples"]
-    lines.append(
-        f"sample_jsonl_line_cap={samples['jsonl_line_cap_bytes']} "
-        f"shards_both_stages_by_record_cap={samples['shards_both_stages_by_record_cap']} "
-        f"full_shard_upper={samples['jsonl_bytes_per_full_shard_if_every_line_hits_cap']} "
-        f"transcript_shard_byte_cap={models['runtime_all_eligible']['transcripts']['byte_cap_per_shard']} "
-        f"full_sample_shard_fits_byte_cap={str(samples['jsonl_full_shard_fits_source_byte_cap']).lower()} "
-        f"sample_shard_record_cap={samples['record_cap_per_shard']} "
-        f"proven_max_line={samples['proven_max_line_bytes']} "
-        f"proven_full_shard={samples['bytes_per_full_shard_at_proven_max_line']} "
-        f"per_shard_fit={'PROVEN' if samples['per_shard_byte_cap_proven'] else 'UNPROVEN'} "
-        "line_sizes=source_ceiling_not_observed spool=72B_per_numeric_record typed_record=180B_model_only"
-    )
-    transcript = models["runtime_all_eligible"]["transcripts"]
-    lines.append(
-        f"transcript_shard_record_cap={transcript['record_cap_per_shard']} "
-        f"byte_cap={transcript['byte_cap_per_shard']} "
-        f"line_cap={transcript['max_line_bytes']} "
-        f"all_max_lines_per_full_shard={transcript['bytes_per_full_shard_if_every_line_hits_max']} "
-        f"average_line_budget_at_full_record_cap={transcript['average_line_budget_at_full_record_cap_bytes']} "
-        f"proven_max_line={transcript['proven_max_line_bytes']} "
-        f"proven_full_shard={transcript['bytes_per_full_shard_at_proven_max_line']} "
-        f"per_shard_fit={'PROVEN' if transcript['per_shard_byte_cap_proven'] else 'UNPROVEN'} "
-        "actual_shard_sizes=unavailable"
-    )
+            f"{name} invocations_per_stage={model['invocations_per_stage']} "
+            f"metrics_artifacts_per_stage={model['metrics_artifacts_per_stage']} "
+            f"metrics_shards_per_stage<={model['metrics_shards_per_stage_upper_bound']} "
+            f"untimed_batches={model['untimed_batches']} payload_files={model['payload_files']}"
+            f"/{model['entry_cap_after_minimum_external_entries']} "
+            f"payload_bytes={model['payload_bytes_upper_bound']}/{model['store_total_bytes']} "
+            f"verdict={'fits' if model['fits'] else 'rejected'} "
+            f"unsharded_entries={model['entries_if_each_metrics_artifact_were_a_store_file']}")
+    maxima = report["maximum_fitting_per_input_metrics_bound"]
+    budget = report["reviewed_budget"]
     lines.extend([
-        f"service_budget_seconds={report['policy_limits']['worker_budget_seconds']} "
-        f"cleanup_reserve_seconds={report['policy_limits']['cleanup_budget_seconds']} "
-        f"sealed_payload_ceiling_bytes={report['policy_limits']['bundle_payload_cap_bytes']} "
-        f"six_copy_ceiling_reservation_bytes={models['runtime_all_eligible']['storage']['six_copy_ceiling_reservation_bytes']}",
-        "CONCLUSION modeled-only; shard payload bytes use the source-proven maximal line widths and exclude "
-        "the caller's external entries/bytes; build/correctness/quiet-phase/sealing/cleanup service costs lack "
-        "current bounds; no full one-hour fit or production A/B authorization is established.",
+        "max_fitting_per_input_metrics_bound " + " ".join(f"{key}={value}" for key, value in maxima.items()),
+        "ASSUMPTION " + report["measured_bound_assumption"]["statement"],
+        f"reviewed_budget pinned={str(budget['pinned']).lower()} "
+        f"compiler_batches={budget['compiler_batches_both_stages']} "
+        f"runtime_processes={budget['runtime_processes_both_stages']} untimed_batches={budget['untimed_batches']} "
+        f"illustrative_object_batch_hours={budget['illustrative_object_batch_hours_at_contract_estimates']}",
+        "CONCLUSION modeled-only; payload bytes use the source-proven maximal line widths and the reviewed "
+        "per-input metrics bound, and exclude the caller's external entries/bytes; the recipe stays blocked.",
     ])
     return "\n".join(lines)
 
@@ -564,9 +650,11 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2],
                         help="immutable checkout root (default: this repository)")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--performance-rows", type=Path, default=None,
+                        help="canonical #508 performance rows: count stage singletons from the census")
     args = parser.parse_args()
     try:
-        report = build_report(args.repo)
+        report = build_report(args.repo, performance_rows=args.performance_rows)
     except (OSError, ValueError, OverflowError, KeyError) as error:
         parser.error(str(error))
     if args.format == "json":

@@ -245,8 +245,16 @@ historical 60-pair arithmetic capacity model in [EXPORT.md](EXPORT.md) has
 invocations; it is not the current support population or a measured host-rate
 bound. Those compiler calls alone would have to average under 101.5
 microseconds across the whole job, leaving no budget for preparation,
-validation, cleanup or manager overhead. No measured end-to-end bound
-establishes that the full population fits this worker budget, so the blocked
+validation, cleanup or manager overhead. Amendment A1 therefore replaces that
+budget, for the retirement recipe only, with a reviewed budget bound into the
+admitted recipe: the record in `tools/throughput/retirement_budget.h`
+(fixed-phase bounds, measured compiler bounds keyed by group kind and stage,
+separate untimed bounds measured on the slowest untimed target, a runtime
+bound and the reviewed metrics bound, plus its derivation), pinned by the
+profile key `campaign-budget-sha256=`. Campaign freeze rejects a job that the
+reviewed ceiling cannot hold before any timing. The blocked profile carries no
+pin, the smoke unit keeps its one-hour limit, and wiring the retirement unit's
+runtime limit to the reviewed ceiling is integration work, so the blocked
 recipe is not admitted on a capacity assumption.
 
 The production systemd path is Linux-only. Windows and macOS return

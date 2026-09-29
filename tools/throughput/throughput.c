@@ -1838,6 +1838,26 @@ static char const* tp_retirement_outcome_name(TpRetirementOutcome outcome)
     return result;
 }
 
+/* Member identities begin with their metric token (binding validator
+ * STATISTICAL_METRICS). Binding the token to its index keeps a member of one
+ * metric, including the A1 batch process pair, from being replayed with
+ * another metric's bootstrap seed domain. */
+static char const* const tp_retirement_metric_tokens[TP_RETIREMENT_VARIABLE_METRICS] = {
+    [TP_RETIREMENT_WALL_TIME] = "compiler_wall_time",
+    [TP_RETIREMENT_PEAK_MEMORY] = "compiler_peak_memory",
+    [TP_RETIREMENT_GENERATED_RUNTIME] = "generated_runtime",
+    [TP_RETIREMENT_BATCH_WALL_TIME] = "compiler_batch_wall_time",
+    [TP_RETIREMENT_BATCH_PEAK_RSS] = "compiler_batch_peak_rss",
+};
+
+static int tp_retirement_member_metric(char const* member, unsigned metric)
+{
+    char const* token = metric < TP_RETIREMENT_VARIABLE_METRICS ? tp_retirement_metric_tokens[metric] : NULL;
+    size_t length = token ? strlen(token) : 0;
+    int result = token && !strncmp(member, token, length) && member[length] == '/';
+    return result;
+}
+
 static int tp_retirement_replay(TpConfig const* config)
 {
     FILE* input = fopen(config->retirement_input, "rb");
@@ -1909,7 +1929,7 @@ static int tp_retirement_replay(TpConfig const* config)
             previous_metric = metric;
         }
         size_t ratio_count = 0;
-        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS &&
+        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS && tp_retirement_member_metric(member, metric) &&
                     kind < TP_RETIREMENT_MEMBER_KINDS && cells > 0 &&
                     cells <= TP_RETIREMENT_MAX_CELLS && member_pairs == pairs &&
                     member_resamples == (kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0) &&

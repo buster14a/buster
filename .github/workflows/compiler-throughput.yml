@@ -41,6 +41,7 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
           ./build/build bench_throughput self-test
           python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+          python3 -W error::ResourceWarning tools/throughput/retirement_capacity_test.py
           # Compile the optional reporter without rebuilding the full compiler.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -o build/build-census
           BUSTER_ALLOCATION_CENSUS=1 ./build/build-census self_host_audit_self_test 2> build/allocation-census.log
@@ -60,6 +61,8 @@ jobs:
           ./build/build.exe bench_throughput self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -W error::ResourceWarning tools/throughput/retirement_capacity_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -lws2_32 -o build/build-census.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
