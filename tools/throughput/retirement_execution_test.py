@@ -661,8 +661,13 @@ class NativeExecutionTests(unittest.TestCase):
                     check()
 
     def campaign_budget(self):
-        """The C test budget's canonical record, as the plan binds it."""
-        record = (self.root / "retirement-campaign-budget.txt").read_text(encoding="ascii")
+        """The C test budget's canonical record, as the plan binds it. Only the
+        Linux measurement self-test produces it, so the replay that binds it is
+        Linux-only too; on Linux a missing record is still an error."""
+        path = self.root / "retirement-campaign-budget.txt"
+        if sys.platform != "linux" and not path.exists():
+            self.skipTest("the campaign budget producer requires Linux")
+        record = path.read_text(encoding="ascii")
         return {"record": record, "sha256": hashlib.sha256(record.encode("ascii")).hexdigest()}
 
     @unittest.skipUnless(sys.platform == "linux", "descriptor-bound execution requires Linux")
