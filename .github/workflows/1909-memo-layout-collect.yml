@@ -45,7 +45,7 @@ jobs:
           root=pathlib.Path('compact')
           excluded={'baseline-ide','observer-ide','candidate-ide','build-driver','replay','replay-sanitized'}
           for path in pathlib.Path('raw').rglob('*'):
-              if path.is_file() and path.name not in excluded:
+              if path.is_file() and path.name not in excluded and path.suffix != '.o':
                   dest=root/path.relative_to('raw')
                   dest.parent.mkdir(parents=True,exist_ok=True)
                   shutil.copy2(path,dest)
@@ -56,6 +56,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
         with:
-          name: memo-layout-compact-${{ github.run_id }}
+          name: memo-layout-slim-${{ github.run_id }}
           path: compact
           retention-days: 30
