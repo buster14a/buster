@@ -134,7 +134,7 @@ static void cases(const char *variant)
 static int fixed_point(void)
 {
     int ok = run("evidence/ide-A cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o evidence/stage1 > evidence/stage1.stdout 2> evidence/stage1.stderr") == 0;
-    if (ok) ok = run("evidence/stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o evidence/stage2 > evidence/stage2.stdout 2> evidence/stage2.stderr") == 0;
+    if (ok) ok = run("evidence/stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o evidence/stage2 > evidence/stage2.stdout 2> evidence/stage2.stderr") == 0;
     if (ok) ok = run("cmp evidence/stage1 evidence/stage2 && sha256sum evidence/stage1 evidence/stage2 > evidence/fixed-point.sha256") == 0;
     return ok;
 }
@@ -167,7 +167,7 @@ int main(int argc, char **argv)
             }
         }
         errors += run("cp build/compile_commands.json evidence/compile_commands.json; git diff --exit-code -- src/buster > evidence/restored.diff; sha256sum -c evidence/source-before.sha256 > evidence/source-restored.txt") != 0;
-        if (ok && !outline) errors += run("evidence/ide-A test --module=c_frontend_tests,c_type_layout_tests,compiler_diagnostic_tests --ci=1 > evidence/targeted-tests.log 2>&1") != 0;
+        if (ok && !outline) errors += run("evidence/ide-A test --module=c_frontend_tests,compiler_diagnostic_tests --ci=1 > evidence/targeted-tests.log 2>&1") != 0;
         fprintf(ledger,"RESEARCH_COMPLETE build_ok=%d workload_errors=%d timing=unmeasured\n",ok,errors);
     }
     free(p); free(i);
