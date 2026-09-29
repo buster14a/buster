@@ -42,6 +42,11 @@ MAX_BUS_DISPATCHES = (4000 // DISPATCH_WINDOW_SECONDS *
                       MAX_DISPATCHES_PER_WINDOW + MAX_DISPATCHES_PER_SECOND)
 MAX_DIAG_BYTES = 512 * 1024
 MAX_DIAG_LINE = 1200
+# sizeof(BqBrokerRequest) for BQ_BROKER_VERSION 2 (#881-C added the recipe
+# selector and runtime limit: 176 -> 184 bytes). The broker accepts only its
+# own version, so a parsed request of any other size is refused.
+REQUEST_FRAME_BYTES = 184
+LEGACY_REQUEST_FRAME_BYTES = 176
 TEMPLATE_METADATA_UNIT = "buster-bench-systemd-broker@internal.service"
 TEMPLATE_METADATA_PATH = ("/org/freedesktop/systemd1/unit/"
                           "buster_2dbench_2dsystemd_2dbroker_40internal_2eservice")
@@ -352,7 +357,7 @@ def _check_request_semantics(request: dict[str, Any]) -> None:
             "command valid without command check")
     require(request["request_known"] == request["parsed"], "request-known does not match parsed")
     if request["request_known"]:
-        require(request["recv"] == 176 and request["flags"] & (0x20 | 0x08) == 0,
+        require(request["recv"] == REQUEST_FRAME_BYTES and request["flags"] & (0x20 | 0x08) == 0,
                 "parsed request has wrong frame size or truncated flags")
         require(request["operation"] in (1, 2) and request["stage"] <= 5 and
                 request["job"] > 0 and request["attempt"] > 0,
@@ -2597,10 +2602,18 @@ def self_test() -> int:
         "ascii", "strict").splitlines()
     producer_messages = [line.replace("pid=10", "pid=459306") for line in producer_messages]
     producer_messages = [line.replace("peer_uid=0", "peer_uid=65000") for line in producer_messages]
+    # The capture predates request version 2; its grammar is unchanged, only
+    # the frame size grew. The version-1 size itself must now be refused.
+    legacy_messages = list(producer_messages)
+    producer_messages = [line.replace(f" recv={LEGACY_REQUEST_FRAME_BYTES} ", f" recv={REQUEST_FRAME_BYTES} ")
+                         for line in producer_messages]
+    require(producer_messages != legacy_messages, "producer fixture frame size was not normalized")
     sequence = parse_sequence(producer_messages)
-    require(sequence["pid"] == 459306 and sequence["request"]["peer_uid"] == 65000,
+    require(sequence["pid"] == 459306 and sequence["request"]["peer_uid"] == 65000 and
+            sequence["request"]["recv"] == REQUEST_FRAME_BYTES,
             "synthetic producer grammar fixture did not parse expected IDs")
     checks += 1
+    rejects(parse_sequence, legacy_messages)
     rejects(parse_sequence, producer_messages + [producer_messages[-1]])
     rejects(_parse_message, "BQ-BROKER-DIAG-V1 OUTCOME pid=1 ticks=2\r")
 
