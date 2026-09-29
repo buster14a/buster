@@ -4354,17 +4354,17 @@ BUSTER_C_INTERNAL void c_ir_construction_refused(CIntegerIrBuilder* builder, IrC
 
 BUSTER_C_INTERNAL void c_ir_ssa_follow_retracted_row(CIntegerIrBuilder* builder, IrInstructionId row, IrInstructionId previous);
 
-// A __builtin_unreachable() inside a larger expression closes its block with
-// UNREACHABLE, yet the rest of the expression still emits rows:
-// `v((__builtin_unreachable(), x))`, `int y = (__builtin_unreachable(), 1);`
-// (#1748). A noreturn call keeps its block open until its consumer or its
-// expression statement is done (c_ir_end_control_flow_after_call), so it
-// reaches this path only where that rule still closes the block at once.
-// Those rows never run, and the marker is the one row that would make them
-// invalid -- behind a terminator. UNREACHABLE has no edge, so retracting it
-// while it is still the newest row reopens the block with the preceding row
-// as its tail; the tail rows then follow it, where the
-// values they use still dominate them (a disconnected block would not). Only
+// A noreturn call or __builtin_unreachable() that closed its block with
+// UNREACHABLE while the rest of its expression still emits rows. Since #1682,
+// #1743 and #1755 both keep the block open until their consumer or their
+// expression statement is done (c_ir_end_control_flow_after_call), so no known
+// expression reaches this path; it is the backstop that keeps a shape that
+// rule misses compiling instead of refused. Those rows never run, and the
+// marker is the one row that would make them invalid -- behind a terminator.
+// UNREACHABLE has no edge, so retracting it while it is still the newest row
+// reopens the block with the preceding row as its tail; the tail rows then
+// follow it, where the values they use still dominate them (a disconnected
+// block would not). Only
 // such tails reopen a block: statements after a closed block are skipped as
 // dead code before they emit anything, so a function without them lowers
 // exactly as before. SSA events and reads recorded after the marker move to

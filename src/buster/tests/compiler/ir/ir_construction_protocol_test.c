@@ -637,14 +637,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_definition_tests(UnitTestArgument
 // Expression tails after a noreturn operand. Before the protocol the frontend
 // committed these rows behind UNREACHABLE (and left the block ending in them)
 // while certifying the module; `-fverify-codegen` rejected them with
-// INSTRUCTION_AFTER_TERMINATOR. A noreturn call now keeps its block open until
-// its consumer or its expression statement is done (#1682, #1743), so the
-// die() rows reopen nothing; a __builtin_unreachable() operand still closes
-// the block at once (#1748), and the builder retracts that edge-less marker
-// once per such function so the tail follows it in the same block. Either way
-// the certified output validates, publishes, and passes selected-MIR
-// verification (definitions still dominate their uses) in both frontend forms
-// and every allocator. Functions without such a tail reopen nothing.
+// INSTRUCTION_AFTER_TERMINATOR. A noreturn call and a __builtin_unreachable()
+// operand now keep their block open until their consumer or their expression
+// statement is done (#1682, #1743, #1755), so no row here reaches the
+// reopen backstop; the certified output validates, publishes, and passes
+// selected-MIR verification (definitions still dominate their uses) in both
+// frontend forms and every allocator.
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -683,7 +681,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_frontend_tests(UnitTestArguments*
 #if BUSTER_BENCH_ALLOCATIONS
                 IrConstructionCounters after = ir_construction_counters();
                 u64 reopened = after.values[IR_CONSTRUCTION_COMMIT_REOPENED_MARKERS] - before.values[IR_CONSTRUCTION_COMMIT_REOPENED_MARKERS];
-                BUSTER_TEST(arguments, tails ? reopened == 3 : reopened == 0);
+                BUSTER_TEST(arguments, reopened == 0);
                 BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_COMMIT_REFUSALS] == before.values[IR_CONSTRUCTION_COMMIT_REFUSALS]);
 #endif
                 BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);

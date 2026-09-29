@@ -85,13 +85,14 @@ publication (below) check their output.
   `ir_block_insert_instruction_after`. `c_ir_finish_construction` runs after SSA
   finish: a refused row or an open block rejects the function with a structured
   diagnostic, so the module is never certified.
-- **Tail after a `noreturn` operand.** A `__builtin_unreachable()` inside a
-  larger expression closes its block with an `UNREACHABLE` marker, and the rest
-  of the expression still emits rows (#1748). A noreturn call keeps its block
-  open until its consumer or its expression statement is done (#1682, #1743),
-  so it closes early only where that rule still ends the block at once. Before
-  this protocol such rows were committed after the terminator on the certified
-  default path. `c_ir_reopen_unreachable_marker` retracts the marker while it is
+- **Tail after a `noreturn` operand.** A noreturn call or
+  `__builtin_unreachable()` that closes its block with an `UNREACHABLE` marker
+  while the rest of its expression still emits rows used to commit those rows
+  after the terminator on the certified default path. Since #1682, #1743 and
+  #1755 both keep the block open until their consumer or their expression
+  statement is done, so no known expression closes early; the frontend witness
+  test asserts that none of its rows reopens a block. As a backstop for a shape
+  that rule misses, `c_ir_reopen_unreachable_marker` retracts the marker while it is
   still the newest row, so the tail follows the call in the same block, where
   its operands still dominate it. A disconnected continuation block would
   satisfy the canonical validator but fail selected-MIR dominance
