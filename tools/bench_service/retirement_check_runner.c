@@ -10,32 +10,47 @@
  *   bq_retirement_check_run             one check in a bounded child, then
  *                                       its durable receipt and run record
  *   bq_retirement_check_evidence_closed the evidence directory's exact
- *                                       closure against the required receipts
+ *                                       closure against the required receipts,
+ *                                       and the ordered run-record and log
+ *                                       aggregate
  *   bq_retirement_check_receipts_hash   the ordered receipt aggregate
+ *   bq_retirement_check_descendants_absent
+ *                                       no child of this process is alive
  *
  * Map: bq_retirement_check_names names one check's four evidence files and
  * its work directory; bq_retirement_check_resolve turns one authority
  * template into a concrete argument with /proc/self/fd paths;
- * bq_retirement_check_spawn forks the child (own process group, RLIMIT_AS,
- * no core, stdin from /dev/null, only the held descriptors inherited);
+ * bq_retirement_check_spawn forks the child through
+ * bq_retirement_build_child's normalized state (own process group, default
+ * signal dispositions, empty mask, umask 0077, close-on-exec from 3) plus
+ * RLIMIT_AS, no core and only the held descriptors inherited;
  * bq_retirement_check_wait drains stdout and stderr under the check bound,
  * the job deadline and the cancellation descriptor and reaps the child
  * (bq_retirement_check_reap is the blocking wait after a kill);
+ * bq_retirement_check_sweep kills and reaps every descendant the child left
+ * (bq_retirement_check_children lists this process's children through /proc);
+ * bq_retirement_check_snapshot and bq_retirement_check_unchanged require the
+ * held binaries, tools and hosted record to be the same unchanged files
+ * after the child; bq_retirement_check_hosted records a hosted check;
  * bq_retirement_check_provenance records the CPU the unit ran on;
  * bq_retirement_check_outcome classifies how the child ended.
  *
- * A child that outlives its own exit through a descendant still holding its
- * pipes, or that exceeds a capture bound, is killed with its group and
- * recorded as a failure. A child killed by SIGKILL that the runner did not
- * send is recorded as out of memory (the kernel's OOM killer in the unit's
- * cgroup); RLIMIT_AS exhaustion shows as the child's own failing exit. The
- * enclosing worker unit still owns whole-cgroup cleanup of any descendant
- * that left the group.
+ * While a check runs, this process is a child subreaper, so every
+ * descendant, including one that left the process group or the session, is
+ * reparented here as its ancestors die; the sweep after the child kills and
+ * reaps them all, and any found fails the check (a descendant still holding
+ * a capture pipe, or a capture overflow, fails it too). The runner refuses
+ * to start while this process has any other child. A per-check cgroup v2 leaf
+ * (cgroup.kill, memory.events) would be stronger but needs delegation the
+ * worker unit does not grant yet. A child killed by SIGKILL that the runner
+ * did not send is recorded as out of memory (the kernel's OOM killer in the
+ * unit's cgroup); RLIMIT_AS exhaustion shows as the child's own failing exit.
  */
 #include "retirement_check_runner.h"
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 
@@ -205,24 +220,99 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_check_reap(pid_t process, int* status)
     while (waited < 0 && errno == EINTR);
 }
 
-/* Forks the child. It leads its own process group, reads /dev/null, writes
- * stdout and stderr into the capture pipes, runs under the memory limit
- * without core dumps in the work directory, and inherits only the command's
- * held descriptors. A setup or exec failure is the child's exit 127. */
+/* This process's direct children, through /proc: up to capacity process
+ * numbers into found. Returns their count, or UINT32_MAX when /proc cannot
+ * be read. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_children(pid_t* found, u32 capacity)
+{
+    DIR* listing = opendir("/proc");
+    u32 count = listing ? 0 : UINT32_MAX;
+    long self = (long)getpid();
+    bool more = listing != NULL;
+    while (more)
+    {
+        struct dirent* entry = readdir(listing);
+        more = entry != NULL;
+        char path[288], text[512];
+        int length = more && entry->d_name[0] >= '1' && entry->d_name[0] <= '9' ?
+                     snprintf(path, sizeof(path), "/proc/%s/stat", entry->d_name) : -1;
+        int file = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        ssize_t read_bytes = file >= 0 ? read(file, text, sizeof(text) - 1u) : -1;
+        if (file >= 0) close(file);
+        if (read_bytes > 0)
+        {
+            text[read_bytes] = 0;
+            /* pid (comm) state ppid ...; comm may hold spaces and parens. */
+            char const* close_paren = strrchr(text, ')');
+            long parent = close_paren && close_paren[1] == ' ' && close_paren[2] && close_paren[3] == ' ' ?
+                          strtol(close_paren + 4, NULL, 10) : 0;
+            if (parent == self)
+            {
+                if (count < capacity) found[count] = (pid_t)strtol(entry->d_name, NULL, 10);
+                count += 1;
+            }
+        }
+    }
+    if (listing) closedir(listing);
+    return count;
+}
+
+bool bq_retirement_check_descendants_absent(void)
+{
+    pid_t found[1];
+    bool absent = bq_retirement_check_children(found, 0) == 0;
+    return absent;
+}
+
+/* Kills and reaps every child of this process until none remain. While the
+ * runner is a child subreaper, every descendant of a finished check (a
+ * setsid escapee included) is reparented here as its ancestors die, so an
+ * empty scan proves the check left nothing running. found receives whether
+ * any was found; false means some remain after the drain bound or /proc
+ * could not be read. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_sweep(bool* found)
+{
+    u64 deadline = bq_retirement_build_clock_ns() + BQ_RETIREMENT_CHECK_DRAIN_NS;
+    bool clean = false, scanned = true;
+    *found = false;
+    while (!clean && scanned && bq_retirement_build_clock_ns() < deadline)
+    {
+        pid_t children[64];
+        u32 count = bq_retirement_check_children(children, BUSTER_ARRAY_LENGTH(children));
+        scanned = count != UINT32_MAX;
+        clean = scanned && count == 0;
+        *found = *found || (scanned && count > 0);
+        for (u32 index = 0; scanned && index < count && index < BUSTER_ARRAY_LENGTH(children); index += 1)
+        {
+            kill(children[index], SIGKILL);
+            bq_retirement_check_reap(children[index], NULL);
+        }
+    }
+    return clean;
+}
+
+/* Forks the child: bq_retirement_build_child's normalized state (own process
+ * group, /dev/null stdin, default SIGTERM/SIGINT/SIGPIPE/SIGCHLD, an empty
+ * signal mask, umask 0077, every descriptor from 3 close-on-exec, the work
+ * directory as cwd) with stderr on the log pipe and stdout on the output
+ * pipe, then the memory limit without core dumps, and only the command's
+ * held descriptors made inheritable. A setup or exec failure is the child's
+ * exit 127. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_check_spawn(BqRetirementCheckCommand const* command, int work,
     u64 memory_bytes, BqRetirementCheckChild* child)
 {
     int output[2] = {-1, -1}, log[2] = {-1, -1};
-    int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    bool ok = null >= 3 && pipe2(output, O_CLOEXEC) == 0 && pipe2(log, O_CLOEXEC) == 0 && output[0] >= 3 &&
-              output[1] >= 3 && log[0] >= 3 && log[1] >= 3;
+    bool ok = pipe2(output, O_CLOEXEC) == 0 && pipe2(log, O_CLOEXEC) == 0 && output[0] >= 3 && output[1] >= 3 &&
+              log[0] >= 3 && log[1] >= 3;
     pid_t process = ok ? fork() : -1;
     if (process == 0)
     {
         struct rlimit memory = {(rlim_t)memory_bytes, (rlim_t)memory_bytes}, core = {0, 0};
-        bool ready = setpgid(0, 0) == 0 && dup2(null, STDIN_FILENO) == STDIN_FILENO &&
-                     dup2(output[1], STDOUT_FILENO) == STDOUT_FILENO && dup2(log[1], STDERR_FILENO) == STDERR_FILENO &&
-                     setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &memory) == 0 && fchdir(work) == 0;
+        /* build_child enters and then closes its source descriptor. */
+        int entry = dup(work);
+        bool ready = entry >= 3 && bq_retirement_build_child(log[1], -1, entry, true, 0077) &&
+                     dup2(output[1], STDOUT_FILENO) == STDOUT_FILENO && setrlimit(RLIMIT_CORE, &core) == 0 &&
+                     setrlimit(RLIMIT_AS, &memory) == 0;
         for (u32 index = 0; ready && index < command->inherit_count; index += 1)
             ready = fcntl(command->inherit[index], F_SETFD, 0) == 0;
         if (ready) execve(command->arguments[0], command->arguments, command->environment);
@@ -233,7 +323,6 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_check_spawn(BqRetirementCheckCommand cons
     if (ok) setpgid(process, process);
     if (output[1] >= 0) close(output[1]);
     if (log[1] >= 0) close(log[1]);
-    if (null >= 0) close(null);
     ok = ok && fcntl(output[0], F_SETFL, O_NONBLOCK) == 0 && fcntl(log[0], F_SETFL, O_NONBLOCK) == 0;
     if (ok)
     {
@@ -419,6 +508,68 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_check_outcome(BqRetirementCheckChild* chi
     outcome->failures = child->overflow + child->lingering + (strcmp(outcome->output_sha256, plan->output_sha256) != 0);
 }
 
+/* The held binaries, tools and hosted record, as fstat saw them before the
+ * child: the run fails when any is not the same file, unchanged (device,
+ * inode, size, mode, links, owner, mtime and ctime), afterwards, so a
+ * same-user modify-and-restore during the check is caught even though the
+ * bytes match again. */
+typedef struct BqRetirementCheckSnapshot
+{
+    struct stat binaries[2];
+    struct stat tools[BQ_RETIREMENT_CHECK_TOOLS_CAP];
+    struct stat hosted;
+} BqRetirementCheckSnapshot;
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_snapshot(BqRetirementCheckRun const* run,
+    BqRetirementCheckSnapshot* snapshot)
+{
+    bool ok = true;
+    for (u32 side = 0; ok && side < 2; side += 1) ok = fstat(run->binaries->descriptors[side], snapshot->binaries + side) == 0;
+    for (u32 tool = 0; ok && tool < run->checks->tool_count; tool += 1)
+        ok = fstat(run->checks->tools[tool], snapshot->tools + tool) == 0;
+    if (ok && run->checks->hosted >= 0) ok = fstat(run->checks->hosted, &snapshot->hosted) == 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_unchanged(BqRetirementCheckRun const* run,
+    BqRetirementCheckSnapshot const* before)
+{
+    BqRetirementCheckSnapshot after = {0};
+    bool ok = bq_retirement_check_snapshot(run, &after);
+    for (u32 side = 0; ok && side < 2; side += 1)
+        ok = bq_retirement_oracle_same_file(before->binaries + side, after.binaries + side);
+    for (u32 tool = 0; ok && tool < run->checks->tool_count; tool += 1)
+        ok = bq_retirement_oracle_same_file(before->tools + tool, after.tools + tool);
+    if (ok && run->checks->hosted >= 0) ok = bq_retirement_oracle_same_file(&before->hosted, &after.hosted);
+    return ok;
+}
+
+/* A hosted check runs no child: its output is the held hosted record, whose
+ * bytes must still hash to the authority's pin, and its log is empty. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_check_hosted(BqRetirementRequiredChecks const* checks,
+    BqRetirementCheckPlan const* plan, int output_file, BqRetirementCheckOutcome* outcome, u64* output_bytes)
+{
+    struct stat info = {0};
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    bool ok = checks->hosted >= 3 && fstat(checks->hosted, &info) == 0 && info.st_size >= 0 &&
+              (u64)info.st_size <= BQ_RETIREMENT_CHECK_OUTPUT_CAP &&
+              bq_retirement_oracle_file_hash(checks->hosted, BQ_RETIREMENT_HOSTED_ACCEPTANCE_BYTES_CAP, false, digest) &&
+              !strcmp(digest, checks->hosted_sha256);
+    u8* bytes = ok ? malloc((size_t)info.st_size + 1u) : NULL;
+    u32 length = 0;
+    ok = ok && bytes && bq_read_file(checks->hosted, bytes, (u32)info.st_size, &length) &&
+         bq_write_all(output_file, bytes, length);
+    free(bytes);
+    if (ok)
+    {
+        memcpy(outcome->output_sha256, digest, SHA256_HEX_CAPACITY);
+        outcome->failures = strcmp(digest, plan->output_sha256) != 0;
+        *output_bytes = length;
+    }
+    BqError result = ok ? BQ_OK : BQ_SOURCE_MISMATCH;
+    return result;
+}
+
 BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index, BqRetirementCheckResult* result)
 {
     if (result) *result = (BqRetirementCheckResult){0};
@@ -428,20 +579,31 @@ BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index, BqRe
     BqRetirementCheckNames names = {0};
     bool valid = plan && result && run->binaries && run->binaries->owned && run->binaries->descriptors[0] >= 3 &&
                  run->binaries->descriptors[1] >= 3 && run->sources[0] >= 3 && run->sources[1] >= 3 &&
-                 run->work >= 3 && run->evidence >= 3 && bq_retirement_check_names(index, &names);
+                 run->work >= 3 && run->evidence >= 3 && run->source_sha256 &&
+                 bq_retirement_hex(string_from_pointer(run->source_sha256[0]), 64) &&
+                 bq_retirement_hex(string_from_pointer(run->source_sha256[1]), 64) &&
+                 bq_retirement_check_names(index, &names);
     BqError status = valid ? bq_retirement_check_stop(run->cancellation_fd, run->deadline_ns) : BQ_BAD_REQUEST;
-    /* The binaries and tools the child will run, rehashed now. */
+    /* No other child may exist: the sweep after the check kills every child
+     * of this process. */
+    if (status == BQ_OK && !bq_retirement_check_descendants_absent()) status = BQ_WORKER_MISMATCH;
+    bool hosted = status == BQ_OK && plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_HOSTED;
+    /* The binaries and tools the child will run, rehashed and fstat'ed now;
+     * the sources are the scanned digests the caller passes. */
     BqRetirementCheckOutcome outcome = {0};
+    BqRetirementCheckSnapshot snapshot = {0};
     if (status == BQ_OK)
     {
-        bool same = bq_retirement_check_binaries(run->binaries, outcome.binary_sha256);
+        bool same = bq_retirement_check_snapshot(run, &snapshot) &&
+                    bq_retirement_check_binaries(run->binaries, outcome.binary_sha256);
         for (u32 tool = 0; same && tool < checks->tool_count; tool += 1)
         {
             char digest[SHA256_HEX_CAPACITY] = {0};
             same = bq_retirement_oracle_file_hash(checks->tools[tool], BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP, true,
                                                   digest) && !strcmp(digest, checks->tool_sha256[tool]);
         }
-        memcpy(outcome.source_sha256, run->binaries->verified.source_sha256, sizeof(outcome.source_sha256));
+        memcpy(outcome.source_sha256[0], run->source_sha256[0], SHA256_HEX_CAPACITY);
+        memcpy(outcome.source_sha256[1], run->source_sha256[1], SHA256_HEX_CAPACITY);
         if (!same) status = BQ_SOURCE_MISMATCH;
     }
     /* A new work directory and new output and log files. */
@@ -456,35 +618,53 @@ BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index, BqRe
         if (log_file < 3) status = BQ_WORKSPACE_MISMATCH;
     }
     BqRetirementCheckCommand command = {0};
-    char observed_command[SHA256_HEX_CAPACITY] = {0};
-    if (status == BQ_OK)
+    char observed_command[SHA256_HEX_CAPACITY] = {0}, log_sha256[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementCheckChild child = {.output = -1, .log = -1};
+    if (status == BQ_OK && hosted)
+    {
+        status = bq_retirement_check_hosted(checks, plan, output_file, &outcome, &child.output_bytes);
+        memcpy(observed_command, checks->hosted_sha256, SHA256_HEX_CAPACITY);
+        bq_digest("", 0, (char8*)log_sha256);
+    }
+    if (status == BQ_OK && !hosted)
         status = bq_retirement_check_command(run, plan, work, &command) &&
                  tp_retirement_command_fields_hash(command.arguments, command.argument_count, command.directory,
                                                    command.environment, command.environment_count,
                                                    observed_command) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
-    BqRetirementCheckChild child = {.output = -1, .log = -1};
+    /* Descendants of the check are reparented to this process while it runs
+     * as a child subreaper; the previous setting is restored afterwards. */
+    int subreaper = 0;
+    bool reaping = status == BQ_OK && !hosted && prctl(PR_GET_CHILD_SUBREAPER, &subreaper) == 0 &&
+                   prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    if (status == BQ_OK && !hosted && !reaping) status = BQ_WORKER_MISMATCH;
     u64 started = bq_retirement_build_clock_ns();
-    if (status == BQ_OK)
+    if (status == BQ_OK && !hosted)
         status = bq_retirement_check_spawn(&command, work, (u64)plan->memory_mib << 20, &child) ? BQ_OK : BQ_IO;
-    bool spawned = status == BQ_OK;
+    bool spawned = status == BQ_OK && !hosted;
     if (spawned)
         status = bq_retirement_check_wait(run, &child, started + (u64)plan->timeout_seconds * 1000000000ull,
                                           output_file, log_file);
+    /* Every descendant, found or not, is gone before anything is recorded;
+     * one that outlived the check fails it. */
+    bool swept = false, clean = !spawned || bq_retirement_check_sweep(&swept);
+    if (spawned && swept) child.lingering = 1;
+    if (reaping && prctl(PR_SET_CHILD_SUBREAPER, subreaper) != 0 && status == BQ_OK) status = BQ_IO;
+    if (status == BQ_OK && !clean) status = BQ_CLEANUP_FAILED;
     if (child.output >= 0) close(child.output);
     if (child.log >= 0) close(child.log);
     free(command.storage);
-    char log_sha256[SHA256_HEX_CAPACITY] = {0};
-    if (status == BQ_OK)
+    if (status == BQ_OK && !hosted)
     {
         bq_retirement_check_outcome(&child, plan, &outcome);
         sha256_finish_hex(&child.log_hash, log_sha256);
     }
-    /* Freeze the captured files; the binaries must not have changed. */
+    /* Freeze the captured files; the held files must be unchanged. */
     if (status == BQ_OK && !(fchmod(output_file, 0400) == 0 && fsync(output_file) == 0 &&
                              fchmod(log_file, 0400) == 0 && fsync(log_file) == 0))
         status = BQ_IO;
     char after[2][SHA256_HEX_CAPACITY] = {{0}};
-    if (status == BQ_OK && !(bq_retirement_check_binaries(run->binaries, after) &&
+    if (status == BQ_OK && !(bq_retirement_check_unchanged(run, &snapshot) &&
+                             bq_retirement_check_binaries(run->binaries, after) &&
                              !memcmp(after, outcome.binary_sha256, sizeof(after))))
         status = BQ_SOURCE_MISMATCH;
     /* The receipt and the run record. */
@@ -586,8 +766,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_check_evidence_name(char const* name, u32
     return known;
 }
 
-bool bq_retirement_check_evidence_closed(int evidence, BqRetirementRequiredCheck const* checks, u32 count, bool sealed)
+bool bq_retirement_check_evidence_closed(int evidence, BqRetirementRequiredCheck const* checks, u32 count, bool sealed,
+    char evidence_sha256[SHA256_HEX_CAPACITY])
 {
+    Sha256 records;
+    sha256_init(&records);
+    static char const domain[] = "bq-retirement-check-evidence-v1";
+    sha256_add(&records, domain, sizeof(domain) - 1);
+    bq_retirement_correctness_number(&records, count);
     struct stat held = {0};
     bool ok = evidence >= 0 && checks && count && count <= BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP &&
               fstat(evidence, &held) == 0 && S_ISDIR(held.st_mode) && held.st_uid == geteuid() &&
@@ -646,6 +832,15 @@ bool bq_retirement_check_evidence_closed(int evidence, BqRetirementRequiredCheck
              !strncmp(record, prefix, (size_t)length) && bq_retirement_check_value(receipt, "output=", named) &&
              !strcmp(named, output) && bq_retirement_check_value(record, "output=", named) && !strcmp(named, output) &&
              bq_retirement_check_value(record, "log=", named) && !strcmp(named, log);
+        /* The ordered run records and logs, which only the evidence holds. */
+        if (ok)
+        {
+            char record_sha256[SHA256_HEX_CAPACITY] = {0};
+            bq_digest(record, record_length, (char8*)record_sha256);
+            sha256_add(&records, record_sha256, 64);
+            sha256_add(&records, log, 64);
+        }
     }
+    if (ok && evidence_sha256) sha256_finish_hex(&records, evidence_sha256);
     return ok;
 }

@@ -51,5 +51,10 @@ BUSTER_F_DECL bool bq_retirement_oracle_observe(BqRetirementOracleLedger* ledger
     int reference_binary, BqRetirementProcessCommand const* command,
     BqRetirementRuntimeStart const* start, int output);
 BUSTER_F_DECL bool bq_retirement_oracle_finish(BqRetirementOracleLedger* ledger);
+/* SHA-256 of a held, read-only, close-on-exec regular file of at most cap
+ * bytes (executable: nonempty with an execute bit), rejecting mutation or
+ * replacement during the read. Defined in retirement_correctness_oracle.c
+ * with external linkage, so it is declared here without BUSTER_F_DECL. */
+bool bq_retirement_oracle_file_hash(int descriptor, uint64_t cap, bool executable, char digest[65]);
 BUSTER_F_DECL bool bq_retirement_oracle_ready(BqRetirementOracleLedger const* ledger);
 #endif

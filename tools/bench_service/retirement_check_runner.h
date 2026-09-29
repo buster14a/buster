@@ -36,11 +36,13 @@
  * check-receipt-<i> and check-run-<i> in it, each O_EXCL); work is the
  * attempt's private retirement-work/ directory (the runner creates a new
  * check-work-<i> in it as the child's working directory). sources are A's
- * held materialized roots (base, candidate). */
+ * held materialized roots (base, candidate) and source_sha256 the manifest
+ * digests the caller's scan of those roots verified. */
 typedef struct BqRetirementCheckRun
 {
     BqRetirementRequiredChecks const* checks;
     BqRetirementHeldBinaries const* binaries;
+    char const (*source_sha256)[SHA256_HEX_CAPACITY];
     int sources[2];
     int work;
     int evidence;
@@ -54,8 +56,12 @@ typedef struct BqRetirementCheckRun
  * out_of_memory, or a receipt that differs from the required one. A readable
  * cancellation descriptor returns BQ_WORKER_CANCEL_SIGNAL and an expired job
  * deadline BQ_WORKER_TIMEOUT, both after the process group is killed and the
- * child reaped; a held binary that changed during the run is
- * BQ_SOURCE_MISMATCH; a planted evidence or work name BQ_WORKSPACE_MISMATCH. */
+ * child reaped; a held binary, tool or hosted record that is not the same
+ * unchanged file afterwards (or whose bytes changed) is BQ_SOURCE_MISMATCH;
+ * a planted evidence or work name BQ_WORKSPACE_MISMATCH; another live child
+ * of this process BQ_WORKER_MISMATCH before anything runs; a descendant that
+ * survives the sweep BQ_CLEANUP_FAILED. A hosted check runs no child: its
+ * output is the held hosted acceptance record. */
 BUSTER_F_DECL BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index,
     BqRetirementCheckResult* result);
 
@@ -63,9 +69,13 @@ BUSTER_F_DECL BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u
  * single-link, service-owned regular file of mode 0400, in a service-owned
  * private directory (sealed: exactly 0500). Each receipt hashes to
  * checks[i].receipt_sha256, and each run record names that receipt and the
- * output and log digests those files rehash to. */
+ * output and log digests those files rehash to. evidence_sha256, when given,
+ * receives the ordered aggregate of every run record's and log's digest. */
 BUSTER_F_DECL bool bq_retirement_check_evidence_closed(int evidence, BqRetirementRequiredCheck const* checks,
-    u32 count, bool sealed);
+    u32 count, bool sealed, char evidence_sha256[SHA256_HEX_CAPACITY]);
+/* Whether this process has no child at all (through /proc). Step 9 runs its
+ * checks only then, and requires it again before issuing the gate. */
+BUSTER_F_DECL bool bq_retirement_check_descendants_absent(void);
 /* The ordered aggregate of the required receipts a passing gate joined. */
 BUSTER_F_DECL bool bq_retirement_check_receipts_hash(BqRetirementRequiredCheck const* checks, u32 count,
     char digest[SHA256_HEX_CAPACITY]);

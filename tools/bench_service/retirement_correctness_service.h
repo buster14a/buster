@@ -121,6 +121,11 @@ BUSTER_F_DECL BqError bq_retirement_correctness_begin_service(BqRetirementProjec
  * blocked profile carries no pin, so the import fails closed. */
 #define BQ_RETIREMENT_REQUIRED_CHECKS_NAME "native-retirement-performance-v1.required-checks"
 #define BQ_RETIREMENT_CHECK_TOOLS_DIRECTORY "native-retirement-performance-v1.checks"
+/* The hosted #509 acceptance evidence record (the exact-head "Native
+ * retirement acceptance complete" run on standard hosted runners), installed
+ * beside the authority and pinned by digest inside it. */
+#define BQ_RETIREMENT_HOSTED_ACCEPTANCE_NAME "native-retirement-performance-v1.hosted-acceptance"
+#define BQ_RETIREMENT_HOSTED_ACCEPTANCE_BYTES_CAP (1024u * 1024u)
 #define BQ_RETIREMENT_REQUIRED_CHECKS_BYTES_CAP (4u * 1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_TOOLS_CAP 16u
 #define BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP (512u * 1024u * 1024u)
@@ -134,15 +139,20 @@ BUSTER_F_DECL BqError bq_retirement_correctness_begin_service(BqRetirementProjec
 #define BQ_RETIREMENT_CHECK_MEMORY_MAX_MIB (1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_RECEIPT_CAP 2048u
 
-/* How honestly a check's evidence is labelled (#509): only a check on the
+/* How honestly a check's evidence is labelled (#509). Only a check on the
  * unit's native target (or a host-wide check, target 0) may claim native
- * execution; emulated, compile-only and link-only never substitute for it. */
+ * in-unit execution. hosted binds the hosted acceptance record for A's exact
+ * candidate commit and tree instead of running a child. A #509 host lane is
+ * covered only by native evidence on the native target or by hosted
+ * evidence; emulated, compile-only and link-only checks are extra controls
+ * that never cover a lane. */
 typedef enum BqRetirementCheckEvidence
 {
     BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE = 1,
     BQ_RETIREMENT_CHECK_EVIDENCE_EMULATED,
     BQ_RETIREMENT_CHECK_EVIDENCE_COMPILE_ONLY,
     BQ_RETIREMENT_CHECK_EVIDENCE_LINK_ONLY,
+    BQ_RETIREMENT_CHECK_EVIDENCE_HOSTED,
     BQ_RETIREMENT_CHECK_EVIDENCE_COUNT
 } BqRetirementCheckEvidence;
 
@@ -151,7 +161,8 @@ typedef enum BqRetirementCheckEvidence
  * one {{binary:0|1}}, {{source:0|1}}, {{tool:N}} or {{work}} token, which
  * the runner resolves to a held descriptor's /proc/self/fd path; argv[0] is
  * exactly a binary or tool token. output_sha256 is the pinned digest of the
- * passing check's complete stdout. */
+ * passing check's complete stdout; a hosted check has no argv or
+ * environment, and its output_sha256 is the hosted record's digest. */
 typedef struct BqRetirementCheckPlan
 {
     char const* configuration;
@@ -167,7 +178,9 @@ typedef struct BqRetirementCheckPlan
  * configuration digest and the receipt digest a passing run of this exact
  * attempt (job, token, request, A, sources and both binaries) must produce.
  * tools are held read-only, close-on-exec descriptors (at least 3) of the
- * pinned installed tools. Zero-initialize; release on every path. */
+ * pinned installed ELF tools. hosted is the held hosted acceptance record
+ * (-1 when the authority declares none), whose commit and tree equal A's
+ * candidate subject. Zero-initialize; release on every path. */
 typedef struct BqRetirementRequiredChecks
 {
     BqRetirementRequiredCheck* checks;
@@ -175,6 +188,9 @@ typedef struct BqRetirementRequiredChecks
     char* text;
     int tools[BQ_RETIREMENT_CHECK_TOOLS_CAP];
     char tool_sha256[BQ_RETIREMENT_CHECK_TOOLS_CAP][SHA256_HEX_CAPACITY];
+    int hosted;
+    char hosted_sha256[SHA256_HEX_CAPACITY];
+    char hosted_commit[65], hosted_tree[65];
     char authority_sha256[SHA256_HEX_CAPACITY], attempt_sha256[SHA256_HEX_CAPACITY];
     char request_sha256[SHA256_HEX_CAPACITY], preparation_sha256[SHA256_HEX_CAPACITY];
     char population_sha256[SHA256_HEX_CAPACITY];
@@ -197,13 +213,17 @@ typedef struct BqRetirementCheckOutcome
 /* Imports the authority with the compiled profile for job's attempt over
  * projection (the sealed B population, whose support, census, population,
  * native target, row counts, A digest, sources and binaries the authority
- * must name). It requires every check kind, a semantic check for each of the
- * six #509 native hosts, no duplicate (kind, target, configuration), census
+ * must name) and preparation (A, whose candidate commit and tree a hosted
+ * record must name). It requires every check kind; each of the six #509
+ * native hosts covered by a native semantic check on the native target or a
+ * hosted one; no duplicate (kind, target, evidence, configuration); census
  * rows equal to the object rows, matrix and no-fallback rows equal to the
- * compiler-eligible rows, and honest evidence labels. The blocked profile
- * has no pin: BQ_RECIPE_MISMATCH before any file is read. */
+ * compiler-eligible rows; and honest evidence labels. The blocked profile
+ * has no pin: BQ_RECIPE_MISMATCH before any file is read. An absent or
+ * mismatched hosted record blocks too. */
 BUSTER_F_DECL BqError bq_retirement_required_checks_import(int installed, BqJob const* job,
-    BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks);
+    BqRetirementPreparation const* preparation, BqRetirementProjection const* projection,
+    BqRetirementRequiredChecks* checks);
 BUSTER_F_DECL bool bq_retirement_required_checks_release(BqRetirementRequiredChecks* checks);
 /* The canonical BQ-RETIREMENT-CHECK-RECEIPT-V1 bytes of check index with
  * outcome. The expected receipt uses the authority's sources and binaries,

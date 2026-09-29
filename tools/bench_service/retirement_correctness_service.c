@@ -3025,6 +3025,9 @@ BqError bq_retirement_reference_policy_import(int installed,
  *   census=<sha256>          the census-rows pin the projection joined
  *   population=<sha256>      the projection's population seal
  *   native-target=<id>       the projection's native target
+ *   hosted=none | hosted=<candidate-commit> <candidate-tree> <record-sha256>
+ *                            the hosted #509 acceptance record, installed as
+ *                            recipes/BQ_RETIREMENT_HOSTED_ACCEPTANCE_NAME
  *   tools=<n>                then, for i in 0..n-1:
  *   tool=<i> <sha256> <name> an executable under ..._TOOLS_DIRECTORY/<name>
  *   checks=<m>               then, for i in 0..m-1:
@@ -3034,13 +3037,19 @@ BqError bq_retirement_reference_policy_import(int installed,
  *   environment=<e>          then e lines env=<NAME=value>
  *
  * kind is census, semantic, matrix, no-fallback, self-host or fixed-point;
- * evidence is native, emulated, compile-only or link-only; numbers are
- * canonical decimals. Nothing here comes from a request or a candidate. */
+ * evidence is native, emulated, compile-only, link-only or hosted (a hosted
+ * check has argv=0, environment=0 and the record digest as its stdout
+ * digest); numbers are canonical decimals. The hosted commit and tree must
+ * be A's candidate subject's, never a value compiled into the candidate.
+ * The record itself (provisional schema, produced at integration) starts
+ * BQ-RETIREMENT-HOSTED-ACCEPTANCE-V1, commit=<c>, tree=<t>, and holds a line
+ * lane=<target> passed for every hosted check's target. Nothing here comes
+ * from a request or a candidate. */
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_check_kind_names[BQ_RETIREMENT_CHECK_COUNT] = {
     "", "census", "semantic", "matrix", "no-fallback", "self-host", "fixed-point"
 };
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_check_evidence_names[BQ_RETIREMENT_CHECK_EVIDENCE_COUNT] = {
-    "", "native", "emulated", "compile-only", "link-only"
+    "", "native", "emulated", "compile-only", "link-only", "hosted"
 };
 /* The six #509 native semantic hosts, in the TARGETS order the rows use:
  * Linux x86-64 and AArch64 (11, 5), macOS (8, 2) and Windows (10, 4). */
@@ -3054,8 +3063,6 @@ typedef enum BqRetirementCheckToken
     BQ_RETIREMENT_CHECK_TOKEN_TOOL,
     BQ_RETIREMENT_CHECK_TOKEN_WORK
 } BqRetirementCheckToken;
-
-bool bq_retirement_oracle_file_hash(int descriptor, uint64_t cap, bool executable, char digest[65]);
 
 /* The token starting at text, if any: its length, kind and index. */
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_token(char const* text, u32 tool_count, u32* kind, u32* index)
@@ -3214,6 +3221,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_check_fields(char* value, char** fields, 
     return ok;
 }
 
+/* A full revision name: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_revision(char const* text)
+{
+    size_t length = text ? strlen(text) : 0;
+    bool ok = (length == 40 || length == 64) && bq_retirement_hex(string_from_pointer(text), (u32)length);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_name(char const* text, char const* const* names, u32 count)
 {
     u32 found = 0;
@@ -3250,7 +3265,9 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_check_plan_decode(BqRetirementCheckCursor
     char const* configuration = bq_retirement_check_line(cursor, "configuration=");
     cursor->ok = cursor->ok && bq_retirement_check_field(configuration, 0, false) && !strstr(configuration, "{{");
     plan->configuration = configuration;
-    plan->argument_count = bq_retirement_check_count(cursor, "argv=", 1, BQ_RETIREMENT_CHECK_ARGUMENTS_CAP);
+    bool hosted = plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_HOSTED;
+    plan->argument_count = bq_retirement_check_count(cursor, "argv=", 0, BQ_RETIREMENT_CHECK_ARGUMENTS_CAP);
+    cursor->ok = cursor->ok && (hosted ? plan->argument_count == 0 : plan->argument_count > 0);
     for (u32 argument = 0; cursor->ok && argument < plan->argument_count; argument += 1)
     {
         plan->arguments[argument] = bq_retirement_check_line(cursor, "arg=");
@@ -3259,11 +3276,12 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_check_plan_decode(BqRetirementCheckCursor
     /* The executable is a held binary or tool, never a path. */
     u32 kind = 0, which = 0;
     cursor->ok = cursor->ok &&
-                 bq_retirement_check_token(plan->arguments[0], checks->tool_count, &kind, &which) ==
-                 strlen(plan->arguments[0]) &&
-                 (kind == BQ_RETIREMENT_CHECK_TOKEN_BINARY || kind == BQ_RETIREMENT_CHECK_TOKEN_TOOL);
+                 (hosted || (bq_retirement_check_token(plan->arguments[0], checks->tool_count, &kind, &which) ==
+                             strlen(plan->arguments[0]) &&
+                             (kind == BQ_RETIREMENT_CHECK_TOKEN_BINARY || kind == BQ_RETIREMENT_CHECK_TOKEN_TOOL)));
     plan->environment_count = bq_retirement_check_count(cursor, "environment=", 0,
                                                         BQ_RETIREMENT_CHECK_ENVIRONMENT_CAP);
+    cursor->ok = cursor->ok && (!hosted || plan->environment_count == 0);
     for (u32 entry = 0; cursor->ok && entry < plan->environment_count; entry += 1)
     {
         char const* text = bq_retirement_check_line(cursor, "env=");
@@ -3293,6 +3311,20 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_decode(BqRetirementCheckC
     bq_retirement_check_digest_line(cursor, "population=", projection->population_sha256);
     u32 native = bq_retirement_check_count(cursor, "native-target=", 1, 12);
     cursor->ok = cursor->ok && native == prepared->native_target;
+    char* hosted = bq_retirement_check_line(cursor, "hosted=");
+    char* hosted_fields[3] = {0};
+    if (cursor->ok && strcmp(hosted, "none"))
+    {
+        cursor->ok = bq_retirement_check_fields(hosted, hosted_fields, 3) &&
+                     bq_retirement_check_revision(hosted_fields[0]) && bq_retirement_check_revision(hosted_fields[1]) &&
+                     bq_retirement_hex(string_from_pointer(hosted_fields[2]), 64);
+        if (cursor->ok)
+        {
+            snprintf(checks->hosted_commit, sizeof(checks->hosted_commit), "%s", hosted_fields[0]);
+            snprintf(checks->hosted_tree, sizeof(checks->hosted_tree), "%s", hosted_fields[1]);
+            memcpy(checks->hosted_sha256, hosted_fields[2], SHA256_HEX_CAPACITY);
+        }
+    }
     u32 tools = bq_retirement_check_count(cursor, "tools=", 1, BQ_RETIREMENT_CHECK_TOOLS_CAP);
     for (u32 index = 0; cursor->ok && index < tools; index += 1)
     {
@@ -3355,8 +3387,10 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_check_plan_digests(BqRetirementRequiredCh
 }
 
 /* The coverage rules begin also enforces, plus the six #509 native semantic
- * hosts, a native semantic lane on the native target and honest evidence
- * labels. */
+ * hosts, each covered only by native evidence on the native target or by
+ * hosted evidence (other labels are extra controls), a native semantic lane
+ * on the native target, honest evidence labels, and every hosted check bound
+ * to the declared hosted record (its digest as the check's output). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_cover(BqRetirementRequiredChecks const* checks,
     BqRetirementProjection const* projection)
 {
@@ -3368,22 +3402,27 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_cover(BqRetirementRequire
     for (u32 index = 0; ok && index < checks->count; index += 1)
     {
         BqRetirementCheckPlan const* plan = checks->plans + index;
-        ok = (plan->evidence != BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE || plan->target == 0 ||
-              plan->target == prepared->native_target) &&
+        bool hosted = plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_HOSTED;
+        bool native = plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE;
+        ok = (!native || plan->target == 0 || plan->target == prepared->native_target) &&
+             (!hosted || (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC && checks->hosted_sha256[0] &&
+                          !strcmp(plan->output_sha256, checks->hosted_sha256))) &&
              (plan->kind != BQ_RETIREMENT_CHECK_SEMANTIC || plan->target >= 1) &&
              (plan->kind != BQ_RETIREMENT_CHECK_CENSUS || plan->rows == prepared->object_rows) &&
              ((plan->kind != BQ_RETIREMENT_CHECK_MATRIX && plan->kind != BQ_RETIREMENT_CHECK_NO_FALLBACK) ||
               plan->rows == eligible);
         kinds |= 1u << plan->kind;
         for (u32 host = 0; ok && host < BUSTER_ARRAY_LENGTH(bq_retirement_509_native_hosts); host += 1)
-            if (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC && plan->target == bq_retirement_509_native_hosts[host])
+            if (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC && plan->target == bq_retirement_509_native_hosts[host] &&
+                (hosted || (native && plan->target == prepared->native_target)))
                 hosts[host] = true;
         native_lane = native_lane || (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC &&
                                       plan->target == prepared->native_target &&
                                       plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE);
         for (u32 previous = 0; ok && previous < index; previous += 1)
             ok = !(checks->plans[previous].kind == plan->kind && checks->plans[previous].target == plan->target &&
-                   !strcmp(checks->checks[previous].configuration_sha256, checks->checks[index].configuration_sha256));
+                   checks->plans[previous].evidence == plan->evidence &&
+                   !strcmp(checks->plans[previous].configuration, plan->configuration));
     }
     for (u32 host = 0; ok && host < BUSTER_ARRAY_LENGTH(hosts); host += 1) ok = hosts[host];
     ok = ok && native_lane && kinds == ((1u << BQ_RETIREMENT_CHECK_COUNT) - 2u);
@@ -3422,20 +3461,31 @@ bool bq_retirement_required_checks_release(BqRetirementRequiredChecks* checks)
     {
         for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1)
             if (checks->tools[index] >= 0 && close(checks->tools[index]) != 0) ok = false;
+        if (checks->hosted >= 0 && close(checks->hosted) != 0) ok = false;
         free(checks->checks);
         free(checks->plans);
         free(checks->text);
     }
     if (checks)
     {
-        *checks = (BqRetirementRequiredChecks){0};
+        *checks = (BqRetirementRequiredChecks){.hosted = -1};
         for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1) checks->tools[index] = -1;
     }
     return ok;
 }
 
+/* An ELF executable: an interpreter script would run whatever its #! line
+ * names, which no pin covers. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_elf(int descriptor)
+{
+    u8 magic[4] = {0};
+    bool ok = pread(descriptor, magic, sizeof(magic), 0) == (ssize_t)sizeof(magic) && magic[0] == 0x7f &&
+              magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+    return ok;
+}
+
 /* Holds every pinned tool read-only and close-on-exec (at least 3) after
- * rehashing it against the authority. */
+ * rehashing it against the authority; each must be an ELF executable. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_hold_tools(int recipes, BqRetirementRequiredChecks* checks,
     char const* const* tool_names)
 {
@@ -3454,20 +3504,67 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_hold_tools(int recipes, B
         checks->tools[index] = tool;
         char digest[SHA256_HEX_CAPACITY] = {0};
         ok = tool >= 3 && bq_retirement_oracle_file_hash(tool, BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP, true, digest) &&
-             !strcmp(digest, checks->tool_sha256[index]);
+             !strcmp(digest, checks->tool_sha256[index]) && bq_retirement_check_elf(tool);
     }
     if (directory >= 0 && close(directory) != 0) ok = false;
     return ok;
 }
 
+/* Holds the hosted acceptance record the authority declares and binds it:
+ * its bytes hash to the pinned digest, it names the authority's commit and
+ * tree, those are A's candidate commit and tree, and it records a passed
+ * lane for every hosted check's target. Without a declaration no record is
+ * read. BQ_CONFIGURATION_MISMATCH for an absent or unreadable record,
+ * BQ_RECIPE_MISMATCH for one that does not bind. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_hold_hosted(int recipes,
+    BqRetirementPreparation const* preparation, BqRetirementRequiredChecks* checks)
+{
+    BqError result = BQ_OK;
+    if (checks->hosted_sha256[0])
+    {
+        u8* bytes = NULL;
+        u32 length = 0;
+        char digest[SHA256_HEX_CAPACITY] = {0}, header[256];
+        result = bq_retirement_reference_read_installed(recipes, BQ_RETIREMENT_HOSTED_ACCEPTANCE_NAME,
+                     BQ_RETIREMENT_HOSTED_ACCEPTANCE_BYTES_CAP, &bytes, &length, digest, &checks->hosted) ?
+                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
+        char* text = result == BQ_OK ? malloc((size_t)length + 1u) : NULL;
+        if (result == BQ_OK && !text) result = BQ_IO;
+        if (text)
+        {
+            memcpy(text, bytes, length);
+            text[length] = 0;
+        }
+        int written = snprintf(header, sizeof(header), "BQ-RETIREMENT-HOSTED-ACCEPTANCE-V1\ncommit=%s\ntree=%s\n",
+                               checks->hosted_commit, checks->hosted_tree);
+        if (result == BQ_OK)
+            result = !strcmp(digest, checks->hosted_sha256) && strlen(text) == length && written > 0 &&
+                     (size_t)written < sizeof(header) && !strncmp(text, header, (size_t)written) &&
+                     !strcmp(checks->hosted_commit, preparation->subjects[1].commit) &&
+                     !strcmp(checks->hosted_tree, preparation->subjects[1].tree) ? BQ_OK : BQ_RECIPE_MISMATCH;
+        for (u32 index = 0; result == BQ_OK && index < checks->count; index += 1)
+        {
+            char lane[32];
+            int lane_length = snprintf(lane, sizeof(lane), "\nlane=%u passed\n", checks->plans[index].target);
+            if (checks->plans[index].evidence == BQ_RETIREMENT_CHECK_EVIDENCE_HOSTED &&
+                !(lane_length > 0 && (size_t)lane_length < sizeof(lane) && strstr(text + written - 1, lane)))
+                result = BQ_RECIPE_MISMATCH;
+        }
+        free(text);
+        free(bytes);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_import_profile(int installed, String8 profile,
-    BqJob const* job, BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks)
+    BqJob const* job, BqRetirementPreparation const* preparation, BqRetirementProjection const* projection,
+    BqRetirementRequiredChecks* checks)
 {
     bool fresh = checks && !checks->owned;
     if (fresh) bq_retirement_required_checks_release(checks);
     char pin[SHA256_HEX_CAPACITY] = {0}, population[SHA256_HEX_CAPACITY] = {0};
-    BqError result = fresh && installed >= 0 && job && projection && projection->owned && projection->rows &&
-                     projection->job_id == job->id && projection->attempt_token == job->token ?
+    BqError result = fresh && installed >= 0 && job && preparation && projection && projection->owned &&
+                     projection->rows && projection->job_id == job->id && projection->attempt_token == job->token ?
                      BQ_OK : BQ_BAD_REQUEST;
     if (result == BQ_OK && !bq_retirement_profile_sha(profile, S8("required-checks-sha256="), pin))
         result = BQ_RECIPE_MISMATCH;
@@ -3475,7 +3572,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_import_profile(int ins
         !(bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population) &&
           !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY)))
         result = BQ_SOURCE_MISMATCH;
-    BqRetirementRequiredChecks imported = {.owned = 1};
+    BqRetirementRequiredChecks imported = {.owned = 1, .hosted = -1};
     for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1) imported.tools[index] = -1;
     int recipes = result == BQ_OK ? openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     u8* bytes = NULL;
@@ -3533,6 +3630,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_import_profile(int ins
     if (result == BQ_OK)
         result = bq_retirement_required_checks_hold_tools(recipes, &imported, tool_names) ?
                  BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK) result = bq_retirement_required_checks_hold_hosted(recipes, preparation, &imported);
     /* The receipt a passing run of this attempt must produce. */
     for (u32 index = 0; result == BQ_OK && index < imported.count; index += 1)
     {
@@ -3554,9 +3652,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_import_profile(int ins
 }
 
 BqError bq_retirement_required_checks_import(int installed, BqJob const* job,
-    BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks)
+    BqRetirementPreparation const* preparation, BqRetirementProjection const* projection,
+    BqRetirementRequiredChecks* checks)
 {
     String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
-    BqError result = bq_retirement_required_checks_import_profile(installed, profile, job, projection, checks);
+    BqError result = bq_retirement_required_checks_import_profile(installed, profile, job, preparation, projection,
+                                                                  checks);
     return result;
 }

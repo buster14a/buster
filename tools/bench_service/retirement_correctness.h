@@ -131,15 +131,18 @@ typedef struct BqRetirementCorrectness
     uint32_t check_count, checks_done, rows_done, eligible_rows;
     uint32_t required_kinds, seen_kinds, failed, finished;
     uint32_t batch_group_count, batches_frozen;
-    /* (M2) Set only by the #509 correctness-authority importer, which does not
-     * exist yet; no entry point here sets it. Without it the campaign binding
-     * refuses every object batch group. It is sealed. */
+    /* (M2) The #509 correctness authority. Only
+     * bq_retirement_correctness_authorize sets it, with the installed
+     * required-check authority's digest in authority_sha256; the step 9
+     * issuer (retirement_unit.c) is its one caller. Without it the campaign
+     * binding refuses every object batch group. Both are sealed. */
     uint32_t batch_authority;
     Sha256 checks_hash;
     /* (L4) batches() snapshots every group's per-side contract digest and
      * batch command into batch_groups_sha256; finish seals the snapshot and
      * finish and ready require the live groups to still match it. */
     char checks_sha256[65], sealed_sha256[65], batch_groups_sha256[65];
+    char authority_sha256[65];
 } BqRetirementCorrectness;
 
 BUSTER_F_DECL bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
@@ -165,6 +168,12 @@ BUSTER_F_DECL bool bq_retirement_correctness_row(BqRetirementCorrectness* gate,
  * caller keeps the groups and their contracts immutable. */
 BUSTER_F_DECL bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
     BqRetirementBatchGroup const* groups, uint32_t count, uint8_t* assigned_workspace, uint32_t workspace_slots);
+/* (M2) Grants the #509 correctness authority once, after every required check
+ * and row fact joined and the batch groups froze, and before finish; the
+ * digest of the installed required-check authority that produced the
+ * receipts is sealed with it. A refused call poisons the gate. */
+BUSTER_F_DECL bool bq_retirement_correctness_authorize(BqRetirementCorrectness* gate,
+    char const authority_sha256[65]);
 BUSTER_F_DECL bool bq_retirement_correctness_finish(BqRetirementCorrectness* gate);
 BUSTER_F_DECL bool bq_retirement_correctness_ready(BqRetirementCorrectness const* gate);
 #endif

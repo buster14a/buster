@@ -150,9 +150,10 @@ the held binaries; see
 [step 9](RETIREMENT_PREPARATION.md#step-9-509-receipts-and-the-gate-issuer-1020).
 The blocked profile has no authority pin. A digest obtained from the candidate
 or downloaded result is not a trusted receipt. Any required host unavailable
-at qualification leaves the campaign blocked: the authority must name all six
-#509 native semantic hosts, and only the unit's native target may be labelled
-native evidence.
+at qualification leaves the campaign blocked: each of the six #509 native
+semantic hosts must be covered by native evidence on the unit's native target
+or by the hosted acceptance record for A's exact candidate commit and tree,
+and emulated, compile-only and link-only checks never cover a host.
 
 `retirement_oracle_authority.{h,c}` separates the private reference-output
 producer's immutable policy from same-attempt observations. The installed
@@ -344,9 +345,11 @@ a metrics shard writer per stage, and the budget's metrics bound in every
 object contract; the queue-aware entry reads the pin from the compiled profile
 key `campaign-budget-sha256=`, which the blocked profile does not carry, so it
 returns `BQ_RECIPE_MISMATCH`. Object groups also need the gate's sealed #509
-authority flag (`batch_authority`), which only the step 9 issuer
-(`bq_retirement_unit_gate_admit` in `retirement_unit.c`) sets, after every
-same-attempt receipt, row fact and frozen batch group has joined:
+authority flag (`batch_authority`). Its one writer is
+`bq_retirement_correctness_authorize`, which records the #509 authority digest
+under the gate seal; only the step 9 issuer (`bq_retirement_unit_gate_admit` in
+`retirement_unit.c`) calls it, after every same-attempt receipt, row fact and
+frozen batch group has joined:
 without it `bind`, `bind_held` and the pinned entry refuse every campaign with
 an object group, even under a profile that pins the budget.
 

@@ -6,6 +6,7 @@
 #define main bq_service_cli_main
 #include "main.c"
 #undef main
+#include <regex.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/time.h>

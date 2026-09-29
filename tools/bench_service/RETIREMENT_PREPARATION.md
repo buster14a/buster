@@ -540,6 +540,7 @@ support=<sha256>
 census=<sha256>
 population=<sha256>
 native-target=<id>
+hosted=<commit> <tree> <sha256>|none
 tools=<n>
 tool=<i> <sha256> <name>
 checks=<m>
@@ -557,13 +558,26 @@ The `tool=` line repeats `n` times. The five lines from `check=` to
 
 - **Joined facts.** `support`, `census`, `population` and `native-target`
   must equal the sealed projection's values.
-- **Tools.** Each tool is an executable under
-  `recipes/native-retirement-performance-v1.checks/<name>`. It is held
-  read-only and close-on-exec, and must hash to its pinned digest; a
+- **Tools.** Each tool is an ELF executable under
+  `recipes/native-retirement-performance-v1.checks/<name>`; an interpreter
+  script is refused, so a tool cannot name an unpinned interpreter. It is
+  held read-only and close-on-exec, and must hash to its pinned digest; a
   mismatch is `BQ_CONFIGURATION_MISMATCH`.
 - **Kind and evidence.** `kind` is one of `census`, `semantic`, `matrix`,
   `no-fallback`, `self-host` or `fixed-point`. `evidence` is one of
-  `native`, `emulated`, `compile-only` or `link-only`.
+  `native`, `emulated`, `compile-only`, `link-only` or `hosted`.
+- **Hosted acceptance.** `hosted=` names A's candidate commit and tree and
+  the SHA-256 of `recipes/native-retirement-performance-v1.hosted-acceptance`,
+  the record of the exact-head hosted acceptance run. The commit and tree
+  must be A's candidate subject, never the compiled profile's. The record
+  must hash to the pinned digest, start with
+  `BQ-RETIREMENT-HOSTED-ACCEPTANCE-V1`, `commit=` and `tree=` lines naming
+  the same commit and tree, and hold a `lane=<target> passed` line for
+  every hosted check. An absent record is `BQ_CONFIGURATION_MISMATCH`; a
+  record that does not bind is `BQ_RECIPE_MISMATCH`. A hosted check has
+  `argv=0` and `environment=0`, is a `semantic` check, and its pinned output
+  is the record's digest. The record schema is provisional until the hosted
+  acceptance workflow publishes it.
 - **Tokens.** An argument or environment value may contain one token:
   `{{binary:0|1}}` (a held matched binary), `{{source:0|1}}` (A's
   materialized root), `{{tool:N}}` or `{{work}}` (the check's new working
@@ -576,11 +590,14 @@ The import rejects the whole authority (`BQ_RECIPE_MISMATCH`) unless it
 meets every coverage rule below:
 
 - It has every check kind.
-- It has a semantic check for each of the six #509 native hosts: Linux,
-  macOS and Windows, each on x86-64 and AArch64 (targets 11, 5, 8, 2, 10
-  and 4).
+- Each of the six #509 native hosts (Linux, macOS and Windows, each on
+  x86-64 and AArch64: targets 11, 5, 8, 2, 10 and 4) is covered by a
+  `native` semantic check on the projection's native target or by a
+  `hosted` semantic check. `emulated`, `compile-only` and `link-only` checks
+  are extra controls: they may appear but never cover a host.
 - It has a `native` semantic lane on the projection's native target.
-- No two checks share the same kind, target and configuration.
+- No two checks share the same kind, target, evidence label and
+  configuration.
 - Census rows equal the object rows, and matrix and no-fallback rows equal
   the compiler-eligible rows.
 - Only a check on the native target, or a host-wide check (target 0), is
@@ -599,19 +616,29 @@ For each check the import derives three digests:
 `bq_retirement_check_run` (in `retirement_check_runner.c`) runs one check
 in a bounded child, with these limits:
 
-- The child leads its own process group, runs under the check's
-  `RLIMIT_AS` with no core dumps, and reads `/dev/null`.
+- The child is normalized by `bq_retirement_build_child`: it leads its own
+  process group, has default SIGTERM, SIGINT, SIGPIPE and SIGCHLD handlers
+  and an empty signal mask, umask `0077`, reads `/dev/null`, and every
+  descriptor above stderr is made close-on-exec (`close_range`).
+- It runs under the check's `RLIMIT_AS` with no core dumps.
 - Its working directory is a new `retirement-work/check-work-<i>`.
 - It inherits only the held binaries, both source roots, the tools and that
-  directory.
+  directory; a fixture check lists `/proc/self/fd` to prove it.
 - It runs under the check's wall bound, the job's absolute deadline and the
   cancellation self-pipe.
+- A hosted check starts no child: its output is the held hosted record.
 
 stdout is the check's summary, bounded to 1 MiB and compared with the
 pinned digest. stderr is its log, bounded to 16 MiB.
 
-The runner rehashes both held binaries before and after the child. It then
-writes four files into the attempt's new `retirement-checks/`:
+Before the child the runner requires that this process has no child at
+all, rehashes both held binaries and every tool, and `fstat`s the binaries,
+tools and hosted record. After the child it requires each of those to be the
+same file with the same device, inode, size, mtime and ctime, and the
+binaries to rehash to the same digests; a same-user modify-and-restore
+therefore fails with `BQ_SOURCE_MISMATCH` even when the bytes match again.
+The sources in the receipt are the digests the caller's scan produced. It
+then writes four files into the attempt's new `retirement-checks/`:
 `check-output-<i>`, `check-log-<i>`, `check-receipt-<i>` and a
 `check-run-<i>` record. The run record holds the concrete
 `/proc/self/fd` command digest, the output and log digests and the CPU
@@ -639,16 +666,26 @@ The runner classifies how the child ended:
   `BQ_WORKER_TIMEOUT` after killing the group and reaping the child, and
   writes no receipt.
 
-The enclosing worker unit still owns whole-cgroup cleanup of any descendant
-that left the group.
+Descendants are contained with `PR_SET_CHILD_SUBREAPER` while the child
+runs: one that leaves the group, even through `setsid`, is reparented to the
+runner. After the child ends, `bq_retirement_check_sweep` lists this
+process's children through `/proc`, kills and reaps every one, and a check
+that left any fails. A per-check cgroup v2 leaf, which would also let OOM be
+read from `memory.events`, needs the worker unit's delegated cgroup and is
+not implemented; OOM is still inferred from an unrequested SIGKILL.
 
 ### The issuer
 
 `bq_retirement_unit_gate` imports the authority for the attempt and requires
-row evidence. It then creates a new `retirement-checks/` (mode 02700), with
-its directory entry made durable, and runs every check in authority order.
-The first failing check stops the gate with `BQ_RECIPE_MISMATCH`; its
-receipt stays in the unsealed directory.
+row evidence and that the unit has no child process. It then creates a new
+`retirement-checks/` (mode 02700), with its directory entry made durable,
+holds and scans A's two materialized roots, and runs every check in
+authority order. The first failing check stops the gate with
+`BQ_RECIPE_MISMATCH`; its receipt stays in the unsealed directory. After the
+last check it rescans both roots with `bq_retirement_scan` (a change is
+`BQ_SOURCE_MISMATCH`), requires the evidence to close exactly, computes the
+ordered digest of every check's run record and log, and requires again that
+no descendant is left (`BQ_CLEANUP_FAILED`).
 
 `bq_retirement_unit_gate_admit` then drives the correctness gate:
 
@@ -658,10 +695,16 @@ receipt stays in the unsealed directory.
    to equal this attempt's expected receipt;
 3. `row` for each row fact;
 4. `batches` for the frozen plan-v3 batch groups;
-5. setting `batch_authority`, then `finish` and `ready`.
+5. `bq_retirement_correctness_authorize` with the authority digest, then
+   `finish` and `ready`.
 
-This is the only code that sets `batch_authority`; a fixture scans the
-service sources to enforce that. The issuer also requires the projection's
+`bq_retirement_correctness_authorize` in `retirement_correctness.c` is the
+only writer of `batch_authority`. It grants the authority once, only to a
+gate whose checks, rows and batches are complete, and records the authority
+digest, which the correctness seal covers. A fixture scans every non-test
+`tools/bench_service` source for any assignment (plain or compound),
+increment, decrement or address-of of `batch_authority` and requires exactly
+that one. The issuer also requires the projection's
 native target to be `BQ_RETIREMENT_UNIT_NATIVE_TARGET`, the A1 native-host
 target (x86_64-unknown-linux-gnu, id 11). The tests check that this target
 equals lane D's `BQ_RETIREMENT_NATIVE_TIMED_TARGET`.
@@ -674,9 +717,14 @@ objects. Its seal binds these facts:
 - the oracle attempt;
 - the authority digest and check count;
 - the ordered receipt aggregate;
+- the ordered digest of the run records and logs;
 - the row-plan digest;
 - the correctness gate's own seal, which covers every check result, row
-  fact, frozen batch group and the batch authority.
+  fact, frozen batch group, the batch authority and the authority digest.
+
+The correctness seal cannot also cover the unit seal, which is computed
+over it; the unit seal and the ready record's `gate=admitted` line cover the
+correctness seal instead.
 
 The issuer then seals `retirement-checks/` to `0500`.
 
@@ -701,8 +749,11 @@ first.
 
 `bq_retirement_unit_ready` is design step 10. It first requires a gate that
 step 9 issued for exactly this attempt, with a seal that verifies against
-the live facts. Otherwise it returns `BQ_RECIPE_MISMATCH` before it examines
-any object or touches the attempt. It then requires every one of these, or
+the live facts, and a profile whose `required-checks-sha256=` pin still
+equals the gate's and the correctness gate's authority digest. Otherwise it
+returns `BQ_RECIPE_MISMATCH` before it examines any object or touches the
+attempt; the public entry uses the compiled blocked profile, so it always
+refuses. It then requires every one of these, or
 returns `BQ_BAD_REQUEST`:
 
 - The prepared, built, projected and oracle objects are live and belong to
@@ -717,7 +768,8 @@ returns `BQ_BAD_REQUEST`:
 - The gate's receipt aggregate still matches its required checks.
 
 It then requires the sealed `retirement-checks/` to hold exactly those
-receipts (`BQ_SOURCE_MISMATCH` otherwise).
+receipts, with run records and logs whose ordered digest is the gate's
+(`BQ_SOURCE_MISMATCH` otherwise).
 
 `BqRetirementUnitGate.issuer` is only a marker, not a capability: any
 in-process caller can set it. Admission rests on the seal verifier and, on
@@ -790,6 +842,7 @@ SHA-256 values and the output name. Then come the step 9 lines:
 | `checks-authority` | the installed required-check authority's SHA-256 |
 | `checks` | the number of required checks |
 | `check-receipts` | the ordered aggregate of their same-attempt receipt digests |
+| `check-evidence` | the ordered digest of their run records and logs |
 | `row-plan` | the row-plan digest the row evidence carried |
 | `correctness` | the correctness gate's seal |
 
@@ -835,7 +888,8 @@ order:
    requires `retirement-checks/` to be sealed `0500` and to hold exactly the
    four files of each check. Each receipt must be the one a passing run of
    this attempt produces. Each run record must name that receipt and the
-   digests its output and log files rehash to.
+   digests its output and log files rehash to. It recomputes the ordered
+   digest of the run records and logs.
 8. It verifies the gate seal against the re-derived facts, formats the
    record those facts give and requires the stored record to equal it byte
    for byte.
