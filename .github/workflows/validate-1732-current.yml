@@ -1,0 +1,50 @@
+name: Validate rebased issue 1732 head
+
+on:
+  push:
+    branches:
+      - validation/1732-current-head
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Release -t ide
+      - name: Strict SysV va_list differential with Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_differential \
+            --ide build/Release/ide \
+            --cc clang \
+            --source tests/differential/sysv_va_list.c \
+            --host tests/differential/sysv_va_list_host.c \
+            --strict-mir --sanitize-oracle --minimize 0 --jobs 1 \
+            --out build/issue-1732-clang
+      - name: Strict SysV va_list differential with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_differential \
+            --ide build/Release/ide \
+            --cc gcc \
+            --source tests/differential/sysv_va_list.c \
+            --host tests/differential/sysv_va_list_host.c \
+            --strict-mir --minimize 0 --jobs 1 \
+            --out build/issue-1732-gcc
