@@ -153,6 +153,25 @@ Historical issue references may use Forgejo numbers. Resolve those through
 [docs/forgejo-issue-archive.md](docs/forgejo-issue-archive.md); a current GitHub
 URL already identifies its issue and must not be remapped.
 
+**Branch naming.** Read the task or issue before choosing a new branch name.
+When you control the name, use `<agent>/<issue-number>-<short-description>`,
+or `<agent>/<short-description>` when no issue exists; never invent an issue
+number. Use `claude/` for Claude and the established prefix for other agents.
+Use lowercase kebab-case for the description and name the actual change,
+not the activity of working on it. Examples (illustrative issue numbers):
+`claude/123-fix-msvc-preflight`, `claude/456-reduce-merge-queue-concurrency`,
+and `claude/document-native-abi`. Do not choose random adjective/person/animal
+names, generic `fix-issues` or `implement-changes` names, or unnecessary dates
+and identifiers.
+
+Preserve any prefix or session suffix required by the execution platform.
+If the platform has already assigned the working branch, keep it when renaming
+is unsupported or would break session/push restrictions; do not bypass those
+restrictions for cosmetic naming. Do not rename an existing PR branch or
+another session's branch merely to satisfy this convention. If a new name is
+already taken, choose a meaningful task-specific qualifier; never reset or
+reuse another session's branch.
+
 Write issue/PR bodies using structured arguments or a body file. Do not interpolate
 Markdown into shell commands. Use `--force-with-lease`, never bare `--force`,
 when an authorized rebase requires a force-push.

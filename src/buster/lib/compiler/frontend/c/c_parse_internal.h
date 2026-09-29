@@ -21,6 +21,8 @@ BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParse
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
 // Whether nested frames' rollback snapshots stay independent; see c_parse.c.
 BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);
+// Promoted-member searches on this thread, and how many needed a per-type table.
+BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type);
 BUSTER_F_DECL u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
@@ -33,4 +35,8 @@ BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPrepr
 // two-population cursor over every [start, end) up to limit.
 BUSTER_F_DECL u32 c_test_parse_call_shape_mismatches(CTokenShape const* shapes, u32 count);
 BUSTER_F_DECL u32 c_test_parse_candidate_merge_mismatches(u32* first, u32 first_count, u32* second, u32 second_count, u32 limit);
+// Tokens of [start, start + count) where the body scope map built under root
+// disagrees with c_parse_scope_for_token's descent; UINT32_MAX without a
+// children index.
+BUSTER_F_DECL u32 c_test_parse_body_scope_mismatches(CParseResult* result, Arena* arena, CScopeId root, u32 start, u32 count);
 #endif
