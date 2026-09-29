@@ -1,0 +1,66 @@
+name: Compiler throughput macOS harness
+
+# The macOS leg of compiler-throughput.yml's native harness (#1825). It holds a
+# scarce macOS runner, so a pull request runs it only when a harness input
+# changes and the pull request is ready; the Linux timing verdict never waits
+# for it. The paths are the `clang -Isrc -MM` closure of build.c (also with
+# -DBUSTER_BENCH_ALLOCATIONS=1) and of tools/throughput/{tests,shared}.c,
+# widened to whole directories so macOS-only includes stay covered. Keep the
+# harness step identical to compiler-throughput.yml's Unix step.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'build.c'
+      - 'src/buster/lib/*'
+      - 'src/buster/lib/compiler/assembly/**'
+      - 'src/buster/lib/compiler/driver/codegen_configurations.h'
+      - 'tools/*.c'
+      - 'tools/*.h'
+      - 'tools/allocation_census.py'
+      - 'tools/bench_service/**'
+      - 'tools/throughput/**'
+      - '.github/workflows/throughput-harness-macos.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: throughput-macos-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  harness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && !github.event.pull_request.draft }}
+    name: harness (macos-26)
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Native harness tests (Unix)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput self-test
+          # Compile the optional reporter without rebuilding the full compiler.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -o build/build-census
+          BUSTER_ALLOCATION_CENSUS=1 ./build/build-census self_host_audit_self_test 2> build/allocation-census.log
+          python3 tools/allocation_census.py --input build/allocation-census.log --output build/allocation-census-report --label 'build-driver CI smoke'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: throughput-harness-macos-26
+          path: |
+            build/throughput-tool-tests
+            build/allocation-census.log
+            build/allocation-census-report
+          retention-days: 7
+          if-no-files-found: warn

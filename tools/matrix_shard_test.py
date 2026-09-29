@@ -716,5 +716,213 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIsNone(github_ci_time.measure(dict(run, run_attempt=2))[0])
 
 
+class DraftMacosDeferralTests(unittest.TestCase):
+    """#1825: draft pull requests defer macOS runners; nothing else may."""
+
+    PREDICATE = ("github.event_name == 'pull_request' && github.event.pull_request.draft && "
+                 "github.run_attempt == '1' && startsWith(matrix.runner, 'macos-')")
+
+    def sample(self, deferred=True):
+        jobs = CompletionGateTests.sample(self)
+        if deferred:
+            for job in jobs:
+                if job["name"] in github_ci_time.MACOS_RUNNER_JOBS:
+                    job["name"] += github_ci_time.DEFERRED_SUFFIX
+                    job["steps"] = [{"name": github_ci_time.DEFERRAL_STEP, "status": "completed",
+                                     "conclusion": "success"}]
+        return jobs
+
+    def check(self, jobs, draft, attempt=1):
+        return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40, draft)
+
+    def workflow_jobs(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        return {
+            "test": workflow.split("\n  test:\n", 1)[1].split("\n  native:\n", 1)[0],
+            "native": workflow.split("\n  native:\n", 1)[1].split("\n  mobile:\n", 1)[0],
+            "mobile": workflow.split("\n  mobile:\n", 1)[1].split("\n  uefi:\n", 1)[0],
+        }
+
+    def test_exactly_the_eight_macos_runner_jobs_are_deferrable(self):
+        jobs = self.workflow_jobs()
+        expected = []
+        desktop = re.findall(r"^          - name: (.+)\n            lane: .+\n            runner: (.+)$", jobs["test"], re.M)
+        expected += [f"{name} {shard}" for name, runner in desktop if runner.startswith("macos-")
+                     for shard in github_ci_time.COMBINATION_SHARDS]
+        for job in ("native", "mobile"):
+            entries = re.findall(r"^          - name: (.+)\n            runner: (.+)$", jobs[job], re.M)
+            expected += [name for name, runner in entries if runner.startswith("macos-")]
+        self.assertEqual(len(expected), 8)
+        self.assertEqual(Counter(expected), Counter(github_ci_time.MACOS_RUNNER_JOBS))
+
+    def test_first_attempt_draft_accepts_deferred_macos_lanes_only(self):
+        self.assertEqual(self.check(self.sample(), draft=True), [])
+        self.assertEqual(self.check(self.sample(deferred=False), draft=True), [])
+        self.assertEqual(self.check(self.sample(deferred=False), draft=False), [])
+        errors = self.check(self.sample(), draft=False)
+        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 8)
+        # A cancelled no-op rerun by rerun-failed-jobs runs the real lane
+        # instead; a deferral record from a later attempt is never accepted.
+        jobs = self.sample()
+        for job in jobs:
+            if job["name"] in ("CI complete", "iOS AArch64" + github_ci_time.DEFERRED_SUFFIX):
+                job["run_attempt"] = 2
+        errors = self.check(jobs, draft=True, attempt=2)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("iOS AArch64 (deferred for draft PR): only the first attempt", errors[0])
+        for job in jobs:
+            job["run_attempt"] = 1 if job["name"] != "CI complete" else 2
+        self.assertEqual(self.check(jobs, draft=True, attempt=2), [])
+
+    def test_deferral_needs_its_successful_step_and_a_macos_identity(self):
+        for mutate in ("fail", "drop", "linux", "duplicate"):
+            with self.subTest(mutate=mutate):
+                jobs = self.sample()
+                target = next(job for job in jobs if job["name"].startswith("macOS AArch64 native"))
+                if mutate == "fail":
+                    target["steps"][0]["conclusion"] = "failure"
+                elif mutate == "drop":
+                    target["steps"] = []
+                elif mutate == "linux":
+                    linux = next(job for job in jobs if job["name"] == "Linux AArch64 native")
+                    linux["name"] += github_ci_time.DEFERRED_SUFFIX
+                else:
+                    jobs.append(dict(copy.deepcopy(target), name="macOS AArch64 native"))
+                self.assertTrue(self.check(jobs, draft=True))
+
+    def test_rerun_all_jobs_replaces_the_deferral_with_the_real_lane(self):
+        first = self.sample()
+        second = [dict(copy.deepcopy(job), id=job["id"] + 100, run_attempt=2) for job in self.sample(deferred=False)]
+        latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
+        self.assertFalse(any(github_ci_time.deferred_base_name(job["name"]) for job in latest))
+        self.assertEqual(self.check(latest, draft=True, attempt=2), [])
+        failed = next(job for job in second if job["name"] == "macOS x86-64 checks")
+        failed["conclusion"] = "failure"
+        latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
+        self.assertTrue(self.check(latest, draft=True, attempt=2))
+        deferred = next(job for job in first if github_ci_time.deferred_base_name(job["name"]))
+        clash = dict(copy.deepcopy(deferred), id=999, name=github_ci_time.deferred_base_name(deferred["name"]))
+        with self.assertRaises(ValueError):
+            github_ci_time.latest_run_jobs(first + [clash], 123, 1, "a" * 40)
+
+    def gate(self, payload, event="pull_request", event_name="pull_request", deferred=True):
+        jobs = self.sample(deferred)
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": event}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "event.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1,
+                                   event_name=event_name, event_path=str(path))
+            with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(jobs), "jobs": jobs}]):
+                result = github_ci_time.require_jobs(args)
+        return result
+
+    def test_gate_binds_the_draft_flag_to_this_runs_own_payload_and_head(self):
+        draft = {"pull_request": {"draft": True, "head": {"sha": "a" * 40}}}
+        result = self.gate(draft)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertTrue(result["draft_pull_request"])
+        self.assertEqual(result["deferred_macos_jobs"], sorted(github_ci_time.MACOS_RUNNER_JOBS))
+        ready = {"pull_request": {"draft": False, "head": {"sha": "a" * 40}}}
+        for payload, event, event_name in (
+                (ready, "pull_request", "pull_request"),
+                ({"pull_request": {"draft": True, "head": {"sha": "b" * 40}}}, "pull_request", "pull_request"),
+                ({"pull_request": {"draft": "true", "head": {"sha": "a" * 40}}}, "pull_request", "pull_request"),
+                (draft, "merge_group", "merge_group"),
+                (draft, "merge_group", "pull_request"),
+                (draft, "push", "push"),
+                ({}, "pull_request", "pull_request")):
+            with self.subTest(event=event, event_name=event_name, payload=payload):
+                result = self.gate(payload, event, event_name)
+                self.assertFalse(result["success"])
+                self.assertFalse(result["draft_pull_request"])
+        result = self.gate(ready, deferred=False)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["deferred_macos_jobs"], [])
+
+    def test_deferred_runs_are_never_timing_samples(self):
+        jobs = self.sample()
+        for job in jobs:
+            job.update(status="completed", conclusion="success")
+        run = {"id": 123, "head_sha": "a" * 40, "workflow_blob_sha": "b" * 40, "run_attempt": 1,
+               "status": "completed", "conclusion": "success", "jobs": jobs}
+        self.assertEqual(github_ci_time.measure(run), (None, "incomplete-or-different-matrix"))
+
+    def test_deferrals_are_reported_on_the_pull_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            summary = Path(temporary) / "summary.md"
+            data = {"success": True, "deferred_macos_jobs": ["iOS AArch64", "macOS AArch64 native"]}
+            with mock.patch("builtins.print") as printed:
+                github_ci_time.report_deferrals(data, str(summary), notice=True)
+            self.assertIn("::notice title=macOS lanes deferred::", printed.call_args.args[0])
+            text = summary.read_text(encoding="utf-8")
+            self.assertIn("(accepted)", text)
+            self.assertIn("- macOS AArch64 native", text)
+            unrelated = dict(data, success=False, errors=["Linux x86-64 release: required job did not complete"])
+            with mock.patch("builtins.print") as printed:
+                github_ci_time.report_deferrals(unrelated, None, notice=True)
+            self.assertIn("(accepted by CI complete)", printed.call_args.args[0])
+            rejected = dict(unrelated, errors=["iOS AArch64" + github_ci_time.DEFERRED_SUFFIX + ": only the first attempt"])
+            with mock.patch("builtins.print") as printed:
+                github_ci_time.report_deferrals(rejected, None, notice=True)
+            self.assertIn("(not accepted by CI complete)", printed.call_args.args[0])
+            with mock.patch("builtins.print") as printed:
+                github_ci_time.report_deferrals({"success": True, "deferred_macos_jobs": []}, str(summary), notice=True)
+            printed.assert_not_called()
+
+    @staticmethod
+    def skips_in_a_deferred_lane(condition):
+        """A top-level conjunct needs an earlier step's success or a non-macOS lane."""
+        expression = condition.strip()
+        if expression.startswith("${{") and expression.endswith("}}"):
+            expression = expression[3:-2]
+        previous = None
+        while previous != expression:
+            previous, expression = expression, re.sub(r"\([^()]*\)", "", expression)
+        conjuncts = [] if "||" in expression else [part.strip() for part in expression.split("&&")]
+        return any(re.fullmatch(r"steps\.\w+\.outcome == 'success'|matrix\.os == '(?:android|linux)'|"
+                                r"matrix\.platform == 'windows'", part) for part in conjuncts)
+
+    def test_every_step_after_checkout_skips_in_a_deferred_lane(self):
+        self.assertTrue(self.skips_in_a_deferred_lane(
+            "${{ !cancelled() && steps.zig.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}"))
+        for condition in ("${{ !cancelled() && steps.pack.outcome != 'success' }}", "${{ matrix.os == 'ios' }}",
+                          "${{ always() || steps.checkout.outcome == 'success' }}", "always()"):
+            self.assertFalse(self.skips_in_a_deferred_lane(condition), condition)
+        for job, text in self.workflow_jobs().items():
+            steps = re.findall(r"(?ms)^      - (?:name: ([^\n]+)|uses: [^\n]+)\n(.*?)(?=^      - |\Z)", text)
+            self.assertEqual([name for name, _ in steps[:2]], [github_ci_time.DEFERRAL_STEP, "Checkout"])
+            for step_name, body in steps[2:]:
+                with self.subTest(job=job, step=step_name):
+                    condition = re.search(r"^        if: (.+)$", body, re.M)
+                    self.assertIsNotNone(condition)
+                    if step_name == "Retain unpacked native logs":
+                        # tests/ci_tools_test.py pins this condition. In a
+                        # deferred lane it finds no files and uploads nothing.
+                        self.assertEqual(condition.group(1), "${{ !cancelled() && steps.pack.outcome != 'success' }}")
+                        self.assertIn("if-no-files-found: ignore", body)
+                        continue
+                    self.assertTrue(self.skips_in_a_deferred_lane(condition.group(1)), condition.group(1))
+
+    def test_workflow_defers_only_macos_runners_on_first_attempt_draft_runs(self):
+        for job, text in self.workflow_jobs().items():
+            with self.subTest(job=job):
+                self.assertIn(f"    runs-on: ${{{{ {self.PREDICATE} && 'ubuntu-26.04' || matrix.runner }}}}\n", text)
+                name = re.search(r"^    name: (.+)$", text, re.M).group(1)
+                self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
+                if job == "test":
+                    self.assertIn("\n    needs: lint\n", text)
+                else:
+                    self.assertNotIn("needs:", text)
+                step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
+                self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "
+                              "github.event.pull_request.draft && github.run_attempt == '1' }}", step)
+                self.assertIn('if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then', step)
+                self.assertIn("exit 1", step)
+                self.assertIn("if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}",
+                              text.split("      - name: Checkout\n", 1)[1].split("\n      - name:", 1)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

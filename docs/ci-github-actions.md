@@ -86,7 +86,12 @@ are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
-merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off
+merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
+The first attempt of a draft pull-request run defers the eight macOS-runner
+jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
+always run them, and `CI complete` rejects a deferral anywhere else (see
+[draft pull-request deferral](ci-runner-queue.md#draft-pull-request-deferral)).
+`fail-fast` is off
 in all three matrices. Native and mobile lanes have no desktop prerequisite;
 combination failure cannot hide their results or turn green. Within each Unix
 native lane, the differential step still runs after mode failure unless

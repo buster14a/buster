@@ -717,6 +717,28 @@ Boolean value result. Integer bitwise opcodes still require integer operands.
 Both native canonical emitters implement these Boolean operations as well as
 the existing machine selectors, including canonical fallback for x87 functions.
 
+A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
+result is 0 exactly when the whole value compares equal to 0.
+`c_ir_truth_value` is its one runtime owner, and `c_ir_emit_cast` answers a
+`_Bool` destination before any arm that dispatches on the source's
+representation (complex halves, binary16 runtime calls, x87 checks); only the
+representation-independent identity, qualifier and aggregate arms and the
+label-provenance refusal come first. A complex value therefore converts as
+`re != 0 || im != 0` in initializers (aggregate members included), assignments,
+arguments, returns, casts, compound assignments, atomic stores and VLA bounds,
+exactly as conditions already did. The complex arm had preceded the `_Bool`
+arm and kept only the real half, so `_Bool b = z` disagreed with `if (z)`
+(#1371). `c_ir_emit_complex_conversion` is the C 6.3.1.7p2 projection onto the
+other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
+still projects first. `c_test_complex_bool_conversion` checks that canonical
+shape on six target layouts in both frontend forms and runs literal
+float/double/long double rows (signed zeros, subnormal, infinite and NaN
+halves, projection controls) in every native allocator at O0/O2. Imaginary
+constants remain outside parse-side integer constant expressions
+(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
+not folded to real targets; `_Bool` bit-field stores fail canonical validation
+independently of this conversion.
+
 ## ABI decomposition ownership
 
 `IrType` holds language identity and layout only. Each `IrAbiContext` owns one
@@ -835,6 +857,20 @@ constant folding and runtime operands consume that type. Static assertions using
 enumerators defer to typed semantic evaluation instead of replacing names with
 untyped decimal spellings. Full-width runtime constants use ordinary canonical
 shift/or operations; the one-immediate integer-constant contract is unchanged.
+
+A selection or iteration statement is a block (C17 6.8.4p3, 6.8.5p5). When an
+`if`, `switch` or `while` controlling expression defines a tag, as in
+`if (sizeof(enum { Q = 8 })) v = Q;`, `c_parse_bind_block_statements` opens a
+statement scope. That scope spans the rest of the expression and every
+substatement, including the else branch and the switch body, and ends with the
+statement. A `for` header uses its loop scope. The walk registers each tag
+defined directly in the header when it reaches the definition, so an earlier
+use still binds the outer name. `c_parse_publish_enum_members` then publishes
+an enum's constants, the same helper local declarations use. The walk steps
+over the enum's body; it still walks a struct or union body so the names in its
+member bounds keep their bindings. A header that defines no tag opens no scope.
+`c_test_controlling_expression_scope` and
+`compiler_driver_test_scoped_constant_execution` cover this (#1304).
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64, and validates canonical IR in both frontend SSA forms.
