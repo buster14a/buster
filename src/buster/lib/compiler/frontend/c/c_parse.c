@@ -14379,7 +14379,112 @@ struct CTypePair
     bool ignore_qualifiers;
 };
 
-BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
+typedef enum CTypeSelfVerdict
+{
+    C_TYPE_SELF_INCOMPATIBLE,
+    C_TYPE_SELF_COMPATIBLE,
+    C_TYPE_SELF_UNDECIDED,
+} CTypeSelfVerdict;
+
+// The pair walk of c_parse_types_compatible_core, specialized to a type
+// compared with itself (C11 6.2.7p1). Such a walk only ever pushes one type
+// twice again, so while each type has at most one child it is a chain and
+// needs no pair stack. Each step keeps the walk's exact verdict -- an id out
+// of range or an array without its bound record is still incompatible -- and
+// its one side effect: an aggregate step asks c_parse_unqualified_type for
+// both halves, which appends a row for a qualified aggregate lacking its
+// unqualified link. A function type, the one kind with several children, and
+// an enum whose underlying type is not a leaf are left UNDECIDED for the
+// stack walk, before any step with a side effect has run.
+BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* result, CTypeId type)
+{
+    CTypeSelfVerdict verdict = C_TYPE_SELF_UNDECIDED;
+    bool walking = true;
+    for (u32 steps = 0; walking && steps <= result->type_count; steps += 1)
+    {
+        walking = false;
+        if (type.value >= result->type_count)
+        {
+            verdict = C_TYPE_SELF_INCOMPATIBLE;
+            continue;
+        }
+        CType value = result->types[type.value];
+        switch (value.kind)
+        {
+        case C_TYPE_POINTER:
+        case C_TYPE_VECTOR:
+        {
+            type = value.element_type;
+            walking = true;
+            break;
+        }
+        case C_TYPE_ARRAY:
+        {
+            verdict = value.array_bound < result->array_bound_count ? verdict : C_TYPE_SELF_INCOMPATIBLE;
+            type = value.element_type;
+            walking = verdict == C_TYPE_SELF_UNDECIDED;
+            break;
+        }
+        case C_TYPE_FUNCTION:
+        {
+            break;
+        }
+        case C_TYPE_STRUCT:
+        case C_TYPE_UNION:
+        case C_TYPE_ENUM:
+        {
+            bool has_element = value.kind == C_TYPE_ENUM && value.element_type.value != C_ID_UNDERLYING_INVALID;
+            bool element_in_range = has_element && value.element_type.value < result->type_count;
+            CTypeKind element_kind = element_in_range ? result->types[value.element_type.value].kind : C_TYPE_INVALID;
+            bool element_leaf = element_kind != C_TYPE_POINTER && element_kind != C_TYPE_ARRAY && element_kind != C_TYPE_VECTOR &&
+                                element_kind != C_TYPE_FUNCTION && element_kind != C_TYPE_STRUCT && element_kind != C_TYPE_UNION &&
+                                element_kind != C_TYPE_ENUM;
+            if (!element_in_range || element_leaf)
+            {
+                c_parse_unqualified_type(result, type);
+                c_parse_unqualified_type(result, type);
+                verdict = has_element && !element_in_range ? C_TYPE_SELF_INCOMPATIBLE : C_TYPE_SELF_COMPATIBLE;
+            }
+            break;
+        }
+        case C_TYPE_INVALID:
+        case C_TYPE_VOID:
+        case C_TYPE_BOOL:
+        case C_TYPE_CHAR:
+        case C_TYPE_SIGNED_CHAR:
+        case C_TYPE_UNSIGNED_CHAR:
+        case C_TYPE_SHORT:
+        case C_TYPE_UNSIGNED_SHORT:
+        case C_TYPE_INT:
+        case C_TYPE_UNSIGNED_INT:
+        case C_TYPE_LONG:
+        case C_TYPE_UNSIGNED_LONG:
+        case C_TYPE_LONG_LONG:
+        case C_TYPE_UNSIGNED_LONG_LONG:
+        case C_TYPE_INT128:
+        case C_TYPE_UNSIGNED_INT128:
+        case C_TYPE_FLOAT16:
+        case C_TYPE_BFLOAT16:
+        case C_TYPE_FLOAT:
+        case C_TYPE_DOUBLE:
+        case C_TYPE_LONG_DOUBLE:
+        case C_TYPE_FLOAT16_COMPLEX:
+        case C_TYPE_FLOAT_COMPLEX:
+        case C_TYPE_DOUBLE_COMPLEX:
+        case C_TYPE_LONG_DOUBLE_COMPLEX:
+        case C_TYPE_VA_LIST:
+        case C_TYPE_NULLPTR:
+        case C_TYPE_COUNT:
+        {
+            verdict = C_TYPE_SELF_COMPATIBLE;
+            break;
+        }
+        }
+    }
+    return verdict;
+}
+
+BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
                                                        CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
 {
     Arena* conflicts[] = {
@@ -14651,6 +14756,39 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParse
     scratch_end(temporary);
     return compatible;
 }
+
+// 96,8% of the calls a stage-1 self-compile makes compare one type id with
+// itself; the self chain settles those without the pair stack, which is
+// sized by the whole type table, and without walking the structure the
+// shared id already identifies. The walk decides everything else.
+BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
+                                                       CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
+{
+    CTypeSelfVerdict self = left.value == right.value ? c_parse_types_self_compatible(result, left) : C_TYPE_SELF_UNDECIDED;
+    bool compatible = self == C_TYPE_SELF_COMPATIBLE;
+    if (self == C_TYPE_SELF_UNDECIDED)
+    {
+        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right, ignore_nested_qualifiers);
+    }
+    return compatible;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
+{
+    return c_parse_types_compatible_core(arena, result, preprocess, left, right, false);
+}
+
+bool c_test_types_compatible_walk(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
+{
+    return c_parse_types_compatible_walk(arena, result, preprocess, left, right, false);
+}
+
+bool c_test_parse_reserve_types(CParseResult* result, u32 additional)
+{
+    return c_parse_result_reserve_types(result, additional);
+}
+#endif
 
 BUSTER_C_SHARED bool c_parse_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
