@@ -122,7 +122,7 @@ typedef struct TpRetirementCampaignStorePlan
 typedef struct TpRetirementCampaignCommand
 {
     char command_sha256[65], output_sha256[65], contract_sha256[65], artifact[128];
-    unsigned timeout_seconds;
+    unsigned timeout_seconds, memory_mib;
     int exit_status;
 } TpRetirementCampaignCommand;
 
@@ -451,6 +451,7 @@ static int tp_retirement_campaign_command_copy(TpRetirementCampaignCommand* targ
             memcpy(target->output_sha256, command->output_sha256, 65);
             if (artifact) memcpy(target->artifact, command->artifact, artifact + 1);
             target->timeout_seconds = command->timeout_seconds;
+            target->memory_mib = command->memory_mib;
             target->exit_status = command->exit_status;
         }
         else *target = (TpRetirementCampaignCommand){0};

@@ -18,8 +18,9 @@
  *       unit gate's A and sources matched, lane B's issued unit gate joined to
  *       the record (bq_retirement_campaign_ready_unit_gate: its seal is the
  *       record's `gate=`, its correctness seal the record's `correctness=`)
- *       and both binaries held again from the record's digests
- *       (bq_retirement_campaign_ready_held);
+ *       both binaries held again from the record's digests
+ *       (bq_retirement_campaign_ready_held) and A's two roots held for the
+ *       launches' canonical layout (ready->sources);
  *   bq_retirement_campaign_service_bind_unit(_pinned)    under MEASURING, the
  *       cheap part: the record still stands with its imported bytes, the gate
  *       join and held pair recheck, the plan and pre-sample context are
@@ -33,7 +34,11 @@
  * driver's workflow documents (retirement_unit_documents.h); the census
  * parser they reuse (retirement_correctness_service.c) must also precede
  * this header. retirement_unit_handoff.h maps the READY driver onto lane E's
- * composer request.
+ * composer request. bq_retirement_campaign_plan_commands resolves the
+ * campaign's measured commands from lane B's row plan in the canonical child
+ * layout with the plan's own (static) resolver, so this header must also
+ * follow retirement_row_plan.c; every label-1 command must hash to the
+ * digest the unit gate sealed for it.
  *
  * Shared tail: bq_retirement_campaign_service_gate_matches (A and both
  * source manifests against the gate), bq_retirement_campaign_service_bind_verified
@@ -61,6 +66,7 @@
 #include "retirement_unit.h"
 #include "retirement_unit_campaign.h"
 #include "retirement_unit_handoff.h"
+#include "retirement_row_plan.h"
 
 #ifdef __linux__
 /* Everything the campaign freeze consumes besides the held binaries. */
@@ -532,6 +538,13 @@ static inline BqError bq_retirement_campaign_service_import_unit_pinned(BqRetire
                                                              &prepared.preparation);
     if (result == BQ_OK) result = bq_retirement_campaign_ready_unit_gate(ready, unit_gate);
     if (result == BQ_OK) result = bq_retirement_campaign_ready_held(unit, &prepared, ready, held);
+    /* A's two roots, each scanned against A's manifest, for the launches'
+     * canonical layout (released with the record). */
+    for (u32 side = 0; result == BQ_OK && side < 2; side += 1)
+    {
+        ready->sources[side] = bq_retirement_unit_source_root(unit->workspaces, &prepared, side);
+        if (ready->sources[side] < 3) result = BQ_SOURCE_MISMATCH;
+    }
     if (result == BQ_OK && !bq_retirement_campaign_service_phase(phases, BQ_PHASE_SETTLING, job_id, attempt_token,
         cancellation_fd, deadline_ns))
         result = BQ_INVALID_TRANSITION;
@@ -830,6 +843,219 @@ static inline BqError bq_retirement_campaign_service_bind_unit(BqRetirementStore
     BqError result = bq_retirement_campaign_service_bind_unit_pinned(&unit, phases, cancellation_fd, deadline_ns,
         job_id, attempt_token, untimed, unit_gate, request, held, ready, binding);
     return result;
+}
+
+/* The campaign's measured commands, resolved from lane B's pinned row plan
+ * in the canonical child layout (retirement_sandbox.h), so each one's
+ * tp_retirement_command_hash is exactly the digest the plan derived for the
+ * same row, side and label. commands holds both stages ([stage * count +
+ * slot * 2 + variant]); every command's argv, environment, artifact leaf and
+ * digests live in its own allocation (blocks). Zero-initialize; release on
+ * every path. */
+typedef struct BqRetirementCampaignPlanCommands
+{
+    TpRetirementMeasuredCommand* commands;
+    char** blocks;
+    size_t count;
+    unsigned groups, runtime_count;
+} BqRetirementCampaignPlanCommands;
+
+static inline void bq_retirement_campaign_plan_commands_release(BqRetirementCampaignPlanCommands* out)
+{
+    if (out)
+    {
+        for (size_t index = 0; out->blocks && index < out->count * TP_RETIREMENT_CAMPAIGN_STAGES; index += 1)
+            free(out->blocks[index]);
+        free(out->blocks);
+        free(out->commands);
+        *out = (BqRetirementCampaignPlanCommands){0};
+    }
+}
+
+/* One resolved step copied into a compact allocation: argv and environment
+ * (each NULL-terminated), the command and output digests and the artifact
+ * leaf (empty for none); command points into it. */
+static inline int bq_retirement_campaign_plan_command_copy(BqRetirementRowCommand const* resolved, char const* artifact,
+    TpRetirementMeasuredCommand* command, char** block, char** digests)
+{
+    size_t strings = strlen(artifact) + 1u;
+    for (u32 index = 0; index < resolved->argument_count; index += 1) strings += strlen(resolved->arguments[index]) + 1u;
+    for (u32 index = 0; index < resolved->environment_count; index += 1)
+        strings += strlen(resolved->environment[index]) + 1u;
+    size_t pointers = (size_t)resolved->argument_count + resolved->environment_count + 2u;
+    char* bytes = malloc(pointers * sizeof(char*) + 2u * SHA256_HEX_CAPACITY + strings);
+    if (bytes)
+    {
+        char** arguments = (char**)(void*)bytes;
+        char** environment = arguments + resolved->argument_count + 1u;
+        char* digest = bytes + pointers * sizeof(char*);
+        char* text = digest + 2u * SHA256_HEX_CAPACITY;
+        memset(digest, 0, 2u * SHA256_HEX_CAPACITY);
+        for (u32 index = 0; index < resolved->argument_count; index += 1)
+        {
+            size_t length = strlen(resolved->arguments[index]) + 1u;
+            memcpy(text, resolved->arguments[index], length);
+            arguments[index] = text;
+            text += length;
+        }
+        arguments[resolved->argument_count] = NULL;
+        for (u32 index = 0; index < resolved->environment_count; index += 1)
+        {
+            size_t length = strlen(resolved->environment[index]) + 1u;
+            memcpy(text, resolved->environment[index], length);
+            environment[index] = text;
+            text += length;
+        }
+        environment[resolved->environment_count] = NULL;
+        memcpy(text, artifact, strlen(artifact) + 1u);
+        command->arguments = arguments;
+        command->argument_count = resolved->argument_count;
+        command->environment = environment;
+        command->environment_count = resolved->environment_count;
+        command->artifact = text[0] ? text : NULL;
+        command->command_sha256 = digest;
+        command->output_sha256 = digest + SHA256_HEX_CAPACITY;
+        *digests = digest;
+    }
+    *block = bytes;
+    int ok = bytes != NULL;
+    return ok;
+}
+
+/* The first member row of a frozen batch group (TP_RETIREMENT_BATCH_NO_ROW
+ * for none). */
+static inline u32 bq_retirement_campaign_plan_first_member(BqRetirementBatchGroup const* group)
+{
+    u32 first = TP_RETIREMENT_BATCH_NO_ROW;
+    for (u32 input = 0; group && input < group->contract[0].input_count && first == TP_RETIREMENT_BATCH_NO_ROW;
+         input += 1)
+        if (group->contract[0].inputs[input].member) first = group->contract[0].inputs[input].row;
+    return first;
+}
+
+/* The campaign's commands from the row plan the unit gate was issued on
+ * (its plan_sha256 is the plan's authority, and the gate's rows are the
+ * plan's completed rows): the timed groups in the campaign's order (each
+ * frozen object group at its first member, each timed singleton at its
+ * row), then the runtime rows, per stage and variant. A command runs side
+ * stage ? variant : 0 with label 2 only for the A/A second variant, in the
+ * work slot (BQ_RETIREMENT_ROW_WORK_PATH), with its template's timeout and
+ * address-space bound. An object group's command carries the frozen
+ * contract of its side, whose exit status and output digest it expects; a
+ * singleton's writes the output leaf and expects its side's observed
+ * artifact; a runtime row's expects the independent oracle's output. Every
+ * label-1 command must hash to the digest the gate sealed for it (its batch
+ * group's, or its row's compiler or runtime command); the label-2 commands
+ * are bound by the gate's A/A aggregate when the campaign binds. */
+static inline int bq_retirement_campaign_plan_commands(BqRetirementRowPlan const* plan,
+    BqRetirementUnitGate const* unit_gate, BqRetirementCampaignPlanCommands* out)
+{
+    BqRetirementCorrectness const* gate = unit_gate ? &unit_gate->correctness : NULL;
+    bool fresh = out && !out->commands && !out->blocks;
+    if (fresh) *out = (BqRetirementCampaignPlanCommands){0};
+    char population[SHA256_HEX_CAPACITY] = {0};
+    int ok = fresh && plan && plan->owned && unit_gate && unit_gate->owned && unit_gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED &&
+        bq_retirement_correctness_ready(gate) && !strcmp(unit_gate->plan_sha256, plan->authority_sha256) &&
+        plan->row_count == gate->prepared.rows && plan->native_target == gate->prepared.native_target &&
+        bq_retirement_oracle_population_hash(gate->trusted_rows, gate->prepared.rows, population) &&
+        !strcmp(population, plan->population_sha256);
+    u32 native = ok ? gate->prepared.native_target : 0;
+    unsigned groups = ok ? bq_retirement_campaign_timed_groups(gate) : 0, runtime_count = 0;
+    for (u32 row = 0; ok && row < gate->prepared.rows; row += 1)
+        runtime_count += gate->trusted_rows[row].compiler_eligible && gate->trusted_rows[row].target == native &&
+            gate->trusted_rows[row].stage != BQ_RETIREMENT_STAGE_OBJECT && gate->facts[row].runtime_eligible;
+    ok = ok && groups != UINT32_MAX && groups;
+    size_t count = ok ? (size_t)(groups + runtime_count) * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT : 0;
+    if (ok)
+    {
+        out->commands = calloc(count * TP_RETIREMENT_CAMPAIGN_STAGES, sizeof(*out->commands));
+        out->blocks = calloc(count * TP_RETIREMENT_CAMPAIGN_STAGES, sizeof(*out->blocks));
+        out->count = count;
+    }
+    char* storage = ok ? malloc(BQ_RETIREMENT_ROW_COMMAND_STORAGE) : NULL;
+    ok = ok && out->commands && out->blocks && storage;
+    unsigned group = 0, runtime = 0, next_batch = 0;
+    for (u32 row = 0; ok && row < gate->prepared.rows; row += 1)
+    {
+        BqRetirementTrustedRow const* trusted = gate->trusted_rows + row;
+        BqRetirementRowPlanRow const* planned = plan->rows + row;
+        if (!(trusted->compiler_eligible && trusted->target == native)) continue;
+        bool object = trusted->stage == BQ_RETIREMENT_STAGE_OBJECT;
+        BqRetirementBatchGroup const* frozen = object && next_batch < gate->batch_group_count ?
+            gate->batch_groups + next_batch : NULL;
+        if (object && bq_retirement_campaign_plan_first_member(frozen) != row)
+        {
+            /* A later member, bound with its group. */
+            ok = planned->compile == BQ_RETIREMENT_ROW_PLAN_BATCH;
+            continue;
+        }
+        bool with_runtime = !object && gate->facts[row].runtime_eligible;
+        BqRetirementRowPlanGroup const* batch = object && planned->compile == BQ_RETIREMENT_ROW_PLAN_BATCH &&
+            planned->group < plan->group_count ? plan->groups + planned->group : NULL;
+        ok = group < groups && (object ? frozen && batch :
+             planned->compile < plan->template_count && planned->fixture &&
+             (!with_runtime || planned->runtime < plan->template_count));
+        char output[32], metrics[32];
+        bq_retirement_row_leaves(row, output, metrics);
+        for (u32 stage = 0; ok && stage < TP_RETIREMENT_CAMPAIGN_STAGES; stage += 1)
+            for (u32 variant = 0; ok && variant < TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT; variant += 1)
+                for (u32 kind = 0; ok && kind < (with_runtime ? 2u : 1u); kind += 1)
+                {
+                    u32 side = stage ? variant : 0, label = !stage && variant ? 2u : 1u;
+                    size_t index = stage * count + (size_t)(kind ? groups + runtime : group) *
+                        TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + variant;
+                    BqRetirementRowContext context = object ?
+                        (BqRetirementRowContext){.metrics = batch->metrics, .inputs = batch->list_leaf, .side = side,
+                                                 .label = label} :
+                        (BqRetirementRowContext){.fixture = planned->fixture, .output = output, .metrics = metrics,
+                                                 .side = side, .label = label};
+                    BqRetirementRowTemplate const* template = plan->templates +
+                        (kind ? planned->runtime : object ? batch->template_index : planned->compile);
+                    TpRetirementMeasuredCommand* command = out->commands + index;
+                    *command = (TpRetirementMeasuredCommand){.unit = kind ? row : group, .kind = kind,
+                        .variant = variant, .directory = BQ_RETIREMENT_ROW_WORK_PATH,
+                        .timeout_seconds = template->timeout_seconds, .memory_mib = template->memory_mib};
+                    BqRetirementRowCommand resolved;
+                    char* digests = NULL;
+                    ok = bq_retirement_row_command(template, &context, storage, &resolved) &&
+                        bq_retirement_campaign_plan_command_copy(&resolved, !object && !kind ? output : "", command,
+                                                                 out->blocks + index, &digests);
+                    char const* sealed = NULL;
+                    if (ok && object)
+                    {
+                        command->batch = &frozen->contract[side];
+                        command->exit_status = (int)frozen->contract[side].exit_status;
+                        ok = tp_retirement_batch_contract_output(command->batch, digests + SHA256_HEX_CAPACITY);
+                        sealed = frozen->command_sha256[side];
+                    }
+                    else if (ok && kind)
+                    {
+                        memcpy(digests + SHA256_HEX_CAPACITY, trusted->independent_oracle_sha256, SHA256_HEX_CAPACITY);
+                        ok = tp_retirement_digest(digests + SHA256_HEX_CAPACITY);
+                        sealed = trusted->runtime_command_sha256[side];
+                    }
+                    else if (ok)
+                    {
+                        char const* objects[1] = {gate->facts[row].side[side].artifact_sha256};
+                        ok = tp_retirement_batch_output_digest(objects, 1, digests + SHA256_HEX_CAPACITY);
+                        sealed = trusted->compiler_command_sha256[side];
+                    }
+                    ok = ok && tp_retirement_command_hash(command, digests) &&
+                        (label == 2 || !strcmp(digests, sealed));
+                }
+        next_batch += object;
+        runtime += with_runtime;
+        group += 1;
+    }
+    free(storage);
+    ok = ok && group == groups && runtime == runtime_count && next_batch == gate->batch_group_count;
+    if (ok)
+    {
+        out->groups = groups;
+        out->runtime_count = runtime_count;
+    }
+    else if (fresh) bq_retirement_campaign_plan_commands_release(out);
+    return ok;
 }
 #endif
 #endif

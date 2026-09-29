@@ -95,6 +95,11 @@ import, and a refusal releases only what the call filled.
 4. `bq_retirement_campaign_ready_held` holds both binaries again from the
    record's build and binary record digests through the unit's own build
    import, and hands over only a pair whose digests and A are the record's.
+5. A's base and candidate roots are held in the record
+   (`BqRetirementCampaignReady.sources`), each opened and scanned against A's
+   manifest by `bq_retirement_unit_source_root`, as lane B's gate holds them.
+   Every launch places them at descriptors 5 and 6 (below); the record's
+   release closes them.
 
 `bq_retirement_campaign_service_bind_unit` is the cheap bind, under the
 MEASURING acknowledgement and after the untimed record stream is sealed. It
@@ -124,6 +129,40 @@ smallest-member order), its runtime flag and its six #619 slice dimensions
 artifact, read through the installed census under its profile pin. Every
 declared row's identity is recomputed from its fields and must equal the gate
 row's sealed identity, so each value is one the gate authenticated.
+
+### Measured commands from the row plan
+
+`bq_retirement_campaign_plan_commands` resolves the campaign's A/A and A/B
+commands from lane B's pinned row plan (`retirement_row_plan.c`), which must
+be the one the unit gate was issued on: the gate's `plan_sha256` is the
+plan's authority and the gate's rows are the plan's completed rows. It uses
+the plan's own resolver (`bq_retirement_row_command`) in the canonical child
+layout (`tools/throughput/retirement_sandbox.h`), so each command's
+`tp_retirement_command_hash` is the digest the plan derived for the same row,
+side and label (`bq_retirement_row_command_digest`):
+
+- The slots are the campaign's: each frozen object group at its first member,
+  each timed singleton at its row, then the runtime rows.
+- Side is the variant in the A/B stage and the baseline in the A/A stage;
+  `{{label}}` is `2` only for the A/A second variant. argv[0] is
+  `/proc/self/fd/3` or `/4`, A's roots are `/proc/self/fd/5` and `/6` and the
+  directory is `BQ_RETIREMENT_ROW_WORK_PATH` (`/proc/self/fd/7`).
+- An object command carries its side's frozen contract and expects its exit
+  status and output digest; a singleton writes `row-<row>.out` and expects its
+  side's observed artifact; a runtime command expects the independent
+  oracle's output. Timeout and address-space bound are the template's
+  (`TpRetirementMeasuredCommand.memory_mib`, frozen with the command but not
+  hashed).
+- Every label-1 command must hash to the digest the gate sealed for it (its
+  batch group's, or its row's compiler or runtime command), or the builder
+  refuses; the label-2 commands are bound by the gate's A/A aggregate when the
+  campaign binds.
+
+Each command's argv, environment, artifact leaf and digests live in one
+allocation; `bq_retirement_campaign_plan_commands_release` frees them. This
+header uses the row plan's private (static) resolver, so it must follow
+`retirement_row_plan.c` in the same translation unit, as it already follows
+`retirement_unit.c`.
 
 ## Plan and context
 
@@ -248,6 +287,23 @@ the attempt:
    code-observed row must have) and its code-section digest and size. The
    driver keeps the batches, their singleton rows and the reviewed budget
    (borrowed) for its documents.
+
+   Every launch (untimed and timed) runs in lane B's canonical child layout
+   and sandbox (`bq_retirement_unit_campaign_inputs`): the side's held binary
+   at descriptor 3 or 4, A's roots from the record at 5 and 6, the work
+   directory at 7 and as cwd, a new Landlock ruleset over exactly those
+   (built before the fork and closed after the launch) and the command's
+   address-space bound. The child is placed and enters the sandbox before
+   the timer starts (`tp_process_observe_inputs`): it reports over a pipe once
+   sandboxed, the parent then takes the start time, arms the timeout and lets
+   it `execve`, so the measured interval is one pipe wake-up, the exec and the
+   program. A child that cannot enter the sandbox never reports; the launch is
+   a launch error and the driver records it as refused. The launch requires
+   the command's directory to be exactly `BQ_RETIREMENT_ROW_WORK_PATH`, its
+   argv[0] the side's slot, the work directory owned by the service user and
+   not group- or world-writable, and a compile's output directory to be the
+   work directory.
+
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
 4. The store bind (above), then lane E's `tp_retirement_compose_plan` over
    the frozen capacity, then `bq_retirement_unit_campaign_attach`, which takes
@@ -375,7 +431,17 @@ without an artifact digest for a code row. READY's post-sample record is read
 back and checked, and the measured digest changes with it. The READY driver
 is mapped onto lane E's request and each mapped field is checked; a timed row
 outside the frozen layout, two swapped dimension columns and a foreign
-dimension value are refused. Launch timeouts are 30 s, so the 1,468 pinned
+dimension value are refused. Every launch uses the canonical layout, and a
+layout child reports, for each side, exactly descriptors 0, 1, 2, its
+side's slot, 5, 6 and 7, cwd `/proc/self/fd/7`, a file outside its sandbox
+denied and a connection to a listening unix socket outside it denied; a
+command naming the other side's slot is refused before any child. The
+fixture's address-space bound is 8 GiB, and none under the sanitizers,
+whose shadow memory needs the whole address space. A sanitized fixture child
+inside the sandbox also runs without LeakSanitizer, which needs `/proc`
+(`__asan_default_options` in `retirement_measurement_test.h` turns it off
+only for a process that cannot open `/proc/self/status`). Launch timeouts are 30 s,
+so the 1,468 pinned
 launches do not time out under sanitizers and load, and a complete run that
 stops prints its retained failure. Its plan tests refuse `U = 0` and
 object-group members out of order or after a control input.
@@ -397,21 +463,38 @@ override. It also checks the timed-row layout (and refuses a short workspace,
 a changed gate identity and an unpinned profile), and runs the driver from
 SETTLING through the import to the first untimed launch of the imported held
 baseline. The census fixture's matched builds are text files, so that launch
-exits 125 and the driver keeps its coordinates, process facts and log. Its
-unit gate is lane B's issuer on this attempt (`bq_prep_campaign_issue`): B's
-stand-in required checks run in the unit and B's passing test evidence,
-carrying this campaign's commands, joins; the bind also refuses another
-unit-gate seal and a caller-held copy of the correctness gate. No timed child
-runs there. All fixture digests, pins and admissions are test data,
+exits 125 and the driver keeps its coordinates, process facts and log; that
+launch runs in the canonical layout with the roots the import held, which a
+refused import never holds. Its unit gate is lane B's pinned issuer on this
+attempt (`bq_prep_campaign_issue`): B's stand-in required checks run in the
+unit, and a row plan over the validator's timed partition of the pinned rows
+(`bq_prep_campaign_plan_text`: one batch group and template per timed object
+group, members in row order with their identity fixtures) is installed,
+pinned and admitted through the observation an honest producer would make
+(`bq_row_test_observe`), since the matched builds are not compilers. The
+campaign's layout follows the issued gate and its commands come from
+`bq_retirement_campaign_plan_commands`; `bq_prep_campaign_digests` checks, for
+a timed batch group and a timed singleton with a runtime row, per side and
+for the A/A second label, that D's digests equal B's (the group's and the
+completed row's digests, and B's own resolver for the singleton's second
+label), that every command hashes as B's `bq_retirement_row_command_digest`
+in the work slot, and that the plan's A/A aggregate is the gate's. A record
+whose `correctness=` seal changed is corrupt, since the replay recomputes the
+seal from the persisted row evidence. The bind also refuses another unit-gate
+seal and a caller-held copy of the correctness gate. No timed child runs
+there. All fixture digests, pins and admissions are test data,
 never a verdict.
 
 ## Open interfaces
 
-- Lane B's production issuer has no row-plan producer yet, so
-  `bq_retirement_unit_gate` refuses in production; only the fixtures issue a
-  gate, from test row evidence and stand-in required checks.
+- The blocked profile pins neither lane B's required checks nor its row
+  plan, so `bq_retirement_unit_gate` refuses in production; only the fixtures
+  issue a gate, from a test observation of a test plan and stand-in required
+  checks, and nothing yet calls `bq_retirement_campaign_plan_commands`
+  outside them.
 - The untimed batch commands have no frozen, authenticated contract in the
-  gate yet; the driver checks them only against the reviewed shapes.
+  gate or the row plan yet; they launch in the canonical layout and sandbox,
+  but the driver checks them only against the reviewed shapes.
 - The frozen #426 pins and the admission capability (#1021) remain
   integration work.
 - Lane E: D cannot derive the stream paths (the service creates and names

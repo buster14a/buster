@@ -20,10 +20,11 @@
  * Map: bq_retirement_check_names names one check's four evidence files and
  * its work directory; bq_retirement_check_resolve turns one authority
  * template into a concrete argument with /proc/self/fd paths;
- * bq_retirement_sandbox_abi reads the kernel's Landlock ABI;
- * bq_retirement_sandbox builds the Landlock ruleset of a child that runs
- * candidate-derived code and bq_retirement_sandbox_enter applies it and the
- * seccomp filter before exec (the row producer's steps use both);
+ * bq_retirement_sandbox_abi, bq_retirement_sandbox and
+ * bq_retirement_sandbox_enter (the kernel's Landlock ABI, a child's ruleset,
+ * and applying it and the seccomp filter before exec) live in
+ * ../throughput/retirement_sandbox.h, shared with the row producer's steps
+ * and lane D's measured launches;
  * bq_retirement_check_spawn forks the child through
  * bq_retirement_build_child's normalized state (own process group, default
  * signal dispositions, empty mask, umask 0077, close-on-exec from 3) plus
@@ -96,158 +97,9 @@
 #define BQ_RETIREMENT_CHECK_SLOT_BYTES (BQ_RETIREMENT_CHECK_FIELD_CAP + 32u)
 #define BQ_RETIREMENT_CHECK_INHERIT_CAP (2u + 2u + BQ_RETIREMENT_CHECK_TOOLS_CAP + 1u)
 
-/* Landlock rights by bit, as the kernel UAPI numbers them, so an older
- * linux/landlock.h still builds: ABI 1 handles bits 0-12, ABI 2 adds REFER,
- * ABI 3 TRUNCATE, ABI 5 IOCTL_DEV; ABI 4 adds TCP bind/connect and ABI 6 the
- * signal and abstract-socket scopes. */
-#define BQ_RETIREMENT_SANDBOX_FS_EXECUTE (1ull << 0)
-#define BQ_RETIREMENT_SANDBOX_FS_WRITE_FILE (1ull << 1)
-#define BQ_RETIREMENT_SANDBOX_FS_READ_FILE (1ull << 2)
-#define BQ_RETIREMENT_SANDBOX_FS_READ_DIR (1ull << 3)
-#define BQ_RETIREMENT_SANDBOX_FS_ABI1 ((1ull << 13) - 1u)
-#define BQ_RETIREMENT_SANDBOX_FS_REFER (1ull << 13)
-#define BQ_RETIREMENT_SANDBOX_FS_TRUNCATE (1ull << 14)
-#define BQ_RETIREMENT_SANDBOX_FS_IOCTL_DEV (1ull << 15)
-#define BQ_RETIREMENT_SANDBOX_NET_TCP 3ull
-#define BQ_RETIREMENT_SANDBOX_SCOPES 3ull
-
-typedef struct BqRetirementSandboxAttributes
-{
-    u64 handled_access_fs, handled_access_net, scoped;
-} BqRetirementSandboxAttributes;
-
-/* The seccomp filter's architecture: the build's own; any other is killed.
- * On x86-64 the x32 system calls share the architecture value and carry
- * this bit in their number, so they are killed too. The io_uring numbers are
- * the same on every architecture and absent from older headers. */
-#if defined(__x86_64__)
-#define BQ_RETIREMENT_SANDBOX_AUDIT_ARCH AUDIT_ARCH_X86_64
-#define BQ_RETIREMENT_SANDBOX_X32_BIT 0x40000000u
-#elif defined(__aarch64__)
-#define BQ_RETIREMENT_SANDBOX_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#endif
-#if defined(BQ_RETIREMENT_SANDBOX_AUDIT_ARCH)
-#define BQ_RETIREMENT_SANDBOX_FILTERED 1
-#else
-#define BQ_RETIREMENT_SANDBOX_FILTERED 0
-#endif
-#define BQ_RETIREMENT_SANDBOX_IO_URING_SETUP 425u
-#define BQ_RETIREMENT_SANDBOX_IO_URING_ENTER 426u
-#define BQ_RETIREMENT_SANDBOX_IO_URING_REGISTER 427u
-
-#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
-/* Test-only: caps the Landlock ABI the sandbox sees, so a test can exercise
- * the refusal below BQ_RETIREMENT_SANDBOX_MIN_ABI on a newer kernel. */
-BUSTER_GLOBAL_LOCAL u32 bq_retirement_sandbox_abi_ceiling = UINT32_MAX;
-#endif
-
-/* The kernel's Landlock ABI, or 0 without Landlock. */
-BUSTER_GLOBAL_LOCAL u32 bq_retirement_sandbox_abi(void)
-{
-    long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
-    u32 result = abi > 0 && abi < (long)UINT32_MAX ? (u32)abi : 0;
-#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
-    if (result > bq_retirement_sandbox_abi_ceiling) result = bq_retirement_sandbox_abi_ceiling;
-#endif
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_rule(int ruleset, int parent, u64 allowed)
-{
-    struct landlock_path_beneath_attr beneath = {.allowed_access = allowed, .parent_fd = parent};
-    bool ok = parent >= 0 && syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0) == 0;
-    return ok;
-}
-
-/* A system path the child may use, when it exists. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_system_rule(int ruleset, char const* path, bool directory, u64 allowed)
-{
-    int held = open(path, O_PATH | O_CLOEXEC | (directory ? O_DIRECTORY : 0));
-    bool ok = held < 0 ? errno == ENOENT || errno == ENOTDIR : bq_retirement_sandbox_rule(ruleset, held, allowed);
-    if (held >= 0) close(held);
-    return ok;
-}
-
-/* The Landlock ruleset (close-on-exec) of one child that runs
- * candidate-derived code, or -1: see the file header. It is -1 without
- * Landlock ABI BQ_RETIREMENT_SANDBOX_MIN_ABI, on an architecture the seccomp
- * filter does not know, or when a rule fails. executables are the held files
- * it may execute and read, sources A's roots (read only) and work its own new
- * directory; abi, when not NULL, receives the Landlock ABI enforced (0 on
- * failure). */
-BUSTER_GLOBAL_LOCAL int bq_retirement_sandbox(int const* executables, u32 executable_count, int const sources[2],
-    int work, u32* abi)
-{
-    u32 version = bq_retirement_sandbox_abi();
-    bool ok = BQ_RETIREMENT_SANDBOX_FILTERED && version >= BQ_RETIREMENT_SANDBOX_MIN_ABI && executables &&
-              executable_count;
-    /* ABI 6 handles every filesystem right, TCP bind and connect, and both
-     * scopes. */
-    u64 handled = BQ_RETIREMENT_SANDBOX_FS_ABI1 | BQ_RETIREMENT_SANDBOX_FS_REFER | BQ_RETIREMENT_SANDBOX_FS_TRUNCATE |
-                  BQ_RETIREMENT_SANDBOX_FS_IOCTL_DEV;
-    BqRetirementSandboxAttributes attributes = {handled, BQ_RETIREMENT_SANDBOX_NET_TCP, BQ_RETIREMENT_SANDBOX_SCOPES};
-    int ruleset = ok ? (int)syscall(SYS_landlock_create_ruleset, &attributes, sizeof(attributes), 0) : -1;
-    u64 read = BQ_RETIREMENT_SANDBOX_FS_READ_FILE | BQ_RETIREMENT_SANDBOX_FS_READ_DIR;
-    u64 null_device = BQ_RETIREMENT_SANDBOX_FS_READ_FILE | BQ_RETIREMENT_SANDBOX_FS_WRITE_FILE |
-                      BQ_RETIREMENT_SANDBOX_FS_TRUNCATE;
-    static char const* const trees[] = {"/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"};
-    static char const* const devices[] = {"/dev/zero", "/dev/urandom", "/dev/random"};
-    ok = ok && ruleset >= 0;
-    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(trees); index += 1)
-        ok = bq_retirement_sandbox_system_rule(ruleset, trees[index], true, read | BQ_RETIREMENT_SANDBOX_FS_EXECUTE);
-    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(devices); index += 1)
-        ok = bq_retirement_sandbox_system_rule(ruleset, devices[index], false, BQ_RETIREMENT_SANDBOX_FS_READ_FILE);
-    for (u32 index = 0; ok && index < executable_count; index += 1)
-        ok = bq_retirement_sandbox_rule(ruleset, executables[index],
-                                        BQ_RETIREMENT_SANDBOX_FS_EXECUTE | BQ_RETIREMENT_SANDBOX_FS_READ_FILE);
-    ok = ok && bq_retirement_sandbox_system_rule(ruleset, "/etc", true, read) &&
-         bq_retirement_sandbox_system_rule(ruleset, "/dev/null", false, null_device) &&
-         bq_retirement_sandbox_rule(ruleset, sources[0], read) && bq_retirement_sandbox_rule(ruleset, sources[1], read) &&
-         bq_retirement_sandbox_rule(ruleset, work, handled);
-    if (!ok && ruleset >= 0) close(ruleset);
-    if (abi) *abi = ok ? version : 0;
-    return ok ? ruleset : -1;
-}
-
-/* In the forked child, just before exec: no new privileges, the ruleset,
- * then the seccomp filter. Landlock does not govern connect() to a
- * path-named unix socket, so the filter refuses (EPERM) every system call
- * that makes, names or uses a socket, and io_uring, which could issue those
- * operations without the system calls; another architecture or an x32 call
- * kills the child. No check or row step needs a socket: they compile and
- * run programs over files. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_enter(int ruleset)
-{
-    bool ok = ruleset >= 0 && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
-              syscall(SYS_landlock_restrict_self, ruleset, 0) == 0;
-#if BQ_RETIREMENT_SANDBOX_FILTERED
-    static u32 const denied[] = {SYS_socket, SYS_socketpair, SYS_connect, SYS_bind, SYS_listen, SYS_accept,
-                                 SYS_accept4, SYS_sendto, SYS_sendmsg, SYS_sendmmsg,
-                                 BQ_RETIREMENT_SANDBOX_IO_URING_SETUP, BQ_RETIREMENT_SANDBOX_IO_URING_ENTER,
-                                 BQ_RETIREMENT_SANDBOX_IO_URING_REGISTER};
-    struct sock_filter filter[8u + 2u * BUSTER_ARRAY_LENGTH(denied)];
-    u32 count = 0;
-    filter[count++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
-    filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, BQ_RETIREMENT_SANDBOX_AUDIT_ARCH, 1, 0);
-    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
-    filter[count++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
-#if defined(BQ_RETIREMENT_SANDBOX_X32_BIT)
-    filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, BQ_RETIREMENT_SANDBOX_X32_BIT, 0, 1);
-    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
-#endif
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(denied); index += 1)
-    {
-        filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, denied[index], 0, 1);
-        filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
-    }
-    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-    struct sock_fprog program = {.len = (unsigned short)count, .filter = filter};
-    ok = ok && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program, 0, 0) == 0;
-#else
-    ok = false;
-#endif
-    return ok;
-}
+/* The sandbox (bq_retirement_sandbox, bq_retirement_sandbox_enter) and the
+ * canonical child layout are shared with lane D's measured launches:
+ * ../throughput/retirement_sandbox.h. */
 
 typedef struct BqRetirementCheckNames
 {

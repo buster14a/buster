@@ -11,7 +11,10 @@
  * (the preparation runner writes the documents from the installed census and
  * runs the validator over them); the driver writes the five workflow
  * documents into a scratch evidence root, and the READY result is mapped
- * onto lane E's composer request. The admission, ready digest and pins are
+ * onto lane E's composer request. Every launch runs in lane B's canonical
+ * child layout and sandbox over stand-in roots (test_unit_campaign_layout
+ * checks what a layout child sees and is denied). The admission, ready
+ * digest and pins are
  * test data: no #426 verdict, acceptance measurement or real ready record.
  * Include after retirement_campaign_test.h, which compiles the fixture
  * admission. */
@@ -76,6 +79,12 @@ typedef struct TestUnitCampaign
     /* The #437 A/A admission receipt stand-in and its digest. */
     char aa_receipt[1024], aa_receipt_sha[65];
     char* environment[3];
+    /* The second A/A label's commands differ by environment (lane B's plan
+     * uses a label token). */
+    char* label_environment[4];
+    /* A's base and candidate root stand-ins: slots 5 and 6 of every launch. */
+    char sources_path[2][TP_PATH_CAP];
+    int sources[2];
     char* arguments[2][6][11];
     char command_sha[2][6][65];
     char* untimed_arguments[2][7];
@@ -239,6 +248,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
 {
     memset(fixture, 0, sizeof(*fixture));
     fixture->binary = fixture->candidate = fixture->other = fixture->cwd = fixture->code = fixture->leak = -1;
+    fixture->sources[0] = fixture->sources[1] = -1;
     int ok = tp_path(fixture->directory, root, "unit-campaign-fixture") && tp_mkdirs(fixture->directory) &&
         chmod(fixture->directory, 0700) == 0 && test_text(fixture->directory, "cwd-marker", "fixed cwd\n") &&
         tp_path(fixture->binary_path, fixture->directory, "fixture-child") &&
@@ -249,7 +259,16 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         tp_path(fixture->other_path, fixture->directory, "fixture-other-candidate-child") &&
         tp_copy_file(executable_path, fixture->other_path) && chmod(fixture->other_path, 0500) == 0 &&
         tp_path(fixture->code_path, fixture->directory, "unit-campaign-code") && tp_mkdirs(fixture->code_path) &&
-        chmod(fixture->code_path, 0700) == 0;
+        chmod(fixture->code_path, 0700) == 0 &&
+        tp_path(fixture->sources_path[0], fixture->directory, "unit-campaign-base") &&
+        tp_mkdirs(fixture->sources_path[0]) &&
+        tp_path(fixture->sources_path[1], fixture->directory, "unit-campaign-candidate") &&
+        tp_mkdirs(fixture->sources_path[1]);
+    for (unsigned side = 0; ok && side < 2; ++side)
+    {
+        fixture->sources[side] = open(fixture->sources_path[side], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        ok = fixture->sources[side] >= 3;
+    }
     if (ok)
     {
         fixture->binary = open(fixture->binary_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -306,15 +325,27 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     snprintf(fixture->list_argument, sizeof(fixture->list_argument), "@%s", fixture->list_leaf);
     fixture->environment[0] = "LC_ALL=C";
     fixture->environment[1] = "TP_RETIREMENT_TEST=explicit";
+    fixture->label_environment[0] = "LC_ALL=C";
+    fixture->label_environment[1] = "TP_RETIREMENT_LABEL=2";
+    fixture->label_environment[2] = "TP_RETIREMENT_TEST=explicit";
+    /* The row plan templates' address-space bound; unlimited under the
+     * sanitizers, whose shadow memory needs the whole address space. */
+#if defined(BUSTER_SANITIZE)
+    unsigned memory_mib = 0;
+#else
+    unsigned memory_mib = 8192;
+#endif
     /* Per stage: [object group baseline, candidate, link group baseline,
-     * candidate, runtime row baseline, candidate]; G = 2, U = 1. */
+     * candidate, runtime row baseline, candidate]; G = 2, U = 1. Every
+     * command is in lane B's canonical layout: the side's binary slot (both
+     * A/A labels run the baseline, slot 3), cwd the work slot. */
     for (unsigned stage = 0; ok && stage < 2; ++stage)
         for (unsigned slot = 0; ok && slot < 3; ++slot)
             for (unsigned variant = 0; ok && variant < 2; ++variant)
             {
                 unsigned index = slot * 2 + variant;
                 char** argv = fixture->arguments[stage][index];
-                argv[0] = variant ? (stage ? fixture->candidate_path : "fixture-child-label-2") : fixture->binary_path;
+                argv[0] = stage && variant ? "/proc/self/fd/4" : "/proc/self/fd/3";
                 argv[1] = "retirement-child";
                 unsigned count = 6;
                 if (!slot)
@@ -333,12 +364,13 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
                 }
                 fixture->commands[stage][index] = (TpRetirementMeasuredCommand){.unit = slot == 2 ? 6 : slot,
                     .kind = slot == 2, .variant = variant, .arguments = argv, .argument_count = count,
-                    .environment = fixture->environment, .environment_count = 2, .directory = fixture->directory,
+                    .environment = !stage && variant ? fixture->label_environment : fixture->environment,
+                    .environment_count = !stage && variant ? 3 : 2, .directory = BQ_RETIREMENT_ROW_WORK_PATH,
                     .artifact = slot == 1 ? argv[3] : NULL, .batch = slot ? NULL : &fixture->batch.contract,
                     .timeout_seconds = 30, .command_sha256 = fixture->command_sha[stage][index],
                     .output_sha256 = slot == 2 ? fixture->runtime_sha : slot ? fixture->batch_output :
                                                                               fixture->object_output,
-                    .exit_status = slot ? 0 : 1};
+                    .exit_status = slot ? 0 : 1, .memory_mib = memory_mib};
                 ok = tp_retirement_command_hash(&fixture->commands[stage][index], fixture->command_sha[stage][index]);
             }
     /* The untimed singleton group 0: a production and a reproduction batch
@@ -346,7 +378,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     for (unsigned variant = 0; ok && variant < 2; ++variant)
     {
         char** argv = fixture->untimed_arguments[variant];
-        argv[0] = variant ? fixture->candidate_path : fixture->binary_path;
+        argv[0] = variant ? "/proc/self/fd/4" : "/proc/self/fd/3";
         argv[1] = "retirement-child";
         argv[2] = "compiler";
         argv[3] = variant ? "untimed-right.bin" : "untimed-left.bin";
@@ -354,8 +386,9 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         argv[5] = fixture->leak_text;
         TpRetirementMeasuredCommand command = {.unit = 0, .kind = 0, .variant = variant, .arguments = argv,
             .argument_count = 6, .environment = fixture->environment, .environment_count = 2,
-            .directory = fixture->directory, .artifact = argv[3], .timeout_seconds = 30,
-            .command_sha256 = fixture->untimed_sha[variant], .output_sha256 = fixture->batch_output};
+            .directory = BQ_RETIREMENT_ROW_WORK_PATH, .artifact = argv[3], .timeout_seconds = 30,
+            .command_sha256 = fixture->untimed_sha[variant], .output_sha256 = fixture->batch_output,
+            .memory_mib = memory_mib};
         ok = tp_retirement_command_hash(&command, fixture->untimed_sha[variant]);
         for (unsigned purpose = 0; ok && purpose < 2; ++purpose)
             fixture->untimed[variant * 2 + purpose] = (TpRetirementUntimedBatch){command, 0, variant, purpose,
@@ -521,6 +554,11 @@ static void test_unit_campaign_teardown(TestUnitCampaign* fixture)
         CHECK(close(fixture->cwd) == 0);
     }
     if (fixture->code >= 3) CHECK(close(fixture->code) == 0);
+    for (unsigned side = 0; side < 2; ++side)
+    {
+        if (fixture->sources[side] >= 3) CHECK(close(fixture->sources[side]) == 0);
+        if (fixture->sources_path[side][0]) rmdir(fixture->sources_path[side]);
+    }
     if (fixture->other >= 3) CHECK(close(fixture->other) == 0);
     if (fixture->leak >= 3) CHECK(close(fixture->leak) == 0);
     if (fixture->candidate >= 3) CHECK(close(fixture->candidate) == 0);
@@ -691,11 +729,12 @@ static void test_unit_campaign_plan(TestUnitCampaign* fixture)
     facts.untimed = &no_untimed;
     CHECK(!bq_retirement_unit_campaign_pre_context(&fixture->gate, &facts, context_changed) && !context_changed[0]);
     /* A changed command changes the commands digest. */
-    fixture->arguments[1][1][0] = "fixture-candidate-child-other";
+    char* binary_slot = fixture->arguments[1][1][0];
+    fixture->arguments[1][1][0] = "/proc/self/fd/9";
     CHECK(tp_retirement_command_hash(&fixture->commands[1][1], fixture->command_sha[1][1]) &&
           bq_retirement_unit_campaign_commands_measured(fixture->commands[0], fixture->commands[1], 6, changed) &&
           strcmp(changed, commands));
-    fixture->arguments[1][1][0] = fixture->candidate_path;
+    fixture->arguments[1][1][0] = binary_slot;
     CHECK(tp_retirement_command_hash(&fixture->commands[1][1], fixture->command_sha[1][1]));
 }
 
@@ -758,8 +797,8 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
         }
     }
     uint64_t started = tp_process_monotonic_ns();
-    int ok = bq_retirement_unit_campaign_untimed(driver, untimed, batches, 4, &held, gate, &fixture->review, &none,
-                                                 &code);
+    int ok = bq_retirement_unit_campaign_untimed(driver, untimed, batches, 4, &held, fixture->sources, gate,
+                                                 &fixture->review, &none, &code);
     uint64_t elapsed = tp_process_monotonic_ns() - started;
     fixture->untimed_inputs[0] = 1;
     BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(driver);
@@ -1307,12 +1346,16 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         CHECK(tp_retirement_execution_peek(&stages.ab.execution, &first) == TP_RETIREMENT_NEXT_READY);
         unsigned index = (first.kind ? 2 : first.group) * 2 + first.variant;
         int log = openat(fixture->cwd, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binding.held_executables[first.variant].descriptor, fixture->cwd, log,
-            fixture->environment, 0};
+        int executable = binding.held_executables[first.variant].descriptor;
+        int ruleset = bq_retirement_sandbox(&executable, 1, fixture->sources, fixture->cwd, NULL);
+        TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, (int)first.variant,
+            {fixture->sources[0], fixture->sources[1]}, ruleset,
+            (uint64_t)fixture->commands[1][index].memory_mib << 20};
         TpRetirementMeasurementResult measured;
         CHECK(log >= 3 && bq_retirement_campaign_run(&binding, &fixture->commands[1][index], &inputs, fixture->cwd,
                                                      &measured) && stages.ab.execution.sequence == 1);
         if (log >= 0) CHECK(close(log) == 0);
+        if (ruleset >= 0) CHECK(close(ruleset) == 0);
         CHECK(!bq_retirement_unit_campaign_freeze(&driver) && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED &&
               campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID);
         ok = 0;
@@ -1456,6 +1499,63 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     }
 }
 
+/* One launch per side in lane B's canonical layout, as the driver makes it:
+ * the child sees exactly stdin, stdout, stderr, its side's binary slot, A's
+ * two roots and the work slot, its cwd is the work slot, and its sandbox
+ * denies a file beside the work directory (a stand-in for the reference
+ * oracle's output) and every socket, so it cannot reach a listening unix
+ * socket outside it. The timer starts only after the child entered the
+ * sandbox (tp_process_observe_inputs). */
+static void test_unit_campaign_layout(TestUnitCampaign* fixture)
+{
+    /* The stand-in oracle output and the listening socket live beside the
+     * sandbox, in a new directory outside the work directory. */
+    char outside[TP_PATH_CAP], socket_directory[] = "/tmp/bq-unit-layout-XXXXXX", socket_path[64];
+    int ok = mkdtemp(socket_directory) != NULL && tp_path(outside, socket_directory, "oracle-output") &&
+        test_text(socket_directory, "oracle-output", "oracle\n");
+    int written = snprintf(socket_path, sizeof(socket_path), "%s/listen", socket_directory);
+    ok = ok && written > 0 && (size_t)written < sizeof(socket_path);
+    int listener = ok ? socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) : -1;
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, socket_path, strlen(socket_path) + 1);
+    ok = ok && listener >= 3 && bind(listener, (struct sockaddr*)&address, sizeof(address)) == 0 &&
+        listen(listener, 1) == 0;
+    CHECK(ok);
+    for (unsigned side = 0; ok && side < 2; ++side)
+    {
+        char* argv[] = {side ? "/proc/self/fd/4" : "/proc/self/fd/3", "retirement-child", "layout", outside,
+            socket_path, fixture->leak_text, NULL};
+        int executable = side ? fixture->candidate : fixture->binary;
+        int log = openat(fixture->cwd, "layout.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        int ruleset = bq_retirement_sandbox(&executable, 1, fixture->sources, fixture->cwd, NULL);
+        TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, (int)side,
+            {fixture->sources[0], fixture->sources[1]}, ruleset, 0};
+        TpProcessObservation observed;
+        TpProcess process = log >= 3 && ruleset >= 3 ?
+            tp_process_observe_inputs(argv, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
+        char text[512], expected[512];
+        ssize_t length = log >= 3 ? pread(log, text, sizeof(text) - 1, 0) : -1;
+        text[length > 0 ? length : 0] = 0;
+        snprintf(expected, sizeof(expected), "fds=0,1,2,%u,5,6,7\ncwd=slot\nopen=denied\nsocket=denied\n", 3 + side);
+        if (strcmp(text, expected)) fprintf(stderr, "unit campaign layout child %u saw:\n%s", side, text);
+        CHECK(log >= 3 && ruleset >= 3 && observed.valid && !process.launch_error && !process.exit_code &&
+              !process.signal_number && !strcmp(text, expected));
+        /* A binary slot that is not the side's is refused before any child. */
+        argv[0] = side ? "/proc/self/fd/3" : "/proc/self/fd/4";
+        TpProcess refused = log >= 3 && ruleset >= 3 ?
+            tp_process_observe_inputs(argv, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
+        CHECK(refused.launch_error && !observed.valid);
+        if (ruleset >= 0) CHECK(close(ruleset) == 0);
+        if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "layout.log", 0) == 0);
+    }
+    if (listener >= 0) CHECK(close(listener) == 0);
+    unlink(socket_path);
+    unlink(outside);
+    rmdir(socket_directory);
+}
+
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)
 {
     TestUnitCampaign* fixture = (TestUnitCampaign*)calloc(1, sizeof(*fixture));
@@ -1464,6 +1564,7 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
     if (ready)
     {
         test_unit_campaign_plan(fixture);
+        test_unit_campaign_layout(fixture);
         /* A driver that has not begun runs no step and touches nothing. */
         BqRetirementUnitCampaign idle = {0};
         BqRetirementUnitCampaignStreams none = {0};
@@ -1473,8 +1574,8 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
         TpRetirementFamilyCounts family = {37, 9};
         CHECK(!bq_retirement_unit_campaign_measuring(&idle) && idle.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
         idle = (BqRetirementUnitCampaign){0};
-        CHECK(!bq_retirement_unit_campaign_untimed(&idle, NULL, fixture->untimed, 4, &fixture->held, &fixture->gate,
-                                                   &fixture->review, &none, &code));
+        CHECK(!bq_retirement_unit_campaign_untimed(&idle, NULL, fixture->untimed, 4, &fixture->held, fixture->sources,
+                                                   &fixture->gate, &fixture->review, &none, &code));
         idle = (BqRetirementUnitCampaign){0};
         CHECK(!bq_retirement_unit_campaign_attach(&idle, NULL, &fixture->ready, &fixture->pins, NULL, &family));
         idle = (BqRetirementUnitCampaign){0};

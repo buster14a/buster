@@ -42,6 +42,12 @@
  *   bq_retirement_unit_campaign_measured   MEASURED, after the caller confirms
  *                                          composition and authority handoff
  *
+ * Every launch runs in lane B's canonical child layout and sandbox
+ * (bq_retirement_unit_campaign_inputs; retirement_sandbox.h): the side's held
+ * binary at 3 or 4, A's roots (the imported record's sources) at 5 and 6 and
+ * the work directory at 7 and as cwd, a new ruleset per launch built before
+ * the fork, and the child enters the sandbox before the timer starts
+ * (tp_process_observe_inputs). A launch the sandbox refuses is recorded.
  * Every launch is refused when it could outlive the absolute deadline, and
  * its child is killed when the cancellation descriptor becomes readable
  * (TpProcessInputs.cancellation). The first failure is retained with its
@@ -649,12 +655,18 @@ static inline int bq_retirement_unit_campaign_post_aa(TpRetirementCampaign const
  * check_evidence_sha256 are the #509 required-check authority and the
  * digest of its run records and logs. unit_gate is the BqRetirementUnitGate
  * the import joined (by address; the bind accepts only that gate).
+ * sources are A's base and candidate roots, held by the import (each opened
+ * and scanned against A's manifest, as lane B's gate holds them) for every
+ * launch's canonical layout: slots 5 and 6 and the sandbox's read-only rules
+ * (bq_retirement_unit_campaign_inputs). The release closes them; a zeroed
+ * record holds none (only descriptors from 3 up are ever held).
  * Zero-initialize; release on every path. */
 typedef struct BqRetirementCampaignReady
 {
     BqJob job;
     void const* unit_gate;
     char* text;
+    int sources[2];
     u64 job_id, attempt_token;
     u32 length, rows, object_rows, native_target, observed_rows, owned;
     char ready_sha256[SHA256_HEX_CAPACITY], preparation_sha256[SHA256_HEX_CAPACITY];
@@ -672,6 +684,8 @@ static inline void bq_retirement_campaign_ready_release(BqRetirementCampaignRead
     if (ready)
     {
         free(ready->text);
+        for (u32 side = 0; side < 2; side += 1)
+            if (ready->owned && ready->sources[side] >= 3) close(ready->sources[side]);
         *ready = (BqRetirementCampaignReady){0};
     }
 }
@@ -815,6 +829,9 @@ typedef struct BqRetirementUnitCampaign
     char support_sha256[65], manifest_sha256[65], timed_rows_sha256[65];
     BqRetirementUnitCampaignDocument record;
     TpRetirementExecutable untimed_executables[2];
+    /* A's base and candidate roots (borrowed), for every launch's canonical
+     * layout: slots 5 and 6 and the sandbox's read-only rules. */
+    int sources[2];
     TpRetirementPlan plan;
     BqRetirementUnitCampaignFailure failure;
     Sha256 shard_hash[TP_RETIREMENT_CAMPAIGN_STAGES];
@@ -1243,6 +1260,23 @@ static inline int bq_retirement_unit_campaign_timed_code(BqRetirementUnitCampaig
     return ok;
 }
 
+/* One launch's inputs in lane B's canonical child layout
+ * (retirement_sandbox.h): the held executable of side at slot 3 + side, A's
+ * roots at 5 and 6 and the work directory at 7 (the cwd), a new sandbox
+ * ruleset over exactly those (the caller closes it) and the command's
+ * address-space limit. The child enters the sandbox before the timer
+ * starts (tp_process_observe_inputs). */
+static inline int bq_retirement_unit_campaign_inputs(BqRetirementUnitCampaign const* driver, int executable,
+    unsigned side, int log, TpRetirementMeasuredCommand const* command, TpProcessInputs* inputs)
+{
+    int ruleset = command && log >= 3 ?
+        bq_retirement_sandbox(&executable, 1, driver->sources, driver->work_directory, NULL) : -1;
+    *inputs = (TpProcessInputs){executable, driver->work_directory, log, command ? command->environment : NULL,
+        driver->cancellation_fd, (int)side, {driver->sources[0], driver->sources[1]}, ruleset,
+        command ? (uint64_t)command->memory_mib << 20 : 0};
+    return ruleset >= 3;
+}
+
 /* Untimed code-artifact batches, outside timing and before MEASURING: each
  * group's production then reproduction batch per variant, in (group,
  * variant, purpose) order, on the held binary of its variant (the pair the
@@ -1255,7 +1289,7 @@ static inline int bq_retirement_unit_campaign_timed_code(BqRetirementUnitCampaig
  * finish requires every reproduction. */
 static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* driver, TpRetirementUntimed* untimed,
     TpRetirementUntimedBatch const* batches, unsigned count, BqRetirementHeldBinaries const* held,
-    BqRetirementCorrectness const* gate, TpRetirementCampaignReview const* review,
+    int const sources[2], BqRetirementCorrectness const* gate, TpRetirementCampaignReview const* review,
     BqRetirementUnitCampaignStreams const* streams, BqRetirementUnitCampaignCode const* code)
 {
     unsigned char* produced = untimed && untimed->groups && untimed->groups <= TP_RETIREMENT_MAX_CELLS ?
@@ -1265,7 +1299,7 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
         review && streams && code && code->rows && code->codes && code->capacity && code->code_directory >= 3 &&
         produced &&
         review->untimed_groups == untimed->groups && count == 4u * untimed->groups &&
-        review->untimed_inputs && review->untimed_kinds &&
+        review->untimed_inputs && review->untimed_kinds && sources && sources[0] >= 3 && sources[1] >= 3 &&
         bq_retirement_unit_campaign_executables(held, driver->untimed_executables);
     if (driver) driver->untimed = untimed;
     if (ok)
@@ -1278,6 +1312,8 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
         driver->untimed_batch_count = count;
         driver->untimed_rows = code->rows;
         driver->budget = review->budget;
+        driver->sources[0] = sources[0];
+        driver->sources[1] = sources[1];
     }
     for (unsigned side = 0; ok && side < 2; ++side)
     {
@@ -1303,14 +1339,17 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
             bq_retirement_unit_campaign_metrics_ready(driver, untimed->metrics, streams->metrics,
                 streams->metrics_count, 0);
         int log = ok ? bq_retirement_unit_campaign_launch_log(driver) : -1;
-        TpProcessInputs inputs = {driver->untimed_executables[batch->variant].descriptor, driver->work_directory, log,
-            batch->command.environment, driver->cancellation_fd};
+        TpProcessInputs inputs;
+        int sandboxed = bq_retirement_unit_campaign_inputs(driver,
+            driver->untimed_executables[batch->variant].descriptor, batch->variant, log, &batch->command, &inputs);
+        if (ok && !sandboxed) bq_retirement_unit_campaign_record(driver, &coordinates);
         TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
             .process = {.exit_code = -1}};
-        int launched = ok && log >= 3;
+        int launched = ok && log >= 3 && sandboxed;
         ok = launched && tp_retirement_untimed_run(untimed, batch, &driver->untimed_executables[batch->variant],
             &inputs, driver->work_directory, &result);
         unsigned after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
+        if (inputs.ruleset >= 0) close(inputs.ruleset);
         if (ok && !bq_retirement_unit_campaign_code_step(driver, code, batch))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE;
         else if (ok && !bq_retirement_unit_campaign_log_chain(driver, log, 0))
@@ -1506,12 +1545,16 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
             if (ok) bq_retirement_unit_campaign_chain(driver, stage, &completed);
         }
         int log = ok ? bq_retirement_unit_campaign_launch_log(driver) : -1;
-        TpProcessInputs inputs = {binding->held_executables[stage && invocation.variant].descriptor,
-            driver->work_directory, log, command ? command->environment : NULL, driver->cancellation_fd};
+        unsigned side = stage && invocation.variant;
+        TpProcessInputs inputs;
+        int sandboxed = bq_retirement_unit_campaign_inputs(driver, binding->held_executables[side].descriptor, side, log,
+            command, &inputs);
+        if (ok && !sandboxed) bq_retirement_unit_campaign_record(driver, &coordinates);
         TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
             .process = {.exit_code = -1}};
-        int launched = ok && log >= 3;
+        int launched = ok && log >= 3 && sandboxed;
         ok = launched && bq_retirement_campaign_run(binding, command, &inputs, driver->work_directory, &result);
+        if (inputs.ruleset >= 0) close(inputs.ruleset);
         unsigned after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
         if (ok && stage && !bq_retirement_unit_campaign_timed_code(driver, samples, &invocation, command))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE;
