@@ -985,11 +985,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
+    // Per-input offsets and wall_ns share this origin.
     bool write_metrics = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.metrics_output_path.length != 0;
-    TimeDataType metrics_start = {0};
     if (write_metrics)
     {
-        metrics_start = timestamp_take();
+        invocation.metrics_origin = timestamp_take();
+        invocation.has_metrics_origin = true;
     }
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -1172,7 +1173,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     if (write_metrics)
     {
         CompilerDriverProcessMetrics process = {
-            .wall_nanoseconds = timestamp_ns_between(metrics_start, timestamp_take()),
+            .wall_nanoseconds = timestamp_ns_between(invocation.metrics_origin, timestamp_take()),
             .peak_resident_bytes = os_get_peak_resident_memory_size(),
             .exit_status = result == PROCESS_RESULT_SUCCESS ? 0 : 1,
         };
