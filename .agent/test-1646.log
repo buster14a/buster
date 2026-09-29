@@ -1,0 +1,7 @@
+test_all_outcome=failure
+self_host_outcome=skipped
+
+===== test_all tail =====
+error: tcc was not found in PATH
+
+===== self_host tail =====
