@@ -4542,6 +4542,16 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
+            // A pasted identifier is interned where it is formed, exactly as
+            // the token pass interns every lexed one, so the id -- not the
+            // spelling -- is the name key every later phase reads. Left at 0,
+            // each downstream lookup re-interned the joined spelling and
+            // dropped the answer; interning here is once per paste. The
+            // joined bytes live in the spelling space, which outlives the
+            // table's borrowed name pointer.
+            u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
+                                    ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
+                                    : 0;
             left->token = (CPpToken){
                 .token =
                     {
@@ -4549,6 +4559,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                         .length = c_token_length_field(joined_length),
                         .kind = pasted_shape.kind,
                         .punctuator = pasted_shape.punctuator,
+                        .symbol = pasted_symbol,
                     },
                 .stamp = stamp & C_PP_STAMP_MASK,
                 .foreign = true,
@@ -6416,6 +6427,21 @@ CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeF
                                             CIncludeFileEntry** entry_out)
 {
     return c_include_file_entry(table, identity, spelling, entry_out);
+}
+
+u32 c_test_symbol_intern(CSymbolTable* table, String8 name)
+{
+    return c_symbol_intern(table, name);
+}
+
+u32 c_test_symbol_find(CSymbolTable const* table, String8 name)
+{
+    return c_symbol_find(table, name);
+}
+
+u32 c_test_symbol_count(CSymbolTable const* table)
+{
+    return table->count;
 }
 
 bool c_test_include_file_table_grow(CIncludeFileTable* table)
