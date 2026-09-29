@@ -147,11 +147,12 @@ importer fails closed today, and nothing in the worker calls it. Real pin
 values still need a reviewed installed template and inventory. This importer
 holds no `rows.tsv` or validator projection and does not check template
 `configuration_sha256` values itself. `bq_retirement_oracle_authority_begin`
-compares them with B's declared rows. `begin_service` binds those rows to the
-#1020 per-row digest derived from pinned `rows.tsv`
+compares them with B's rows. `project_service` derives those rows from the
+pinned census and binds them to the #1020 per-row digest derived from pinned
+`rows.tsv`
 ([definition](retirement_census_import.md#per-row-configuration_sha256-1020)),
-so a caller that passes the same B array to both binds the template
-transitively.
+and the unit passes that same array to `authority_begin`, which binds the
+template transitively.
 The fixture in `retirement_prepare_tests.c` exercises the importer through its
 `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY` seam
 `bq_retirement_reference_policy_import_pinned` with a synthetic profile.
@@ -369,6 +370,114 @@ installs the reviewed binaries. That installation needs its own packet
 (new binary digests, and a disposable real-systemd rehearsal of the four
 units).
 
+## Unit-side projection and oracle (#1020)
+
+After `bq_retirement_unit_build`, the unit runs design steps 6 to 8 in
+`retirement_unit.c`. Step 9, the correctness gate, stays fail-closed until
+#509 same-attempt receipts exist. The ready record and the coordinator
+replay are the next PR.
+
+`bq_retirement_unit_project` is step 6. It performs these steps in order:
+
+1. It opens the eight pinned census files beside the reference template,
+   in `recipes/native-retirement-performance-v1.census/`. The files are
+   `support.tsv`, `source-applicability.tsv`, `inputs.tsv`, `rows.tsv`,
+   `manifest.txt`, `validator-report.json`, `applicability.tsv` and
+   `applicability-skips.tsv`. Each is opened without following links and
+   held close-on-exec at descriptor 3 or above. The projection then checks
+   every file against its own profile pin, as before.
+2. It opens the sealed `retirement-build/` directory and requires its exact
+   closure.
+3. It calls `bq_retirement_correctness_project_profile` with
+   `BqRetirementBuildStores` made of the export and `retirement-build/`,
+   never the queue. That re-imports A, the matched-build sequence (with its
+   broker binding) and the binary record, and joins their preparation,
+   source and binary identities into `BqRetirementPrepared`. It then runs
+   the eligibility projection for the pinned template's `native_target`.
+   The report must declare `full-census`, and its compiler and baseline
+   digests must equal the two frozen binaries.
+4. `bq_retirement_census_rows_derive` builds the whole
+   `BqRetirementTrustedRow` array from that projection. No caller can supply
+   rows. The raw census join and `bq_retirement_validator_rows_join` then
+   check that same array.
+
+The projection is returned only when every check passes. It must name the
+binaries the unit holds, and its support and census digests must equal the
+template's.
+
+The derived population is:
+
+- **Object rows.** One per census row, in ordinal order. Each takes its
+  target from the census matrix, its classification, compiler eligibility
+  and skip proof from the schema-2 sidecars, and its identity from the
+  approved #508 identity serialization with `artifact_stage=object`. Its
+  source digest is the subject's support-declaration digest and its
+  configuration digest is the #1020 digest. `code_obligation` is set for
+  `supported-object-zero-fallback` and `execution_obligation` for
+  `semantic-gate-509`.
+- **Two native stage rows.** A `link` row and then a `self-host-stage1`
+  row. Both name the *stage census row*: the lowest census ordinal on the
+  native target that is compiler eligible and owes both obligations. Their
+  identities use the same serialization with their own `artifact_stage`.
+
+This stage-row rule is staged policy. The final stage population comes from
+#508's performance-row declaration, which this service does not import yet.
+The reviewed template pins the result, because its `population_sha256`
+covers every row.
+
+Command, oracle and #509 fields stay empty. `population_sha256` seals the
+rows that `rows_join` accepted. This is an in-process misuse check, not a
+security boundary. `bq_retirement_correctness_begin_service` now takes only
+that projection. An intact projection still returns `BQ_RECIPE_MISMATCH`,
+and one whose rows changed returns `BQ_SOURCE_MISMATCH`. Either way the gate
+is poisoned and no binary is held.
+
+`bq_retirement_unit_oracle` is steps 7 and 8. It requires these first:
+
+- the profile's `reference-template-sha256` equals the policy's template;
+- the projection still matches its seal;
+- the cancellation descriptor is not readable and the deadline has not
+  passed.
+
+It then performs these steps in order:
+
+1. `bq_retirement_oracle_authority_begin` receives the policy template, its
+   pin, the projection's `prepared` and the same `rows` array.
+2. The unit creates `retirement-work/reference-oracle/`, new and `0700`, as
+   the producer's output directory. A second oracle into the same attempt is
+   refused.
+3. It holds A's materialized `base/source` and `candidate/source` copies as
+   the producer's source roots. Each must still match the imported manifest
+   and same-job materialized inode closure. Both copies are made `0550` by
+   the materializer under the service UID, which also runs `worker-unit`, so
+   they satisfy the producer's owner and write-bit checks on source roots.
+4. `bq_retirement_reference_producer_begin` receives the decoded plan, both
+   pins, the held inventory, `policy.source`, the roots, the toolchain
+   manifest pin, the held Clang and the output directory.
+5. For each reference row, the unit calls `producer_next`, then
+   `bq_retirement_reference_producer_runtime`, then `authority_next`. The
+   producer builds the runtime command from its own plan row, with argv[0]
+   `/proc/self/fd/<held binary>` and cwd `/proc/self/fd/<output>`. The
+   caller never composes argv.
+6. It calls `authority_finish`, `authority_ready` and `producer_ready`.
+
+Each step's deadline is the unit's absolute deadline, or one hour away if
+that is earlier, because the producer and authority refuse longer child
+deadlines. A readable cancellation descriptor returns
+`BQ_WORKER_CANCEL_SIGNAL` and an expired deadline `BQ_WORKER_TIMEOUT`. In
+both cases the running child's process group is killed and reaped. Any
+failure releases the producer, the directories and the references, and
+returns no facts. A partial reference directory stays in the attempt for
+the failure path. `BqRetirementUnitOracle` keeps the finished authority,
+which points into the prepared policy, the projection's rows and its
+references.
+
+`main.c` now defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED` before it
+includes `retirement_oracle_authority.c`. The service's adapter therefore
+accepts only the pending token of the live producer bound to that authority.
+`bq_worker_unit` still calls none of these steps, and every recipe gate
+still rejects the job first.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,
@@ -555,8 +664,9 @@ individually capped at 16 MiB; each frozen binary at 512 MiB.
 `bq_retirement_matched_build_import` rederives the commands, rereads each
 immutable log and stage receipt, checks the exact final build record digest,
 and reimports A and both binary outputs. The public
-`bq_retirement_correctness_begin_service` requires that authenticated build
-record digest and workspace root before opening B's binary holder or gate.
+`bq_retirement_correctness_project_service` requires that authenticated build
+record digest before it derives B's rows, and `begin_service` accepts only
+that projection before it would open B's binary holder or gate.
 This is a private handoff, not an executable retirement recipe: the blocked
 profile has neither `build-driver-sha256` nor `toolchain-manifest-sha256`; the
 #923 runner has not been wired to these four commands and the final reviewed
@@ -658,6 +768,38 @@ Through the unit, four more jobs check the other broker outcomes:
 - A relayed `125` returns `BQ_CLEANUP_FAILED` with no receipt.
 Each of the four sends exactly one KILL. Descriptor counts match before and
 after.
+The unit-oracle fixture (`retirement_unit_oracle_tests.h`) runs the whole
+sequence on a separate real-A tree:
+
+- **Census.** `retirement_validator_eligibility_test.py --emit` writes the
+  genuine schema-2 census with that module's Python configuration digests.
+- **Sources.** The baseline snapshot also holds the census subject's bytes
+  at `tests/unit.c`. This is the reference source.
+- **Toolchain.** `bin/clang` is a copy of the host compiler.
+- **Build.** A `census-fixture` marker makes the fixture driver freeze the
+  census manifest's literal compiler bytes, so the compiler/baseline join
+  holds.
+
+The sequence is prepare, a fixture-broker build, project and oracle. The
+fixture checks these properties:
+
+- Every derived row's configuration digest equals the Python reference.
+- The stage rows name the first eligible native row.
+- The blocked profile, a missing census pin, a changed report pin and a
+  `full-census` requirement on the self-test report each fail closed.
+- `begin_service` stays fail-closed, and a changed row is refused by both
+  `begin_service` and the oracle.
+- The oracle's success produces the reference and oracle files, and a second
+  oracle is refused.
+- In the service translation unit, forged and foreign tokens are refused
+  before any child runs, and a consumed token is stale.
+- With a second template whose second reference program spins, a SIGALRM
+  cancellation and an expired deadline each fail closed with no live child
+  after the first row finished.
+- No descriptor leaks.
+- `worker_linux.c`, `main.c`, `workspace.c` and `queue.c` name none of these
+  entry points.
+
 The #1018 completion case builds on an attempt created by the real
 `bq_materialize`, so the attempt is the production `02710` rather than a
 fixture directory. Real materialization admits only the smoke recipe, so a

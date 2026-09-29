@@ -57,10 +57,9 @@ valid projection because the remaining B/#509 authorities are not joined.
 The projection checks the complete fixed target, frontend, PIC, and allocator
 matrix; zero-based row and group order; fixture path, recipe, and compile
 obligation against the authenticated source ledger; and the approved #508
-canonical JSON identity digest for each row. The staged service entry checks
-projection ordinals and per-row `configuration_sha256` values against the
-supplied B rows, but does not import the
-matched build or begin the correctness gate. The lower-level `_built_pinned`
+canonical JSON identity digest for each row. The staged service projection derives the
+B rows itself and checks their ordinals and per-row `configuration_sha256`
+values; begin does not hold binaries or begin the correctness gate. The lower-level `_built_pinned`
 fixture seam exercises matched-build import separately. The `inputs.tsv` projection joins
 every line to the pinned support declaration, validates byte count, SHA-256,
 role, and compile obligation, and checks exact path-based `fixture_recipe` and
@@ -122,19 +121,24 @@ In C, `bq_retirement_validator_row_configuration_sha256` hashes the same list
 from the pinned `rows.tsv` fields. It uses the list writer that
 `bq_retirement_validator_rows_digest` also uses for the report-bound
 `rows_identity_sha256`. `bq_retirement_validator_eligibility_projection`
-exposes one digest per census row in `configuration_sha256`. The production
-`begin_service` passes it to `bq_retirement_validator_rows_join`, which
-requires every B row, of any stage, to carry the digest of the census row
-named by its `census_row`. B's caller-asserted value therefore cannot choose
-its own configuration identity. Reference template rows are native
+exposes one digest per census row in `configuration_sha256`.
+`project_service` derives every B row from the same projection and passes the
+array to `bq_retirement_validator_rows_join`, which requires every row, of any
+stage, to carry the digest of the census row named by its `census_row`. No
+caller-asserted row enters. Reference template rows are native
 LINK/SELF_HOST rows. `bq_retirement_oracle_authority_begin` compares their
-`configuration_sha256` with the same B rows, so the template is bound to the
-derived value only transitively. A future worker caller must pass the
-unchanged B row array that `begin_service` joined to `authority_begin`. The
-pinned reference-policy importer has no projection to join against directly.
+`configuration_sha256` with the same rows, so the template is bound to the
+derived value only transitively. The worker unit passes the unchanged joined
+array to `authority_begin` (see
+[unit-side projection and oracle](RETIREMENT_PREPARATION.md#unit-side-projection-and-oracle-1020)).
+The pinned reference-policy importer has no projection to join against
+directly.
 `retirement_prepare_tests.c` and `retirement_validator_eligibility_test.py`
 share one golden digest. The real schema-2 fixture compares all 192 C digests with
-the Python reference.
+the Python reference. The unit-oracle fixture installs the same genuine census
+(`retirement_validator_eligibility_test.py --emit`) and requires every row
+the unit derives, object and stage, to carry the Python reference digest of
+its census row.
 
 ## Production status
 
@@ -149,15 +153,18 @@ current-source full census artifact has established these exact pins. The checke
 declaration currently contains 411 subjects, which project to 78,912 object
 rows at 192 rows per subject.
 
-The production service entry reimports the durable A preparation, fixed
-matched-build and frozen-binary records, then checks their source and binary
-identities against the supplied B declaration. It checks projection ordinals
-and derived configuration digests against the supplied B rows but does not
-overwrite them, acquire launchable
-binary descriptors, or call the correctness-gate begin function.
-Even a valid full-census projection returns `BQ_RECIPE_MISMATCH` until the
-separate authority joins are implemented. The per-row `configuration_sha256`
-join above is in place. Missing facts include independent verification of
+`bq_retirement_correctness_project_service` reimports the durable A
+preparation, fixed matched-build and frozen-binary records from the worker
+unit's per-attempt stores, joins their source and binary identities into the
+derived `BqRetirementPrepared`, and derives the whole B row array from the
+projection before the raw and configuration joins. The two native stage rows
+follow a staged rule (the lowest compiler-eligible native row owing code and
+execution), pending an import of #508's performance-row declaration. The
+still fail-closed `begin_service` accepts only that sealed projection; it does
+not acquire launchable binary descriptors or call the correctness-gate begin
+function. Even a valid full-census projection returns `BQ_RECIPE_MISMATCH`
+until the #509 authority joins are implemented. The per-row
+`configuration_sha256` join above is in place. Missing facts include independent verification of
 per-row compiler/runtime argv/cwd/environment and CPU provenance, an
 authenticated #509 required-check list and receipt bytes/digests, and
 independent-oracle bytes/digest from an admitted producer. The gate can validate

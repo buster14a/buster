@@ -1,7 +1,9 @@
 /* Isolated native-process fixture for the #1018 matched-build handoff.
  * It accepts the fixed generate/build argv, runs in the supplied source cwd,
- * and compiles a small executable into the same configured build path. This
- * test driver is not the trusted Clang production build driver. */
+ * and compiles a small executable into the same configured build path. A
+ * subject whose src/main.c carries the census-fixture marker instead freezes
+ * the schema-2 census fixture's literal compiler bytes (#1020 unit oracle).
+ * This test driver is not the trusted Clang production build driver. */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <stdbool.h>
@@ -199,7 +201,18 @@ int main(int argc, char** argv)
                                                         "int main(void) { return 2; }\n";
             ok = ok && source_fd >= 0 && write(source_fd, code, strlen(code)) == (ssize_t)strlen(code);
             if (source_fd >= 0 && close(source_fd) != 0) ok = false;
-            if (ok)
+            /* The unit oracle fixture's census manifest names the schema-2
+             * fixture's literal compiler bytes; a census-fixture subject
+             * freezes exactly those instead of compiling. */
+            char const* census = !strstr(data, "census-fixture") ? NULL :
+                                 baseline ? "direct baseline\n" : "candidate compiler\n";
+            if (ok && census)
+            {
+                int output_fd = open(output, O_WRONLY | O_CREAT | O_EXCL, 0700);
+                ok = output_fd >= 0 && write(output_fd, census, strlen(census)) == (ssize_t)strlen(census);
+                if (output_fd >= 0 && close(output_fd) != 0) ok = false;
+            }
+            if (ok && !census)
             {
                 pid_t child = fork();
                 if (!child)

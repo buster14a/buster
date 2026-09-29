@@ -50,7 +50,7 @@ int main(int argc, char** argv)
         String8 profile = {(char8*)profile_bytes, profile_length};
         ok = bq_retirement_validator_eligibility_projection(descriptors[0], descriptors[1],
             descriptors[2], descriptors[3], descriptors[4], descriptors[5], descriptors[6], descriptors[7],
-            profile, &projection);
+            profile, 0, &projection);
     }
     if (ok)
     {
@@ -71,10 +71,7 @@ int main(int argc, char** argv)
         if (descriptors[index] >= 0) close(descriptors[index]);
     if (profile_file >= 0) close(profile_file);
     free(profile_bytes);
-    free(projection.compiler_eligible);
-    free(projection.classification);
-    free(projection.skip_proof_sha256);
-    free(projection.configuration_sha256);
+    bq_retirement_validator_eligibility_release(&projection);
     int result = ok ? 0 : 1;
     return result;
 }

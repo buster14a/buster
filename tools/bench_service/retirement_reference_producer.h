@@ -3,7 +3,8 @@
  * runtime command bytes; A supplies held materialized roots and toolchain.
  * begin authenticates those bytes to separate compiled-profile pins. next
  * observes a real bounded trusted-Clang child, freezes its binary/log/receipt
- * and issues one opaque build token for authority_next. The worker owns the
+ * and issues one opaque build token for authority_next; runtime builds that
+ * token's runtime command, so no caller composes argv. The worker owns the
  * whole-job sandbox, lease, deadline and durable evidence after this call.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_REFERENCE_PRODUCER_H
@@ -109,6 +110,25 @@ BUSTER_F_DECL bool bq_retirement_reference_producer_begin(
 BUSTER_F_DECL bool bq_retirement_reference_producer_next(
     BqRetirementReferenceProducer* producer, int cancellation_fd,
     uint64_t absolute_deadline_ns, BqRetirementOracleVerifiedBuild const** issued);
+/* The runtime command for the token next just issued, built by the producer
+ * from its own pinned plan row so the caller never composes argv: argv[0] is
+ * /proc/self/fd/<held reference binary>, the working directory is
+ * /proc/self/fd/<output directory>, argv[1..] and the environment are the
+ * installed inventory's runtime bytes, and output names the template row's
+ * output file in that directory. command points into this object, so keep it
+ * in place until authority_next returns. */
+typedef struct BqRetirementReferenceRuntime
+{
+    char executable[64], directory[64];
+    char* arguments[BQ_RETIREMENT_REFERENCE_ARGS_CAP + 1];
+    char* environment[BQ_RETIREMENT_REFERENCE_ENV_CAP + 1];
+    BqRetirementProcessCommand command;
+    BqRetirementArtifactLocation output;
+} BqRetirementReferenceRuntime;
+
+BUSTER_F_DECL bool bq_retirement_reference_producer_runtime(
+    BqRetirementReferenceProducer const* producer, BqRetirementOracleVerifiedBuild const* token,
+    BqRetirementReferenceRuntime* runtime);
 BUSTER_F_DECL bool bq_retirement_reference_producer_ready(
     BqRetirementReferenceProducer const* producer);
 BUSTER_F_DECL bool bq_retirement_reference_producer_release(

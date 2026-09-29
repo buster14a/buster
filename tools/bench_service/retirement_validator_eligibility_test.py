@@ -521,11 +521,72 @@ def execute(probe):
         fixture.tearDown()
 
 
+# Installed names of the unit's census directory (retirement_unit.h
+# BQ_RETIREMENT_UNIT_CENSUS_FILES), mapped to this fixture's artifact keys.
+EMITTED_CENSUS_FILES = (
+    ("support.tsv", "support"),
+    ("source-applicability.tsv", "source_applicability"),
+    ("inputs.tsv", "inputs"),
+    ("rows.tsv", "rows"),
+    ("manifest.txt", "manifest"),
+    ("validator-report.json", "report"),
+    ("applicability.tsv", "applicability"),
+    ("applicability-skips.tsv", "skips"),
+)
+
+
+def emit(directory):
+    """Write the genuine fixture's eight census files for the C unit fixture.
+
+    retirement_prepare_tests.c installs them as the worker unit's pinned
+    census and compares the rows its projection derives with
+    ``configurations.txt``: this module's row_configuration_digest for every
+    census row, in row order. The directory must not exist yet.
+    """
+    check_row_configuration_reference()
+    directory.mkdir(mode=0o700)
+    fixture = contract_test.ContractTests(methodName="runTest")
+    fixture.setUp()
+    try:
+        fixture.install_applicability({INAPPLICABLE_RECORD, UNAVAILABLE_RECORD})
+        report_path = fixture.root / "validator-report.json"
+        report = run_validator(fixture.shards, report_path)
+        independently_replay_python(fixture.root, report, fixture.shards[0])
+        shard = fixture.shards[0]
+        artifacts = {
+            "support": shard / "support-contract.tsv",
+            "source_applicability": shard / "applicability-ledger.tsv",
+            "inputs": shard / "inputs.tsv",
+            "rows": shard / "rows.tsv",
+            "manifest": shard / "manifest.txt",
+            "report": report_path,
+            "applicability": fixture.root / "applicability.tsv",
+            "skips": fixture.root / "applicability-skips.tsv",
+        }
+        configurations = expected_configurations(report, shard)
+        for name, key in EMITTED_CENSUS_FILES:
+            target = directory / name
+            target.write_bytes(artifacts[key].read_bytes())
+            target.chmod(0o444)
+        target = directory / "configurations.txt"
+        target.write_text("".join(f"{digest}\n" for digest in configurations), encoding="ascii")
+        target.chmod(0o444)
+    finally:
+        fixture.tearDown()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("probe", type=Path,
+    parser.add_argument("probe", type=Path, nargs="?",
                         help="compiled retirement validator eligibility probe")
+    parser.add_argument("--emit", type=Path,
+                        help="write the fixture's census files into this new directory instead")
     arguments = parser.parse_args()
+    if (arguments.probe is None) == (arguments.emit is None):
+        parser.error("give exactly one of the probe or --emit")
+    if arguments.emit is not None:
+        emit(arguments.emit)
+        return
     execute(arguments.probe.resolve())
     print("schema-2 validator eligibility fixture passed "
           "(192 rows, 160 eligible, 32 skipped, 192 C/Python configuration digests; "

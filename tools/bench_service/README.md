@@ -478,15 +478,18 @@ smoke recipe from being relabelled as a retirement result while preserving a
 machine-visible identity for the future admitted implementation. Because the
 unit cannot reach the queue, the supervisor exports the verified preparation
 record and the request into a sealed `retirement/` directory of the attempt
-workspace. The unit-side importer and matched-build runner in
-`retirement_unit.c` are compiled but not yet called. The runner sends both
-subjects' build stages through typed broker `start-stage` requests. The broker
+workspace. The unit-side importer, matched-build runner, census projection
+and oracle/reference-producer caller in `retirement_unit.c` are compiled but
+not yet called; the correctness gate after them stays fail-closed. The runner
+sends both subjects' build stages through typed broker `start-stage`
+requests. The broker
 source now defines those four stages (see
 [SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#retirement-matched-build-stages-1020)),
 but the installed broker does not accept them until LOCAL installs the
 reviewed binaries; see
 [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)
-and [unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020).
+[unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020)
+and [unit-side projection and oracle](RETIREMENT_PREPARATION.md#unit-side-projection-and-oracle-1020).
 
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
