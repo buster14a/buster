@@ -4,8 +4,9 @@
 remain the default. This opt-in extension implements the **cloud phase of #1791**:
 standing machine authorization and automatic scheduling through the existing
 single writer. It does not install, authorize or invoke another benchmark-host
-executor. The checked-in standing policy starts **disabled**. Source availability
-is not a claim that the live repository has been activated or demonstrated.
+executor. The standing policy shipped **disabled** and is now enabled for the
+`ordinary` class only. Source availability is not a claim that the live
+repository has been activated or demonstrated.
 
 ## Authority and ordinary operation
 
@@ -129,8 +130,9 @@ Historical failures are retained, never overwritten with fabricated success.
 ## Installation and activation
 
 Install the source-only bootstrap through the existing permitted main integration
-process. The new policy is disabled and the host workflow/settings are unchanged.
-A branch cannot activate its own privileged controller or writer.
+process. The bootstrap shipped the policy disabled, with the host workflow and
+settings unchanged. A branch cannot activate its own privileged controller or
+writer.
 
 After the implementation is trusted on main:
 
