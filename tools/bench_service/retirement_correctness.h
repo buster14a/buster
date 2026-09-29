@@ -47,15 +47,23 @@ typedef struct BqRetirementPrepared
 /* Imported from the independently replayed #508/#929 projection, including
  * rows with no compiler invocation. A retained control may still be eligible.
  * The importer must authenticate the whole array and the oracle source before
- * calling begin; a candidate result cannot declare its own eligibility. */
+ * calling begin; a candidate result cannot declare its own eligibility.
+ * (A1) batch_key_sha256 is the importer's digest of the row's batch-group key
+ * (configuration and recipe: allocator, frontend lowering, PIC, fixture
+ * recipe, CPU and CPU features); every member and row-naming control of one
+ * object batch group shares it, and no two groups share it. batch_control
+ * marks a native, compiler-ineligible object row that is a status-checked
+ * control of a frozen object batch: it carries that batch's command digests
+ * and its row facts record the control's observed status and diagnostic. */
 typedef struct BqRetirementTrustedRow
 {
     uint32_t row, census_row, target, stage, classification;
-    uint32_t compiler_eligible, code_obligation, execution_obligation;
+    uint32_t compiler_eligible, code_obligation, execution_obligation, batch_control;
     char identity_sha256[65], source_sha256[65], configuration_sha256[65];
-    char skip_proof_sha256[65], independent_oracle_sha256[65];
+    char skip_proof_sha256[65], independent_oracle_sha256[65], batch_key_sha256[65];
     /* Independently derived exact argv/cwd/environment, by trusted binary.
-     * Untimed sides and inapplicable native runtime have empty commands. */
+     * Untimed sides and inapplicable native runtime have empty commands; a
+     * batch control row carries its batch's command. */
     char compiler_command_sha256[2][65], runtime_command_sha256[2][65];
 } BqRetirementTrustedRow;
 
@@ -78,10 +86,12 @@ typedef struct BqRetirementCheckResult
 
 /* Observations are from the service-owned launcher and artifact reader.
  * Command digests include exact argv, cwd and environment; runtime output is
- * checked against an independent oracle, never against a candidate value. */
+ * checked against an independent oracle, never against a candidate value.
+ * diagnostic_sha256 is the compiler diagnostic digest; a batch control row's
+ * facts carry it with the control's exit status (and object when it compiles). */
 typedef struct BqRetirementObservedSide
 {
-    char compiler_command_sha256[65], artifact_sha256[65], code_sha256[65];
+    char compiler_command_sha256[65], artifact_sha256[65], code_sha256[65], diagnostic_sha256[65];
     char runtime_command_sha256[65], runtime_output_sha256[65];
     uint64_t code_bytes;
     uint32_t semantic_pass, fallback_count, timed_out, out_of_memory;
@@ -121,8 +131,15 @@ typedef struct BqRetirementCorrectness
     uint32_t check_count, checks_done, rows_done, eligible_rows;
     uint32_t required_kinds, seen_kinds, failed, finished;
     uint32_t batch_group_count, batches_frozen;
+    /* (M2) Set only by the #509 correctness-authority importer, which does not
+     * exist yet; no entry point here sets it. Without it the campaign binding
+     * refuses every object batch group. It is sealed. */
+    uint32_t batch_authority;
     Sha256 checks_hash;
-    char checks_sha256[65], sealed_sha256[65];
+    /* (L4) batches() snapshots every group's per-side contract digest and
+     * batch command into batch_groups_sha256; finish seals the snapshot and
+     * finish and ready require the live groups to still match it. */
+    char checks_sha256[65], sealed_sha256[65], batch_groups_sha256[65];
 } BqRetirementCorrectness;
 
 BUSTER_F_DECL bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
@@ -139,9 +156,13 @@ BUSTER_F_DECL bool bq_retirement_correctness_row(BqRetirementCorrectness* gate,
  * The groups must partition the timed object rows exactly (each member a
  * compiler-eligible native-target object row, groups ordered by their smallest
  * member), agree across both sides except for object digests, bind each
- * member's compiler command and observed artifact, and name controls only
- * outside the timed projection. assigned_workspace holds at least `rows`
- * bytes. The caller keeps the groups and their contracts immutable. */
+ * member's compiler command and observed artifact, share one batch key per
+ * group (no two groups with the same key), and name as row controls exactly
+ * the gate's batch control rows: each native and outside the timed
+ * projection, in the group's key, run with the group's batch command, with its
+ * status, diagnostic and object joined to the row facts. assigned_workspace
+ * holds at least `rows` bytes. The contract digests are snapshotted here; the
+ * caller keeps the groups and their contracts immutable. */
 BUSTER_F_DECL bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
     BqRetirementBatchGroup const* groups, uint32_t count, uint8_t* assigned_workspace, uint32_t workspace_slots);
 BUSTER_F_DECL bool bq_retirement_correctness_finish(BqRetirementCorrectness* gate);

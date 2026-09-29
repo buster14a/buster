@@ -8,9 +8,10 @@
  * result populations, and the per-batch metrics artifacts packed into metrics
  * shards) plus the untimed code-artifact batches against the #1023 store
  * entry and byte ceilings before any timing. freeze also requires the reviewed
- * campaign budget (retirement_budget.h) to match its recipe pin and to hold the
- * derived counts. It does not confer receipt authority, evaluate #426, or
- * admit a service recipe.
+ * campaign budget (retirement_budget.h) to match the recipe pin its caller
+ * passes and to hold the derived counts, each timed group costed by its kind
+ * and stage. It does not confer receipt authority, evaluate #426, or admit a
+ * service recipe.
  *
  * Map: TpRetirementCampaignShape, tp_retirement_campaign_metrics_shards,
  * tp_retirement_campaign_capacity, tp_retirement_campaign_store_preflight,
@@ -121,15 +122,19 @@ typedef struct TpRetirementCampaignCommand
 } TpRetirementCampaignCommand;
 
 /* The reviewed-budget inputs freeze needs besides the frozen commands: the
- * budget record, its recipe/profile pin, and the untimed code-artifact groups
- * (input count and group kind for each; a singleton has one input). */
+ * budget record, each timed group's budget stage (TP_RETIREMENT_BUDGET_STAGE_*;
+ * object for an object group, the row's link or self-host stage for a
+ * singleton), and the untimed code-artifact groups (input count, group kind
+ * and budget stage for each; a singleton has one input). The recipe pin is a
+ * separate freeze argument taken from the admitted profile, never from here. */
 typedef struct TpRetirementCampaignReview
 {
     TpRetirementCampaignBudget const* budget;
-    char const* budget_sha256;
+    unsigned const* group_stages;
     unsigned const* untimed_inputs;
     unsigned const* untimed_kinds;
-    unsigned untimed_groups;
+    unsigned const* untimed_stages;
+    unsigned group_count, untimed_groups;
 } TpRetirementCampaignReview;
 
 typedef struct TpRetirementCampaign
@@ -430,23 +435,26 @@ static unsigned tp_retirement_campaign_group_shape(TpRetirementSampleGroup const
 
 /* Derive the store shape and the budget counts from the frozen commands and
  * the reviewed record: each timed group's input count (an object group's
- * contract inputs, members plus controls; a singleton's one), the reviewed
- * metrics bound every object contract must carry, and the untimed groups.
- * Capacity and the budget preflight must both hold. */
+ * contract inputs, members plus controls; a singleton's one), kind and stage,
+ * the reviewed metrics bound every object contract must carry, and the
+ * untimed groups. Capacity and the budget preflight must both hold. */
 static int tp_retirement_campaign_review(TpRetirementCampaignReview const* review,
     TpRetirementMeasuredCommand const* aa_commands, TpRetirementMeasuredCommand const* ab_commands,
     unsigned groups, unsigned const* group_shapes, unsigned rows, unsigned runtime, unsigned pairs,
     TpRetirementCampaignCapacity* capacity, TpRetirementBudgetPreflight* budget)
 {
-    unsigned* inputs = groups ? (unsigned*)malloc((size_t)groups * sizeof(*inputs)) : NULL;
+    unsigned* inputs = groups ? (unsigned*)malloc((size_t)groups * 2 * sizeof(*inputs)) : NULL;
+    unsigned* kinds = inputs ? inputs + groups : NULL;
     unsigned objects = 0, untimed_objects = 0;
     uint64_t metrics = 0, untimed_metrics = 0, largest = 0;
     int ok = review && review->budget && inputs && aa_commands && ab_commands && group_shapes &&
+        review->group_count == groups && review->group_stages &&
         review->untimed_groups <= TP_RETIREMENT_MAX_CELLS &&
-        (!review->untimed_groups || (review->untimed_inputs && review->untimed_kinds));
+        (!review->untimed_groups || (review->untimed_inputs && review->untimed_kinds && review->untimed_stages));
     for (unsigned group = 0; ok && group < groups; ++group)
     {
         unsigned object = (group_shapes[group] & 1) == TP_RETIREMENT_GROUP_OBJECT;
+        kinds[group] = group_shapes[group] & 1;
         TpRetirementBatchContract const* first = aa_commands[(size_t)group * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT].batch;
         uint64_t bound = 0;
         inputs[group] = object ? (first ? first->input_count : 0) : 1;
@@ -481,8 +489,9 @@ static int tp_retirement_campaign_review(TpRetirementCampaignReview const* revie
     }
     TpRetirementCampaignShape shape = {groups, objects, rows, runtime, pairs,
         review ? review->untimed_groups : 0, untimed_objects, metrics, untimed_metrics, largest};
-    TpRetirementBudgetCounts counts = {inputs, review ? review->untimed_inputs : NULL, groups, runtime, pairs,
-        review ? review->untimed_groups : 0};
+    TpRetirementBudgetCounts counts = {{inputs, kinds, review ? review->group_stages : NULL, groups},
+        {review ? review->untimed_inputs : NULL, review ? review->untimed_kinds : NULL,
+         review ? review->untimed_stages : NULL, review ? review->untimed_groups : 0}, runtime, pairs};
     ok = ok && tp_retirement_campaign_capacity(&shape, capacity) &&
         tp_retirement_budget_preflight(review->budget, &counts, budget);
     if (!ok)
@@ -497,7 +506,8 @@ static int tp_retirement_campaign_review(TpRetirementCampaignReview const* revie
 /* Called only after the service independently authenticates its immutable
  * inputs. The adapter checks consistency and snapshots all command, batch
  * contract and oracle identities; a digest or this structure alone never
- * authenticates them. Source commands are laid out per stage as
+ * authenticates them. budget_pin_sha256 is the admitted recipe profile's
+ * `campaign-budget-sha256=` pin, which the review's budget must hash to. Source commands are laid out per stage as
  * [group * 2 + variant] for every group, then [(G + r) * 2 + variant] for every
  * runtime row r, so command_workspace has exactly 2 * 2 * (G + U) slots and
  * identity_workspace G + U: group shapes, then runtime row IDs. */
@@ -507,7 +517,7 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
     TpRetirementExecutable const* ab_candidate, TpRetirementMeasuredCommand const* aa_commands,
     TpRetirementMeasuredCommand const* ab_commands, TpRetirementCampaignCommand* command_workspace,
     size_t command_count, unsigned* identity_workspace, size_t identity_count,
-    unsigned population_rows, TpRetirementCampaignReview const* review,
+    unsigned population_rows, TpRetirementCampaignReview const* review, char const* budget_pin_sha256,
     char const* plan_sha256, char const* context_sha256)
 {
     TpRetirementExecution* a = aa && aa->transcript ? aa->transcript->execution : NULL;
@@ -553,11 +563,12 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
         !strcmp(aa->transcript->job, ab->transcript->job) &&
         !strcmp(aa->transcript->boot, ab->transcript->boot) &&
         (!aa->object_count || (aa->metrics && ab->metrics && aa->metrics != ab->metrics &&
-            strcmp(aa->metrics->tag, ab->metrics->tag) && aa->metrics->stream != ab->metrics->stream &&
+            strcmp(aa->metrics->tag, ab->metrics->tag) && strcmp(aa->metrics->tag, TP_RETIREMENT_UNTIMED_METRICS_TAG) &&
+            strcmp(ab->metrics->tag, TP_RETIREMENT_UNTIMED_METRICS_TAG) && aa->metrics->stream != ab->metrics->stream &&
             !aa->metrics->artifacts && !ab->metrics->artifacts)) &&
-        review && review->budget && tp_retirement_digest(review->budget_sha256) &&
+        review && review->budget && tp_retirement_digest(budget_pin_sha256) &&
         tp_retirement_budget_digest(review->budget, budget_sha256) &&
-        !strcmp(budget_sha256, review->budget_sha256);
+        !strcmp(budget_sha256, budget_pin_sha256);
     /* Both stages must carry the same frozen layout. */
     for (unsigned row = 0; ok && row < aa->row_count; ++row)
         ok = aa->rows[row].id == ab->rows[row].id && aa->rows[row].metrics == ab->rows[row].metrics &&

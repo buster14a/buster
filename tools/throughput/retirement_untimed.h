@@ -23,6 +23,9 @@
 
 #define TP_RETIREMENT_UNTIMED_PRODUCTION 0u
 #define TP_RETIREMENT_UNTIMED_REPRODUCTION 1u
+/* The untimed metrics shard writer's tag; the timed stages' writers (for
+ * example `aa` and `ab`) must use other tags, so no shard name is shared. */
+#define TP_RETIREMENT_UNTIMED_METRICS_TAG "untimed"
 /* Largest untimed batch record, including LF; pinned by the native test and
  * below the validator's 8,192-byte record line cap. */
 #define TP_RETIREMENT_UNTIMED_RECORD_BYTES_MAX 747u
@@ -65,7 +68,7 @@ static inline int tp_retirement_untimed_init(TpRetirementUntimed* untimed, FILE*
         tp_retirement_token(boot) && attempt && cpu >= 0 && reserved_at_ns &&
         timed_bound_at_ns > reserved_at_ns && (!timed_completed_at_ns || timed_completed_at_ns > timed_bound_at_ns) &&
         (!metrics || (!metrics->failed && !metrics->finished && !metrics->artifacts && metrics->stream &&
-                      metrics->stream != stream));
+                      metrics->stream != stream && !strcmp(metrics->tag, TP_RETIREMENT_UNTIMED_METRICS_TAG)));
     if (untimed)
     {
         *untimed = (TpRetirementUntimed){.failed = !ok};

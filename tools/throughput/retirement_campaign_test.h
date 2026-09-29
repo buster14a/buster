@@ -4,7 +4,10 @@
  * (A1, M4) The campaign fixture has one timed object batch group (census rows
  * 4 and 5, bound through the correctness gate's frozen batch contract and the
  * `@file` response file) and one singleton link group (row 6) with native
- * runtime; every freeze carries the reviewed test budget and its pin. */
+ * runtime; every freeze carries the reviewed test budget, each group's budget
+ * stage and the recipe pin. The gate's #509 batch authority is set by hand
+ * here, standing in for the future importer; without it object groups never
+ * bind. */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_TEST_H
 #define BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_TEST_H
 #define TP_RETIREMENT_CAMPAIGN_FIXTURE_AA 1
@@ -62,8 +65,14 @@ static void test_retirement_campaign_budget(void)
     size_t size = tp_retirement_budget_encode(&budget, text, sizeof(text));
     CHECK(size && tp_retirement_budget_valid(&budget) && tp_retirement_budget_digest(&budget, digest));
     CHECK(!strncmp(text, "schema=" TP_RETIREMENT_BUDGET_SCHEMA "\nderivation=", 7 + 32 + 12) &&
+          strstr(text, "\nderivation=" TP_RETIREMENT_BUDGET_DERIVATION "\n") &&
+          strstr(text, "never a one-input batch") && strstr(text, "slowest untimed target") &&
           strstr(text, "\nreviewed-ns=36000000000000\n") && strstr(text, "\nmetrics-input-bytes=16384\n") &&
-          strstr(text, "\nbatch=1:40000000\nbatch=4:60000000\nbatch=1024:2000000000\n"));
+          strstr(text, "\nbatch=1:40000000\nbatch=4:60000000\nbatch=1024:2000000000\n"
+                       "singleton=link:45000000\nsingleton=self-host-stage1:900000000\n"
+                       "untimed-batch=1:50000000\nuntimed-batch=4:80000000\nuntimed-batch=1024:2500000000\n"
+                       "untimed-singleton=link:60000000\nuntimed-singleton=self-host-stage1:1200000000\n") &&
+          text[size - 1] == '\n' && !strcmp(text + size - 46, "untimed-singleton=self-host-stage1:1200000000\n"));
     Sha256 hash;
     sha256_init(&hash);
     sha256_add(&hash, text, (u64)size);
@@ -71,18 +80,29 @@ static void test_retirement_campaign_budget(void)
     CHECK(!strcmp(digest, other));
     TpRetirementCampaignBudget decoded;
     CHECK(tp_retirement_budget_decode(text, size, &decoded) && !memcmp(&decoded, &budget, sizeof(budget)));
-    /* Any other spelling, order or extra line rejects the installed record. */
+    /* Any other spelling, order, duplicate, unknown stage or extra line
+     * rejects the installed record. */
     char mutated[TP_RETIREMENT_BUDGET_BYTES + 64];
     char const* const edits[][2] = {
         {"reviewed-ns=36000000000000", "reviewed-ns=036000000000000"},
         {"cleanup-ns=20000000000\nruntime-process-ns", "runtime-process-ns=50000000\ncleanup-ns"},
         {"batch=1:40000000\nbatch=4:60000000\nbatch=1024:2000000000\n", ""},
-        {"batch=1:40000000", "batch=4:40000000"},
-        {"batch=1:40000000", "batch=1:70000000"},
+        {"\nbatch=1:40000000", "\nbatch=4:40000000"},
+        {"\nbatch=1:40000000", "\nbatch=1:70000000"},
         {"batch=1024:2000000000\n", "batch=1024:2000000000\nextra=1\n"},
         {"derivation=fixed", "derivation=other"},
         {"metrics-header-bytes=4096", "metrics-header-bytes=0"},
-        {"batch=1024:2000000000", "batch=1025:2000000000"}};
+        {"\nbatch=1024:2000000000", "\nbatch=1025:2000000000"},
+        {"\nsingleton=link:45000000\nsingleton=self-host-stage1:900000000",
+         "\nsingleton=self-host-stage1:900000000\nsingleton=link:45000000"},
+        {"\nsingleton=link:45000000\n", "\nsingleton=link:45000000\nsingleton=link:45000000\n"},
+        {"\nsingleton=link:45000000\n", "\n"},
+        {"\nsingleton=link:", "\nsingleton=linker:"},
+        {"\nsingleton=link:", "\nsingleton=object:"},
+        {"\nsingleton=link:45000000", "\nsingleton=link:0"},
+        {"untimed-singleton=link:60000000\n", ""},
+        {"untimed-batch=1:50000000\nuntimed-batch=4:80000000\nuntimed-batch=1024:2500000000\n", ""},
+        {"untimed-batch=1:50000000", "timed-batch=1:50000000"}};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(edits); ++i)
     {
         char const* at = strstr(text, edits[i][0]);
@@ -95,7 +115,7 @@ static void test_retirement_campaign_budget(void)
         memcpy(mutated + prefix + new_length, at + old_length, size - prefix - old_length);
         size_t mutated_size = size - old_length + new_length;
         CHECK(!tp_retirement_budget_decode(mutated, mutated_size, &decoded) &&
-              !decoded.reviewed_ns && !decoded.classes);
+              !decoded.reviewed_ns && !decoded.timed.classes && !decoded.untimed.classes);
     }
     CHECK(!tp_retirement_budget_decode(text, size - 1, &decoded));
     /* Every bound is an input of the pin: changing one changes the digest. */
@@ -103,15 +123,44 @@ static void test_retirement_campaign_budget(void)
     changed.cleanup_ns += 1;
     CHECK(tp_retirement_budget_digest(&changed, other) && strcmp(other, digest));
     changed = budget;
-    changed.batch[2].batch_ns += 1;
+    changed.timed.batch[2].batch_ns += 1;
     CHECK(tp_retirement_budget_digest(&changed, other) && strcmp(other, digest));
-    /* Batch bounds by group size; metrics bound by input count. */
+    changed = budget;
+    changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] += 1;
+    CHECK(tp_retirement_budget_digest(&changed, other) && strcmp(other, digest));
+    changed = budget;
+    changed.untimed.batch[0].batch_ns += 1;
+    CHECK(tp_retirement_budget_digest(&changed, other) && strcmp(other, digest));
+    changed = budget;
+    changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK] += 1;
+    CHECK(tp_retirement_budget_digest(&changed, other) && strcmp(other, digest));
+    /* (M1) Bounds are keyed by group kind and stage: object batches by input
+     * count, singletons by their own stage and never as a one-input batch;
+     * untimed batches use the untimed table. Every other pairing rejects. */
     uint64_t value = 0;
-    CHECK(tp_retirement_budget_batch_ns(&budget, 1, &value) && value == 40000000);
-    CHECK(tp_retirement_budget_batch_ns(&budget, 2, &value) && value == 60000000);
-    CHECK(tp_retirement_budget_batch_ns(&budget, 416, &value) && value == 2000000000);
-    CHECK(!tp_retirement_budget_batch_ns(&budget, 1025, &value) && !value);
-    CHECK(!tp_retirement_budget_batch_ns(&budget, 0, &value));
+    unsigned const object = TP_RETIREMENT_GROUP_OBJECT, singleton = TP_RETIREMENT_GROUP_SINGLETON;
+    CHECK(tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 1, &value) &&
+          value == 40000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 2, &value) &&
+          value == 60000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 416, &value) &&
+          value == 2000000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 1, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 416, &value) &&
+          value == 2500000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 0, singleton, TP_RETIREMENT_BUDGET_STAGE_LINK, 1, &value) &&
+          value == 45000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 0, singleton, TP_RETIREMENT_BUDGET_STAGE_SELF_HOST, 1, &value) &&
+          value == 900000000);
+    CHECK(tp_retirement_budget_group_ns(&budget, 1, singleton, TP_RETIREMENT_BUDGET_STAGE_SELF_HOST, 1, &value) &&
+          value == 1200000000);
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 1025, &value) &&
+          !value);
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 0, &value));
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, object, TP_RETIREMENT_BUDGET_STAGE_LINK, 1, &value));
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, singleton, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 1, &value));
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, singleton, TP_RETIREMENT_BUDGET_STAGE_LINK, 2, &value));
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, singleton, TP_RETIREMENT_BUDGET_STAGE_COUNT, 1, &value));
+    CHECK(!tp_retirement_budget_group_ns(&budget, 0, 2, TP_RETIREMENT_BUDGET_STAGE_OBJECT, 1, &value));
     CHECK(tp_retirement_budget_metrics_bytes(&budget, 416, &value) && value == 4096 + 416 * 16384);
     changed = budget;
     changed.metrics_input_bytes = TP_RETIREMENT_METRICS_ARTIFACT_BYTES / 16;
@@ -121,7 +170,10 @@ static void test_retirement_campaign_budget(void)
         &changed.settling_per_stage_ns, &changed.aa_qualification_ns, &changed.aa_receipt_sealing_ns,
         &changed.sample_export_per_stage_ns, &changed.final_statistics_ns, &changed.final_sealing_ns,
         &changed.cleanup_ns, &changed.runtime_process_ns, &changed.metrics_header_bytes,
-        &changed.metrics_input_bytes};
+        &changed.metrics_input_bytes, &changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK],
+        &changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_SELF_HOST],
+        &changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK],
+        &changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_SELF_HOST]};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(required); ++i)
     {
         changed = budget;
@@ -129,25 +181,47 @@ static void test_retirement_campaign_budget(void)
         CHECK(!tp_retirement_budget_valid(&changed) && !tp_retirement_budget_encode(&changed, text, sizeof(text)));
     }
     changed = budget;
-    changed.batch[1].batch_ns = 30000000; /* A larger group may not be cheaper. */
+    changed.timed.batch[1].batch_ns = 30000000; /* A larger group may not be cheaper. */
     CHECK(!tp_retirement_budget_valid(&changed));
     changed = budget;
-    changed.classes = 0;
+    changed.timed.classes = 0;
     CHECK(!tp_retirement_budget_valid(&changed));
     changed = budget;
-    changed.batch[3] = (TpRetirementBudgetClass){1, 1}; /* Beyond `classes`. */
+    changed.untimed.classes = 0;
+    CHECK(!tp_retirement_budget_valid(&changed));
+    changed = budget;
+    changed.timed.batch[3] = (TpRetirementBudgetClass){1, 1}; /* Beyond `classes`. */
+    CHECK(!tp_retirement_budget_valid(&changed));
+    changed = budget;
+    changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_OBJECT] = 1; /* An object singleton. */
+    CHECK(!tp_retirement_budget_valid(&changed));
+    changed = budget;
+    changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_COUNT] = 1; /* An unnamed stage slot. */
     CHECK(!tp_retirement_budget_valid(&changed));
 
-    /* The derivation over the realistic A1 counts at 254 pairs. */
-    unsigned groups[82], untimed[880];
+    /* The derivation over the realistic A1 counts at 254 pairs: 80 object
+     * groups and the link and self-host singletons timed; 880 untimed object
+     * groups and 11 untimed link singletons (one per cross target). */
+    unsigned inputs[82], kinds[82], stages[82], untimed[891], untimed_kinds[891], untimed_stages[891];
     static unsigned const sizes[] = {416, 4, 1, 1, 1};
-    for (unsigned i = 0; i < 80; ++i) groups[i] = sizes[i % 5];
-    groups[80] = groups[81] = 1;
-    for (unsigned i = 0; i < 880; ++i) untimed[i] = sizes[i % 5];
-    TpRetirementBudgetCounts counts = {groups, untimed, 82, 2, 254, 880};
+    for (unsigned i = 0; i < 82; ++i)
+    {
+        inputs[i] = i < 80 ? sizes[i % 5] : 1;
+        kinds[i] = i < 80 ? object : singleton;
+        stages[i] = i < 80 ? TP_RETIREMENT_BUDGET_STAGE_OBJECT :
+            i == 80 ? TP_RETIREMENT_BUDGET_STAGE_LINK : TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
+    }
+    for (unsigned i = 0; i < 891; ++i)
+    {
+        untimed[i] = i < 880 ? sizes[i % 5] : 1;
+        untimed_kinds[i] = i < 880 ? object : singleton;
+        untimed_stages[i] = i < 880 ? TP_RETIREMENT_BUDGET_STAGE_OBJECT : TP_RETIREMENT_BUDGET_STAGE_LINK;
+    }
+    TpRetirementBudgetCounts counts = {{inputs, kinds, stages, 82}, {untimed, untimed_kinds, untimed_stages, 891},
+        2, 254};
     TpRetirementBudgetPreflight preflight;
     /* The test record's ten-hour ceiling cannot hold this campaign at these
-     * bounds (about 20 hours); a reviewed 28-hour ceiling can. */
+     * bounds (about 21 hours); a reviewed 28-hour ceiling can. */
     CHECK(!tp_retirement_budget_preflight(&budget, &counts, &preflight) && !preflight.required_ns);
     TpRetirementCampaignBudget a1_budget = budget;
     a1_budget.reviewed_ns = UINT64_C(100800000000000);
@@ -155,27 +229,58 @@ static void test_retirement_campaign_budget(void)
     uint64_t fixed = UINT64_C(1000000000) + 2000000000 + 3000000000 + 3000000000 + 4000000000 +
         2 * UINT64_C(500000000) + 600000000 + 700000000 + 2 * UINT64_C(800000000) + 900000000 + 1000000000 +
         UINT64_C(20000000000);
-    uint64_t compiler = UINT64_C(2040) * (16 * (UINT64_C(2000000000) + 60000000 + 3 * UINT64_C(40000000)) +
-        2 * UINT64_C(40000000));
+    uint64_t compiler_object = UINT64_C(2040) * 16 * (UINT64_C(2000000000) + 60000000 + 3 * UINT64_C(40000000));
+    uint64_t compiler_singleton = UINT64_C(2040) * (UINT64_C(45000000) + 900000000);
     uint64_t runtime = UINT64_C(2040) * 2 * 50000000;
-    uint64_t untimed_ns = 4 * UINT64_C(176) * (UINT64_C(2000000000) + 60000000 + 3 * UINT64_C(40000000));
+    uint64_t untimed_object = 4 * UINT64_C(176) * (UINT64_C(2500000000) + 80000000 + 3 * UINT64_C(50000000));
+    uint64_t untimed_singleton = 4 * UINT64_C(11) * 60000000;
+    uint64_t required_ns = fixed + compiler_object + compiler_singleton + runtime + untimed_object + untimed_singleton;
     CHECK(tp_retirement_budget_preflight(&a1_budget, &counts, &preflight) && preflight.fits &&
-          preflight.fixed_ns == fixed && preflight.compiler_ns == compiler && preflight.runtime_ns == runtime &&
-          preflight.untimed_ns == untimed_ns && preflight.required_ns == fixed + compiler + runtime + untimed_ns &&
-          preflight.remaining_ns == a1_budget.reviewed_ns - preflight.required_ns &&
+          preflight.fixed_ns == fixed && preflight.compiler_object_ns == compiler_object &&
+          preflight.compiler_singleton_ns == compiler_singleton &&
+          preflight.compiler_ns == compiler_object + compiler_singleton && preflight.runtime_ns == runtime &&
+          preflight.untimed_object_ns == untimed_object && preflight.untimed_singleton_ns == untimed_singleton &&
+          preflight.untimed_ns == untimed_object + untimed_singleton && preflight.required_ns == required_ns &&
+          preflight.remaining_ns == a1_budget.reviewed_ns - required_ns &&
           preflight.compiler_batches == UINT64_C(82) * 2040 && preflight.runtime_processes == UINT64_C(4080) &&
-          preflight.untimed_batches == UINT64_C(3520));
+          preflight.untimed_batches == UINT64_C(3564));
+    /* (M1) A ceiling that holds the campaign only when the self-host and link
+     * singletons are costed as one-input batches (the v1 derivation) no longer
+     * passes; nor does one that holds the untimed batches only at the native
+     * timed bounds. */
+    TpRetirementCampaignBudget changed_ceiling = a1_budget;
+    changed_ceiling.reviewed_ns = required_ns - UINT64_C(2040) * ((45000000 - 40000000) + (900000000 - 40000000));
+    CHECK(!tp_retirement_budget_preflight(&changed_ceiling, &counts, &preflight) && !preflight.required_ns);
+    changed_ceiling.reviewed_ns = required_ns - (untimed_object -
+        4 * UINT64_C(176) * (UINT64_C(2000000000) + 60000000 + 3 * UINT64_C(40000000)));
+    CHECK(!tp_retirement_budget_preflight(&changed_ceiling, &counts, &preflight));
+    /* A group whose kind and stage disagree has no bound. */
+    stages[81] = TP_RETIREMENT_BUDGET_STAGE_OBJECT;
+    CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
+    stages[81] = TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
+    stages[0] = TP_RETIREMENT_BUDGET_STAGE_LINK;
+    CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
+    stages[0] = TP_RETIREMENT_BUDGET_STAGE_OBJECT;
+    inputs[80] = 2;
+    CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
+    inputs[80] = 1;
+    untimed_stages[890] = TP_RETIREMENT_BUDGET_STAGE_COUNT;
+    CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
+    untimed_stages[890] = TP_RETIREMENT_BUDGET_STAGE_LINK;
+    counts.timed.stages = NULL;
+    CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
+    counts.timed.stages = stages;
     /* A reviewed ceiling one nanosecond short, a group beyond every class, a
      * missing runtime bound or an odd pair count rejects before timing. */
     changed = a1_budget;
-    changed.reviewed_ns = preflight.required_ns - 1;
+    changed.reviewed_ns = required_ns - 1;
     CHECK(!tp_retirement_budget_preflight(&changed, &counts, &preflight) && !preflight.fits &&
           !preflight.required_ns);
-    changed.reviewed_ns = fixed + compiler + runtime + untimed_ns;
+    changed.reviewed_ns = required_ns;
     CHECK(tp_retirement_budget_preflight(&changed, &counts, &preflight) && !preflight.remaining_ns);
-    groups[0] = 1025;
+    inputs[0] = 1025;
     CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
-    groups[0] = 416;
+    inputs[0] = 416;
     untimed[0] = 0;
     CHECK(!tp_retirement_budget_preflight(&a1_budget, &counts, &preflight));
     untimed[0] = 416;
@@ -536,7 +641,10 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     TpRetirementCampaignBudget budget = test_retirement_budget();
     char budget_sha[65];
     CHECK(tp_retirement_budget_digest(&budget, budget_sha));
-    TpRetirementCampaignReview review = {&budget, budget_sha, NULL, NULL, 0};
+    /* Dense group 0 is the object group, group 1 the link singleton. */
+    unsigned group_stages[2] = {TP_RETIREMENT_BUDGET_STAGE_OBJECT, TP_RETIREMENT_BUDGET_STAGE_LINK};
+    TpRetirementCampaignReview review = {&budget, group_stages, NULL, NULL, NULL, 2, 0};
+    char const* budget_pin = budget_sha;
     /* The frozen object batch: rows 4 and 5, then a rejection control, with
      * the budget's metrics bound for three inputs and its response file. */
     char* words[] = {"+alpha", "+beta", "-control"};
@@ -632,11 +740,14 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     {
         trusted[row].row = facts[row].row = row;
     }
+    static char const batch_key[] = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    static char const other_key[] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     for (unsigned row = 4; row < 6; ++row)
     {
         trusted[row].compiler_eligible = 1;
         trusted[row].stage = BQ_RETIREMENT_STAGE_OBJECT;
         trusted[row].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
+        memcpy(trusted[row].batch_key_sha256, batch_key, sizeof(batch_key));
         facts[row].compiler_eligible = 1;
         for (unsigned variant = 0; variant < 2; ++variant)
         {
@@ -686,10 +797,65 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         wrong.contract[0].inputs = shifted;
         probe = gate;
         CHECK(!bq_retirement_correctness_batches(&probe, &wrong, 1, assigned, 7));
-        shifted[2].row = 3; /* An untimed row is a valid control row. */
+        /* (L3) A row control must be one of the gate's batch control rows:
+         * native, untimed, in the group's key, run with the batch command,
+         * with its status and diagnostic joined to its facts. Row 3 is a
+         * cross-target row, so it cannot be a control of a native batch. */
+        shifted[2].row = 3;
         wrong.contract[1].inputs = shifted;
         probe = gate;
+        CHECK(!bq_retirement_correctness_batches(&probe, &wrong, 1, assigned, 7));
+        trusted[3].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
+        trusted[3].stage = BQ_RETIREMENT_STAGE_OBJECT;
+        trusted[3].batch_control = 1;
+        memcpy(trusted[3].batch_key_sha256, batch_key, sizeof(batch_key));
+        for (unsigned variant = 0; variant < 2; ++variant)
+        {
+            memcpy(trusted[3].compiler_command_sha256[variant], command_sha[1][variant], 65);
+            memcpy(facts[3].side[variant].compiler_command_sha256, command_sha[1][variant], 65);
+            memcpy(facts[3].side[variant].diagnostic_sha256, test_batch_control_digest, 65);
+            facts[3].side[variant].compiler_exit = 1;
+        }
+        probe = gate;
         CHECK(bq_retirement_correctness_batches(&probe, &wrong, 1, assigned, 7) && probe.batches_frozen);
+        /* A control row outside the group's key, with another diagnostic,
+         * with a status its facts contradict, or run with another command. */
+        for (unsigned control = 0; control < 4; ++control)
+        {
+            if (control == 0) memcpy(trusted[3].batch_key_sha256, other_key, sizeof(other_key));
+            if (control == 1) facts[3].side[1].diagnostic_sha256[0] ^= 1;
+            if (control == 2) facts[3].side[0].compiler_exit = 0;
+            if (control == 3) facts[3].side[1].compiler_command_sha256[0] ^= 1;
+            probe = gate;
+            CHECK(!bq_retirement_correctness_batches(&probe, &wrong, 1, assigned, 7) && probe.failed);
+            if (control == 0) memcpy(trusted[3].batch_key_sha256, batch_key, sizeof(batch_key));
+            if (control == 1) facts[3].side[1].diagnostic_sha256[0] ^= 1;
+            if (control == 2) facts[3].side[0].compiler_exit = 1;
+            if (control == 3) facts[3].side[1].compiler_command_sha256[0] ^= 1;
+        }
+        /* A batch control row that no frozen control claims. */
+        probe = gate;
+        CHECK(!bq_retirement_correctness_batches(&probe, &frozen_group, 1, assigned, 7) && probe.failed);
+        trusted[3] = (BqRetirementTrustedRow){.row = 3};
+        facts[3] = (BqRetirementRowFact){.row = 3};
+        /* Members share one batch key, and no two groups share one. */
+        memcpy(trusted[5].batch_key_sha256, other_key, sizeof(other_key));
+        probe = gate;
+        CHECK(!bq_retirement_correctness_batches(&probe, &frozen_group, 1, assigned, 7) && probe.failed);
+        TpRetirementBatchInput split_inputs[2][1] = {{batch.inputs[0]}, {batch.inputs[1]}};
+        BqRetirementBatchGroup split[2] = {frozen_group, frozen_group};
+        for (unsigned g = 0; g < 2; ++g)
+            for (unsigned variant = 0; variant < 2; ++variant)
+            {
+                split[g].contract[variant].inputs = split_inputs[g];
+                split[g].contract[variant].input_count = 1;
+                split[g].contract[variant].exit_status = 0;
+            }
+        probe = gate;
+        CHECK(bq_retirement_correctness_batches(&probe, split, 2, assigned, 7) && probe.batch_group_count == 2);
+        memcpy(trusted[5].batch_key_sha256, batch_key, sizeof(batch_key));
+        probe = gate;
+        CHECK(!bq_retirement_correctness_batches(&probe, split, 2, assigned, 7) && probe.failed);
         probe = gate;
         facts[5].side[1].artifact_sha256[0] ^= 1;
         CHECK(!bq_retirement_correctness_batches(&probe, &frozen_group, 1, assigned, 7));
@@ -702,6 +868,17 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(!bq_retirement_correctness_batches(&gate, &frozen_group, 1, assigned, 7) && gate.failed);
     gate.failed = 0;
     gate.finished = 1;
+    /* (M2) Stand-in for the future #509 importer, the only intended setter. */
+    gate.batch_authority = 1;
+    {
+        /* (L4) A frozen contract edited after batches() no longer matches
+         * the snapshot: the gate is not ready even after a reseal. */
+        char saved_status = frozen_group.contract[1].exit_status ? 1 : 0;
+        frozen_group.contract[1].exit_status = saved_status ? 0 : 1;
+        bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+        CHECK(!bq_retirement_correctness_ready(&gate));
+        frozen_group.contract[1].exit_status = (unsigned)saved_status;
+    }
     /* The fixture precommits the second baseline labels, whose distinct
      * argv[0] or path give them different command hashes from the first A/A
      * label: one v3 entry per timed group, keyed by its smallest row. */
@@ -722,9 +899,10 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
           bq_retirement_campaign_timed_groups(&gate) == 2);
 #define TEST_CAMPAIGN_BIND_HELD() bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, \
     &aa->samples, &ab->samples, &held, 1, 2, commands[0], commands[1], snapshots, 12, identities, 3, &review, \
-    identity, identity)
+    budget_pin, identity, identity)
 #define TEST_CAMPAIGN_FREEZE() tp_retirement_campaign_freeze(&campaign, &plan, &aa->samples, &ab->samples, \
-    &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, 7, &review, identity, identity)
+    &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, 7, &review, budget_pin, \
+    identity, identity)
     char candidate_identity[SHA256_HEX_CAPACITY];
     memcpy(candidate_identity, held.verified.binary_identity_sha256[1], sizeof(candidate_identity));
     for (unsigned scenario = 0; scenario < 4; ++scenario)
@@ -797,8 +975,12 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
      * command other than the frozen one, a budget other than its pin, one that
      * cannot hold the counts, a contract without the reviewed metrics bound, a
      * stage without a metrics shard writer, and an A/A second label outside
-     * the sealed aggregate each fail closed before timing. */
-    for (unsigned scenario = 0; scenario < 8; ++scenario)
+     * the sealed aggregate each fail closed before timing. (M2) So does a
+     * gate without the #509 batch authority, although the pin matches; (M1)
+     * and a singleton costed at a stage other than its row's. */
+    char saved_snapshot[65];
+    memcpy(saved_snapshot, gate.batch_groups_sha256, sizeof(saved_snapshot));
+    for (unsigned scenario = 0; scenario < 11; ++scenario)
     {
         TpRetirementCampaignBudget scenario_budget = budget;
         char scenario_sha[65];
@@ -809,6 +991,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         {
             gate.batch_groups = NULL;
             gate.batch_group_count = gate.batches_frozen = 0;
+            memset(gate.batch_groups_sha256, 0, sizeof(gate.batch_groups_sha256));
         }
         if (scenario == 1)
         {
@@ -816,22 +999,27 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
             commands[1][1].batch = &changed.contract;
         }
         if (scenario == 2) frozen_group.command_sha256[0][0] ^= 1;
-        if (scenario == 3) review.budget_sha256 = identity;
+        if (scenario == 3) budget_pin = identity;
         if (scenario == 4) scenario_budget.reviewed_ns = 1000;
         if (scenario == 5) scenario_budget.metrics_input_bytes = 8192;
         if (scenario == 4 || scenario == 5)
         {
             CHECK(tp_retirement_budget_digest(&scenario_budget, scenario_sha));
             review.budget = &scenario_budget;
-            review.budget_sha256 = scenario_sha;
+            budget_pin = scenario_sha;
         }
+        if (scenario == 8) gate.batch_authority = 0;
+        if (scenario == 9) group_stages[1] = TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
+        if (scenario == 10) group_stages[0] = TP_RETIREMENT_BUDGET_STAGE_LINK;
         if (scenario == 7)
         {
             arguments[0][1][0] = "fixture-child-unsealed-label";
             CHECK(tp_retirement_command_hash(&commands[0][1], command_sha[0][1]));
         }
         bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
-        CHECK(bq_retirement_correctness_ready(&gate));
+        /* (L4) A batch command edited after batches() no longer matches the
+         * gate's snapshot, so that gate is not even ready. */
+        CHECK(scenario == 2 ? !bq_retirement_correctness_ready(&gate) : bq_retirement_correctness_ready(&gate));
         CHECK(test_retirement_campaign_open(&stages, cpu, scenario != 6));
         campaign = (TpRetirementCampaign){0};
         binding = (BqRetirementCampaignBinding){0};
@@ -839,9 +1027,14 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
               aa->samples.failed && ab->samples.failed && !binding.campaign && !aa->execution.sequence);
         gate.batch_groups = &frozen_group;
         gate.batch_group_count = gate.batches_frozen = 1;
+        gate.batch_authority = 1;
+        memcpy(gate.batch_groups_sha256, saved_snapshot, sizeof(saved_snapshot));
         commands[1][1].batch = &batch.contract;
         if (scenario == 2) frozen_group.command_sha256[0][0] ^= 1;
-        review = (TpRetirementCampaignReview){&budget, budget_sha, NULL, NULL, 0};
+        group_stages[0] = TP_RETIREMENT_BUDGET_STAGE_OBJECT;
+        group_stages[1] = TP_RETIREMENT_BUDGET_STAGE_LINK;
+        review = (TpRetirementCampaignReview){&budget, group_stages, NULL, NULL, NULL, 2, 0};
+        budget_pin = budget_sha;
         arguments[0][1][0] = saved_argv0;
         CHECK(tp_retirement_command_hash(&commands[0][1], command_sha[0][1]));
         bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
@@ -866,7 +1059,9 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
           campaign.capacity.metrics_shards_per_stage_upper_bound == 2 && campaign.capacity.total_payload_files == 10 &&
           !strcmp(campaign.budget_sha256, budget_sha) && campaign.budget.fits &&
           campaign.budget.compiler_batches == 976 && campaign.budget.runtime_processes == 488 &&
-          campaign.budget.compiler_ns == UINT64_C(488) * (60000000 + 40000000) &&
+          campaign.budget.compiler_object_ns == UINT64_C(488) * 60000000 &&
+          campaign.budget.compiler_singleton_ns == UINT64_C(488) * 45000000 &&
+          campaign.budget.compiler_ns == UINT64_C(488) * (60000000 + 45000000) &&
           campaign.budget.runtime_ns == UINT64_C(488) * 50000000);
     for (unsigned stage = 0; stage < 2; ++stage)
     {
@@ -1005,7 +1200,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     campaign = (TpRetirementCampaign){0};
     binding = (BqRetirementCampaignBinding){0};
     CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa->samples, &ab->samples,
-        &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, identity, identity));
+        &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, budget_pin, identity, identity));
     int unheld_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     TpProcessInputs unheld_inputs = {binary, cwd, unheld_log, environment};
     TpRetirementMeasurementResult unheld_result;
@@ -1032,7 +1227,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         CHECK(tp_retirement_command_hash(&commands[0][index], command_sha[0][index]));
         CHECK(bq_retirement_correctness_ready(&gate));
         CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa->samples, &ab->samples,
-            &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, identity, identity) &&
+            &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, budget_pin, identity, identity) &&
             campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
             aa->samples.failed && ab->samples.failed &&
             !aa->execution.sequence && !ab->execution.sequence && !binding.campaign);
@@ -1097,7 +1292,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(bq_retirement_correctness_ready(&gate));
     binding = (BqRetirementCampaignBinding){0};
     CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa->samples, &ab->samples,
-        &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, identity, identity) &&
+        &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, budget_pin, identity, identity) &&
         campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
         aa->samples.failed && ab->samples.failed && !aa->execution.sequence);
     facts[6].side[1].artifact_sha256[0] = saved_artifact_digit;
@@ -1117,11 +1312,13 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     TestBatchFixture unbounded = batch;
     unbounded.contract.inputs = unbounded.inputs;
     unbounded.contract.metrics_bytes_max = TEST_BATCH_METRICS_BYTES;
-    for (unsigned scenario = 0; scenario < 13; ++scenario)
+    for (unsigned scenario = 0; scenario < 16; ++scenario)
     {
         CHECK(test_retirement_campaign_open(&stages, cpu, 1));
         campaign = (TpRetirementCampaign){0};
         TpRetirementCampaignReview const* frozen_review = &review;
+        TpRetirementCampaignReview unstaged = review;
+        char const* frozen_pin = budget_pin;
         if (scenario == 0) ab->samples.rows[2].metrics ^= TP_RETIREMENT_SAMPLE_RUNTIME;
         if (scenario == 1) ab->samples.groups[1].kind = TP_RETIREMENT_GROUP_OBJECT;
         if (scenario == 2) ab->execution.runtime_rows[0] = 5;
@@ -1134,9 +1331,12 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         if (scenario == 10) commands[1][1].batch = &unbounded.contract; /* Not the reviewed metrics bound. */
         if (scenario == 11) frozen_review = NULL;
         if (scenario == 12) ab->samples.metrics = aa->samples.metrics; /* One writer for both stages. */
+        if (scenario == 13) frozen_pin = NULL; /* No recipe pin. */
+        if (scenario == 14) unstaged.group_stages = NULL, frozen_review = &unstaged;
+        if (scenario == 15) strcpy(stages.metrics[1].tag, TP_RETIREMENT_UNTIMED_METRICS_TAG); /* (L5) */
         int ok = tp_retirement_campaign_freeze(&campaign, &plan, &aa->samples, &ab->samples,
             &frozen, &frozen, &frozen, commands[0], commands[1], scenario == 5 ? NULL : snapshots, 12,
-            identities, 3, 7, frozen_review, identity, identity);
+            identities, 3, 7, frozen_review, frozen_pin, identity, identity);
         CHECK(!ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
               aa->samples.failed && ab->samples.failed && !aa->execution.sequence);
         plan.pairs_per_round = 60;

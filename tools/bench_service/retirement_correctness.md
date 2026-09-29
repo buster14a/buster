@@ -305,20 +305,34 @@ sides agree on everything but object digests; every member is a compiler
 eligible, native-target object row assigned to exactly one group; groups are
 ordered by their smallest member; each member's trusted and observed compiler
 command equals its side's batch command and its observed artifact equals that
-side's frozen object digest; a control names no row or a row outside the timed
-projection; and every timed object row is covered. The seal covers each side's
-contract digest and batch command. A timed object row outside every frozen
+side's frozen object digest; every member shares one importer-derived batch
+key (`batch_key_sha256`: configuration and recipe) and no two groups share a
+key; a control names no row or one of the gate's batch control rows
+(`batch_control`: native, compiler-ineligible, at the object stage), in the
+group's key, whose trusted and observed command is the group's batch command
+and whose observed exit status, diagnostic digest (the new
+`diagnostic_sha256` fact) and object equal the control's frozen status,
+diagnostic and object; every batch control row is claimed by exactly one
+control; and every timed object row is covered. `batches()` snapshots each
+side's contract digest and batch command; the seal covers that snapshot, and
+finish and ready require the live groups to still match it. A timed object row outside every frozen
 group still fails closed (`BQ_RECIPE_MISMATCH` from the queue-aware entry).
 
 The binder walks the timed rows in ascending order: the first member of a
 frozen group opens that object group at its dense position, and every command
 for it must carry the frozen contract (same contract digest), the frozen batch
 command (the second A/A label excepted), the frozen batch output digest and
-exit status. Freeze then requires the reviewed campaign budget and its pin
-(`throughput/retirement_budget.h`), a metrics shard writer per stage, and the
-budget's metrics bound in every object contract; the queue-aware entry reads
-the pin from the compiled profile key `campaign-budget-sha256=`, which the
-blocked profile does not carry, so it returns `BQ_RECIPE_MISMATCH`.
+exit status; each group's budget stage in the review must be the object stage
+for an object group and the row's own link or self-host stage for a
+singleton. Freeze then requires the reviewed campaign budget to hash to the
+pin the caller passes into `bind`/`bind_held` (`throughput/retirement_budget.h`),
+a metrics shard writer per stage, and the budget's metrics bound in every
+object contract; the queue-aware entry reads the pin from the compiled profile
+key `campaign-budget-sha256=`, which the blocked profile does not carry, so it
+returns `BQ_RECIPE_MISMATCH`. Object groups also need the gate's sealed #509
+authority flag (`batch_authority`), which only the future #509 importer sets:
+without it `bind`, `bind_held` and the pinned entry refuse every campaign with
+an object group, even under a profile that pins the budget.
 
 The campaign stays fail-closed: frozen batch contracts, the reviewed budget
 and sharded metrics are in place, but the recipe stays blocked until #509

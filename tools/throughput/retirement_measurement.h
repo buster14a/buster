@@ -309,8 +309,13 @@ static inline int tp_retirement_batch_input_list_write(int directory, TpRetireme
 
 /* The batch argv names its inputs only through one `@<leaf>` argument, whose
  * leaf is the list's own SHA-256, and the file in the cwd is exactly the
- * canonical list: read-only, single-link, owned by the service. */
-static int tp_retirement_batch_input_list_check(TpRetirementMeasuredCommand const* command, int directory)
+ * canonical list: read-only, owned by the service. `identity` receives the
+ * file's status; with `before` (the status recorded before the child ran),
+ * the device, inode and change time must be unchanged, so a child that
+ * rewrites, replaces or renames the list, even back to identical bytes,
+ * fails the batch. */
+static int tp_retirement_batch_input_list_check(TpRetirementMeasuredCommand const* command, int directory,
+    struct stat* identity, struct stat const* before)
 {
     TpRetirementBatchContract const* batch = command ? command->batch : NULL;
     char leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP];
@@ -331,11 +336,14 @@ static int tp_retirement_batch_input_list_check(TpRetirementMeasuredCommand cons
     int file = ok ? openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
     struct stat info;
     ok = ok && file >= 3 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && !(info.st_mode & 0222) &&
-        info.st_uid == geteuid() && (uint64_t)info.st_size == size;
+        info.st_uid == geteuid() && (uint64_t)info.st_size == size &&
+        (!before || (info.st_dev == before->st_dev && info.st_ino == before->st_ino &&
+                     info.st_ctim.tv_sec == before->st_ctim.tv_sec && info.st_ctim.tv_nsec == before->st_ctim.tv_nsec));
     uint64_t actual_size = 0;
     unsigned char* actual = ok ? tp_retirement_file_read(file, TP_RETIREMENT_INPUT_LIST_BYTES, &actual_size) : NULL;
     ok = ok && actual && actual_size == size && !memcmp(actual, expected, (size_t)size);
     if (file >= 0 && close(file) != 0) ok = 0;
+    if (identity) *identity = ok ? info : (struct stat){0};
     free(actual);
     free(expected);
     return ok;
@@ -367,7 +375,7 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
     TpRetirementBatchContract const* batch = command ? command->batch : NULL;
     TpRetirementMetricsShards* metrics = launch ? launch->metrics : NULL;
     int output_directory = launch ? launch->output_directory : -1;
-    struct stat binary, cwd, named_cwd, log, output_root;
+    struct stat binary, cwd, named_cwd, log, output_root, input_list;
     char output_digest[65] = {0}, frozen_output[65];
     int object = 0;
     int ok = result && command && executable && command_digest && executable->valid && inputs &&
@@ -398,7 +406,7 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
                 !strcmp(frozen_output, command->output_sha256) &&
                 output_root.st_dev == cwd.st_dev && output_root.st_ino == cwd.st_ino &&
                 tp_retirement_output_absent(output_directory, batch->metrics) &&
-                tp_retirement_batch_input_list_check(command, output_directory) &&
+                tp_retirement_batch_input_list_check(command, output_directory, &input_list, NULL) &&
                 metrics && !metrics->failed && !metrics->finished && !metrics->completed_ready && metrics->stream &&
                 (metrics->spare || batch->metrics_bytes_max <= TP_RETIREMENT_METRICS_SHARD_BYTES - metrics->bytes);
             for (unsigned i = 0; ok && i < batch->input_count; ++i)
@@ -455,8 +463,9 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
             }
             ok = ok && tp_retirement_batch_output_digest(objects, batch->input_count, output_digest);
             free(digests);
-            /* The child must leave the response file unchanged. */
-            ok = ok && tp_retirement_batch_input_list_check(command, output_directory);
+            /* The child must leave the response file untouched: same bytes,
+             * device, inode and change time as before it started. */
+            ok = ok && tp_retirement_batch_input_list_check(command, output_directory, NULL, &input_list);
             int file = ok ? openat(output_directory, batch->metrics,
                 O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
             uint64_t metrics_bytes = 0;

@@ -15,13 +15,17 @@ which rereads the record and frozen files while opening the two held
 descriptors. Only those acquired descriptors reach
 `bq_retirement_campaign_bind_held`.
 
-(M4) The entry also takes the reviewed campaign budget and requires its
-digest to equal the compiled profile's `campaign-budget-sha256=` pin before it
-binds; the checked-in blocked profile has no such pin, so the entry returns
-`BQ_RECIPE_MISMATCH`. Timed object rows bind through the gate's frozen batch
-groups. The fixture binds a singleton-only campaign and one with an object
-group under a test-pinned profile, and refuses an object row without a frozen
-contract, the unpinned profile and a budget other than the pin.
+(M4) The entry also takes the reviewed campaign budget, reads the compiled
+profile's `campaign-budget-sha256=` pin and passes it into the binding, where
+freeze requires the budget's digest to equal it; the checked-in blocked
+profile has no such pin, so the entry returns `BQ_RECIPE_MISMATCH`. Timed
+object rows bind through the gate's frozen batch groups, and only when the gate
+carries the sealed #509 authority flag, which only the future #509 importer
+sets. The fixture binds a singleton-only campaign and one with an object group
+(with a test stand-in for that flag) under a test-pinned profile, and refuses
+an object row without a frozen contract, the unpinned profile, a budget other
+than the pin, object groups without the #509 flag under the pinned profile,
+and a singleton costed at another stage.
 
 The pinned entry exists for the miniature fixture, whose installed inventory
 and toolchain pins are test-created. The ordinary private entry obtains the

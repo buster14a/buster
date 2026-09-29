@@ -2,8 +2,10 @@
  * durable record identities from the active job, reimports A and frozen B
  * outputs, then binds the held descriptors to the fixed campaign transcript.
  * (M4) The reviewed campaign budget must match the compiled recipe profile's
- * `campaign-budget-sha256=` pin; the blocked profile carries none, so this
- * entry fails closed with BQ_RECIPE_MISMATCH until integration pins it.
+ * `campaign-budget-sha256=` pin, which this entry passes into the binding and
+ * freeze compares; the blocked profile carries none, so this entry fails
+ * closed with BQ_RECIPE_MISMATCH until integration pins it. (M2) A pin alone
+ * never admits object batch groups: they also need the gate's #509 authority.
  * It is an internal service seam; no worker or recipe calls it yet. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_SERVICE_H
@@ -97,13 +99,11 @@ static BqError bq_retirement_campaign_service_bind_pinned(BqQueue* queue,
     if (result == BQ_OK && !bq_retirement_campaign_service_active(queue, job_id, attempt_token))
         result = BQ_INVALID_TRANSITION;
     char budget_pin[SHA256_HEX_CAPACITY] = {0};
-    if (result == BQ_OK && (!review || !review->budget_sha256 ||
-        !bq_retirement_profile_sha(profile, S8("campaign-budget-sha256="), budget_pin) ||
-        strcmp(budget_pin, review->budget_sha256)))
+    if (result == BQ_OK && !bq_retirement_profile_sha(profile, S8("campaign-budget-sha256="), budget_pin))
         result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && !bq_retirement_campaign_bind_held(binding, gate, campaign, plan,
         aa, ab, held, job->id, job->token, aa_commands, ab_commands, command_workspace,
-        command_count, identity_workspace, identity_count, review, plan_sha256, context_sha256))
+        command_count, identity_workspace, identity_count, review, budget_pin, plan_sha256, context_sha256))
         result = BQ_RECIPE_MISMATCH;
     if (result != BQ_OK)
     {

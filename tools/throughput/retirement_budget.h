@@ -2,9 +2,12 @@
  * Amendment A1 replaces the fixed one-hour worker budget with a reviewed
  * budget bound into the admitted service recipe. This record holds every input
  * of that budget: the reviewed whole-job ceiling, the authenticated fixed-phase
- * bounds, a measured upper bound per batch process by group size (input
- * count), a measured upper bound per runtime process, and the reviewed
- * metrics-artifact byte bound per input. Its canonical text encoding names the
+ * bounds, measured upper bounds per compiler process keyed by group kind and
+ * artifact stage (object batches by input count; link and self-host
+ * singletons by stage, never as a one-input batch), separate untimed bounds
+ * measured on the slowest untimed target, a measured upper bound per runtime
+ * process, and the reviewed metrics-artifact byte bound per input. Its
+ * canonical text encoding names the
  * derivation formula, so the recipe/profile pin (`campaign-budget-sha256=`)
  * binds inputs and derivation together; the blocked profile carries no pin.
  * tp_retirement_budget_preflight derives the required time from the frozen
@@ -12,27 +15,45 @@
  * The numeric bounds are integration-time pins; nothing here admits a recipe.
  *
  * Map: TpRetirementCampaignBudget, tp_retirement_budget_valid,
- * tp_retirement_budget_batch_ns, tp_retirement_budget_metrics_bytes,
+ * tp_retirement_budget_group_ns, tp_retirement_budget_metrics_bytes,
  * tp_retirement_budget_encode/_decode/_digest, TpRetirementBudgetCounts,
  * tp_retirement_budget_preflight.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_BUDGET_H
 #define BUSTER_THROUGHPUT_RETIREMENT_BUDGET_H
-#include "retirement_execution.h"
+#include "retirement_samples.h"
 
-#define TP_RETIREMENT_BUDGET_SCHEMA "tp-retirement-campaign-budget-v1"
+#define TP_RETIREMENT_BUDGET_SCHEMA "tp-retirement-campaign-budget-v2"
 /* The derivation the pinned record commits to, per collection stage s (A/A,
  * A/B), per_unit = 2 * (warmups + rounds * pairs):
  * fixed + stages * (settling + export) + sum over timed groups of
- * stages * per_unit * batch(inputs) + runtime_rows * stages * per_unit *
- * runtime + sum over untimed groups of 2 variants * 2 purposes * batch(inputs),
- * where batch(n) is the first class whose max_inputs >= n. */
+ * stages * per_unit * timed(kind, stage, inputs) + runtime_rows * stages *
+ * per_unit * runtime + sum over untimed groups of 2 variants * 2 purposes *
+ * untimed(kind, stage, inputs). An object group costs the first batch class
+ * whose max_inputs >= n; a link or self-host singleton costs its stage's own
+ * bound, never a one-input batch. The untimed tables are separate bounds, each
+ * measured as the maximum over every untimed target (the slowest target), and
+ * never the native timed bounds. */
 #define TP_RETIREMENT_BUDGET_DERIVATION \
-    "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*batch(n_g))+U*stages*2*(W+R*P)*runtime" \
-    "+sum_u(4*batch(n_u))"
+    "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))" \
+    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));" \
+    "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;" \
+    "untimed:separate tables measured on the slowest untimed target"
 #define TP_RETIREMENT_BUDGET_STAGES 2u
 #define TP_RETIREMENT_BUDGET_CLASSES 16u
 #define TP_RETIREMENT_BUDGET_BYTES 4096u
+/* Budget keys by artifact stage (the validator's STAGES order). A singleton
+ * group has a non-object stage; an object group has the object stage. The
+ * singleton tables have room for later stages, whose slots stay zero until a
+ * named stage (and so a new schema and pin) is added. */
+#define TP_RETIREMENT_BUDGET_STAGE_OBJECT 0u
+#define TP_RETIREMENT_BUDGET_STAGE_LINK 1u
+#define TP_RETIREMENT_BUDGET_STAGE_SELF_HOST 2u
+#define TP_RETIREMENT_BUDGET_STAGE_COUNT 3u
+#define TP_RETIREMENT_BUDGET_STAGE_CAP 8u
+BUSTER_CT_CHECK(TP_RETIREMENT_BUDGET_STAGE_COUNT <= TP_RETIREMENT_BUDGET_STAGE_CAP);
+static char const* const tp_retirement_budget_stage_names[TP_RETIREMENT_BUDGET_STAGE_COUNT] = {
+    "object", "link", "self-host-stage1"};
 /* Untimed code-artifact groups cost two variants times production and
  * reproduction batches. */
 #define TP_RETIREMENT_BUDGET_UNTIMED_BATCHES 4u
@@ -43,9 +64,21 @@ typedef struct TpRetirementBudgetClass
     uint64_t batch_ns;
 } TpRetirementBudgetClass;
 
+/* One table of compiler-process bounds: object batch classes ascending by
+ * max_inputs with nondecreasing bounds, and one singleton bound per named
+ * non-object stage (singleton_ns[TP_RETIREMENT_BUDGET_STAGE_OBJECT] and every
+ * unnamed slot stay zero). */
+typedef struct TpRetirementBudgetTable
+{
+    unsigned classes;
+    TpRetirementBudgetClass batch[TP_RETIREMENT_BUDGET_CLASSES];
+    uint64_t singleton_ns[TP_RETIREMENT_BUDGET_STAGE_CAP];
+} TpRetirementBudgetTable;
+
 /* Every nanosecond bound includes launcher and collector work (outputs hashed,
- * metrics read and sharded, records written). batch[] is ascending by
- * max_inputs with nondecreasing bounds. */
+ * metrics read and sharded, records written). `timed` holds the native-host
+ * bounds of the timed batch groups; `untimed` the bounds of the untimed
+ * code-artifact batches, each the maximum measured over every untimed target. */
 typedef struct TpRetirementCampaignBudget
 {
     uint64_t reviewed_ns;
@@ -54,8 +87,7 @@ typedef struct TpRetirementCampaignBudget
     uint64_t final_statistics_ns, final_sealing_ns, cleanup_ns;
     uint64_t runtime_process_ns;
     uint64_t metrics_header_bytes, metrics_input_bytes;
-    unsigned classes;
-    TpRetirementBudgetClass batch[TP_RETIREMENT_BUDGET_CLASSES];
+    TpRetirementBudgetTable timed, untimed;
 } TpRetirementCampaignBudget;
 
 static inline int tp_retirement_budget_add(uint64_t left, uint64_t right, uint64_t* sum)
@@ -72,8 +104,27 @@ static inline int tp_retirement_budget_mul(uint64_t left, uint64_t right, uint64
     return ok;
 }
 
-/* Missing (zero) bounds, unordered classes or a bound that shrinks with the
- * group size are rejected; so is a metrics bound that cannot hold one input. */
+static inline int tp_retirement_budget_table_valid(TpRetirementBudgetTable const* table)
+{
+    int ok = table->classes && table->classes <= TP_RETIREMENT_BUDGET_CLASSES;
+    for (unsigned i = 0; ok && i < table->classes; ++i)
+        ok = table->batch[i].max_inputs && table->batch[i].max_inputs <= TP_RETIREMENT_BATCH_INPUTS &&
+            table->batch[i].batch_ns &&
+            (!i || (table->batch[i].max_inputs > table->batch[i - 1].max_inputs &&
+                    table->batch[i].batch_ns >= table->batch[i - 1].batch_ns));
+    for (unsigned i = ok ? table->classes : TP_RETIREMENT_BUDGET_CLASSES; i < TP_RETIREMENT_BUDGET_CLASSES; ++i)
+        ok = ok && !table->batch[i].max_inputs && !table->batch[i].batch_ns;
+    for (unsigned stage = 0; ok && stage < TP_RETIREMENT_BUDGET_STAGE_CAP; ++stage)
+    {
+        int named = stage != TP_RETIREMENT_BUDGET_STAGE_OBJECT && stage < TP_RETIREMENT_BUDGET_STAGE_COUNT;
+        ok = named ? table->singleton_ns[stage] != 0 : !table->singleton_ns[stage];
+    }
+    return ok;
+}
+
+/* Missing (zero) bounds, unordered classes, a bound that shrinks with the
+ * group size, a missing stage bound or a bound in an unnamed stage slot are
+ * rejected; so is a metrics bound that cannot hold one input. */
 static inline int tp_retirement_budget_valid(TpRetirementCampaignBudget const* budget)
 {
     int ok = budget && budget->reviewed_ns && budget->reservation_ns && budget->materialization_ns &&
@@ -84,28 +135,31 @@ static inline int tp_retirement_budget_valid(TpRetirementCampaignBudget const* b
         budget->metrics_input_bytes &&
         budget->metrics_input_bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES - budget->metrics_header_bytes &&
         budget->metrics_header_bytes < TP_RETIREMENT_METRICS_ARTIFACT_BYTES &&
-        budget->classes && budget->classes <= TP_RETIREMENT_BUDGET_CLASSES;
-    for (unsigned i = 0; ok && i < budget->classes; ++i)
-        ok = budget->batch[i].max_inputs && budget->batch[i].max_inputs <= TP_RETIREMENT_BATCH_INPUTS &&
-            budget->batch[i].batch_ns &&
-            (!i || (budget->batch[i].max_inputs > budget->batch[i - 1].max_inputs &&
-                    budget->batch[i].batch_ns >= budget->batch[i - 1].batch_ns));
-    for (unsigned i = budget && budget->classes <= TP_RETIREMENT_BUDGET_CLASSES ? budget->classes : 0;
-         ok && i < TP_RETIREMENT_BUDGET_CLASSES; ++i)
-        ok = !budget->batch[i].max_inputs && !budget->batch[i].batch_ns;
+        tp_retirement_budget_table_valid(&budget->timed) && tp_retirement_budget_table_valid(&budget->untimed);
     return ok;
 }
 
-/* The measured upper bound for one batch of `inputs` inputs (a singleton
- * link/self-host group has one); a group larger than every class rejects. */
-static inline int tp_retirement_budget_batch_ns(TpRetirementCampaignBudget const* budget, unsigned inputs, uint64_t* ns)
+/* The measured upper bound for one compiler process of a group, keyed by its
+ * kind and stage: an object group of `inputs` inputs costs the first batch
+ * class that holds it (a group larger than every class rejects); a singleton
+ * link or self-host group has one input and costs its stage's bound. Any
+ * other kind/stage pairing rejects. `untimed` selects the untimed table. */
+static inline int tp_retirement_budget_group_ns(TpRetirementCampaignBudget const* budget, int untimed,
+    unsigned kind, unsigned stage, unsigned inputs, uint64_t* ns)
 {
-    unsigned found = TP_RETIREMENT_BUDGET_CLASSES;
+    TpRetirementBudgetTable const* table = budget ? (untimed ? &budget->untimed : &budget->timed) : NULL;
+    uint64_t found = 0;
     int ok = ns && inputs && tp_retirement_budget_valid(budget);
-    for (unsigned i = 0; ok && i < budget->classes && found == TP_RETIREMENT_BUDGET_CLASSES; ++i)
-        if (budget->batch[i].max_inputs >= inputs) found = i;
-    ok = ok && found < TP_RETIREMENT_BUDGET_CLASSES;
-    if (ns) *ns = ok ? budget->batch[found].batch_ns : 0;
+    if (ok && kind == TP_RETIREMENT_GROUP_OBJECT && stage == TP_RETIREMENT_BUDGET_STAGE_OBJECT)
+    {
+        for (unsigned i = 0; !found && i < table->classes; ++i)
+            if (table->batch[i].max_inputs >= inputs) found = table->batch[i].batch_ns;
+    }
+    else if (ok && kind == TP_RETIREMENT_GROUP_SINGLETON && inputs == 1 &&
+             stage != TP_RETIREMENT_BUDGET_STAGE_OBJECT && stage < TP_RETIREMENT_BUDGET_STAGE_COUNT)
+        found = table->singleton_ns[stage];
+    ok = ok && found;
+    if (ns) *ns = ok ? found : 0;
     return ok;
 }
 
@@ -143,9 +197,46 @@ static inline void tp_retirement_budget_scalars(TpRetirementCampaignBudget const
     memcpy(values, source, sizeof(source));
 }
 
+static inline int tp_retirement_budget_number(char const* text, size_t length, uint64_t* value)
+{
+    int ok = value && length && length <= 20 && (text[0] != '0' || length == 1);
+    uint64_t number = 0;
+    for (size_t i = 0; ok && i < length; ++i)
+    {
+        unsigned digit = (unsigned)(text[i] - '0');
+        ok = text[i] >= '0' && text[i] <= '9' && number <= (UINT64_MAX - digit) / 10;
+        if (ok) number = number * 10 + digit;
+    }
+    if (value) *value = ok ? number : 0;
+    return ok;
+}
+
+static inline int tp_retirement_budget_table_encode(TpRetirementBudgetTable const* table, char const* prefix,
+    char* output, size_t capacity, size_t* size)
+{
+    int ok = 1, written = 0;
+    for (unsigned i = 0; ok && i < table->classes; ++i)
+    {
+        written = snprintf(output + *size, capacity - *size, "%sbatch=%u:%" PRIu64 "\n", prefix,
+                           table->batch[i].max_inputs, table->batch[i].batch_ns);
+        ok = written > 0 && (size_t)written < capacity - *size;
+        if (ok) *size += (size_t)written;
+    }
+    for (unsigned stage = TP_RETIREMENT_BUDGET_STAGE_OBJECT + 1; ok && stage < TP_RETIREMENT_BUDGET_STAGE_COUNT; ++stage)
+    {
+        written = snprintf(output + *size, capacity - *size, "%ssingleton=%s:%" PRIu64 "\n", prefix,
+                           tp_retirement_budget_stage_names[stage], table->singleton_ns[stage]);
+        ok = written > 0 && (size_t)written < capacity - *size;
+        if (ok) *size += (size_t)written;
+    }
+    return ok;
+}
+
 /* Canonical ASCII: `schema=`, `derivation=`, the scalar keys above in order,
- * then one `batch=<max_inputs>:<batch_ns>` line per class; LF-terminated
- * decimal values without leading zeros. Returns the size (0 on failure). */
+ * then the timed table (one `batch=<max_inputs>:<batch_ns>` line per class,
+ * then `singleton=<stage>:<ns>` per named non-object stage) and the untimed
+ * table with the same lines prefixed `untimed-`; LF-terminated decimal values
+ * without leading zeros. Returns the size (0 on failure). */
 static inline size_t tp_retirement_budget_encode(TpRetirementCampaignBudget const* budget, char* output, size_t capacity)
 {
     size_t size = 0;
@@ -163,13 +254,8 @@ static inline size_t tp_retirement_budget_encode(TpRetirementCampaignBudget cons
         ok = written > 0 && (size_t)written < capacity - size;
         if (ok) size += (size_t)written;
     }
-    for (unsigned i = 0; ok && i < budget->classes; ++i)
-    {
-        written = snprintf(output + size, capacity - size, "batch=%u:%" PRIu64 "\n", budget->batch[i].max_inputs,
-                           budget->batch[i].batch_ns);
-        ok = written > 0 && (size_t)written < capacity - size;
-        if (ok) size += (size_t)written;
-    }
+    ok = ok && tp_retirement_budget_table_encode(&budget->timed, "", output, capacity, &size) &&
+        tp_retirement_budget_table_encode(&budget->untimed, "untimed-", output, capacity, &size);
     if (!ok && output && capacity) output[0] = 0;
     return ok ? size : 0;
 }
@@ -190,23 +276,38 @@ static inline int tp_retirement_budget_digest(TpRetirementCampaignBudget const* 
     return ok;
 }
 
-static inline int tp_retirement_budget_number(char const* text, size_t length, uint64_t* value)
+/* One table line (after its `untimed-` prefix, if any): `batch=<n>:<ns>`
+ * appends a class; `singleton=<stage>:<ns>` sets a named non-object stage. */
+static inline int tp_retirement_budget_table_line(char const* text, size_t length, TpRetirementBudgetTable* table)
 {
-    int ok = value && length && length <= 20 && (text[0] != '0' || length == 1);
-    uint64_t number = 0;
-    for (size_t i = 0; ok && i < length; ++i)
+    size_t prefix = length > 6 && !memcmp(text, "batch=", 6) ? 6 :
+        length > 10 && !memcmp(text, "singleton=", 10) ? 10 : 0;
+    size_t colon = prefix;
+    while (colon < length && text[colon] != ':') ++colon;
+    uint64_t value = 0, max_inputs = 0;
+    int ok = prefix && colon < length && tp_retirement_budget_number(text + colon + 1, length - colon - 1, &value);
+    if (ok && prefix == 6)
     {
-        unsigned digit = (unsigned)(text[i] - '0');
-        ok = text[i] >= '0' && text[i] <= '9' && number <= (UINT64_MAX - digit) / 10;
-        if (ok) number = number * 10 + digit;
+        ok = table->classes < TP_RETIREMENT_BUDGET_CLASSES &&
+            tp_retirement_budget_number(text + 6, colon - 6, &max_inputs) && max_inputs <= TP_RETIREMENT_BATCH_INPUTS;
+        if (ok) table->batch[table->classes++] = (TpRetirementBudgetClass){(unsigned)max_inputs, value};
     }
-    if (value) *value = ok ? number : 0;
+    else if (ok)
+    {
+        unsigned found = TP_RETIREMENT_BUDGET_STAGE_OBJECT;
+        for (unsigned stage = TP_RETIREMENT_BUDGET_STAGE_OBJECT + 1; stage < TP_RETIREMENT_BUDGET_STAGE_COUNT; ++stage)
+            if (strlen(tp_retirement_budget_stage_names[stage]) == colon - 10 &&
+                !memcmp(text + 10, tp_retirement_budget_stage_names[stage], colon - 10))
+                found = stage;
+        ok = found != TP_RETIREMENT_BUDGET_STAGE_OBJECT;
+        if (ok) table->singleton_ns[found] = value;
+    }
     return ok;
 }
 
 /* Strict decoder for an installed record: every scalar key once, in order,
- * then at least one class line; the decoded record must re-encode to exactly
- * the input bytes, so any other spelling, order or extra key rejects. */
+ * then the table lines; the decoded record must re-encode to exactly the
+ * input bytes, so any other spelling, order, duplicate or extra key rejects. */
 static inline int tp_retirement_budget_decode(char const* bytes, size_t size, TpRetirementCampaignBudget* budget)
 {
     TpRetirementCampaignBudget decoded = {0};
@@ -230,14 +331,9 @@ static inline int tp_retirement_budget_decode(char const* bytes, size_t size, Tp
         }
         else if (ok && line >= 2 + TP_RETIREMENT_BUDGET_SCALARS)
         {
-            size_t colon = 6;
-            while (colon < length && text[colon] != ':') ++colon;
-            uint64_t max_inputs = 0, batch_ns = 0;
-            ok = decoded.classes < TP_RETIREMENT_BUDGET_CLASSES && length > 6 && !memcmp(text, "batch=", 6) &&
-                colon < length && tp_retirement_budget_number(text + 6, colon - 6, &max_inputs) &&
-                max_inputs <= TP_RETIREMENT_BATCH_INPUTS &&
-                tp_retirement_budget_number(text + colon + 1, length - colon - 1, &batch_ns);
-            if (ok) decoded.batch[decoded.classes++] = (TpRetirementBudgetClass){(unsigned)max_inputs, batch_ns};
+            int untimed = length > 8 && !memcmp(text, "untimed-", 8);
+            ok = untimed ? tp_retirement_budget_table_line(text + 8, length - 8, &decoded.untimed) :
+                tp_retirement_budget_table_line(text, length, &decoded.timed);
         }
         offset = end + 1;
         ++line;
@@ -268,22 +364,53 @@ static inline int tp_retirement_budget_decode(char const* bytes, size_t size, Tp
     return ok;
 }
 
-/* The frozen counts: timed groups (object: its input count, members plus
- * controls; singleton: 1), runtime-eligible timed rows, the frozen pair count
- * and the untimed code-artifact groups' input counts. */
+/* One group list of the frozen counts: each group's input count (object:
+ * members plus controls; singleton: 1), kind (TP_RETIREMENT_GROUP_*) and
+ * budget stage (TP_RETIREMENT_BUDGET_STAGE_*). */
+typedef struct TpRetirementBudgetGroups
+{
+    unsigned const* inputs;
+    unsigned const* kinds;
+    unsigned const* stages;
+    unsigned count;
+} TpRetirementBudgetGroups;
+
+/* The frozen counts: the timed groups, runtime-eligible timed rows, the frozen
+ * pair count and the untimed code-artifact groups. */
 typedef struct TpRetirementBudgetCounts
 {
-    unsigned const* group_inputs;
-    unsigned const* untimed_inputs;
-    unsigned groups, runtime_rows, pairs, untimed_groups;
+    TpRetirementBudgetGroups timed, untimed;
+    unsigned runtime_rows, pairs;
 } TpRetirementBudgetCounts;
 
+/* compiler_ns splits into object batches and stage singletons; so does
+ * untimed_ns. */
 typedef struct TpRetirementBudgetPreflight
 {
     uint64_t fixed_ns, compiler_ns, runtime_ns, untimed_ns, required_ns, remaining_ns;
+    uint64_t compiler_object_ns, compiler_singleton_ns, untimed_object_ns, untimed_singleton_ns;
     uint64_t compiler_batches, runtime_processes, untimed_batches;
     int fits;
 } TpRetirementBudgetPreflight;
+
+/* Sum one group list's bounds, each process `repeats` times. */
+static inline int tp_retirement_budget_groups_ns(TpRetirementCampaignBudget const* budget, int untimed,
+    TpRetirementBudgetGroups const* groups, uint64_t repeats, uint64_t* object_ns, uint64_t* singleton_ns,
+    uint64_t* processes)
+{
+    int ok = groups->count <= TP_RETIREMENT_MAX_CELLS &&
+        (!groups->count || (groups->inputs && groups->kinds && groups->stages));
+    for (unsigned g = 0; ok && g < groups->count; ++g)
+    {
+        uint64_t bound = 0, cost = 0;
+        uint64_t* sum = groups->kinds[g] == TP_RETIREMENT_GROUP_OBJECT ? object_ns : singleton_ns;
+        ok = tp_retirement_budget_group_ns(budget, untimed, groups->kinds[g], groups->stages[g], groups->inputs[g],
+                &bound) &&
+            tp_retirement_budget_mul(bound, repeats, &cost) && tp_retirement_budget_add(*sum, cost, sum) &&
+            tp_retirement_budget_add(*processes, repeats, processes);
+    }
+    return ok;
+}
 
 /* Derive the required time exactly as TP_RETIREMENT_BUDGET_DERIVATION states
  * and reject, before any timing, a budget that cannot hold it: missing
@@ -294,12 +421,10 @@ static inline int tp_retirement_budget_preflight(TpRetirementCampaignBudget cons
 {
     TpRetirementBudgetPreflight result = {0};
     uint64_t per_unit = 0, per_group = 0, settling = 0, export_ns = 0;
-    int ok = preflight && counts && tp_retirement_budget_valid(budget) && counts->groups &&
-        counts->groups <= TP_RETIREMENT_MAX_CELLS && counts->group_inputs &&
-        counts->runtime_rows <= counts->groups &&
+    int ok = preflight && counts && tp_retirement_budget_valid(budget) && counts->timed.count &&
+        counts->runtime_rows <= counts->timed.count &&
         counts->pairs >= TP_RETIREMENT_MIN_PAIRS_PER_ROUND && counts->pairs <= TP_RETIREMENT_EXECUTION_MAX_PAIRS &&
-        !(counts->pairs & 1) && (!counts->untimed_groups || counts->untimed_inputs) &&
-        counts->untimed_groups <= TP_RETIREMENT_MAX_CELLS &&
+        !(counts->pairs & 1) &&
         tp_retirement_budget_mul(TP_RETIREMENT_ROUNDS, counts->pairs, &per_unit) &&
         tp_retirement_budget_add(per_unit, TP_RETIREMENT_WARMUPS, &per_unit) &&
         tp_retirement_budget_mul(per_unit, 2, &per_unit) &&
@@ -315,25 +440,14 @@ static inline int tp_retirement_budget_preflight(TpRetirementCampaignBudget cons
         for (unsigned i = 0; ok && i < BUSTER_ARRAY_LENGTH(fixed); ++i)
             ok = tp_retirement_budget_add(result.fixed_ns, fixed[i], &result.fixed_ns);
     }
-    for (unsigned g = 0; ok && g < counts->groups; ++g)
-    {
-        uint64_t batch = 0, cost = 0;
-        ok = tp_retirement_budget_batch_ns(budget, counts->group_inputs[g], &batch) &&
-            tp_retirement_budget_mul(batch, per_group, &cost) &&
-            tp_retirement_budget_add(result.compiler_ns, cost, &result.compiler_ns) &&
-            tp_retirement_budget_add(result.compiler_batches, per_group, &result.compiler_batches);
-    }
-    ok = ok && tp_retirement_budget_mul(counts->runtime_rows, per_group, &result.runtime_processes) &&
-        tp_retirement_budget_mul(result.runtime_processes, budget->runtime_process_ns, &result.runtime_ns);
-    for (unsigned u = 0; ok && u < counts->untimed_groups; ++u)
-    {
-        uint64_t batch = 0, cost = 0;
-        ok = tp_retirement_budget_batch_ns(budget, counts->untimed_inputs[u], &batch) &&
-            tp_retirement_budget_mul(batch, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES, &cost) &&
-            tp_retirement_budget_add(result.untimed_ns, cost, &result.untimed_ns) &&
-            tp_retirement_budget_add(result.untimed_batches, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
-                &result.untimed_batches);
-    }
+    ok = ok && tp_retirement_budget_groups_ns(budget, 0, &counts->timed, per_group, &result.compiler_object_ns,
+            &result.compiler_singleton_ns, &result.compiler_batches) &&
+        tp_retirement_budget_add(result.compiler_object_ns, result.compiler_singleton_ns, &result.compiler_ns) &&
+        tp_retirement_budget_mul(counts->runtime_rows, per_group, &result.runtime_processes) &&
+        tp_retirement_budget_mul(result.runtime_processes, budget->runtime_process_ns, &result.runtime_ns) &&
+        tp_retirement_budget_groups_ns(budget, 1, &counts->untimed, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
+            &result.untimed_object_ns, &result.untimed_singleton_ns, &result.untimed_batches) &&
+        tp_retirement_budget_add(result.untimed_object_ns, result.untimed_singleton_ns, &result.untimed_ns);
     ok = ok && tp_retirement_budget_add(result.fixed_ns, result.compiler_ns, &result.required_ns) &&
         tp_retirement_budget_add(result.required_ns, result.runtime_ns, &result.required_ns) &&
         tp_retirement_budget_add(result.required_ns, result.untimed_ns, &result.required_ns) &&

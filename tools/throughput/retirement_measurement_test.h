@@ -111,6 +111,21 @@ static int test_retirement_batch_child(int argc, char** argv)
     TestMetricsInput timings[TEST_BATCH_INPUTS];
     ok = ok && test_batch_contract(&fixture, argv[3], argv + 7, (unsigned)(argc - 7), test_batch_empty_digest) &&
         test_batch_response_file(argv[6], &fixture);
+    /* (L2) Touch the response file and leave identical bytes behind: renamed
+     * away and back, or rewritten in place. Only its identity changes. */
+    if (ok && !strcmp(behavior, "relist"))
+        ok = rename(argv[6] + 1, "relisted.rsp") == 0 && rename("relisted.rsp", argv[6] + 1) == 0;
+    if (ok && !strcmp(behavior, "rewrite"))
+    {
+        FILE* list = fopen(argv[6] + 1, "rb");
+        char bytes[4096];
+        size_t count = list ? fread(bytes, 1, sizeof(bytes), list) : 0;
+        ok = list && count && count < sizeof(bytes) && fclose(list) == 0 && chmod(argv[6] + 1, 0600) == 0;
+        list = ok ? fopen(argv[6] + 1, "wb") : NULL;
+        ok = list && fwrite(bytes, 1, count, list) == count;
+        if (list && fclose(list) != 0) ok = 0;
+        ok = chmod(argv[6] + 1, 0400) == 0 && ok;
+    }
     for (unsigned i = 0; ok && i < fixture.contract.input_count; ++i)
     {
         uint64_t start = test_batch_clock(origin, previous);
@@ -237,7 +252,10 @@ static void test_retirement_measurement_publish(int cwd, TestBatchFixture const*
         if (fixture->inputs[i].artifact) CHECK(unlinkat(cwd, fixture->inputs[i].artifact, 0) == 0);
 }
 
-/* A reviewed test budget: every bound nonzero, classes by group size. */
+/* A reviewed test budget: every bound nonzero, object classes by group size,
+ * link and self-host singletons by stage (a self-host process builds the
+ * compiler and costs far more than a one-input batch), and separate untimed
+ * bounds (the slowest untimed target). */
 static TpRetirementCampaignBudget test_retirement_budget(void)
 {
     TpRetirementCampaignBudget budget = {.reviewed_ns = UINT64_C(36000000000000),
@@ -246,8 +264,12 @@ static TpRetirementCampaignBudget test_retirement_budget(void)
         .aa_qualification_ns = 600000000, .aa_receipt_sealing_ns = 700000000,
         .sample_export_per_stage_ns = 800000000, .final_statistics_ns = 900000000,
         .final_sealing_ns = 1000000000, .cleanup_ns = 20000000000, .runtime_process_ns = 50000000,
-        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384, .classes = 3,
-        .batch = {{1, 40000000}, {4, 60000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}}};
+        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384,
+        .timed = {3, {{1, 40000000}, {4, 60000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}},
+                  {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 45000000, [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 900000000}},
+        .untimed = {3, {{1, 50000000}, {4, 80000000}, {TP_RETIREMENT_BATCH_INPUTS, 2500000000}},
+                    {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 60000000,
+                     [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 1200000000}}};
     return budget;
 }
 
@@ -266,6 +288,16 @@ static void test_retirement_untimed_fixture(char const* root, int cwd, int other
     char output_digest[65];
     CHECK(tp_retirement_batch_contract_output(&batch.contract, output_digest));
     char path[TP_PATH_CAP];
+    /* The canonical budget record, which the Python replay binds into its
+     * execution plan (the validator re-derives every metrics bound from it). */
+    {
+        char record[TP_RETIREMENT_BUDGET_BYTES];
+        size_t record_size = tp_retirement_budget_encode(&budget, record, sizeof(record));
+        CHECK(record_size && tp_path(path, root, "retirement-campaign-budget.txt"));
+        FILE* record_file = fopen(path, "wb");
+        CHECK(record_file && fwrite(record, 1, record_size, record_file) == record_size);
+        if (record_file) CHECK(fclose(record_file) == 0);
+    }
     CHECK(tp_path(path, root, "retirement-untimed-batches.jsonl"));
     FILE* records = fopen(path, "wb+");
     CHECK(tp_path(path, root, "retirement-metrics-untimed-0000.txt"));
@@ -747,7 +779,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
           chmod(other_directory, 0700) == 0);
     int other = open(other_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     CHECK(other >= 3);
-    for (unsigned scenario = 0; scenario < 18; ++scenario)
+    for (unsigned scenario = 0; scenario < 20; ++scenario)
     {
         memset(&test, 0, sizeof(test));
         test.stream = tmpfile();
@@ -773,7 +805,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
         if (scenario == 16) metrics_shards.bytes = TP_RETIREMENT_METRICS_SHARD_BYTES - TEST_BATCH_METRICS_BYTES + 1;
         batch_arguments[4] = scenario == 1 ? "nondeterministic" : scenario == 2 ? "status" :
             scenario == 3 ? "badmetrics" : scenario == 4 ? "overlap" : scenario == 5 ? "exit0" :
-            scenario == 6 ? "nometrics" : "ok";
+            scenario == 6 ? "nometrics" : scenario == 18 ? "relist" : scenario == 19 ? "rewrite" : "ok";
         batch_arguments[10] = scenario == 10 ? "tests/alpha.c" : scenario == 12 ? "@other.rsp" : NULL;
         batch_command.argument_count = scenario == 10 || scenario == 12 ? 11 : 10;
         TestBatchFixture changed = batch;
@@ -822,7 +854,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
             }
             else
             {
-                unsigned output_failure = scenario < 5 || scenario == 6 || scenario == 14;
+                unsigned output_failure = scenario < 5 || scenario == 6 || scenario == 14 || scenario >= 18;
                 unsigned expected_status = scenario == 5 ? TP_RETIREMENT_MEASUREMENT_PROCESS_FAILED :
                     output_failure ? TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID : TP_RETIREMENT_MEASUREMENT_PLAN_INVALID;
                 CHECK(!run_ok && result.status == expected_status && test.samples.failed &&

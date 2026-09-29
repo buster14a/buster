@@ -36,6 +36,7 @@ typedef struct BqCampaignServiceFixture
     TpRetirementBatchContract contract;
     TpRetirementCampaignBudget budget;
     TpRetirementCampaignReview review;
+    unsigned group_stages[2];
     TpRetirementCampaign campaign;
     TpRetirementPlan plan;
     BqCampaignSampleFixture samples[2];
@@ -107,8 +108,12 @@ static TpRetirementCampaignBudget bq_campaign_service_budget(void)
         .aa_qualification_ns = 1000000000, .aa_receipt_sealing_ns = 1000000000,
         .sample_export_per_stage_ns = 1000000000, .final_statistics_ns = 1000000000,
         .final_sealing_ns = 1000000000, .cleanup_ns = 1000000000, .runtime_process_ns = 50000000,
-        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384, .classes = 2,
-        .batch = {{4, 100000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}}};
+        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384,
+        .timed = {2, {{4, 100000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}},
+                  {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 90000000, [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 900000000}},
+        .untimed = {2, {{4, 150000000}, {TP_RETIREMENT_BATCH_INPUTS, 3000000000}},
+                    {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 120000000,
+                     [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 1200000000}}};
     return budget;
 }
 
@@ -142,7 +147,11 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         tp_retirement_batch_output_digest(objects, 1, fixture->output_sha256) &&
         bq_campaign_service_sample_open(&fixture->samples[0], job_id, attempt_token, object_group, "aa") &&
         bq_campaign_service_sample_open(&fixture->samples[1], job_id, attempt_token, object_group, "ab");
-    fixture->review = (TpRetirementCampaignReview){&fixture->budget, fixture->budget_sha256, NULL, NULL, 0};
+    /* Dense groups: [object group,] link singleton. */
+    fixture->group_stages[0] = object_group ? TP_RETIREMENT_BUDGET_STAGE_OBJECT : TP_RETIREMENT_BUDGET_STAGE_LINK;
+    fixture->group_stages[1] = TP_RETIREMENT_BUDGET_STAGE_LINK;
+    fixture->review = (TpRetirementCampaignReview){&fixture->budget, fixture->group_stages, NULL, NULL, NULL,
+        object_group ? 2u : 1u, 0};
     /* Slots: [object group,] link group, per variant. */
     unsigned link = object_group ? 1 : 0;
     for (u32 stage = 0; ok && stage < 2; stage += 1)
@@ -187,6 +196,7 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         }
         for (u32 row = 4; object_group && row < 6; row += 1)
         {
+            memset(fixture->trusted[row].batch_key_sha256, 'c', 64);
             fixture->trusted[row].compiler_eligible = 1;
             fixture->trusted[row].stage = BQ_RETIREMENT_STAGE_OBJECT;
             fixture->trusted[row].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
@@ -245,6 +255,8 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         if (object_group)
             ok = ok && bq_retirement_correctness_batches(&fixture->gate, &fixture->frozen, 1, fixture->assigned, 7);
         fixture->gate.finished = 1;
+        /* (M2) Stand-in for the future #509 importer, the only intended setter. */
+        fixture->gate.batch_authority = object_group ? 1u : 0u;
         fixture->plan = (TpRetirementPlan){.version = TP_RETIREMENT_STATISTICS_VERSION,
             .seed = 7, .pairs_per_round = 60, .resamples = TP_RETIREMENT_MIN_RESAMPLES,
             .bootstrap_members_per_scope = 1, .cell_members_per_scope = 1,
@@ -258,7 +270,8 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
 enum
 {
     BQ_CAMPAIGN_SERVICE_SINGLETON, BQ_CAMPAIGN_SERVICE_OBJECT_GROUP, BQ_CAMPAIGN_SERVICE_UNFROZEN_OBJECT,
-    BQ_CAMPAIGN_SERVICE_UNPINNED_BUDGET, BQ_CAMPAIGN_SERVICE_OTHER_BUDGET
+    BQ_CAMPAIGN_SERVICE_UNPINNED_BUDGET, BQ_CAMPAIGN_SERVICE_OTHER_BUDGET, BQ_CAMPAIGN_SERVICE_NO_AUTHORITY,
+    BQ_CAMPAIGN_SERVICE_WRONG_STAGE
 };
 
 static BqError bq_campaign_service_attempt(BqQueue* queue, uint64_t job_id,
@@ -269,8 +282,19 @@ static BqError bq_campaign_service_attempt(BqQueue* queue, uint64_t job_id,
 {
     BqCampaignServiceFixture fixture = {0};
     bool ready = bq_campaign_service_fixture_init(&fixture, preparation, binaries,
-        preparation_sha256, job_id, attempt_token, mode == BQ_CAMPAIGN_SERVICE_OBJECT_GROUP);
+        preparation_sha256, job_id, attempt_token,
+        mode == BQ_CAMPAIGN_SERVICE_OBJECT_GROUP || mode == BQ_CAMPAIGN_SERVICE_NO_AUTHORITY);
     BQ_PREP_CHECK(ready);
+    /* (M2) With a pinned profile, object groups still need the gate's #509
+     * authority; (M1) a link singleton costed at the self-host stage. */
+    if (ready && mode == BQ_CAMPAIGN_SERVICE_NO_AUTHORITY)
+    {
+        fixture.gate.batch_authority = 0;
+        bq_retirement_correctness_seal(&fixture.gate, fixture.gate.sealed_sha256);
+        ready = bq_retirement_correctness_ready(&fixture.gate);
+        BQ_PREP_CHECK(ready);
+    }
+    if (mode == BQ_CAMPAIGN_SERVICE_WRONG_STAGE) fixture.group_stages[0] = TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
     /* (A1) A timed object row outside every frozen batch contract. */
     if (ready && mode == BQ_CAMPAIGN_SERVICE_UNFROZEN_OBJECT)
     {
@@ -291,8 +315,7 @@ static BqError bq_campaign_service_attempt(BqQueue* queue, uint64_t job_id,
     char other_sha256[65];
     other.cleanup_ns += 1;
     BQ_PREP_CHECK(tp_retirement_budget_digest(&other, other_sha256));
-    if (mode == BQ_CAMPAIGN_SERVICE_OTHER_BUDGET)
-        fixture.review = (TpRetirementCampaignReview){&other, other_sha256, NULL, NULL, 0};
+    if (mode == BQ_CAMPAIGN_SERVICE_OTHER_BUDGET) fixture.review.budget = &other;
     char const* plan_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     char const* context_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     size_t units = fixture.object_group ? 2 : 1;
@@ -436,11 +459,14 @@ static bool bq_retirement_campaign_service_test(int installed, int workspaces,
     if (ok) ok = bq_retirement_binaries_import_pinned(&queue, active, installed, service_workspaces,
         string_from_pointer(profile), preparation_sha256, binary_sha256, &binaries) == BQ_OK;
     /* A singleton-only campaign and (A1) timed object rows bound through the
-     * gate's frozen batch contract both bind; an object row without a frozen
-     * contract, the unpinned blocked profile and a budget other than the pin
-     * fail closed. */
+     * gate's frozen batch contract (with the #509 authority stand-in) both
+     * bind; an object row without a frozen contract, the unpinned blocked
+     * profile, a budget other than the pin, object groups without the gate's
+     * #509 authority under a pinned profile, and a singleton costed at
+     * another stage fail closed. */
     static unsigned const modes[] = {BQ_CAMPAIGN_SERVICE_SINGLETON, BQ_CAMPAIGN_SERVICE_OBJECT_GROUP,
-        BQ_CAMPAIGN_SERVICE_UNFROZEN_OBJECT, BQ_CAMPAIGN_SERVICE_UNPINNED_BUDGET, BQ_CAMPAIGN_SERVICE_OTHER_BUDGET};
+        BQ_CAMPAIGN_SERVICE_UNFROZEN_OBJECT, BQ_CAMPAIGN_SERVICE_UNPINNED_BUDGET, BQ_CAMPAIGN_SERVICE_OTHER_BUDGET,
+        BQ_CAMPAIGN_SERVICE_NO_AUTHORITY, BQ_CAMPAIGN_SERVICE_WRONG_STAGE};
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(modes); index += 1)
     {
         BqError expected = modes[index] <= BQ_CAMPAIGN_SERVICE_OBJECT_GROUP ? BQ_OK : BQ_RECIPE_MISMATCH;

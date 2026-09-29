@@ -7,7 +7,12 @@
  * command, output digest and exit status per side); a timed object row outside
  * every frozen group fails closed. Timed link and self-host rows bind as
  * singleton groups against their per-row commands. freeze then requires the
- * reviewed campaign budget to match its recipe pin and hold the counts.
+ * reviewed campaign budget to hash to the caller's recipe-profile pin and to
+ * hold the counts, each group costed by the kind and stage the gate's rows
+ * give it. (M2) Object batch groups bind only when the gate carries the #509
+ * correctness authority (gate->batch_authority), which only the future #509
+ * importer sets; until then bind, bind_held and the pinned service entry
+ * refuse every campaign with an object group, whatever the profile pins.
  * The recipe stays blocked until #509 supplies the correctness authority.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
@@ -147,7 +152,7 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     TpRetirementMeasuredCommand const* ab_commands,
     TpRetirementCampaignCommand* command_workspace, size_t command_count,
     unsigned* identity_workspace, size_t identity_count,
-    TpRetirementCampaignReview const* review,
+    TpRetirementCampaignReview const* review, char const* budget_pin_sha256,
     char const* plan_sha256, char const* context_sha256);
 
 /* Bind service-acquired held descriptors and require both transcript streams
@@ -163,7 +168,7 @@ static int bq_retirement_campaign_bind_held(BqRetirementCampaignBinding* binding
     TpRetirementMeasuredCommand const* ab_commands,
     TpRetirementCampaignCommand* command_workspace, size_t command_count,
     unsigned* identity_workspace, size_t identity_count,
-    TpRetirementCampaignReview const* review,
+    TpRetirementCampaignReview const* review, char const* budget_pin_sha256,
     char const* plan_sha256, char const* context_sha256)
 {
     TpRetirementTranscript const* aa_transcript = aa ? aa->transcript : NULL;
@@ -202,7 +207,7 @@ static int bq_retirement_campaign_bind_held(BqRetirementCampaignBinding* binding
         ok = bq_retirement_campaign_bind(binding, gate, campaign, plan, aa, ab,
             &binding->held_executables[0], &binding->held_executables[1], aa_commands, ab_commands,
             command_workspace, command_count, identity_workspace, identity_count,
-            review, plan_sha256, context_sha256);
+            review, budget_pin_sha256, plan_sha256, context_sha256);
     if (ok)
     {
         binding->held_binaries = held;
@@ -229,7 +234,7 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     TpRetirementMeasuredCommand const* ab_commands,
     TpRetirementCampaignCommand* command_workspace, size_t command_count,
     unsigned* identity_workspace, size_t identity_count,
-    TpRetirementCampaignReview const* review,
+    TpRetirementCampaignReview const* review, char const* budget_pin_sha256,
     char const* plan_sha256, char const* context_sha256)
 {
     TpRetirementExecution const* execution = aa && aa->transcript ? aa->transcript->execution : NULL;
@@ -248,7 +253,9 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
         gate->prepared.rows <= TP_RETIREMENT_MAX_CELLS &&
         aa_commands && ab_commands && aa && ab && aa->rows && ab->rows && ab->row_count == aa->row_count &&
         aa->group_count == groups && ab->group_count == groups &&
-        (!gate->batch_group_count || gate->batches_frozen);
+        (!gate->batch_group_count || (gate->batches_frozen && gate->batch_authority == 1)) &&
+        (!aa->object_count || gate->batch_authority == 1) &&
+        review && review->group_stages && review->group_count == groups;
     for (uint32_t i = 0; ok && i < gate->prepared.rows; i += 1)
     {
         BqRetirementTrustedRow const* trusted = &gate->trusted_rows[i];
@@ -283,6 +290,7 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
             TpRetirementSampleGroup const* layout = group < groups ? &aa->groups[group] : NULL;
             ok = layout && layout->kind == TP_RETIREMENT_GROUP_OBJECT && ab->groups[group].kind == TP_RETIREMENT_GROUP_OBJECT &&
                 layout->count == members && ab->groups[group].count == members &&
+                review->group_stages[group] == TP_RETIREMENT_BUDGET_STAGE_OBJECT &&
                 tp_retirement_batch_contract_digest(&frozen->contract[0], contract_sha256[0]) &&
                 tp_retirement_batch_contract_digest(&frozen->contract[1], contract_sha256[1]) &&
                 tp_retirement_batch_contract_output(&frozen->contract[0], output_sha256[0]) &&
@@ -333,7 +341,11 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
         ok = ok && group < groups && aa->rows[rows - 1].metrics == metrics && ab->rows[rows - 1].metrics == metrics &&
             aa->groups[group].kind == TP_RETIREMENT_GROUP_SINGLETON &&
             ab->groups[group].kind == TP_RETIREMENT_GROUP_SINGLETON &&
-            aa->rows[aa->members[aa->groups[group].first]].id == i;
+            aa->rows[aa->members[aa->groups[group].first]].id == i &&
+            /* (M1) A singleton is costed by its row's own stage. */
+            review->group_stages[group] == (trusted->stage == BQ_RETIREMENT_STAGE_LINK ?
+                TP_RETIREMENT_BUDGET_STAGE_LINK : trusted->stage == BQ_RETIREMENT_STAGE_SELF_HOST ?
+                TP_RETIREMENT_BUDGET_STAGE_SELF_HOST : TP_RETIREMENT_BUDGET_STAGE_COUNT);
         if (ok && fact->runtime_eligible)
             ok = runtime < execution->runtime_count && execution->runtime_rows[runtime] == i;
         for (unsigned stage = 0; ok && stage < 2; stage += 1)
@@ -388,7 +400,7 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     if (ok)
         ok = tp_retirement_campaign_freeze(campaign, plan, aa, ab, baseline, baseline, candidate,
             aa_commands, ab_commands, command_workspace, command_count, identity_workspace,
-            identity_count, gate->prepared.rows, review, plan_sha256, context_sha256);
+            identity_count, gate->prepared.rows, review, budget_pin_sha256, plan_sha256, context_sha256);
     if (ok)
     {
         binding->gate = gate;

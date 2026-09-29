@@ -248,7 +248,8 @@ microseconds across the whole job, leaving no budget for preparation,
 validation, cleanup or manager overhead. Amendment A1 therefore replaces that
 budget, for the retirement recipe only, with a reviewed budget bound into the
 admitted recipe: the record in `tools/throughput/retirement_budget.h`
-(fixed-phase bounds, a measured bound per batch by group size, a runtime
+(fixed-phase bounds, measured compiler bounds keyed by group kind and stage,
+separate untimed bounds measured on the slowest untimed target, a runtime
 bound and the reviewed metrics bound, plus its derivation), pinned by the
 profile key `campaign-budget-sha256=`. Campaign freeze rejects a job that the
 reviewed ceiling cannot hold before any timing. The blocked profile carries no
