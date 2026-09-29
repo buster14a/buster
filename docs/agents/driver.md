@@ -18,6 +18,12 @@ captured stderr diagnostics separately; the retirement census reads its
 reporting a failed compiler invocation. A `-v -E` invocation also prints the
 requested statistics on stdout; use plain `-E` when piping preprocessed C.
 
+With several inputs, only a native link copies each unit's in-memory object
+out of its translation-unit arena into the result arena for `link_objects`.
+Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
+`-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
+nothing per unit and leave `CompilerDriverResult.object` unset.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -439,6 +445,17 @@ library must follow), calls and data in both directions, the lifecycle order
 of initializers and handlers, a randomized PIE base, a CPython extension when
 `python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
 and Mach-O dylibs have no writer yet.
+
+## Object output (`-c`)
+
+`-c` writes the object through `object_write`. The ELF64 writer plans the
+whole file with checked arithmetic, then stores each byte once; it refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds the object writer's limits (...)`,
+and leaves an existing output file untouched. `-v` prints the writer's exact
+work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
+`-c`. See [object emission](../object-emission.md).
 
 ## External ELF debug information
 
