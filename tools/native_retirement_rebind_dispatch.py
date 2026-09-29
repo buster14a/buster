@@ -19,6 +19,7 @@ import merge_queue_admission as admission
 
 WORKFLOW = "native-retirement-rebind.yml"
 WORKFLOW_PATH = ".github/workflows/" + WORKFLOW
+MAIN_WORKFLOW_PATHS = {WORKFLOW_PATH + "@main", WORKFLOW_PATH + "@refs/heads/main"}
 
 
 class Dispatcher:
@@ -52,7 +53,7 @@ def existing_worker(api, repository, head):
         admission.require(isinstance(run, dict), "malformed rebind workflow run")
         if run.get("display_title") != "Native rebind " + head:
             continue
-        admission.require(run.get("path") == WORKFLOW_PATH and
+        admission.require(run.get("path") in MAIN_WORKFLOW_PATHS and
                           run.get("event") == "workflow_dispatch" and
                           run.get("head_branch") == "main" and
                           run.get("repository", {}).get("full_name") == repository and
