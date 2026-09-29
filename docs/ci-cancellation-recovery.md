@@ -37,8 +37,8 @@ requirements. They take effect only after landing on the default branch.
 The separate `.github/workflows/ci-recovery-tests.yml` runs both existing
 offline suites for PR and main changes to the two handlers, their helper and
 test sources. The new workflow-shape tests live in
-`tests/ci_recovery_workflow_test.py` so the frozen native-retirement support
-inventory does not acquire a changed byte identity. The regression workflow
+`.github/scripts/test_ci_recovery_workflows.py` so the frozen native-retirement
+support inventory and tracked `tests/` census stay unchanged. The regression workflow
 has no `workflow_run` trigger and no write credential. This
 preserves the source-change regression coverage without adding a skipped test
 check to every lifecycle delivery.
@@ -152,7 +152,7 @@ eight required checks remain the authority for merge admission.
 ## Validation and escalation
 
 Run `python3 tests/ci_recovery_test.py` for ordinary PR recovery,
-`python3 tests/ci_recovery_workflow_test.py` for workflow selection and
+`python3 .github/scripts/test_ci_recovery_workflows.py` for workflow selection and
 attribution, then `python3 .github/scripts/test_merge_queue_fail_fast.py` for required-check
 failure, optional-check exclusion, exact-head cancellation, and successful
 completion. These offline tests run for PR changes to the controller files.

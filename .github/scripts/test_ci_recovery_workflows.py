@@ -7,7 +7,7 @@ import re
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
     "recovery", ROOT / ".github/scripts/recover-ci.py")
 recovery = importlib.util.module_from_spec(SPEC)
@@ -42,7 +42,7 @@ class LifecycleWorkflowTests(unittest.TestCase):
         for path in ("ci-recovery.yml", "ci-merge-group-watch.yml", "ci-recovery-tests.yml"):
             self.assertEqual(regressions.count("'.github/workflows/" + path + "'"), 2)
         for path in (".github/scripts/recover-ci.py", ".github/scripts/test_merge_queue_fail_fast.py",
-                     "tests/ci_recovery_test.py", "tests/ci_recovery_workflow_test.py"):
+                     "tests/ci_recovery_test.py", ".github/scripts/test_ci_recovery_workflows.py"):
             self.assertEqual(regressions.count("'" + path + "'"), 2)
 
     def test_summary_distinguishes_upstream_and_trusted_handler(self):
