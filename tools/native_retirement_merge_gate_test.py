@@ -670,12 +670,17 @@ class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
 
     def test_stale_pr_event_base_uses_trusted_live_main_and_groups_keep_queued_base(self):
-        for name, step in (("api-migration-policy.yml", "Enforce trusted native-retirement integration"),
-                           ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions")):
+        enforce = "Enforce trusted native-retirement integration"
+        # The rebind job admits PRs before reconstruction and groups after
+        # their predecessor lands, so each event has its own step (#1893).
+        for name, steps in (("api-migration-policy.yml", {"pull_request": enforce, "merge_group": enforce}),
+                            ("native-retirement-rebind.yml", {
+                                "pull_request": "Reject feature-owned generated state and classify trust transitions",
+                                "merge_group": "Admit the landed merge group with trusted tools"})):
             workflow = (self.root / ".github/workflows" / name).read_text()
-            block = workflow.split("      - name: " + step + "\n", 1)[1].split("      - name:", 1)[0]
-            script = textwrap.dedent(block.split("        run: |\n", 1)[1])
             for event in ("pull_request", "merge_group"):
+                block = workflow.split("      - name: " + steps[event] + "\n", 1)[1].split("      - name:", 1)[0]
+                script = textwrap.dedent(block.split("        run: |\n", 1)[1])
                 with self.subTest(workflow=name, event=event), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     (root / "trusted/tools").mkdir(parents=True)
@@ -694,7 +699,8 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "else:\n"
                         " assert args.repository=='buster14a/buster'\n"
                         " assert args.base==os.environ['BASE_SHA']\n"
-                        "print(json.dumps({'status':'admitted','mode':'trusted-integration'}))\n")
+                        "mode='trusted-integration-merge-group' if args.event=='merge_group' else 'trusted-integration'\n"
+                        "print(json.dumps({'status':'admitted','mode':mode}))\n")
                     (root / "trusted/tools/merge_queue_admission.py").write_text(
                         "import json\nprint(json.dumps({'status':'base-landed'}))\n")
                     # The PR event still names the old main, while a verified
