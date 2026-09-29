@@ -1495,6 +1495,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
     needs: [lint, test, native, mobile, uefi, analyzer]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
