@@ -3702,6 +3702,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_rollback_growth(UnitTestArg
     return result;
 }
 
+// A member reached through anonymous structs and unions is found by a
+// breadth-first search over those aggregates, whose queue is its own visited
+// set: a search that reaches a few of them must not touch a flag per row of the
+// type table, however large the table is, and one that reaches more than the
+// queue scan bound must still find the member through the table it switches to.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { FILLER = 3000, WIDE = 100, DEEP = 100 };
+    for (u32 shape = 0; shape < 3; shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 capacity = BUSTER_KB(512);
+        char8* source = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        // Filler array types make the type table large without adding a
+        // single aggregate the search could reach.
+        for (u32 index = 0; index < FILLER; index += 1)
+        {
+            String8 line = string_format(temporary.arena, S8("typedef int filler{u32}[{u32}];\n"), index, index + 1);
+            c_test_append_source(source, capacity, &length, line);
+        }
+        String8 member = S8("");
+        if (shape == 0)
+        {
+            c_test_append_source(source, capacity, &length,
+                                 S8("struct S { int a; struct { long b; union { int c; float d; }; }; };\n"
+                                    "_Static_assert(_Generic(((struct S*)0)->d, float: 1, default: 0), \"d\");\n"
+                                    "long read_s(struct S* s) { return s->a + s->b + s->c + (long)s->d; }\n"));
+            member = S8("d");
+        }
+        else if (shape == 1)
+        {
+            c_test_append_source(source, capacity, &length, S8("struct W {"));
+            for (u32 index = 0; index < WIDE; index += 1)
+            {
+                c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" struct {{ int m{u32}; };"), index));
+            }
+            c_test_append_source(source, capacity, &length,
+                                 S8(" char last; };\n_Static_assert(_Generic(((struct W*)0)->m99, int: 1, default: 0), \"m99\");\n"
+                                    "int read_w(struct W* w) { return w->m99 + w->last; }\n"));
+            member = S8("m99");
+        }
+        else
+        {
+            c_test_append_source(source, capacity, &length, S8("struct D { int top;"));
+            for (u32 index = 0; index < DEEP; index += 1)
+            {
+                c_test_append_source(source, capacity, &length, S8(" struct {"));
+            }
+            c_test_append_source(source, capacity, &length, S8(" short leaf;"));
+            for (u32 index = 0; index < DEEP; index += 1)
+            {
+                c_test_append_source(source, capacity, &length, S8(" };"));
+            }
+            c_test_append_source(source, capacity, &length,
+                                 S8(" };\n_Static_assert(_Generic(((struct D*)0)->leaf, short: 1, default: 0), \"leaf\");\n"
+                                    "int read_d(struct D* d) { return d->leaf + d->top; }\n"));
+            member = S8("leaf");
+        }
+        u64 searches_before = 0;
+        u64 tables_before = 0;
+        c_test_member_search_counts(&searches_before, &tables_before);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 0))
+        {
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 0,
+                            analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("no diagnostic"));
+            BUSTER_TEST(arguments, analysis.type_count > FILLER);
+        }
+        u64 searches = 0;
+        u64 tables = 0;
+        c_test_member_search_counts(&searches, &tables);
+        searches -= searches_before;
+        tables -= tables_before;
+        BUSTER_TEST_RAW(arguments, searches != 0 && (shape == 0 ? tables == 0 : tables != 0 && tables <= searches),
+                        string_format(arguments->arena, S8("member={S8} searches={u64} tables={u64}"), member, searches, tables));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -26158,6 +26243,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_promoted_member_search);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
 
