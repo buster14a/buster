@@ -169,12 +169,32 @@ jobs:
         env:
           APT_INPUTS: ${{ steps.native_dependencies.outcome }}
           COMPILER: ${{ steps.compiler.outcome }}
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
         run: |
           set -euo pipefail
           test "$APT_INPUTS" = success
           test "$COMPILER" = success
+          test "$CJSON" = success
           test -s evidence/apt-readline/pinned.identity.json
           test -s evidence/apt-readline/selected.identity.json
+          case "$LUA" in
+            success) ;;
+            failure)
+              grep -F "in function 'partition': could not lower call to 'sort_comp'" evidence/lua.log
+              grep -F "LUA_COMPILE_SUMMARY allocator=fast units=34 failed=1 status=fail" evidence/lua.log
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$SQLITE" in
+            success) ;;
+            failure)
+              grep -F "in function 'sqlite3RegisterBuiltinFunctions': could not lower initializer expression for local 'aBuiltinFunc'" evidence/sqlite.log
+              grep -F "error: test_sqlite stage=library config=threadsafe allocator=fast failed" evidence/sqlite.log
+              ;;
+            *) exit 1 ;;
+          esac
       - name: Verify descriptor and staged-input preflights
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
