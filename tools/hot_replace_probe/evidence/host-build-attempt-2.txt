@@ -1,0 +1,5 @@
+/usr/bin/ld: /tmp/x86_64_metadata-8eef56.o: in function `buster_x86_metadata_validate_form_record':
+x86_64_metadata.c:(.text.buster_x86_metadata_validate_form_record+0x336): undefined reference to `buster_hash_64'
+/usr/bin/ld: /tmp/object-25fdcf.o: in function `object_read':
+object.c:(.text.object_read+0x7738): undefined reference to `dwarf_cfi_build'
+clang-20: error: linker command failed with exit code 1 (use -v to see invocation)

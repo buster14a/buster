@@ -1,0 +1,78 @@
+CANDIDATE generation=1 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS initial_v1_prepared
+CHECK PASS initial_v1_published
+CHECK PASS initial_v1_callable
+CHECK PASS initial_lease_dropped
+CANDIDATE generation=2 result=3 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS abi_change_rejected
+CHECK PASS rejected_candidate_not_published
+CHECK PASS failure_preserves_v1
+CHECK PASS failure_lease_dropped
+CHECK PASS failed_candidate_released
+CANDIDATE generation=3 result=6 object_error=0 jit_error=11 sections=24 symbols=2 relocations=1
+CHECK PASS missing_entry_rejected
+CHECK PASS rejected_candidate_not_published
+CHECK PASS failure_preserves_v1
+CHECK PASS failure_lease_dropped
+CHECK PASS failed_candidate_released
+CANDIDATE generation=4 result=6 object_error=0 jit_error=6 sections=24 symbols=3 relocations=2
+CHECK PASS missing_import_rejected
+CHECK PASS rejected_candidate_not_published
+CHECK PASS failure_preserves_v1
+CHECK PASS failure_lease_dropped
+CHECK PASS failed_candidate_released
+CANDIDATE generation=5 result=6 object_error=0 jit_error=7 sections=24 symbols=3 relocations=2
+CHECK PASS tls_rejected
+CHECK PASS rejected_candidate_not_published
+CHECK PASS failure_preserves_v1
+CHECK PASS failure_lease_dropped
+CHECK PASS failed_candidate_released
+CANDIDATE generation=6 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS different_abi_candidate_prepared
+CHECK PASS prepared_different_abi_publish_rejected
+CHECK PASS cross_abi_failure_preserves_v1
+CHECK PASS cross_abi_lease_dropped
+CHECK PASS arena_release_failure_retains_owner
+CHECK PASS release_pending_slot_not_overwritten
+CHECK PASS release_pending_slot_not_published
+CHECK PASS arena_release_retry_succeeds
+CANDIDATE generation=7 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS v2_prepared
+CHECK PASS separate_old_candidate_mappings
+CHECK PASS quiescent_publish_rejects_pin
+CHECK PASS old_borrow_survives_busy_rejection
+CHECK PASS active_mapping_not_reclaimed
+CHECK PASS quiescent_borrow_dropped
+CHECK PASS quiescent_v2_published
+CHECK PASS quiescent_v1_reclaimed
+CHECK PASS v2_callable
+CHECK PASS v2_lease_dropped
+CANDIDATE generation=8 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS versioned_v1_prepared
+CHECK PASS versioned_publish_with_old_pin
+CHECK PASS retired_v2_lease_callable
+CHECK PASS versioned_new_v1_callable
+CHECK PASS retired_mapping_held_by_old_pin
+CHECK PASS last_old_lease_dropped
+CHECK PASS versioned_old_reclaimed_after_last_pin
+CHECK PASS versioned_new_lease_dropped
+CHECK PASS shutdown_reclaim
+CHECK PASS shutdown_reclaim
+CANDIDATE generation=9 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS state_v1_prepared
+CHECK PASS state_v1_published
+CHECK PASS host_owned_context_updated_by_v1
+CHECK PASS state_v1_lease_dropped
+CANDIDATE generation=10 result=3 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS stateless_to_stateful_abi_change_rejected
+CHECK PASS failed_state_candidate_preserves_host_context
+CHECK PASS bad_state_candidate_released
+CANDIDATE generation=11 result=0 object_error=0 jit_error=0 sections=24 symbols=2 relocations=1
+CHECK PASS state_v2_prepared
+CHECK PASS state_v2_published
+CHECK PASS state_v1_reclaimed
+CHECK PASS host_owned_context_retained_across_replacement
+CHECK PASS state_v2_lease_dropped
+CHECK PASS shutdown_reclaim
+CHECK PASS shutdown_reclaim
+COUNTS checks=66 failures=0 candidates=11 maps=7 cumulative_mapped_bytes=57344 sections=264 symbols=24 relocations=13 metadata_bytes_unregistered=504 publications=5 reclamations=11 calls=12

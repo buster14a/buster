@@ -1,0 +1,162 @@
+[
+  {
+    "fixture": "v1",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_v1.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_v1.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "v2",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_v2.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_v2.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "bad_abi",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_bad_abi.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_bad_abi.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "missing_entry",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_missing_entry.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_missing_entry.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "missing_import",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_missing_import.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_missing_import.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "tls",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_tls.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_tls.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "state_v1",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_state_v1.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_state_v1.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  },
+  {
+    "fixture": "state_v2",
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-g0",
+      "-fverify-codegen",
+      "-fregister-allocator=mir-stack",
+      "-fno-machine-fallback",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "tools/hot_replace_probe/pilot_state_v2.c",
+      "-o",
+      "/tmp/buster-hot-replace-objects/pilot_state_v2.o"
+    ],
+    "exit": 0,
+    "stdout": "CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=mir-stack\n",
+    "stderr": ""
+  }
+]

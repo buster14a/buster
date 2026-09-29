@@ -1,0 +1,8 @@
+
+Relocation section '.rela.text' at offset 0xd8 contains 1 entry:
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+000000000000002e  0000000300000004 R_X86_64_PLT32         0000000000000000 unavailable_host_function - 4
+
+Relocation section '.rela.eh_frame' at offset 0xf0 contains 1 entry:
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+0000000000000020  0000000100000002 R_X86_64_PC32          0000000000000000 pilot + 0

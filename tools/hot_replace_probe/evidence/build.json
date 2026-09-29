@@ -1,0 +1,52 @@
+{
+  "evidence_class": "diagnostic provenance; not hosted or 9700X admission",
+  "base_commit": "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+  "base_tree": "8810c6603e47e5eecf26e1d73633619a347c70d8",
+  "platform": "Linux d2016dc72f5d 6.18.44 #1 SMP Sat Sep 26 20:02:31 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+  "host_cpu": "AMD EPYC 9V74 80-Core Processor",
+  "host_cpus": 9,
+  "host_compiler": "Ubuntu clang version 20.1.2 (0ubuntu1~24.04.3)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-20/bin",
+  "bootstrap_compiler": "tcc version 0.9.28rc 2026-09-04 HEAD@0fb54300 (x86_64 Linux)",
+  "bootstrap_source": "TinyCC/tinycc 0fb54300b56512754221d80adda85ddb9815bceb",
+  "ide_sha256": "ab8df337fa9263607a1f124c692afd5b123ad42c41d13415c021b070e9f669be",
+  "build_commands": [
+    "./build.sh generate --cc clang-20 --linker DEFAULT (PATH-resolved distribution TCC 0.9.27: FAIL src/buster/lib/string.c:1020 array type expected)",
+    "PATH=/workspace/scratch/f4d18a4f30dc/tcc-pinned/bin:$PATH ./build.sh generate --cc clang-20 --linker DEFAULT (PASS)",
+    "PATH=/workspace/scratch/f4d18a4f30dc/tcc-pinned/bin:$PATH ./build.sh build --config Release -t ide (PASS)"
+  ],
+  "ide_compile_commands": [
+    {
+      "directory": "/workspace/scratch/f4d18a4f30dc/buster/build",
+      "command": "/usr/bin/clang-20 -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/usr/bin/clang-20\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/usr/lib/llvm-20/lib/clang/20/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=0 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Debug\\\" -I/workspace/scratch/f4d18a4f30dc/buster/build/generated -I/workspace/scratch/f4d18a4f30dc/buster/src -g -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Whigher-precision-for-complex-division -Wthread-safety -ferror-limit=1 -march=native -o CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o -c /workspace/scratch/f4d18a4f30dc/buster/src/buster/apps/ide/ide.c",
+      "file": "/workspace/scratch/f4d18a4f30dc/buster/src/buster/apps/ide/ide.c",
+      "output": "CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o"
+    },
+    {
+      "directory": "/workspace/scratch/f4d18a4f30dc/buster/build",
+      "command": "/usr/bin/clang-20 -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/usr/bin/clang-20\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/usr/lib/llvm-20/lib/clang/20/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/f4d18a4f30dc/buster/build/generated -I/workspace/scratch/f4d18a4f30dc/buster/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wno-unused-function -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Whigher-precision-for-complex-division -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -c /workspace/scratch/f4d18a4f30dc/buster/src/buster/apps/ide/ide.c",
+      "file": "/workspace/scratch/f4d18a4f30dc/buster/src/buster/apps/ide/ide.c",
+      "output": "CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o"
+    }
+  ],
+  "accepted_performance_measurements": null,
+  "hosted_validation": null,
+  "benchpress_validation": null,
+  "probe_host_compile_command": "clang-20 -O1 -g0 -std=c11 -Wall -Wextra -Werror -Wpedantic \\\n    -Wno-missing-field-initializers \\\n    -fwrapv -fno-strict-aliasing -funsigned-char \\\n    -ffunction-sections -fdata-sections \\\n    -DBUSTER_SINGLE_THREADED=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_UNITY_BUILD=0 \\\n    -Isrc -Ibuild/generated tools/hot_replace_probe/host.c \\\n    src/buster/lib/arena.c src/buster/lib/integer.c src/buster/lib/os.c \\\n    src/buster/lib/string.c src/buster/lib/target.c src/buster/lib/x86_64.c \\\n    src/buster/lib/hash.c src/buster/lib/byte_writer.c \\\n    src/buster/lib/compiler/dwarf/dwarf.c \\\n    src/buster/lib/compiler/assembly/aarch64_encoding.c \\\n    src/buster/lib/compiler/assembly/x86_64_metadata.c \\\n    src/buster/lib/compiler/object/object.c src/buster/lib/compiler/jit/jit.c \\\n    -Wl,--gc-sections -pthread -ldl -lm -o /tmp/buster-hot-replace-host",
+  "probe_host_sha256": "b05b22fe9a3062faace7400af9de3186bd965db793a3f8c3503e2f8d7d3ac044",
+  "probe_gcc_syntax_command": "gcc -std=c11 -Wall -Wextra -Werror -Wpedantic -Wno-missing-field-initializers -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_SINGLE_THREADED=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_UNITY_BUILD=0 -Isrc -Ibuild/generated -fsyntax-only tools/hot_replace_probe/host.c",
+  "probe_gcc_syntax_exit": 0,
+  "host_execution_command": [
+    "/tmp/buster-hot-replace-host",
+    "/tmp/buster-hot-replace-objects/pilot_v1.o",
+    "/tmp/buster-hot-replace-objects/pilot_v2.o",
+    "/tmp/buster-hot-replace-objects/pilot_bad_abi.o",
+    "/tmp/buster-hot-replace-objects/pilot_missing_entry.o",
+    "/tmp/buster-hot-replace-objects/pilot_missing_import.o",
+    "/tmp/buster-hot-replace-objects/pilot_tls.o",
+    "/tmp/buster-hot-replace-objects/pilot_state_v1.o",
+    "/tmp/buster-hot-replace-objects/pilot_state_v2.o"
+  ],
+  "host_execution_exit": 0,
+  "host_checks": 72,
+  "host_failures": 0
+}

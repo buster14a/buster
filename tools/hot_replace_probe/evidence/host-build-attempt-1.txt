@@ -1,0 +1,4 @@
+src/buster/lib/compiler/assembly/x86_64_metadata.c:13370:32: error: missing field 'required' initializer [-Werror,-Wmissing-field-initializers]
+ 13370 |     {S8_INITIALIZER("LONGMODE")},
+       |                                ^
+1 error generated.
