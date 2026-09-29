@@ -18,6 +18,8 @@
 #include <sys/prctl.h>
 #include <grp.h>
 #include <sys/wait.h>
+#include <sched.h>
+#include <sys/mount.h>
 #include "sgid_sandbox_test.h"
 #endif
 
@@ -2654,21 +2656,73 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
     rmdir(root);
 }
 
+/* Run the recheck in a private mount namespace where an empty mode-0 file is
+ * bind-mounted over the lease pathname, as systemd's InaccessiblePaths does.
+ * Unlike a search-denied parent this hides the name from a privileged process
+ * too. Returns 0 when the name is verifiably hidden and the recheck passes, 1
+ * on failure, and 2 when unshare(CLONE_NEWNS) is unavailable (skipped). */
+BUSTER_GLOBAL_LOCAL u32 bq_test_lease_recheck_behind_inaccessible_mount(char const* root, char const* lease_path,
+                                                                        BqWorkerLease const* lease)
+{
+    char node[BQ_PATH_CAP + 1];
+    int node_length = snprintf(node, sizeof(node), "%s/inaccessible", root);
+    int created = node_length > 0 && (u32)node_length < sizeof(node) ?
+                  open(node, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0) : -1;
+    bool ready = created >= 0 && fchmod(created, 0) == 0;
+    if (created >= 0) close(created);
+    pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        int result = 2;
+        if (unshare(CLONE_NEWNS) == 0)
+        {
+            struct stat named = {0}, held = {0};
+            bool hidden = mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 &&
+                          mount(node, lease_path, NULL, MS_BIND, NULL) == 0 &&
+                          stat(lease_path, &named) == 0 && fstat(lease->descriptor, &held) == 0 &&
+                          (named.st_dev != held.st_dev || named.st_ino != held.st_ino);
+            result = hidden && bq_worker_lease_recheck_for_exec(lease_path, lease) ? 0 : 1;
+        }
+        _exit(result);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0)
+    {
+        while ((waited = waitpid(child, &status, 0)) < 0 && errno == EINTR) {}
+    }
+    u32 result = waited == child && WIFEXITED(status) && WEXITSTATUS(status) <= 2 ? (u32)WEXITSTATUS(status) : 1;
+    if (created >= 0) unlink(node);
+    return result;
+}
+
 /* A new lease inode at the same path cannot substitute for the transferred
- * lock. The checker must release each temporary descriptor on both paths.
+ * lock. The checker must release each temporary descriptor on every path.
  * Inside the outer unit the lease pathname is an InaccessiblePaths node, so
  * the recheck must not traverse it: a search-denied parent (mode 0, effective
- * when not privileged) models that here and must still pass. */
+ * when not privileged) and, where a mount namespace is available, an
+ * inaccessible bind mount over the name (effective as root too) model that
+ * here and must still pass. Every way the held file can stop being the
+ * named, single-link lock holder is refused: renamed away, a second link, its
+ * name unlinked (a path spelled "<name> (deleted)" included), replaced by a
+ * rename over it, and a second, unlocked description of the same file. */
 BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
 {
     char root[] = "/tmp/buster-lease-recheck-XXXXXX";
-    char lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1];
+    char lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1], alias_path[BQ_PATH_CAP + 1];
+    char other_path[BQ_PATH_CAP + 1], deleted_path[BQ_PATH_CAP + 1];
     BqWorkerLease lease = {.descriptor = -1};
     bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
     int path_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
     int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
+    int alias_length = snprintf(alias_path, sizeof(alias_path), "%s/alias.lock", root);
+    int other_length = snprintf(other_path, sizeof(other_path), "%s/other.lock", root);
+    int deleted_length = snprintf(deleted_path, sizeof(deleted_path), "%s/host.lock" BQ_WORKER_DELETED_SUFFIX, root);
     ready = ready && path_length > 0 && (u32)path_length < sizeof(lease_path) &&
             prior_length > 0 && (u32)prior_length < sizeof(prior_path) &&
+            alias_length > 0 && (u32)alias_length < sizeof(alias_path) &&
+            other_length > 0 && (u32)other_length < sizeof(other_path) &&
+            deleted_length > 0 && (u32)deleted_length < sizeof(deleted_path) &&
             bq_worker_lease_acquire(lease_path, &lease) == 0;
     BQ_CHECK(ready);
     if (ready)
@@ -2683,6 +2737,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
             BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
             BQ_CHECK(chmod(root, 0700) == 0);
         }
+        u32 mounted = bq_test_lease_recheck_behind_inaccessible_mount(root, lease_path, &lease);
+        if (mounted == 2) printf("BQ_TEST_SKIPPED lease-recheck-inaccessible-mount reason=unshare-unavailable\n");
+        else BQ_CHECK(mounted == 0);
         bool moved = rename(lease_path, prior_path) == 0;
         BQ_CHECK(moved);
         if (moved)
@@ -2695,9 +2752,41 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
             BQ_CHECK(unlink(lease_path) == 0 && rename(prior_path, lease_path) == 0);
             BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
         }
-        for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
-        BQ_CHECK(before == after);
+        /* A second link is refused. Unlinking the lease name leaves one link,
+         * but the held entry now reads "<name> (deleted)": refused, including
+         * against a configured path spelled with that suffix. */
+        bool linked = link(lease_path, alias_path) == 0;
+        BQ_CHECK(linked);
+        if (linked)
+        {
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(unlink(lease_path) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(deleted_path, &lease));
+            BQ_CHECK(unlink(alias_path) == 0);
+        }
         bq_worker_lease_release(&lease);
+        bool fresh = bq_worker_lease_acquire(lease_path, &lease) == 0;
+        BQ_CHECK(fresh);
+        if (fresh)
+        {
+            /* A second description of the same file, unlocked, while the
+             * locked one stays open: the upgrade fails, so it is refused. */
+            BqWorkerLease second = {.descriptor = open(lease_path, O_RDWR | O_CLOEXEC)};
+            BQ_CHECK(second.descriptor >= 3);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &second));
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            bq_worker_lease_release(&second);
+            /* A replacement renamed over the live held name deletes it. */
+            int other = open(other_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(other >= 3);
+            if (other >= 0) BQ_CHECK(close(other) == 0);
+            BQ_CHECK(rename(other_path, lease_path) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
+            BQ_CHECK(before == after);
+            bq_worker_lease_release(&lease);
+        }
         BQ_CHECK(unlink(lease_path) == 0);
     }
     if (ready) BQ_CHECK(rmdir(root) == 0);
