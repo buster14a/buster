@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -269,6 +270,82 @@ class ExportReplayTest(unittest.TestCase):
                 self.assertIn("invalid retirement capacity inventory", result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_export_limits_match_their_c_definitions(self):
+        root = Path(replay.__file__).resolve().parents[2]
+
+        def define(relative, name):
+            text = (root / relative).read_text(encoding="utf-8")
+            match = re.search(rf"^#define {name} (.+)$", text, re.MULTILINE)
+            self.assertIsNotNone(match, name)
+            expression = re.sub(r"(?<=[0-9])(ull|u)\b", "", match.group(1))
+            expression = expression.replace("UINT64_C", "")
+            self.assertRegex(expression, r"^[0-9 ()*+]+$")
+            return eval(expression)  # noqa: S307 - digits and operators only
+
+        worker = "tools/bench_service/worker_linux.h"
+        entries = define(worker, "BQ_WORKER_BUNDLE_ENTRY_CAP")
+        path = define("tools/bench_service/queue.h", "BQ_PATH_CAP")
+        self.assertEqual(entries, replay.ENTRY_CAP)
+        self.assertEqual(path, replay.PATH_CAP)
+        self.assertEqual(define(worker, "BQ_WORKER_BUNDLE_FILE_CAP"), replay.FILE_CAP)
+        payload = define(worker, "BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP")
+        self.assertEqual(payload, replay.RESULT_FILE_CAP)
+        self.assertEqual(define("tools/throughput/retirement_store.h", "TP_RETIREMENT_STORE_TOTAL_BYTES"),
+                         replay.RESULT_FILE_CAP)
+        self.assertEqual(define("tools/throughput/retirement_execution.h", "TP_RETIREMENT_RECEIPT_BYTES"),
+                         replay.STORE_RECEIPT_BYTES)
+        # BQ_EXPORT_RETIREMENT_TOTAL_CAP in export.c.
+        self.assertEqual(payload + define(worker, "BQ_WORKER_BUNDLE_CAP") + 2 * 32768 +
+                         entries * (replay.ENTRY_HEADER_BYTES + path), replay.ARCHIVE_CAP)
+        self.assertEqual(define("tools/bench_service/export.c", "BQ_EXPORT_RECEIPT_CAP"), replay.RECEIPT_BYTES)
+
+    def test_a1_ledger_counts_metrics_shards_and_untimed_records(self):
+        root = Path(replay.__file__).resolve().parents[2]
+        report = replay.a1_capacity_report(root, require_committed=False)
+        scenarios = report["scenarios"]
+        self.assertTrue(scenarios)
+        for name, ledger in scenarios.items():
+            with self.subTest(name=name):
+                self.assertFalse(ledger["export_binds_before_store"])
+                self.assertTrue(ledger["per_file_fits"])
+                self.assertEqual(ledger["largest_file_bytes"]["metrics_shard"], replay.FILE_CAP)
+                self.assertLessEqual(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
+                self.assertEqual(ledger["untimed_record_files"], 1)
+                self.assertEqual(ledger["entries_left_for_composer_and_directories"],
+                                 replay.ENTRY_CAP - replay.WORKER_CONTROL_ENTRIES - ledger["owned_files"])
+                self.assertTrue(ledger["model_only"])
+        self.assertTrue(all(ledger["fits"] for name, ledger in scenarios.items() if name.startswith("pairs-60/")))
+        rejected = [name for name, ledger in scenarios.items() if not ledger["fits"]]
+        self.assertTrue(rejected)
+        self.assertTrue(all("/per-input-16384/" in name and name.startswith("pairs-254/") for name in rejected))
+        self.assertEqual(report["six_copy_ceiling"]["logical_six_copy_file_bytes"], 824805176192)
+        worst = scenarios["pairs-254/per-input-8192/runtime-0"]
+        self.assertGreater(worst["entries_left_for_composer_and_directories"], 0)
+        self.assertGreater(worst["bytes_left_for_composer_and_controls"], 8 * 1024 * 1024)
+
+    def test_ledger_rejects_oversized_untimed_record_file(self):
+        root = Path(replay.__file__).resolve().parents[2]
+        sys.path.insert(0, str(root / "tools" / "throughput"))
+        import retirement_capacity as capacity
+        limits = capacity.source_limits(root)
+        model = capacity.build_report(root, require_committed=False)["scenarios"][
+            "pairs-60/per-input-4096/runtime-0"]
+        huge = dict(model, untimed_batches=replay.FILE_CAP // limits["untimed_record_bytes_max"] + 1)
+        ledger = replay.a1_export_ledger(huge, limits)
+        self.assertFalse(ledger["per_file_fits"])
+        self.assertFalse(ledger["fits"])
+
+    def test_composer_hook_fixes_the_binding_location(self):
+        self.assertIsNone(replay.COMPOSER_BINDING_PATH)
+        self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
+        with mock.patch.object(replay, "COMPOSER_BINDING_PATH", "retirement/binding.json"):
+            self.assertEqual(str(replay.composer_binding_path("retirement/binding.json")),
+                             "retirement/binding.json")
+            with self.assertRaisesRegex(ValueError, "composer"):
+                replay.composer_binding_path("other/binding.json")
+            with self.assertRaises(ValueError):
+                replay.composer_binding_path("../binding.json")
 
     def test_publish_only_capacity_output_does_not_claim_replay(self):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
