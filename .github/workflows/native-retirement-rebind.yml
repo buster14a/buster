@@ -123,6 +123,19 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      # Pinned closures are checked out into candidate/external before a merge
+      # group is admitted, so the reserved-root check must run here, on the
+      # pristine candidate checkout, for every event.
+      - name: Reject candidate-controlled checkout destinations
+        run: |
+          set -euo pipefail
+          for relative in external .native-retirement-trusted; do
+            path="$GITHUB_WORKSPACE/candidate/$relative"
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "error: candidate controls reserved materialization root '$relative'" >&2
+              exit 1
+            fi
+          done
       - name: Reject feature-owned generated state and classify trust transitions
         id: admission
         if: ${{ github.event_name == 'pull_request' }}
@@ -340,11 +353,18 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "catch_up=$catch_up" >> "$GITHUB_OUTPUT"
           if [[ "$mode" != trusted-integration-merge-group ]]; then
+            # candidate/external now holds the pinned closures, which the
+            # classifier's reserved-root check would reject. Classify a
+            # pristine worktree of the same head instead; the candidate's own
+            # reserved roots were rejected before materialization.
+            pristine="$RUNNER_TEMP/native-retirement-classify"
+            git -C candidate worktree add --detach "$pristine" "$CANDIDATE_HEAD"
             python3 "$classifier" classify \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              --repo-root "$pristine" \
               --base "$base" \
               --head "$CANDIDATE_HEAD" \
               | tee "$RUNNER_TEMP/native-retirement-classification.json"
+            git -C candidate worktree remove --force "$pristine"
           fi
       - name: Require exact current generated state for attested non-catch-up heads
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}

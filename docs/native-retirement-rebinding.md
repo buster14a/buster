@@ -117,6 +117,10 @@ group. Only then does it wait for the predecessor under independently
 checked-out main policy and run the trusted gate. The wait (`wait-base`) proves
 that no predecessor changed the admission or rebinding policy that the
 reconstruction trusted. So only cheap checks follow a predecessor's landing.
+Because the pinned closures already occupy `candidate/external` by then, the
+job rejects candidate-controlled reserved roots on the pristine checkout for
+every event, and the late group classification runs on a pristine worktree of
+the exact head.
 An attested non-catch-up head must carry exactly current generated state. The
 repository job has a 310-minute limit for the bounded five-hour wait.
 `Main integration admission` requires that job's success on the exact group
