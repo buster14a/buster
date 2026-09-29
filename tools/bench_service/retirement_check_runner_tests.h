@@ -461,7 +461,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_check_test_import_variant(BqCheckTestFixture* fix
 BUSTER_GLOBAL_LOCAL BqRetirementCheckRun bq_check_test_run_for(BqCheckTestFixture* fixture,
     BqRetirementRequiredChecks const* checks, BqRetirementHeldBinaries const* held, int evidence, int work)
 {
-    BqRetirementCheckRun run = {checks, held, fixture->projection.prepared.source_sha256,
+    BqRetirementCheckRun run = {checks, held,
+                                (char const (*)[SHA256_HEX_CAPACITY])fixture->projection.prepared.source_sha256,
                                 {fixture->sources[0], fixture->sources[1]}, work, evidence, fixture->cancel[0],
                                 bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
     return run;

@@ -203,9 +203,11 @@ until the #509 authority joins are implemented. The per-row
 list and same-attempt receipts come from the installed required-check
 authority and the in-unit runner
 ([step 9](RETIREMENT_PREPARATION.md#step-9-509-receipts-and-the-gate-issuer-1020)).
-Missing facts include independent verification of per-row compiler/runtime
-argv/cwd/environment and CPU provenance (the row-plan authority), and
-independent-oracle bytes/digest from an admitted producer. The gate can validate
+Per-row compiler/runtime argv/cwd/environment and CPU provenance now come
+from the pinned row-plan authority and the in-unit producer
+([step 9](RETIREMENT_PREPARATION.md#the-row-plan-authority)), which the
+blocked profile does not pin. Missing facts include independent-oracle
+bytes/digest from an admitted producer. The gate can validate
 that a caller's check digest matches its caller-supplied expected digest; this
 import does not establish where that expectation or receipt came from. It also
 does not prove clean acceptance or replay the complete validator. The existing

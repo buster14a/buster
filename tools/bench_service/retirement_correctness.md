@@ -132,9 +132,11 @@ The eventual production caller must verify the complete #1018 preparation and
 independently replay the #508/#929 support, raw census, validator report, and
 sparse eligibility projection. The current C code checks only the staged raw
 identity and source-ledger projection described above, including the derived
-per-row `configuration_sha256` join. It does not yet derive or authenticate
-each row's compiler/runtime commands, #509 receipts, or oracle from an
-admitted source. A `retained-control` label alone
+per-row `configuration_sha256` join. Each row's compiler and runtime
+commands, batch key and batch-control mark are derived from the installed,
+profile-pinned row-plan authority (`bq_retirement_row_plan_import`), and the
+unit's producer observes the row facts with the held binaries; see
+[step 9](RETIREMENT_PREPARATION.md#the-row-plan-authority). A `retained-control` label alone
 does not exclude a row. No candidate output, manifest, or request may select
 these missing authority values.
 
