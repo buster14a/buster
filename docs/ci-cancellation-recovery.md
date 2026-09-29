@@ -36,7 +36,8 @@ requirements. They take effect only after landing on the default branch.
 
 The separate `.github/workflows/ci-recovery-tests.yml` runs both existing
 offline suites for PR and main changes to the two handlers, their helper and
-test sources. The new workflow-shape tests live in
+test sources. It also runs for `ci.yml` changes, because the watcher's step
+deadline mirrors a `ci.yml` step timeout. The new workflow-shape tests live in
 `.github/scripts/test_ci_recovery_workflows.py` so the frozen native-retirement
 support inventory and tracked `tests/` census stay unchanged. The regression workflow
 has no `workflow_run` trigger and no write credential. This
@@ -149,13 +150,89 @@ controller rather than authorization to continue or fabricate success. The
 watcher is a cost-saving controller, not a required status check; the existing
 eight required checks remain the authority for merge admission.
 
+## Merge-group workflow-tool step deadline
+
+Buster CI run [36571009755](https://github.com/buster14a/buster/actions/runs/36571009755)
+attempt 1 (merge-group candidate `fd1ebb286a90639535e654456084395aa92ab84c`)
+blocked its queue entry on `macOS x86-64 release`. That job's `Workflow tool
+regression tests` step started at 2026-09-29T12:53:23Z and was still
+`in_progress` more than 30 minutes later, despite its 5-minute step timeout.
+The other 23 jobs succeeded. The job log was unavailable (`BlobNotFound`), so
+no cause is established ([#1866](https://github.com/buster14a/buster/issues/1866)).
+The fail-fast path could not help: it reacts only to *completed*
+non-success jobs.
+
+The same trusted watcher therefore applies a narrow deadline on each probe.
+It covers only the six desktop Release job names (`Linux x86-64 release` …
+`Windows AArch64 release`) and only their `Workflow tool regression tests`
+step:
+
+| Lanes | Step budget (`ci.yml`) | Grace | Deadline after step start |
+| --- | --- | --- | --- |
+| Linux x86-64, Linux AArch64 | 2 minutes | 10 minutes | 12 minutes |
+| macOS x86-64, macOS AArch64, Windows x86-64, Windows AArch64 | 5 minutes | 10 minutes | 15 minutes |
+
+`WORKFLOW_TOOLS_BUDGET_SECONDS`, `STEP_DEADLINE_GRACE_SECONDS` and
+`FORCE_CANCEL_GRACE_SECONDS` in `.github/scripts/recover-ci.py` hold the
+policy. `test_budgets_mirror_the_ci_workflow_step` fails if the budgets drift
+from the step's `timeout-minutes` or the matrix names. The watcher executes
+default-branch code, so a PR that raises that timeout past budget plus grace
+is protected only after the matching watcher budget lands.
+
+Elapsed time runs from GitHub's step `started_at`, compared with the
+controller's clock. The job's `started_at` must not follow the step's. Run
+creation, queue time and total workflow age are ignored. A step is a candidate only while
+both the job and the step are `in_progress` with no conclusion. The job's
+`run_id`, `run_attempt` and `head_sha` must match the exact merge-group
+attempt. Queued, waiting and completed jobs and steps are never candidates,
+and neither are completed policy steps in long healthy jobs, `checks` shards,
+native lanes, or other workflows. The watcher already refuses main, tag,
+manual and PR runs, other heads and superseded attempts. A duplicate step, a mismatched
+identity, or a missing, naive or unparseable timestamp is refused. The refusal is
+recorded once and fail-fast watching continues.
+
+When a step is overdue (strictly past its deadline), the controller:
+
+1. Re-reads the latest merge-group runs, the jobs, and finally the run itself.
+   It confirms the same run, attempt, head, job, step number and step start
+   are still in progress and overdue. A replaced run, a new attempt, or a
+   changed head ends the watcher without mutation; a step that stopped or
+   restarted is recorded as `refused-progressed`.
+2. Requests normal cancellation of that exact Buster CI run
+   (`POST actions/runs/{id}/cancel`). GitHub cannot cancel a single job.
+   Completed job results are retained. The resulting cancelled jobs then
+   reach the existing fail-fast path, which cancels the rest of the
+   exact-head merge group.
+3. Keeps polling. Fail-fast waits for the overdue step instead of returning.
+   If that same step is still in progress `FORCE_CANCEL_GRACE_SECONDS`
+   (5 minutes) after the request, it revalidates again as in step 1. Only
+   then does it call the documented
+   [force-cancel endpoint](https://docs.github.com/en/rest/actions/workflow-runs#force-cancel-a-workflow-run)
+   (`POST actions/runs/{id}/force-cancel`). A `409` from either endpoint
+   records `run-already-finished`; any other API error fails the watcher
+   visibly.
+
+Nothing is rerun and no success is published. A deterministic failure stays
+failed, and the job's existing `actions: write` permission covers both
+endpoints. Every decision prints one greppable `STEP_DEADLINE` line with the
+action (`refused`, `refused-progressed`, `cancel-requested`, `step-stopped`,
+`force-cancel-requested` or `run-already-finished`). Each line carries the exact
+run, attempt, head, job, step, start timestamp, budget, grace, deadline and
+elapsed seconds. The job summary repeats these lines even when a later API
+error fails the controller. This protection is separate from diagnosing why
+the affected runner did not report the step's own timeout.
+
 ## Validation and escalation
 
 Run `python3 tests/ci_recovery_test.py` for ordinary PR recovery,
 `python3 .github/scripts/test_ci_recovery_workflows.py` for workflow selection and
 attribution, then `python3 .github/scripts/test_merge_queue_fail_fast.py` for required-check
 failure, optional-check exclusion, exact-head cancellation, and successful
-completion. These offline tests run for PR changes to the controller files.
+completion. The same suite covers the step deadline: the 2026-09-29 incident,
+each lane's boundary second, progression between reads, changed attempts and
+heads, queued/completed jobs, malformed metadata, normal cancellation,
+force-cancel escalation, API errors, and budget drift from `ci.yml`.
+These offline tests run for PR changes to the controller files and `ci.yml`.
 They do not prove a live merge-group cancellation; the watcher can execute only
 after its workflow lands on the default branch. Workflow lint covers the YAML.
 After landing, capture an ordinary PR completion, a main push, and a merge-group

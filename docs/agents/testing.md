@@ -74,7 +74,10 @@
   On `merge_group`, desktop and mobile enable matrix fail-fast; the native
   matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
   controller cancels exact-head merge-group runs after a failed Buster CI job
-  or required check from another workflow.
+  or required check from another workflow. It also stops a desktop Release
+  `Workflow tool regression tests` step that is still in progress past its
+  `ci.yml` budget plus grace. That budget table is mirrored in
+  `.github/scripts/recover-ci.py` and checked for drift.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
