@@ -494,7 +494,7 @@ typedef struct TpRetirementTranscript
 /* The caller owns exclusive service-created streams and their durable/no-replace
  * publication. A local shard digest is only an integrity descriptor, never the
  * independently authenticated execution receipt. No stream is closed here. */
-static int tp_retirement_transcript_init(TpRetirementTranscript* transcript,
+static inline int tp_retirement_transcript_init(TpRetirementTranscript* transcript,
     TpRetirementExecution* execution, char const* job, uint64_t attempt,
     char const* boot, int cpu, uint64_t bound_at_ns)
 {
@@ -796,7 +796,7 @@ static int tp_retirement_receipt_write(FILE* stream, Sha256* hash, uint64_t* byt
  * receipt bytes. The service must fsync, publish without replacement and
  * authenticate the resulting receipt digest out of band for independent replay.
  * A failed write poisons the complete attempt; partial receipt bytes remain. */
-static int tp_retirement_transcript_receipt(TpRetirementTranscript* transcript,
+static inline int tp_retirement_transcript_receipt(TpRetirementTranscript* transcript,
     char const* plan_sha256, char const* context_sha256,
     TpRetirementShardFile const* shards, unsigned count, FILE* stream, TpRetirementShard* receipt)
 {

@@ -178,7 +178,7 @@ static uint64_t tp_retirement_samples_union(unsigned rows, unsigned objects, uns
  * frozen fan-out. row_workspace and member_workspace hold `rows` entries and
  * group_workspace `groups`. The execution's runtime rows must be exactly the
  * runtime-flagged rows, in order. */
-static int tp_retirement_samples_init(TpRetirementSamples* samples, TpRetirementTranscript* transcript,
+static inline int tp_retirement_samples_init(TpRetirementSamples* samples, TpRetirementTranscript* transcript,
     FILE* spool, TpRetirementLayout const* layout, TpRetirementSampleRow* row_workspace,
     TpRetirementSampleGroup* group_workspace, unsigned* member_workspace)
 {
@@ -340,7 +340,7 @@ static uint64_t tp_retirement_samples_ordinal(TpRetirementSamples const* samples
  * object groups needs none. Its callers (the measured object-batch boundary
  * and its tests) are Linux-only, so it is too. */
 #ifdef __linux__
-static int tp_retirement_samples_attach_metrics(TpRetirementSamples* samples, TpRetirementMetricsShards* metrics)
+static inline int tp_retirement_samples_attach_metrics(TpRetirementSamples* samples, TpRetirementMetricsShards* metrics)
 {
     int ok = samples && !samples->failed && !samples->collected && !samples->metrics && samples->object_count &&
         metrics && !metrics->failed && !metrics->finished && !metrics->artifacts && metrics->stream;
@@ -561,7 +561,7 @@ static int tp_retirement_samples_verify(TpRetirementSamples* samples, Sha256 con
  * order, and compare at unit completion, which catches mutation even when a
  * unit crosses a shard boundary. A shard never mixes populations. Earlier
  * shards stay partial integrity artifacts until finish/manifest succeed. */
-static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE* stream, TpRetirementShard* shard)
+static inline int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE* stream, TpRetirementShard* shard)
 {
     int ok = samples && !samples->failed && samples->exporting && !samples->finished && shard &&
         samples->transcript && !samples->transcript->failed && samples->transcript->finished &&
@@ -642,7 +642,7 @@ static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE*
     return ok;
 }
 
-static int tp_retirement_samples_finish(TpRetirementSamples* samples)
+static inline int tp_retirement_samples_finish(TpRetirementSamples* samples)
 {
     uint64_t batches = tp_retirement_samples_population_records(samples, TP_RETIREMENT_POPULATION_BATCHES);
     int ok = samples && !samples->failed && samples->exporting && !samples->finished &&
@@ -666,7 +666,7 @@ static int tp_retirement_samples_finish(TpRetirementSamples* samples)
 
 /* One #615 manifest per full-cap partition of one population. Shard paths
  * and identities are fixed per population, not request fields. */
-static int tp_retirement_samples_manifest(TpRetirementSamples* samples, unsigned population,
+static inline int tp_retirement_samples_manifest(TpRetirementSamples* samples, unsigned population,
     TpRetirementShard const* shards, unsigned shard_count, unsigned partition, FILE* stream,
     TpRetirementShard* descriptor)
 {

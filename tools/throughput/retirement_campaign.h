@@ -511,7 +511,7 @@ static int tp_retirement_campaign_review(TpRetirementCampaignReview const* revie
  * [group * 2 + variant] for every group, then [(G + r) * 2 + variant] for every
  * runtime row r, so command_workspace has exactly 2 * 2 * (G + U) slots and
  * identity_workspace G + U: group shapes, then runtime row IDs. */
-static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetirementPlan const* plan,
+static inline int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetirementPlan const* plan,
     TpRetirementSamples* aa, TpRetirementSamples* ab,
     TpRetirementExecutable const* aa_binary, TpRetirementExecutable const* ab_baseline,
     TpRetirementExecutable const* ab_candidate, TpRetirementMeasuredCommand const* aa_commands,
@@ -710,7 +710,7 @@ static inline TpRetirementCampaignOutcome tp_retirement_campaign_outcome(TpRetir
 /* A child runs only after freeze and only for the next predeclared cursor item.
  * The caller supplies a fresh log/output directory and handles shard rotation
  * and durable publication through #1023. No failed launch is retried. */
-static int tp_retirement_campaign_run(TpRetirementCampaign* campaign,
+static inline int tp_retirement_campaign_run(TpRetirementCampaign* campaign,
     TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs,
     int output_directory, TpRetirementMeasurementResult* result)
 {
@@ -785,7 +785,7 @@ static inline int tp_retirement_campaign_rotate(TpRetirementCampaign* campaign, 
  * only after the service independently validates its admission receipt against
  * this frozen job, plan and context; that authority is supplied by #1021. A
  * stage with object groups must first finish its metrics shard writer. */
-static int tp_retirement_campaign_finish_stage(TpRetirementCampaign* campaign,
+static inline int tp_retirement_campaign_finish_stage(TpRetirementCampaign* campaign,
     uint64_t completed_at_ns, TpRetirementShard* final_shard)
 {
     unsigned stage = campaign && campaign->phase == TP_RETIREMENT_CAMPAIGN_AB ? 1 : 0;

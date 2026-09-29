@@ -114,7 +114,7 @@ static int tp_retirement_file_hash(int descriptor, char digest[65], uint64_t* si
     return ok;
 }
 
-static int tp_retirement_executable_init(TpRetirementExecutable* executable, int descriptor,
+static inline int tp_retirement_executable_init(TpRetirementExecutable* executable, int descriptor,
     char const* expected_sha256)
 {
     struct stat before, after;
