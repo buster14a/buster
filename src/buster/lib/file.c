@@ -115,7 +115,18 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     result.error = target.error;
     bool replaces = target.valid && target.kind == OS_FILE_KIND_REGULAR;
     bool stages = false;
-    if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
+    if (target.valid && target.kind == OS_FILE_KIND_STREAM)
+    {
+        // A device or FIFO such as /dev/null is the requested sink itself;
+        // there is nothing to replace, so write it in place.
+        OsFileTransferResult written = file_write_checked(path, content, permissions);
+        result.error = written.error;
+        if (!result.error.v)
+        {
+            result.status = written.transferred == content.length ? FILE_PUBLISH_PUBLISHED : FILE_PUBLISH_FAILED;
+        }
+    }
+    else if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
     {
         result.status = FILE_PUBLISH_UNSUPPORTED_DESTINATION;
     }
