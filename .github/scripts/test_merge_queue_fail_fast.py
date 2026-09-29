@@ -139,13 +139,12 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.assertEqual(self.api.cancelled, [])
 
     def test_watcher_uses_trusted_checkout_and_job_permissions(self):
-        workflow = (ROOT / ".github/workflows/ci-recovery.yml").read_text()
-        watch = workflow.split("\n  watch-merge-group:", 1)[1].split("\n  recover:", 1)[0]
-        self.assertIn("github.event.workflow_run.event == 'merge_group'", watch)
-        self.assertIn("actions: write", watch)
-        self.assertIn("checks: read", watch)
-        self.assertIn("ref: ${{ github.sha }}", watch)
-        self.assertNotIn("github.event.workflow_run.head_sha", watch)
+        workflow = (ROOT / ".github/workflows/ci-merge-group-watch.yml").read_text()
+        self.assertIn("github.event.workflow_run.event == 'merge_group'", workflow)
+        self.assertIn("actions: write", workflow)
+        self.assertIn("checks: read", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha }}", workflow)
 
 
 if __name__ == "__main__":

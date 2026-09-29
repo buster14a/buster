@@ -3257,6 +3257,40 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
     return id;
 }
 
+// The id `name` was interned under, or 0 when it never was. The probe is
+// c_symbol_intern's without the insertion, so a consumer that holds a
+// spelling from outside the token stream -- lowering's IrField names -- can
+// ask for its id without growing the table. A 0 answer is exact: no token
+// interned into this table spells `name`.
+BUSTER_C_SHARED u32 c_symbol_find(const CSymbolTable* table, String8 name)
+{
+    CSymbolKey key = c_symbol_key(name);
+    u64 length_word = (u64)name.length << 32;
+    u32 mask = table->slot_capacity - 1;
+    u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    u32 result = 0;
+    for (;;)
+    {
+        CSymbolSlot* entry = &table->slots[slot];
+        u64 length_and_id = entry->length_and_id;
+        if (!length_and_id)
+        {
+            break;
+        }
+        if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
+        {
+            u32 id = (u32)length_and_id;
+            if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
+            {
+                result = id;
+                break;
+            }
+        }
+        slot = (slot + 1) & mask;
+    }
+    return result;
+}
+
 BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("auto"),          S8_INITIALIZER("break"),     S8_INITIALIZER("case"),           S8_INITIALIZER("char"),
     S8_INITIALIZER("const"),         S8_INITIALIZER("continue"),  S8_INITIALIZER("default"),        S8_INITIALIZER("do"),

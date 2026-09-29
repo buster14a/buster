@@ -4296,8 +4296,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                                                      : S8("cannot specify -o with -fsyntax-only and multiple input files");
         goto finish;
     }
+    // Only the native link reads `objects`. A -c unit has already published
+    // its own .o, and -S, -E, -fsyntax-only and -emit-llvm all finish before
+    // link_objects, so no other action copies a unit's object out of its TU
+    // arena or reserves a slot for it. Prebuilt inputs are link-only as well.
+    bool link_inputs_retained = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
     ObjectArchive* input_archives = arena_allocate(arena, ObjectArchive, invocation.input_count);
-    u32 object_capacity = invocation.input_count;
+    u32 object_capacity = link_inputs_retained ? invocation.input_count : 0;
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
         String8 input_path = invocation.input_paths[input_index];
@@ -4353,8 +4358,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += archive.object_count;
     }
-    u32 runtime_object_capacity =
-        !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK ? compiler_driver_runtime_object_capacity(invocation.target) : 0;
+    u32 runtime_object_capacity = link_inputs_retained ? compiler_driver_runtime_object_capacity(invocation.target) : 0;
     if (runtime_object_capacity)
     {
         if (object_capacity > UINT32_MAX - runtime_object_capacity)
@@ -4411,12 +4415,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         single.input_count = 1;
         single.input_language_count = single.input_languages ? 1 : 0;
         single.output_path = (String8){0};
-        bool suppress_object_write = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
+        bool suppress_object_write = link_inputs_retained;
         if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
         {
             single.output_path = compiler_driver_default_object_path(arena, invocation.input_paths[input_index]);
         }
-        else if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK)
+        else if (link_inputs_retained)
         {
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
         }
@@ -4619,7 +4623,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             }
             goto finish;
         }
-        if (unit.has_object)
+        if (unit.has_object && link_inputs_retained)
         {
             if (unit_in_result_arena)
             {
@@ -4712,7 +4716,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         arena_destroy(archive_state.arena, 1);
         archive_state.arena = 0;
     }
-    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
+    if (link_inputs_retained && compiler_driver_windows_runtime_object_target(invocation.target))
     {
         objects[object_count++] = link_windows_runtime_object(arena, invocation.target);
         // The UCRT exit-handler stubs are selected the way an archive member
@@ -4725,7 +4729,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             objects[object_count++] = runtime;
         }
     }
-    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_elf_runtime_object_target(invocation.target))
+    if (link_inputs_retained && compiler_driver_elf_runtime_object_target(invocation.target))
     {
         // Selected the way an archive member is: only a program that
         // references one of its stubs and defines none of them pulls it in.

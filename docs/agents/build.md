@@ -164,6 +164,12 @@ A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
+On Linux, native Clang sanitizer configurations require Clang's shared
+compiler-rt ASan runtime. Configuration fails before graph generation when it
+is missing; on Debian/Ubuntu, install `libclang-rt-<clang-major>-dev`. GCC
+sanitizer configurations continue to discover `libasan.so`, while Zig keeps
+its separate compiler-rt lookup and fallback policy.
+
 `optnone_audit BUILD_DIRECTORY [--config C]` guards the trusted Clang unity
 `ide`. Its test bodies compile under `#pragma clang optimize off` in
 `src/buster/apps/ide/ide.c` to bound compile memory (#781), and a production
@@ -281,10 +287,17 @@ Each shared compiler tree builds Debug and Release through one cross-config
 Ninja process, so concurrent builds never write the same `.ninja_deps` or
 .ninja_log`. One shared CMake job pool admits the outer compiler and test
 commands, so a completed tree can release its slot to its tests while other
-trees continue compiling. On hosts with four or fewer logical CPUs, it admits
-one tree per CPU and sets every inner Ninja and `BUSTER_TEST_JOBS` quota to
-one; the six-tree Windows matrix therefore runs four one-job compiler trees
-at a time without nested oversubscription. Larger hosts retain the weighted
+trees continue compiling. On hosts with four or fewer logical CPUs (every
+hosted runner), it admits one tree per CPU. Trees that run tests divide the
+whole CPU budget between them as their inner Ninja and `BUSTER_TEST_JOBS`
+quota, and compile-only GCC/Zig/MSVC trees keep one job. The compile-only trees
+finish within the first minutes, so the only oversubscription is that bounded
+overlap; afterwards the sanitized trees, which carry nearly all build and test
+work, use every CPU instead of one each (#892 measured macOS arm64 checks at
+454 s build plus 532 s test in a one-job sanitized tree beside 120 s and 90 s
+compile-only trees). A matrix without test trees, or one whose concurrent
+self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
+allocation (`matrix_superbuild_allocate_jobs`). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
