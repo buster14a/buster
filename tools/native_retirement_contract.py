@@ -33,8 +33,9 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e"
-FULL_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
-NEXT_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+LEGACY_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
+FULL_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+NEXT_SUPPORT_CONTRACT_SHA256 = "c37b0807e3b30530860f343ceaa220e2e445af8e622944ddee23659219711131"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -588,7 +589,8 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") in (
-            FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256)
+            LEGACY_SUPPORT_CONTRACT_SHA256, FULL_SUPPORT_CONTRACT_SHA256,
+            NEXT_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""

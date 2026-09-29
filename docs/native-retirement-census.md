@@ -23,6 +23,12 @@ obligation remain `support-file` and `dependency-only`; the 559 inputs, 411
 subjects, and 78,912 row identities do not change. The previously approved
 declaration digest remains accepted for historical evidence. The new exact
 declaration digest is `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`.
+The #1793/#1796 support decision likewise updates only the byte/hash identity
+of `tests/wasm_integer_execution.js`: the oracle now writes its terminal marker
+synchronously and exits zero explicitly after all 1,504 checks pass. Its role,
+obligation, population, and row identities remain unchanged. Both earlier
+declaration digests remain accepted for historical evidence; the new exact
+declaration digest is `c37b0807e3b30530860f343ceaa220e2e445af8e622944ddee23659219711131`.
 The trusted digest-reader bootstrap must already be installed before this
 support policy is integrated; the generated source snapshot and aggregate
 binding are published only by the trusted writer.
