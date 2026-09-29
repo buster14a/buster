@@ -1,0 +1,561 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c: c_parse_static_assert_evaluate (5353-5418) =====
+  5353: BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+  5354:                                                         CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out,
+  5355:                                                         bool* requires_typed_evaluation_out)
+  5356: {
+  5357:     if (requires_typed_evaluation_out)
+  5358:     {
+  5359:         *requires_typed_evaluation_out = false;
+  5360:     }
+  5361:     u32 start = declaration.token_start;
+  5362:     u32 end = start + declaration.token_count;
+  5363:     bool valid = start + 3 < end && end <= preprocess.token_count &&
+  5364:                  c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+  5365:     u32 comma = end;
+  5366:     u32 close = end;
+  5367:     u32 depth = 0;
+  5368:     // Braces and brackets carry commas of their own -- a compound literal
+  5369:     // operand (`_Static_assert(sizeof (struct S){1, 2} == 8, "...")`) or a
+  5370:     // subscript -- and neither can close the assert's parenthesis, so they get
+  5371:     // their own depth. Counting only parentheses takes the literal's first
+  5372:     // comma for the message separator and truncates the expression.
+  5373:     u32 group_depth = 0;
+  5374:     for (u32 token_index = start + 1; valid && token_index < end; token_index += 1)
+  5375:     {
+  5376:         CToken token = preprocess.tokens[token_index];
+  5377:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+  5378:         {
+  5379:             group_depth += 1;
+  5380:         }
+  5381:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+  5382:         {
+  5383:             group_depth -= group_depth != 0;
+  5384:         }
+  5385:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+  5386:         {
+  5387:             depth += 1;
+  5388:         }
+  5389:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+  5390:         {
+  5391:             if (!depth)
+  5392:             {
+  5393:                 valid = false;
+  5394:             }
+  5395:             else if (!--depth)
+  5396:             {
+  5397:                 close = token_index;
+  5398:                 break;
+  5399:             }
+  5400:         }
+  5401:         else if (depth == 1 && !group_depth && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+  5402:         {
+  5403:             comma = token_index;
+  5404:         }
+  5405:     }
+  5406:     u32 expression_end = comma < close ? comma : close;
+  5407:     valid = valid && close != end && expression_end > start + 2;
+  5408:     if (valid)
+  5409:     {
+  5410:         if (comma < close && comma + 1 < close && preprocess.tokens[comma + 1].kind == C_TOKEN_STRING_LITERAL)
+  5411:         {
+  5412:             *message_out = c_token_spelling(preprocess.spelling_base, preprocess.tokens[comma + 1]);
+  5413:         }
+  5414:         valid = c_parse_constant_expression_evaluate(machine, arena, preprocess, result, scope, start + 2, expression_end,
+  5415:                                                       value_out, requires_typed_evaluation_out);
+  5416:     }
+  5417:     return valid;
+  5418: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c: c_parse_static_assert_check (5796-5879) =====
+  5796: BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+  5797:                                                      CDeclaration declaration, CScopeId scope)
+  5798: {
+  5799:     bool deferred = false;
+  5800:     for (u32 token_offset = 0; token_offset < declaration.token_count; token_offset += 1)
+  5801:     {
+  5802:         CToken token = preprocess.tokens[declaration.token_start + token_offset];
+  5803:         // The legacy token evaluator replaces identifiers with untyped u64
+  5804:         // spellings. Enum arithmetic must instead use the semantic evaluator,
+  5805:         // retaining signedness, compatible type, and both magnitude limbs.
+  5806:         CEntityId entity = token.kind == C_TOKEN_IDENTIFIER
+  5807:                                ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token) : C_ENTITY_ID_INVALID;
+  5808:         bool enumerator = entity.value < result->entity_count ? result->entities[entity.value].kind == C_ENTITY_ENUMERATOR
+  5809:                           : token.kind == C_TOKEN_IDENTIFIER &&
+  5810:                             c_parse_pending_enum_member(preprocess, result, scope, declaration.token_start + token_offset) != 0;
+  5811:         if (token.kind == C_TOKEN_IDENTIFIER &&
+  5812:             (enumerator || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
+  5813:              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
+  5814:         {
+  5815:             deferred = true;
+  5816:             break;
+  5817:         }
+  5818:     }
+  5819:     deferred |= c_parse_static_assert_has_unresolved_array(preprocess, result, declaration, scope);
+  5820:     u32 syntax_start = 0;
+  5821:     u32 syntax_end = 0;
+  5822:     u32 syntax_token = 0;
+  5823:     String8 syntax_error = machine && c_parse_static_assert_expression_range(preprocess, declaration, &syntax_start, &syntax_end)
+  5824:                                ? c_parse_constant_expression_syntax_error(machine, result, preprocess, scope, syntax_start, syntax_end, &syntax_token)
+  5825:                                : (String8){0};
+  5826:     if (syntax_error.length)
+  5827:     {
+  5828:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[syntax_token]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+  5829:                            syntax_error);
+  5830:     }
+  5831:     else if (deferred)
+  5832:     {
+  5833:         c_parse_defer_static_assert(preprocess, result, declaration, scope);
+  5834:     }
+  5835:     if (syntax_error.length || deferred)
+  5836:     {
+  5837:         return;
+  5838:     }
+  5839:     CToken first = preprocess.tokens[declaration.token_start];
+  5840:     bool expression_is_integer = true;
+  5841:     u32 expression_start = 0;
+  5842:     u32 expression_end = 0;
+  5843:     bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+  5844:     if (machine && has_expression)
+  5845:     {
+  5846:         CTypeId expression_type = C_TYPE_ID_INVALID;
+  5847:         if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
+  5848:             expression_type.value < result->type_count)
+  5849:         {
+  5850:             expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+  5851:         }
+  5852:     }
+  5853:     u64 value = 0;
+  5854:     String8 message = {0};
+  5855:     bool requires_typed_evaluation = false;
+  5856:     bool evaluated = expression_is_integer &&
+  5857:                      c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value, &message,
+  5858:                                                     &requires_typed_evaluation);
+  5859:     if (requires_typed_evaluation)
+  5860:     {
+  5861:         c_parse_defer_static_assert(preprocess, result, declaration, scope);
+  5862:     }
+  5863:     else if (!evaluated)
+  5864:     {
+  5865:         // Quote the whole controlling expression: the range ends at the
+  5866:         // separator comma or closing parenthesis at the assertion's own depth,
+  5867:         // not at the first one inside a parenthesized operand or a call.
+  5868:         String8 expression = has_expression ? c_parse_token_range_text(arena, preprocess, expression_start, expression_end) : (String8){0};
+  5869:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+  5870:                            expression.length
+  5871:                                ? string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression)
+  5872:                                : S8("static assertion expression is not an integer constant expression"));
+  5873:     }
+  5874:     else if (!value)
+  5875:     {
+  5876:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+  5877:                            message.length ? string_format(arena, S8("static assertion failed: {S8}"), message) : S8("static assertion failed"));
+  5878:     }
+  5879: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c: c_parse_defer_static_assert (5528-5545) =====
+  5528: BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
+  5529: {
+  5530:     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
+  5531:     {
+  5532:         return;
+  5533:     }
+  5534:     CSourceLocation location = declaration.location;
+  5535:     if (declaration.token_start < preprocess.token_count)
+  5536:     {
+  5537:         location = c_preprocess_token_location(&preprocess, preprocess.tokens[declaration.token_start]);
+  5538:     }
+  5539:     result->deferred_static_asserts[result->deferred_static_assert_count++] = (CDeferredStaticAssert){
+  5540:         .token_start = declaration.token_start,
+  5541:         .token_count = declaration.token_count,
+  5542:         .scope = scope,
+  5543:         .location = location,
+  5544:     };
+  5545: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c: c_parse_validate_deferred_assertions (22798-22829) =====
+ 22798: BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+ 22799:                                                                CPreprocessResult preprocess)
+ 22800: {
+ 22801:     for (u32 index = 0; index < result->deferred_static_assert_count; index += 1)
+ 22802:     {
+ 22803:         CDeferredStaticAssert assertion = result->deferred_static_asserts[index];
+ 22804:         // A member assertion is deferred from its aggregate's scope; the
+ 22805:         // innermost block enclosing it is where its names bind.
+ 22806:         assertion.scope = c_parse_scope_for_token(result, assertion.scope, assertion.token_start);
+ 22807:         CDeclaration declaration = {.token_start = assertion.token_start, .token_count = assertion.token_count};
+ 22808:         u32 start = 0;
+ 22809:         u32 end = 0;
+ 22810:         u64 mark = machine->scratch_arena->position;
+ 22811:         CParseConstant value = {.type = C_TYPE_ID_INVALID};
+ 22812:         if (c_parse_static_assert_expression_range(preprocess, declaration, &start, &end))
+ 22813:         {
+ 22814:             value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, assertion.scope, start, end);
+ 22815:         }
+ 22816:         arena_set_position(machine->scratch_arena, mark);
+ 22817:         if (!value.valid)
+ 22818:         {
+ 22819:             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+ 22820:                                S8("static assertion expression is not an integer constant expression"));
+ 22821:         }
+ 22822:         else if (value.is_float || !c_parse_constant_truth(value))
+ 22823:         {
+ 22824:             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+ 22825:                                S8("static assertion expression is not a true integer constant expression"));
+ 22826:         }
+ 22827:     }
+ 22828:     BUSTER_UNUSED(arena);
+ 22829: }
+
+===== src/buster/tests/compiler/frontend/c/c_test.c: c_test_deferred_assert_positive (4959-4982) =====
+  4959: BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_positive(UnitTestArguments* arguments)
+  4960: {
+  4961:     UnitTestResult result = {0};
+  4962:     BUSTER_UNUSED(arguments);
+  4963:     TemporalArena deferred_assert_temporary = scratch_begin(0, 0);
+  4964:     CPreprocessResult deferred_assert_tokens = c_preprocess(
+  4965:         deferred_assert_temporary.arena,
+  4966:         S8("static int inferred_assert_array[] = { [(unsigned char)256] = 1 };"
+  4967:            " _Static_assert(sizeof(inferred_assert_array) == 4, \"inferred array size\");"
+  4968:            " int deferred_assert_positive(void) { return inferred_assert_array[0]; }\n"),
+  4969:         (CPreprocessOptions){
+  4970:             .target = target_native,
+  4971:             .data_layout = target_data_layout(target_native),
+  4972:         });
+  4973:     CParseResult deferred_assert_parse = c_parse(deferred_assert_temporary.arena, deferred_assert_tokens);
+  4974:     CIRLowerResult deferred_assert_ir = c_lower_to_ir(deferred_assert_temporary.arena, S8("deferred-assert-positive.c"), deferred_assert_tokens,
+  4975:                                                       deferred_assert_parse, target_native);
+  4976:     BUSTER_TEST(arguments, deferred_assert_tokens.diagnostic_count == 0);
+  4977:     BUSTER_TEST(arguments, deferred_assert_parse.diagnostic_count == 0);
+  4978:     BUSTER_TEST(arguments, deferred_assert_parse.deferred_static_assert_count == 1);
+  4979:     BUSTER_TEST(arguments, deferred_assert_ir.diagnostic_count == 0);
+  4980:     scratch_end(deferred_assert_temporary);
+  4981:     return result;
+  4982: }
+
+===== src/buster/tests/compiler/frontend/c/c_test.c: c_test_deferred_assert_false (4984-5076) =====
+  4984: BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArguments* arguments)
+  4985: {
+  4986:     UnitTestResult result = {0};
+  4987:     BUSTER_UNUSED(arguments);
+  4988:     TemporalArena deferred_assert_false_temporary = scratch_begin(0, 0);
+  4989:     CPreprocessResult deferred_assert_false_tokens = c_preprocess(
+  4990:         deferred_assert_false_temporary.arena,
+  4991:         S8("static int false_assert_array[] = { [(unsigned char)256] = 1 };"
+  4992:            " _Static_assert(sizeof(false_assert_array) == 8, \"false inferred array size\");\n"),
+  4993:         (CPreprocessOptions){
+  4994:             .target = target_native,
+  4995:             .data_layout = target_data_layout(target_native),
+  4996:         });
+  4997:     CParseResult deferred_assert_false_parse = c_parse(deferred_assert_false_temporary.arena, deferred_assert_false_tokens);
+  4998:     CIRLowerResult deferred_assert_false_ir = c_lower_to_ir(deferred_assert_false_temporary.arena, S8("deferred-assert-false.c"),
+  4999:                                                             deferred_assert_false_tokens, deferred_assert_false_parse, target_native);
+  5000:     BUSTER_TEST(arguments, deferred_assert_false_tokens.diagnostic_count == 0);
+  5001:     BUSTER_TEST(arguments, deferred_assert_false_parse.diagnostic_count == 0);
+  5002:     BUSTER_TEST(arguments, deferred_assert_false_parse.deferred_static_assert_count == 1);
+  5003:     BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostic_count == 1);
+  5004:     if (deferred_assert_false_ir.diagnostic_count == 1)
+  5005:     {
+  5006:         BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+  5007:     }
+  5008:     TemporalArena static_assert_type_temporary = scratch_begin(0, 0);
+  5009:     String8 invalid_static_assert_sources[] = {
+  5010:         S8("_Static_assert(1.0, \"file floating control\");\n"),
+  5011:         S8("_Static_assert((void *)1, \"file pointer control\");\n"),
+  5012:         S8("int floating_control(void) { _Static_assert(1.0, \"function floating control\"); return 0; }\n"),
+  5013:         S8("int pointer_control(void) { _Static_assert((void *)1, \"function pointer control\"); return 0; }\n"),
+  5014:     };
+  5015:     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_static_assert_sources); source_index += 1)
+  5016:     {
+  5017:         CPreprocessResult invalid_tokens = c_preprocess(
+  5018:             static_assert_type_temporary.arena, invalid_static_assert_sources[source_index],
+  5019:             (CPreprocessOptions){
+  5020:                 .target = target_native,
+  5021:                 .data_layout = target_data_layout(target_native),
+  5022:             });
+  5023:         CParseResult invalid_parse = c_parse(static_assert_type_temporary.arena, invalid_tokens);
+  5024:         BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+  5025:         BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 1);
+  5026:         if (invalid_parse.diagnostic_count == 1)
+  5027:         {
+  5028:             BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+  5029:         }
+  5030:     }
+  5031:     CPreprocessResult valid_static_assert_tokens = c_preprocess(
+  5032:         static_assert_type_temporary.arena,
+  5033:         S8("_Static_assert(1, \"file integer control\");"
+  5034:            " _Static_assert((int)1.0, \"file floating-to-integer cast\");"
+  5035:            " _Static_assert((unsigned char)257, \"file narrowing integer cast\");"
+  5036:            " _Static_assert(sizeof(int) >= 2, \"file sizeof\");"
+  5037:            " _Static_assert(_Alignof(int) >= 1, \"file alignof\");"
+  5038:            " int valid_static_assert_controls(void) {"
+  5039:            " _Static_assert(1, \"function integer control\");"
+  5040:            " _Static_assert((int)1.0, \"function floating-to-integer cast\");"
+  5041:            " _Static_assert((unsigned char)257, \"function narrowing integer cast\");"
+  5042:            " _Static_assert(sizeof(int) >= 2, \"function sizeof\");"
+  5043:            " _Static_assert(_Alignof(int) >= 1, \"function alignof\");"
+  5044:            " return 0; }\n"),
+  5045:         (CPreprocessOptions){
+  5046:             .target = target_native,
+  5047:             .data_layout = target_data_layout(target_native),
+  5048:         });
+  5049:     CParseResult valid_static_assert_parse = c_parse(static_assert_type_temporary.arena, valid_static_assert_tokens);
+  5050:     CIRLowerResult valid_static_assert_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-integer-controls.c"),
+  5051:                                                          valid_static_assert_tokens, valid_static_assert_parse, target_native);
+  5052:     BUSTER_TEST(arguments, valid_static_assert_tokens.diagnostic_count == 0);
+  5053:     BUSTER_TEST(arguments, valid_static_assert_parse.diagnostic_count == 0);
+  5054:     BUSTER_TEST(arguments, valid_static_assert_ir.diagnostic_count == 0);
+  5055: 
+  5056:     CPreprocessResult narrowing_false_tokens = c_preprocess(
+  5057:         static_assert_type_temporary.arena, S8("_Static_assert((unsigned char)256, \"narrowing cast becomes zero\");\n"),
+  5058:         (CPreprocessOptions){
+  5059:             .target = target_native,
+  5060:             .data_layout = target_data_layout(target_native),
+  5061:         });
+  5062:     CParseResult narrowing_false_parse = c_parse(static_assert_type_temporary.arena, narrowing_false_tokens);
+  5063:     CIRLowerResult narrowing_false_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-narrowing-false.c"),
+  5064:                                                       narrowing_false_tokens, narrowing_false_parse, target_native);
+  5065:     BUSTER_TEST(arguments, narrowing_false_tokens.diagnostic_count == 0);
+  5066:     BUSTER_TEST(arguments, narrowing_false_parse.diagnostic_count == 0);
+  5067:     BUSTER_TEST(arguments, narrowing_false_parse.deferred_static_assert_count == 1);
+  5068:     BUSTER_TEST(arguments, narrowing_false_ir.diagnostic_count == 1);
+  5069:     if (narrowing_false_ir.diagnostic_count == 1)
+  5070:     {
+  5071:         BUSTER_TEST(arguments, narrowing_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+  5072:     }
+  5073:     scratch_end(static_assert_type_temporary);
+  5074:     scratch_end(deferred_assert_false_temporary);
+  5075:     return result;
+  5076: }
+
+===== src/buster/tests/compiler/frontend/c/c_test.c: c_test_deferred_assert_nonconstant (5078-5106) =====
+  5078: BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestArguments* arguments)
+  5079: {
+  5080:     UnitTestResult result = {0};
+  5081:     BUSTER_UNUSED(arguments);
+  5082:     TemporalArena deferred_assert_nonconstant_temporary = scratch_begin(0, 0);
+  5083:     CPreprocessResult deferred_assert_nonconstant_tokens = c_preprocess(
+  5084:         deferred_assert_nonconstant_temporary.arena,
+  5085:         S8("static int nonconstant_assert_array[] = { [(unsigned char)256] = 1 };"
+  5086:            " int nonconstant_assert_value(void);"
+  5087:            " _Static_assert(sizeof(nonconstant_assert_array) == nonconstant_assert_value(), \"runtime value\");\n"),
+  5088:         (CPreprocessOptions){
+  5089:             .target = target_native,
+  5090:             .data_layout = target_data_layout(target_native),
+  5091:         });
+  5092:     CParseResult deferred_assert_nonconstant_parse = c_parse(deferred_assert_nonconstant_temporary.arena, deferred_assert_nonconstant_tokens);
+  5093:     CIRLowerResult deferred_assert_nonconstant_ir = c_lower_to_ir(deferred_assert_nonconstant_temporary.arena, S8("deferred-assert-nonconstant.c"),
+  5094:                                                                     deferred_assert_nonconstant_tokens, deferred_assert_nonconstant_parse,
+  5095:                                                                     target_native);
+  5096:     BUSTER_TEST(arguments, deferred_assert_nonconstant_tokens.diagnostic_count == 0);
+  5097:     BUSTER_TEST(arguments, deferred_assert_nonconstant_parse.diagnostic_count == 0);
+  5098:     BUSTER_TEST(arguments, deferred_assert_nonconstant_parse.deferred_static_assert_count == 1);
+  5099:     BUSTER_TEST(arguments, deferred_assert_nonconstant_ir.diagnostic_count == 1);
+  5100:     if (deferred_assert_nonconstant_ir.diagnostic_count == 1)
+  5101:     {
+  5102:         BUSTER_TEST(arguments, deferred_assert_nonconstant_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+  5103:     }
+  5104:     scratch_end(deferred_assert_nonconstant_temporary);
+  5105:     return result;
+  5106: }
+
+===== src/buster/tests/compiler/frontend/c/c_test.c: c_test_static_assert_nonconstant_quote (5114-5162) =====
+  5114: BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTestArguments* arguments)
+  5115: {
+  5116:     UnitTestResult result = {0};
+  5117:     struct
+  5118:     {
+  5119:         String8 source;
+  5120:         String8 message;
+  5121:     } cases[] = {
+  5122:         {S8("int value;\n_Static_assert(value, \"simple\");\n"),
+  5123:          S8("static assertion expression is not an integer constant expression: value")},
+  5124:         {S8("int value;\n_Static_assert((value + 1) != 0, \"parenthesized\");\n"),
+  5125:          S8("static assertion expression is not an integer constant expression: (value + 1) != 0")},
+  5126:         {S8("int pair(int, int);\n_Static_assert(pair(1, 2), \"call\");\n"),
+  5127:          S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+  5128:         {S8("int pair(int, int);\n_Static_assert((1 << 32) != 0 && pair(1, 2), \"both\");\n"),
+  5129:          S8("static assertion expression is not an integer constant expression: (1 << 32) != 0 && pair(1, 2)")},
+  5130:         {S8("int pair(int, int);\n_Static_assert(pair(1, 2));\n"),
+  5131:          S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+  5132:         {S8("int local(int n) { _Static_assert((n + 1) * 2, \"local\"); return n; }\n"),
+  5133:          S8("static assertion expression is not an integer constant expression: (n + 1) * 2")},
+  5134:         {S8("int pair(int, int);\n_Static_assert(pair(/* first */ 1,\n    2) + pair( 3 , 4 ), \"layout\");\n"),
+  5135:          S8("static assertion expression is not an integer constant expression: pair( 1, 2) + pair( 3 , 4 )")},
+  5136:         {S8("#define NEGATIVE -1\nint pair(int, int);\n_Static_assert(pair(-NEGATIVE, 2), \"macro\");\n"),
+  5137:          S8("static assertion expression is not an integer constant expression: pair(- - 1 , 2)")},
+  5138:         {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"generic\");\n"),
+  5139:          S8("static assertion expression is not an integer constant expression")},
+  5140:     };
+  5141:     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+  5142:     {
+  5143:         TemporalArena temporary = scratch_begin(0, 0);
+  5144:         CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+  5145:                                                 (CPreprocessOptions){
+  5146:                                                     .target = target_native,
+  5147:                                                     .data_layout = target_data_layout(target_native),
+  5148:                                                 });
+  5149:         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+  5150:         CIRLowerResult analysis = c_analyze(temporary.arena, S8("static-assert-quote.c"), tokens, syntax, target_native);
+  5151:         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+  5152:         BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+  5153:         BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 1, cases[case_index].source);
+  5154:         if (analysis.diagnostic_count == 1)
+  5155:         {
+  5156:             BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+  5157:             BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
+  5158:         }
+  5159:         scratch_end(temporary);
+  5160:     }
+  5161:     return result;
+  5162: }
+
+===== src/buster/tests/compiler/driver/driver_fast_test.c: compiler_driver_test_local_sizeof_static_asserts (198-308) =====
+   198: BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
+   199: {
+   200:     UnitTestResult result = {0};
+   201:     struct
+   202:     {
+   203:         String8 source;
+   204:         bool valid;
+   205:         String8 diagnostic_fragment;
+   206:     } cases[] = {
+   207:         {S8("typedef long T;\n"
+   208:             "int f(void) {\n"
+   209:             "    T a = 0;\n"
+   210:             "    {\n"
+   211:             "        typedef char T;\n"
+   212:             "        T b = 0;\n"
+   213:             "        _Static_assert(sizeof b == 1, \"inner\");\n"
+   214:             "    }\n"
+   215:             "    return sizeof a;\n"
+   216:             "}\n"), true, {0}},
+   217:         {S8("int f(void) {\n"
+   218:             "    int a[4];\n"
+   219:             "    _Static_assert(sizeof a == 4 * sizeof(int), \"array\");\n"
+   220:             "    return _Generic(a, int *: 1);\n"
+   221:             "}\n"), true, {0}},
+   222:         {S8("int f(void) {\n"
+   223:             "    char value;\n"
+   224:             "    _Static_assert(sizeof (value) == 1, \"parenthesized scalar\");\n"
+   225:             "    return sizeof value;\n"
+   226:             "}\n"), true, {0}},
+   227:         {S8("int f(void) {\n"
+   228:             "    int values[4];\n"
+   229:             "    _Static_assert(sizeof (values) == 4 * sizeof(int), \"parenthesized array\");\n"
+   230:             "    return sizeof values;\n"
+   231:             "}\n"), true, {0}},
+   232:         {S8("int f(int n) {\n"
+   233:             "    _Static_assert(sizeof n == n, \"runtime value\");\n"
+   234:             "    return n;\n"
+   235:             "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+   236:         {S8("int f(int n) {\n"
+   237:             "    int values[n];\n"
+   238:             "    _Static_assert(sizeof values == n * sizeof(int), \"variable array\");\n"
+   239:             "    return (int)sizeof values;\n"
+   240:             "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+   241:         {S8("int f(void) {\n"
+   242:             "    char value;\n"
+   243:             "    _Static_assert(sizeof value == 2, \"false\");\n"
+   244:             "    return 0;\n"
+   245:             "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+   246:     };
+   247:     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+   248:     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+   249:     {
+   250:         TemporalArena temporary = arena_begin_temporal(arguments->arena);
+   251:         Arena* arena = temporary.arena;
+   252:         String8 input = buster_test_temporary_path(arena, S8("buster-local-sizeof-static-assert"), S8(".c"));
+   253:         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source)));
+   254:         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+   255:         {
+   256:             String8 output = buster_test_temporary_path(arena,
+   257:                 string_format(arena, S8("buster-local-sizeof-static-assert-{u32}-{u32}"), case_index, form), S8(".o"));
+   258:             String8 syntax_command[] = {S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-fsyntax-only"), input};
+   259:             String8 object_command[] = {S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-c"), S8("-o"), output, input};
+   260:             CompilerDriverInvocation syntax_invocation = compiler_driver_parse_arguments(
+   261:                 arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+   262:             CompilerDriverInvocation object_invocation = compiler_driver_parse_arguments(
+   263:                 arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command));
+   264:             BUSTER_TEST(arguments, syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+   265:             BUSTER_TEST(arguments, object_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+   266: #if BUSTER_BENCH_ALLOCATIONS
+   267:             IrConstructionCounters before = ir_construction_counters();
+   268: #endif
+   269:             CompilerDriverResult syntax = compiler_driver_execute_invocation(arena, syntax_invocation);
+   270: #if BUSTER_BENCH_ALLOCATIONS
+   271:             IrConstructionCounters after = ir_construction_counters();
+   272:             BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+   273:             for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+   274:             {
+   275:                 BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
+   276:             }
+   277: #endif
+   278:             CompilerDriverResult object = compiler_driver_execute_invocation(arena, object_invocation);
+   279:             BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[case_index].valid);
+   280:             BUSTER_TEST(arguments, syntax.error == object.error);
+   281:             BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
+   282:                             string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+   283:                                           cases[case_index].source, syntax.diagnostic, object.diagnostic));
+   284:             BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
+   285:             BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
+   286:             BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+   287:             for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(syntax.diagnostic_count, object.diagnostic_count); diagnostic += 1)
+   288:             {
+   289:                 CompilerDiagnostic first = syntax.diagnostics[diagnostic];
+   290:                 CompilerDiagnostic second = object.diagnostics[diagnostic];
+   291:                 BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
+   292:                 BUSTER_STRING_TEST(arguments, first.code, second.code);
+   293:                 BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
+   294:             }
+   295:             if (cases[case_index].diagnostic_fragment.length)
+   296:             {
+   297:                 BUSTER_TEST_RAW(arguments, compiler_driver_test_string_contains(syntax.diagnostic, cases[case_index].diagnostic_fragment),
+   298:                                 string_format(arena, S8("source={S8}\ndiagnostic={S8}"), cases[case_index].source, syntax.diagnostic));
+   299:             }
+   300:             if (cases[case_index].valid)
+   301:             {
+   302:                 BUSTER_TEST(arguments, object.has_object);
+   303:             }
+   304:         }
+   305:         scratch_end(temporary);
+   306:     }
+   307:     return result;
+   308: }
+
+===== repository matches: not a true integer constant expression =====
+.github/workflows/agent-1646-context.yml:76:               'not a true integer constant expression',
+src/buster/lib/compiler/frontend/c/c_parse.c:22825:                                S8("static assertion expression is not a true integer constant expression"));
+src/buster/lib/compiler/frontend/c/c_gen.c:38160:                     builder->failure_message = S8("static assertion expression is not a true integer constant expression");
+src/buster/lib/compiler/frontend/c/c_gen.c:50457:                 .message = S8("static assertion expression is not a true integer constant expression"),
+src/buster/tests/compiler/driver/driver_fast_test.c:245:             "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+
+===== repository matches: static assertion failed =====
+.github/workflows/agent-1646-context.yml:77:               'static assertion failed',
+src/buster/lib/compiler/frontend/c/c_parse.c:5877:                            message.length ? string_format(arena, S8("static assertion failed: {S8}"), message) : S8("static assertion failed"));
+src/buster/tests/compiler/frontend/c/c_test.c:10474:                            S8("static assertion failed: "
+src/buster/tests/compiler/frontend/c/c_test.c:23610:         BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, S8("static assertion failed: \"kept after growth\""));
+
+===== repository matches: C_DIAGNOSTIC_STATIC_ASSERT_FAILED =====
+.github/workflows/agent-1646-context.yml:78:               'C_DIAGNOSTIC_STATIC_ASSERT_FAILED',
+src/buster/lib/compiler/driver/driver_diagnostic.c:35:         [C_DIAGNOSTIC_STATIC_ASSERT_FAILED] = S8_INITIALIZER("c.static-assert-failed"),
+src/buster/lib/compiler/frontend/c/c.h:244:     C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+src/buster/lib/compiler/frontend/c/c_parse.c:5876:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+src/buster/lib/compiler/frontend/c/c_parse.c:22824:             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+src/buster/lib/compiler/frontend/c/c_gen.c:50459:                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+src/buster/tests/compiler/frontend/c/c_test.c:5006:         BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+src/buster/tests/compiler/frontend/c/c_test.c:5071:         BUSTER_TEST(arguments, narrowing_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+src/buster/tests/compiler/frontend/c/c_test.c:10472:         BUSTER_TEST(arguments, failed_static_assert_parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+src/buster/tests/compiler/frontend/c/c_test.c:23609:         BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+src/buster/tests/compiler/frontend/c/c_test.c:24097:             if (diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED)
+
+===== repository matches: C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT =====
+.github/workflows/agent-1646-context.yml:79:               'C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT',
+src/buster/lib/compiler/driver/driver_diagnostic.c:34:         [C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT] = S8_INITIALIZER("c.static-assert-not-constant"),
+src/buster/lib/compiler/frontend/c/c.h:243:     C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+src/buster/lib/compiler/frontend/c/c_parse.c:5869:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+src/buster/lib/compiler/frontend/c/c_parse.c:22819:             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+src/buster/lib/compiler/frontend/c/c_gen.c:50447:                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+src/buster/tests/compiler/frontend/c/c_test.c:5028:             BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+src/buster/tests/compiler/frontend/c/c_test.c:5102:         BUSTER_TEST(arguments, deferred_assert_nonconstant_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+src/buster/tests/compiler/frontend/c/c_test.c:5156:             BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+
