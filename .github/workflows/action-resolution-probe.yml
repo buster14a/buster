@@ -20,15 +20,29 @@ jobs:
         id: resolution
         continue-on-error: true
         uses: ./.github/actions/action-resolution-probe
-      - name: Prove control returned after resolution failure
+      - name: Retry unavailable nested dependency once
+        id: resolution_retry
+        if: ${{ steps.resolution.outcome == 'failure' && steps.resolution.outputs.entered != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/action-resolution-probe
+      - name: Prove both resolution failures returned control
         if: ${{ always() }}
         shell: bash
         env:
-          RESOLUTION_OUTCOME: ${{ steps.resolution.outcome }}
-          RESOLUTION_CONCLUSION: ${{ steps.resolution.conclusion }}
+          FIRST_OUTCOME: ${{ steps.resolution.outcome }}
+          FIRST_CONCLUSION: ${{ steps.resolution.conclusion }}
+          FIRST_ENTERED: ${{ steps.resolution.outputs.entered }}
+          RETRY_OUTCOME: ${{ steps.resolution_retry.outcome }}
+          RETRY_CONCLUSION: ${{ steps.resolution_retry.conclusion }}
+          RETRY_ENTERED: ${{ steps.resolution_retry.outputs.entered }}
         run: |
           set -euo pipefail
-          printf 'ACTION_RESOLUTION_PROBE outcome=%s conclusion=%s\n' \
-            "$RESOLUTION_OUTCOME" "$RESOLUTION_CONCLUSION"
-          test "$RESOLUTION_OUTCOME" = failure
-          test "$RESOLUTION_CONCLUSION" = success
+          printf 'ACTION_RESOLUTION_PROBE first_outcome=%s first_conclusion=%s first_entered=%s retry_outcome=%s retry_conclusion=%s retry_entered=%s\n' \
+            "$FIRST_OUTCOME" "$FIRST_CONCLUSION" "$FIRST_ENTERED" \
+            "$RETRY_OUTCOME" "$RETRY_CONCLUSION" "$RETRY_ENTERED"
+          test "$FIRST_OUTCOME" = failure
+          test "$FIRST_CONCLUSION" = success
+          test -z "$FIRST_ENTERED"
+          test "$RETRY_OUTCOME" = failure
+          test "$RETRY_CONCLUSION" = success
+          test -z "$RETRY_ENTERED"
