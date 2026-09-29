@@ -88,3 +88,51 @@ No Buster compiler build, SIMD harness runtime, fresh hardware profile,
 self-host fixed point or hosted CI was run for this recovery. Historical
 measurements are not new Zen 4/Zen 5 acceptance. Publish as a draft until the
 current-head applicable checks and opt-in harness compatibility are reviewed.
+
+## Later disposition: SIMD harness removed from main
+
+[Issue 1591](https://github.com/buster14a/buster/issues/1591) removed the
+recovered `tools/bench_pr139_simd/` harness (seven files, 40,207 bytes) from
+the current tree. No build, CMake, CI workflow, release path or registered
+test invoked it. Its exact bytes stay in main history:
+
+- [`ed99d3deca479e9eb2db1331103ddeba734e4fb7`](https://github.com/buster14a/buster/tree/ed99d3deca479e9eb2db1331103ddeba734e4fb7/tools/bench_pr139_simd)
+  is the directory's last change. Its tree,
+  `322158565697bbc79e1329c421b10107553835ed`, is unchanged up to the removal
+  and holds the six recovered files plus the `RECOVERY.md` status note.
+- `f88704caec3c00819510c219d609e34639c3f681` first carried the recovered
+  files on main. Their original source remains
+  `8c3b9944ff0ecee0c25d89b312ca005729f51abb`.
+- [manifest.json](manifest.json) and the recovery audit's
+  [recovered-files.json](../../performance-audits/evidence/2026-09-11T131903Z/recovered-files.json)
+  still record every file's original blob, SHA-256 and length.
+
+To replay the harness, check out `ed99d3de` in an isolated worktree and follow
+its README there. The [recovery audit](../../performance-audits/2026-09-11T131903Z.md)
+check-only commands run from that tree too. Do not copy the harness back into
+the source tree.
+
+The three kernels it isolated keep differential coverage in registered tests.
+None of the harness's timing machinery was promoted, and `./build.sh
+bench_throughput` remains the throughput launcher:
+
+- `c_test_string_literal_decode_differential` (`c_frontend_tests`) holds
+  `c_ir_decode_quoted` and `c_ir_count_quoted` to
+  `c_ir_decode_quoted_reference`, with escapes slid across window boundaries
+  and a grammar fuzz.
+- `c_test_intern_scan_by_shape` (`c_frontend_tests`) holds identifier
+  selection in `c_symbols_intern_tokens` to the scalar definition at every
+  lane of the window.
+- `x86_64_metadata_tests` first checks every decoded metadata blob against
+  the generated accessors (`buster_x86_metadata_test_flat_decode_matches_generated`),
+  through whichever chunk decoder the build selected: AVX-512 VBMI or scalar.
+
+The [September 6 audit](../../performance-audits/2026-09-06T125122Z.md) and
+its [evidence README](../../performance-audits/evidence/2026-09-06T125122Z/README.md)
+each linked the harness by relative path. Those two link targets now point at
+the harness README in `ed99d3de`, and nothing else in either file changed.
+Their current blobs, `77a3eec1d0c06adb9e147cd57e3c423c337d61ab` and
+`034d40b33eb7388e8478b1f29e24e40b198ca9ee`, therefore differ from the
+manifest's `287b7f233c3f8729273d5158044426cfef132e4b` and
+`3315e5035a34b9fee77554219b0de45525701a1f`. Those original bytes remain
+retrievable at `f88704ca`.

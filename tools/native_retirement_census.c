@@ -1214,6 +1214,13 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
                 command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/android/{S8}-linux-android"),
                     settings->project_snapshot, target == 6 ? S8("x86_64") : S8("aarch64"));
             }
+            else if (target == 8 || target == 9)
+            {
+                // Use the same authenticated compatibility input for both
+                // subjects, before the unchanged pinned Darwin headers.
+                command[command_count++] = S8("-isystem");
+                command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/darwin-adapter"), settings->project_snapshot);
+            }
             command[command_count++] = S8("-isystem");
             command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/{S8}"), settings->project_snapshot, sdk);
         }
