@@ -17,6 +17,7 @@ int main(int argc, char** argv)
     BUSTER_UNUSED(bq_retirement_support_projection);
     BUSTER_UNUSED(bq_retirement_correctness_begin_service_built_pinned);
     BUSTER_UNUSED(bq_retirement_reference_policy_import_pinned);
+    BUSTER_UNUSED(bq_retirement_unit_gate_fixture_admit);
     bool population = argc == 12;
     bool ok = argc == 10 || population;
     int descriptors[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};

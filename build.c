@@ -36347,6 +36347,9 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     os_argument_builder_append(&builder, S8("-funsigned-char"));
     os_argument_builder_append(&builder, S8("-Isrc"));
     os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
+    /* The service and its tests.c build as the installed service, which
+     * retirement_unit.c refuses to combine with its test-only gate issuer. */
+    if (service) os_argument_builder_append(&builder, S8("-DBQ_SERVICE_INSTALLED=1"));
     os_argument_builder_append(&builder, (service ? (self_test ? S8("tools/bench_service/tests.c") : S8("tools/bench_service/main.c")) : (self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"))));
     os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
     if (sanitize)

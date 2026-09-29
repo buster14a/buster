@@ -15,7 +15,10 @@
  * translation unit defines BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED, so forged,
  * foreign and stale tokens are exercised against the real issuer check. The
  * host compiler and fixture broker prove mechanics, not trusted Clang
- * provenance or the broker's identity split.
+ * provenance or the broker's identity split. PR 4 (bq_prep_test_unit_ready)
+ * then shows the production gate refusing, writes the ready record through
+ * the test-only admitted gate, replays it and tampers with each bound field,
+ * the directory and the exported reference files.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
@@ -574,6 +577,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle_unreached(void)
         ok = ok && text && bq_read_file(file, (u8*)text, (u32)info.st_size, &length) && length == (u32)info.st_size;
         for (u32 caller = 0; ok && caller < BUSTER_ARRAY_LENGTH(callers); caller += 1)
             ok = strstr(text, callers[caller]) == NULL;
+        /* The service unit never enables the test-only gate issuer. */
+        if (index == 1) ok = ok && strstr(text, "#define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY") == NULL;
         BQ_PREP_CHECK(ok);
         free(text);
         if (file >= 0) close(file);
@@ -584,6 +589,377 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle_unreached(void)
                                  S8("/workspace"), S8("1111111111111111111111111111111111111111"),
                                  S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) ==
                   BQ_BAD_REQUEST);
+}
+
+/* #1020 PR 4: the ready record and the coordinator replay on the finished
+ * oracle attempt. The replay runs with the fixture's profile and broker, the
+ * way the coordinator would with the compiled ones. */
+#define BQ_PREP_READY_CAP 8192u
+
+BUSTER_GLOBAL_LOCAL BqError bq_prep_test_replay(BqPrepOracleFixture* fixture, BqPrepOracleAttempt const* attempt,
+    char const digest[SHA256_HEX_CAPACITY])
+{
+    BqError result = bq_retirement_unit_replay_pinned(attempt->attempt.store, fixture->workspaces_fd,
+        fixture->installed_fd, attempt->attempt.job.id, attempt->attempt.job.token,
+        string_from_pointer(fixture->workspaces), string_from_pointer(fixture->profile), S8("self-test"),
+        fixture->driver, fixture->toolchain_root, fixture->broker, fixture->workspaces, attempt->attempt.digest,
+        digest);
+    return result;
+}
+
+/* Replace the sealed record named by current with bytes under their own
+ * content address, as a writer that controls the record could; digest
+ * receives that address. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_ready_install(int attempt, char digest[SHA256_HEX_CAPACITY], char const* bytes,
+    u32 length)
+{
+    char current[80], name[80];
+    int old_length = snprintf(current, sizeof(current), "ready-%s", digest);
+    bq_digest(bytes, length, (char8*)digest);
+    int new_length = snprintf(name, sizeof(name), "ready-%s", digest);
+    int ready = openat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = old_length > 0 && new_length > 0 && ready >= 0 && fchmod(ready, 0700) == 0 &&
+              unlinkat(ready, current, 0) == 0;
+    int writer = ok ? openat(ready, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+    ok = ok && writer >= 0 && bq_write_all(writer, (u8 const*)bytes, length);
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    ok = ok && fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0;
+    if (ready >= 0) close(ready);
+    return ok;
+}
+
+/* Flip the first byte of the field-th space-separated field after
+ * "\n<key>". */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_ready_tamper(char* bytes, char const* key, u32 field)
+{
+    char pattern[48];
+    int length = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    char* cursor = length > 0 ? strstr(bytes, pattern) : NULL;
+    if (cursor) cursor += length;
+    for (u32 skip = 0; cursor && skip < field; skip += 1)
+    {
+        cursor = strchr(cursor, ' ');
+        if (cursor) cursor += 1;
+    }
+    bool ok = cursor && *cursor && *cursor != '\n';
+    if (ok) *cursor = *cursor == '0' ? '1' : '0';
+    return ok;
+}
+
+/* Replace the field-th field after "\n<key>" with a decimal value. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_ready_set(char* bytes, u32* length, char const* key, u32 field, int value)
+{
+    char pattern[48], text[16];
+    int pattern_length = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    int text_length = snprintf(text, sizeof(text), "%d", value);
+    char* cursor = pattern_length > 0 ? strstr(bytes, pattern) : NULL;
+    if (cursor) cursor += pattern_length;
+    for (u32 skip = 0; cursor && skip < field; skip += 1)
+    {
+        cursor = strchr(cursor, ' ');
+        if (cursor) cursor += 1;
+    }
+    size_t old = cursor ? strcspn(cursor, " \n") : 0;
+    bool ok = cursor && old > 0 && text_length > 0 && *length - old + (u32)text_length < BQ_PREP_READY_CAP;
+    if (ok)
+    {
+        size_t tail = strlen(cursor + old) + 1u;
+        memmove(cursor + text_length, cursor + old, tail);
+        memcpy(cursor, text, (size_t)text_length);
+        *length = *length - (u32)old + (u32)text_length;
+    }
+    return ok;
+}
+
+typedef struct BqPrepReadyTamper
+{
+    char const* key;
+    u32 field;
+    BqError expected;
+} BqPrepReadyTamper;
+
+/* Replace one reference-oracle/ file with bytes (NULL removes it). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_reference_replace(int reference, char const* name, char const* bytes,
+    u32 length, mode_t mode)
+{
+    bool ok = fchmod(reference, 0700) == 0 && (unlinkat(reference, name, 0) == 0 || errno == ENOENT);
+    int writer = ok && bytes ? openat(reference, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    if (bytes) ok = ok && writer >= 0 && bq_write_all(writer, (u8 const*)bytes, length) && fchmod(writer, mode) == 0;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    return fchmod(reference, BQ_RETIREMENT_EXPORT_MODE) == 0 && ok;
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_prep_test_read_at(int directory, char const* name, char* bytes, u32 capacity)
+{
+    int file = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t count = file >= 0 ? read(file, bytes, capacity - 1u) : -1;
+    if (file >= 0) close(file);
+    u32 used = count > 0 ? (u32)count : 0;
+    bytes[used] = 0;
+    return used;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, BqPrepOracleAttempt* success,
+    BqRetirementUnitOracle* oracle)
+{
+    u32 descriptors = bq_prep_test_open_descriptors();
+    BqRetirementUnitPrepared* unit = &success->attempt.unit;
+    BqRetirementProjection* projection = &success->projection;
+    int attempt = success->attempt.attempt, workspaces = fixture->workspaces_fd;
+    struct stat info = {0};
+    char digest[SHA256_HEX_CAPACITY] = {0}, refused[SHA256_HEX_CAPACITY] = {0};
+    char const* reference_path = BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/" BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY;
+
+    /* Design step 9 in production: begin_service fails closed, so the gate
+     * stays unadmitted and step 10 writes nothing and seals nothing. */
+    BqRetirementUnitGate gate = {0};
+    BQ_PREP_CHECK(bq_retirement_unit_gate(projection, oracle, &gate) == BQ_RECIPE_MISMATCH && !gate.issuer &&
+                  !gate.seal_sha256[0]);
+    BqRetirementUnitGate forged = {.issuer = 1};
+    memset(forged.seal_sha256, 'a', 64);
+    BqRetirementUnitGate const* unadmitted[] = {&gate, &forged, NULL};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unadmitted); index += 1)
+        BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, unadmitted[index],
+                      workspaces, refused) == BQ_RECIPE_MISMATCH && !refused[0] &&
+                      fstatat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                      errno == ENOENT && fstatat(attempt, reference_path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                      (info.st_mode & 0777) == 0700);
+
+    /* The test-only admitted gate is the only way to the success path. It
+     * binds this attempt's facts: a changed row or seal is refused. */
+    BQ_PREP_CHECK(bq_retirement_unit_gate_fixture_admit(unit, projection, oracle, &gate) && gate.issuer);
+    forged = gate;
+    forged.seal_sha256[0] = forged.seal_sha256[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &forged, workspaces,
+                  refused) == BQ_RECIPE_MISMATCH);
+    projection->rows[7].configuration_sha256[0] ^= 1;
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, refused) ==
+                  BQ_BAD_REQUEST && fstatat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, &info,
+                                            AT_SYMLINK_NOFOLLOW) != 0);
+    projection->rows[7].configuration_sha256[0] ^= 1;
+
+    /* A reference output changed between the oracle and the writer fails
+     * the authority comparison before retirement-ready/ exists, so the
+     * restored attempt can still write its record. */
+    int reference = openat(attempt, reference_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    char saved[BQ_PREP_READY_CAP], changed[BQ_PREP_READY_CAP];
+    u32 saved_size = reference >= 0 ? bq_prep_test_read_at(reference, "oracle-output-0", saved, sizeof(saved)) : 0;
+    memcpy(changed, saved, saved_size + 1u);
+    if (saved_size) changed[saved_size - 1u] ^= 1;
+    BQ_PREP_CHECK(saved_size > 0 && bq_prep_test_reference_replace(reference, "oracle-output-0", changed, saved_size,
+                                                                   0400));
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, refused) ==
+                  BQ_SOURCE_MISMATCH && !refused[0] &&
+                  fstatat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                  errno == ENOENT);
+    BQ_PREP_CHECK(bq_prep_test_reference_replace(reference, "oracle-output-0", saved, saved_size, 0400));
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, digest) ==
+                  BQ_OK && bq_retirement_hex(string_from_pointer(digest), 64));
+
+    /* One sealed record under its content address; the producer's output is
+     * sealed too. A second record into the attempt is refused. */
+    char name[80], bytes[BQ_PREP_READY_CAP], original[BQ_PREP_READY_CAP], path[160];
+    snprintf(name, sizeof(name), "ready-%s", digest);
+    snprintf(path, sizeof(path), BQ_RETIREMENT_UNIT_READY_DIRECTORY "/%s", name);
+    int ready = openat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    u32 length = ready >= 0 ? bq_prep_test_read_at(ready, name, original, sizeof(original)) : 0;
+    char computed[SHA256_HEX_CAPACITY] = {0};
+    bq_digest(original, length, (char8*)computed);
+    BQ_PREP_CHECK(length > 0 && !strcmp(computed, digest) && !strncmp(original, "BQ-RETIREMENT-READY-V1\n", 23) &&
+                  strstr(original, "\nobserved-rows=2\n") && strstr(original, "\ngate=admitted ") &&
+                  fstat(ready, &info) == 0 && (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE &&
+                  fstatat(attempt, path, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
+                  (info.st_mode & 07777) == 0400 && info.st_nlink == 1 &&
+                  fstatat(attempt, reference_path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE);
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, refused) ==
+                  BQ_WORKSPACE_MISMATCH && !refused[0]);
+
+    /* The coordinator's replay re-derives the same record. The blocked
+     * profile, another token, a wrong A digest and a wrong record digest
+     * fail closed, and nothing leaks. */
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    BQ_PREP_CHECK(bq_retirement_unit_replay(success->attempt.store, workspaces, fixture->installed_fd,
+                  success->attempt.job.id, success->attempt.job.token, success->attempt.digest, digest) ==
+                  BQ_RECIPE_MISMATCH);
+    BQ_PREP_CHECK(bq_retirement_unit_replay_pinned(success->attempt.store, workspaces, fixture->installed_fd,
+                  success->attempt.job.id, success->attempt.job.token + 1u, string_from_pointer(fixture->workspaces),
+                  string_from_pointer(fixture->profile), S8("self-test"), fixture->driver, fixture->toolchain_root,
+                  fixture->broker, fixture->workspaces, success->attempt.digest, digest) != BQ_OK);
+    char wrong[SHA256_HEX_CAPACITY];
+    memcpy(wrong, success->attempt.digest, sizeof(wrong));
+    wrong[0] = wrong[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_retirement_unit_replay_pinned(success->attempt.store, workspaces, fixture->installed_fd,
+                  success->attempt.job.id, success->attempt.job.token, string_from_pointer(fixture->workspaces),
+                  string_from_pointer(fixture->profile), S8("self-test"), fixture->driver, fixture->toolchain_root,
+                  fixture->broker, fixture->workspaces, wrong, digest) != BQ_OK);
+    memcpy(wrong, digest, sizeof(wrong));
+    wrong[0] = wrong[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, wrong) == BQ_WORKSPACE_MISMATCH);
+
+    /* Every bound field, tampered and re-addressed so that only the replay's
+     * own recomputation can catch it, each with the error of the check that
+     * must catch it; the original is restored and replayed after each. A
+     * header field or row value the replay recomputes fails the final
+     * comparison (BQ_CORRUPT); a build digest fails its re-import; a
+     * descriptor number or command digest fails the rebuilt command
+     * (BQ_SOURCE_MISMATCH); the gate seal fails its verifier. */
+    static BqPrepReadyTamper const tampers[] = {
+        {"job=", 0, BQ_CORRUPT}, {"attempt=", 0, BQ_CORRUPT}, {"attempt-identity=", 0, BQ_CORRUPT},
+        {"request=", 0, BQ_CORRUPT}, {"preparation=", 0, BQ_CORRUPT}, {"binaries=", 0, BQ_CORRUPT},
+        {"matched-builds=", 0, BQ_CORRUPT}, {"binary-base=", 0, BQ_CORRUPT}, {"binary-candidate=", 0, BQ_CORRUPT},
+        {"support=", 0, BQ_CORRUPT}, {"census=", 0, BQ_CORRUPT}, {"population=", 0, BQ_CORRUPT},
+        {"rows=", 0, BQ_CORRUPT}, {"object-rows=", 0, BQ_CORRUPT}, {"native-target=", 0, BQ_CORRUPT},
+        {"evidence=", 0, BQ_CORRUPT}, {"template=", 0, BQ_CORRUPT}, {"inventory=", 0, BQ_CORRUPT},
+        {"oracle-attempt=", 0, BQ_CORRUPT}, {"oracle-observed=", 0, BQ_CORRUPT}, {"observed-rows=", 0, BQ_CORRUPT},
+        {"observed=", 0, BQ_CORRUPT}, {"observed=", 1, BQ_CORRUPT}, {"observed=", 2, BQ_CORRUPT},
+        {"observed=", 3, BQ_CORRUPT}, {"observed=", 4, BQ_SOURCE_MISMATCH}, {"observed=", 5, BQ_SOURCE_MISMATCH},
+        {"observed=", 6, BQ_CORRUPT}, {"observed=", 7, BQ_CORRUPT}, {"observed=", 8, BQ_CORRUPT},
+        {"observed=", 9, BQ_SOURCE_MISMATCH}, {"observed=", 10, BQ_CORRUPT}, {"gate=", 0, BQ_CORRUPT},
+        {"gate=", 1, BQ_RECIPE_MISMATCH},
+        /* Special cases: key NULL, field selects it. */
+        {NULL, 0, BQ_CORRUPT}, {NULL, 1, BQ_CORRUPT}, {NULL, 2, BQ_CORRUPT}, {NULL, 3, BQ_SOURCE_MISMATCH},
+        {NULL, 4, BQ_SOURCE_MISMATCH}};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(tampers); index += 1)
+    {
+        BqPrepReadyTamper const* tamper = tampers + index;
+        memcpy(bytes, original, length + 1u);
+        u32 changed_length = length;
+        bool tampered = true;
+        if (tamper->key) tampered = bq_prep_test_ready_tamper(bytes, tamper->key, tamper->field);
+        else if (tamper->field == 0)
+        {
+            /* The two observed rows, reordered. */
+            char* first = strstr(bytes, "\nobserved=0 ") + 1;
+            char* second = strstr(bytes, "\nobserved=1 ") + 1;
+            char* end = strchr(second, '\n') + 1;
+            char swapped[BQ_PREP_READY_CAP];
+            size_t head = (size_t)(second - first), tail = (size_t)(end - second);
+            memcpy(swapped, second, tail);
+            memcpy(swapped + tail, first, head);
+            memcpy(first, swapped, head + tail);
+        }
+        else if (tamper->field == 1)
+        {
+            memcpy(bytes + length, "extra=1\n", 9);
+            changed_length = length + 8u;
+        }
+        else if (tamper->field == 2) bytes[0] = 'X';
+        else
+        {
+            /* Row 0's binary or working-directory descriptor moved to
+             * another valid canonical number that is not the other one. */
+            int number[2] = {oracle->descriptors[0], oracle->descriptors[1]};
+            u32 moved = tamper->field - 3u;
+            int value = number[moved] + 1 == number[1u - moved] ? number[moved] + 2 : number[moved] + 1;
+            tampered = bq_prep_test_ready_set(bytes, &changed_length, "observed=", 4u + moved, value);
+        }
+        BQ_PREP_CHECK(tampered && bq_prep_test_ready_install(attempt, digest, bytes, changed_length));
+        BqError result = bq_prep_test_replay(fixture, success, digest);
+        if (result != tamper->expected)
+            fprintf(stderr, "RETIREMENT_PREP ready tamper case %u returned %d\n", index, (int)result);
+        BQ_PREP_CHECK(result == tamper->expected);
+        BQ_PREP_CHECK(bq_prep_test_ready_install(attempt, digest, original, length) &&
+                      bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    }
+
+    /* A consistent forgery: row 0's binary descriptor moved, and its
+     * command, the observation chain, the oracle attempt and the fixture gate
+     * seal all recomputed with the unit's own functions. The test build's
+     * replay accepts it: only the authenticated record digest and the future
+     * #509 gate anchor the record. */
+    int forged_descriptors[2u * BQ_PREP_ORACLE_REFERENCES];
+    memcpy(forged_descriptors, oracle->descriptors, sizeof(forged_descriptors));
+    forged_descriptors[0] += forged_descriptors[0] + 1 == forged_descriptors[1] ? 2 : 1;
+    BqRetirementOracleReference forged_references[BQ_PREP_ORACLE_REFERENCES];
+    char forged_outputs[BQ_PREP_ORACLE_REFERENCES][SHA256_HEX_CAPACITY];
+    BqRetirementProjection copy = *projection;
+    copy.rows = malloc((size_t)projection->prepared.rows * sizeof(*copy.rows));
+    for (u32 index = 0; copy.rows && index < projection->prepared.rows; index += 1)
+    {
+        copy.rows[index] = projection->rows[index];
+        memset(copy.rows[index].independent_oracle_sha256, 0, SHA256_HEX_CAPACITY);
+    }
+    BqRetirementOracleAuthority forged_authority = {0};
+    BqRetirementUnitReadyFacts facts = {.job = &unit->job, .projection = &copy, .authority = &forged_authority,
+        .descriptors = forged_descriptors, .binary_record_sha256 = success->built.binary_record_sha256,
+        .build_record_sha256 = success->built.build_record_sha256,
+        .template_sha256 = unit->policy.template_sha256, .inventory_sha256 = unit->policy.inventory_sha256};
+    u32 forged_length = 0;
+    BQ_PREP_CHECK(copy.rows && bq_retirement_unit_reference_observe(reference, unit, forged_descriptors,
+                      forged_references, forged_outputs) &&
+                  bq_retirement_unit_replay_authority(unit, &copy, forged_references, forged_outputs,
+                                                      &forged_authority) &&
+                  strcmp(forged_authority.attempt_sha256, oracle->attempt_sha256) &&
+                  bq_retirement_unit_attempt_sha(&unit->job, facts.attempt_sha256) &&
+                  bq_retirement_unit_gate_fixture_seal(&facts, facts.gate_sha256) &&
+                  bq_retirement_unit_ready_format(&facts, bytes, sizeof(bytes), &forged_length) &&
+                  bq_prep_test_ready_install(attempt, digest, bytes, forged_length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    free(copy.rows);
+    BQ_PREP_CHECK(bq_prep_test_ready_install(attempt, digest, original, length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+
+    /* A crash between the temporary and the link leaves only the temporary
+     * in an unsealed directory; one after the link, two links. Both fail,
+     * and the unit refuses to write into the leftover directory. */
+    char partial[48];
+    BQ_PREP_CHECK(bq_record_name(partial, "ready-partial", success->attempt.job.id));
+    BQ_PREP_CHECK(ready >= 0 && fchmod(ready, 0700) == 0 && renameat(ready, name, ready, partial) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, refused) ==
+                  BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(linkat(ready, partial, ready, name, 0) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(unlinkat(ready, partial, 0) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0 && bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+
+    /* An extra entry, a symlinked record and a writable record. */
+    BQ_PREP_CHECK(fchmod(ready, 0700) == 0 && symlinkat(name, ready, "planted") == 0 &&
+                  fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(fchmod(ready, 0700) == 0 && unlinkat(ready, "planted", 0) == 0 &&
+                  renameat(ready, name, attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/ready-copy") == 0 &&
+                  symlinkat("../" BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/ready-copy", ready, name) == 0 &&
+                  fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(fchmod(ready, 0700) == 0 && unlinkat(ready, name, 0) == 0 &&
+                  renameat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/ready-copy", ready, name) == 0 &&
+                  fchmodat(ready, name, 0600, 0) == 0 && fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0);
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(fchmod(ready, 0700) == 0 && fchmodat(ready, name, 0400, 0) == 0 &&
+                  fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0 && bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+
+    /* The exported artifacts: an unsealed or extended reference directory,
+     * a missing output, a changed output, receipt or log. */
+    BQ_PREP_CHECK(reference >= 0 && fchmod(reference, 0700) == 0 && bq_prep_test_replay(fixture, success, digest) ==
+                  BQ_SOURCE_MISMATCH && fchmod(reference, BQ_RETIREMENT_EXPORT_MODE) == 0);
+    BQ_PREP_CHECK(bq_prep_test_reference_replace(reference, "planted", "x", 1, 0400) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_SOURCE_MISMATCH &&
+                  bq_prep_test_reference_replace(reference, "planted", NULL, 0, 0));
+    /* A missing file breaks the closure, a changed receipt or log its
+     * rebuilt receipt; a changed output rebuilds another oracle attempt,
+     * which the gate seal no longer admits. */
+    char const* artifacts[] = {"oracle-output-1", "oracle-output-0", "reference-receipt-00000001",
+                               "reference-log-00000000"};
+    BqError const expected[] = {BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(artifacts); index += 1)
+    {
+        u32 size = reference >= 0 ? bq_prep_test_read_at(reference, artifacts[index], saved, sizeof(saved)) : 0;
+        /* A compiler log may be empty: then the change is one added byte. */
+        memcpy(changed, size ? saved : "x", size ? size + 1u : 2u);
+        if (size) changed[size - 1u] ^= 1;
+        BQ_PREP_CHECK(bq_prep_test_reference_replace(reference, artifacts[index], index ? changed : NULL,
+                                                     size ? size : 1u, 0400));
+        BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == expected[index]);
+        BQ_PREP_CHECK(bq_prep_test_reference_replace(reference, artifacts[index], saved, size, 0400) &&
+                      bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    }
+    BQ_PREP_CHECK(bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    if (reference >= 0) close(reference);
+    if (ready >= 0) close(ready);
+    BQ_PREP_CHECK(bq_prep_test_open_descriptors() == descriptors && bq_prep_test_live_children() == 0);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
@@ -750,6 +1126,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                       &oracle) == BQ_BAD_REQUEST && oracle.owned);
         BQ_PREP_CHECK(bq_retirement_unit_oracle_pinned(unit, projection, workspaces, profile, cancel[0], generous,
                       &again) != BQ_OK && !again.owned);
+        /* Design steps 9 and 10, then the coordinator replay. */
+        bq_prep_test_unit_ready(fixture, success, &oracle);
         BQ_PREP_CHECK(bq_retirement_unit_oracle_release(&oracle) && !oracle.owned && !oracle.references);
         BQ_PREP_CHECK(bq_prep_test_live_children() == 0);
 

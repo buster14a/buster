@@ -5445,6 +5445,53 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 #endif
 
+#ifdef __linux__
+/* #1020 PR 4 in the service's own build (BQ_SERVICE_INSTALLED, without
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY): no gate issuer is compiled in, so the
+ * verifier refuses a well-formed seal over well-formed facts, and the ready
+ * writer refuses an issuer-marked gate before any attempt I/O. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
+{
+#if !defined(BQ_SERVICE_INSTALLED) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+    BQ_CHECK(!"the service tests must build as the installed service");
+#endif
+    BqJob job = {.id = 1, .token = 2};
+    String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("ready-refused"),
+        S8("fake-success-v1"), S8("1111111111111111111111111111111111111111"),
+        S8("2222222222222222222222222222222222222222")};
+    BQ_CHECK(bq_request_make(fields, &job.request) == BQ_OK);
+    bq_request_digest(&job.request, job.digest);
+    BqRetirementProjection projection = {.owned = 1, .job_id = 1, .attempt_token = 2};
+    BqRetirementUnitOracle oracle = {.owned = 1};
+    memset(projection.prepared.preparation_sha256, 'a', 64);
+    memset(projection.population_sha256, 'b', 64);
+    memset(oracle.authority.attempt_sha256, 'c', 64);
+    BqRetirementUnitReadyFacts facts = {.job = &job, .projection = &projection, .authority = &oracle.authority};
+    BqRetirementUnitGate gate = {.issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED};
+    memset(gate.seal_sha256, 'd', 64);
+    BQ_CHECK(bq_retirement_unit_attempt_sha(&job, facts.attempt_sha256) &&
+             bq_retirement_hex(string_from_pointer(facts.attempt_sha256), 64) &&
+             !bq_retirement_unit_gate_sealed(gate.seal_sha256, &facts));
+    char root[] = "/tmp/bq-ready-refused-XXXXXX";
+    char attempt[64];
+    bool made = mkdtemp(root) != NULL;
+    BQ_CHECK(made && bq_workspace_name(attempt, job.id, job.token));
+    int workspaces = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_CHECK(workspaces >= 0 && mkdirat(workspaces, attempt, 0700) == 0);
+    BqRetirementUnitPrepared prepared = {.job = job, .owned = 1, .policy = {.clang = -1, .inventory = -1}};
+    BqRetirementUnitBuilt built = {.owned = 1};
+    char digest[SHA256_HEX_CAPACITY] = "unchanged";
+    struct stat info = {0};
+    char path[128];
+    snprintf(path, sizeof(path), "%s/" BQ_RETIREMENT_UNIT_READY_DIRECTORY, attempt);
+    BQ_CHECK(bq_retirement_unit_ready(&prepared, &built, &projection, &oracle, &gate, workspaces, digest) ==
+             BQ_RECIPE_MISMATCH && !digest[0] && fstatat(workspaces, path, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+             errno == ENOENT);
+    BQ_CHECK(workspaces < 0 || (unlinkat(workspaces, attempt, AT_REMOVEDIR) == 0 && close(workspaces) == 0));
+    BQ_CHECK(!made || rmdir(root) == 0);
+}
+#endif
+
 #include "export_tests.c"
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
@@ -5497,6 +5544,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
 #endif
     bq_test_transport_boundaries();
+    bq_test_retirement_ready_refused();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff(false);
     bq_test_worker_lease_handoff(true);
