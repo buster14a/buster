@@ -160,6 +160,13 @@ typedef enum ObjectRelocationKind
     // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
     // instruction begins four bytes before its relocated field.
     OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
+    // R_AARCH64_ADR_GOT_PAGE and R_AARCH64_LD64_GOT_LO12_NC: an ADRP of the
+    // page holding the symbol's GOT slot and the 64-bit LDR of that slot.
+    // LLVM reaches every extern-weak symbol this way, even under -fno-pic.
+    // The reader keeps the LDR with a zero offset; object_aarch64_elf_page_relocate
+    // resolves the pair by relaxation to ADRP/ADD of the symbol itself.
+    OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -168,6 +175,10 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
+
+// The four AArch64 ELF page-address kinds object_aarch64_elf_page_relocate
+// accepts: the direct ADRP/ADD pair and the GOT ADRP/LDR pair.
+BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the
