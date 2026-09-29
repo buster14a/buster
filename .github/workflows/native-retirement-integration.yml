@@ -201,10 +201,18 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare pinned closure with trusted main tools
         run: |
           python3 trusted/tools/native_retirement_sdks.py \
-            --source-root "$GITHUB_WORKSPACE/integration"
+            --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -334,9 +342,17 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct independently with trusted tools
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -474,9 +490,17 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct and compare without running candidate code
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
