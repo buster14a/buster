@@ -1,0 +1,69 @@
+name: Refresh 1793 binding pin
+
+on:
+  push:
+    branches:
+      - fix/1793-wasm-integer-exit
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-1793-binding-pin
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Refresh validator pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          old = "2d3c97e5f31b6af5dc5cdfe7a956b7ea7910fd61a5c71ebab7be29e725ec4d95"
+          validator = Path("tools/native_retirement_performance_binding.py")
+          new = sha256(validator.read_bytes()).hexdigest()
+          if new == old:
+              raise SystemExit("binding validator digest unexpectedly unchanged")
+
+          for path in (
+              "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
+              "tools/bench_service/queue.c",
+          ):
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: expected one stale binding pin, found {text.count(old)}")
+              file.write_text(text.replace(old, new), encoding="utf-8")
+
+          profile = Path("tools/bench_service/profiles/native-retirement-performance-v1.blocked").read_text(encoding="utf-8")
+          if f"binding-validator-sha256={new}" not in profile:
+              raise SystemExit("blocked profile did not receive exact validator digest")
+          queue = Path("tools/bench_service/queue.c").read_text(encoding="utf-8")
+          if f"binding-validator-sha256={new}\\n" not in queue:
+              raise SystemExit("embedded blocked profile did not receive exact validator digest")
+          print(f"binding-validator-sha256={new}")
+          PY
+
+          git diff --check
+          python3 tools/native_retirement_performance_identity_test.py
+
+      - name: Commit reviewed pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tools/bench_service/profiles/native-retirement-performance-v1.blocked tools/bench_service/queue.c
+          git commit -m "ci: refresh native-retirement binding pin"
+          git push origin HEAD:fix/1793-wasm-integer-exit
