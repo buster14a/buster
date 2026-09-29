@@ -483,6 +483,349 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_response_file_write(Arena* arena, String8 root, String8 name, String8 content, String8* argument)
+{
+    String8 path = string_format_z(arena, S8("{S8}/{S8}"), root, name);
+    *argument = string_format_z(arena, S8("@{S8}"), path);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_response_file_change_directory(String8 path)
+{
+#if BUSTER_WINDOWS
+    TemporalArena scratch = scratch_begin(0, 0);
+    String16 wide_path = string16_from_string8(scratch.arena, path, true);
+    bool result = SetCurrentDirectoryW(wide_path.pointer) != 0;
+    scratch_end(scratch);
+    return result;
+#else
+    BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
+    return chdir((const char*)path.pointer) == 0;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL ProcessWaitResult compiler_driver_test_response_file_run(Arena* arena, SliceString8 command)
+{
+    ProcessWaitResult result = {.result = PROCESS_RESULT_FAILED};
+    ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
+                                                  (ProcessSpawnOptions){
+                                                      .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                      .use_process_environment = 1, .search_path = 1,
+                                                  });
+    if (spawned.handle)
+    {
+        result = os_process_wait_deadline(arena, spawned, 60000000);
+    }
+    return result;
+}
+#endif
+
+// `@path` expansion in compiler_driver_parse_arguments: GNU quoting and
+// escapes, empty files, unreadable files, the byte and argument bounds,
+// malformed text and the refused nesting. Parsing records inputs without
+// opening them, so expanded arguments are observed as input paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // The bound checks parse 65536 inputs; keep them out of the fixture arena.
+    Arena* arena = arena_create((ArenaCreation){0});
+    String8 root = arena ? buster_test_temporary_path(arena, S8("buster-response-file-arguments"), S8("")) : (String8){0};
+    bool ready = root.length && os_make_directory_attempt(root);
+    BUSTER_TEST(arguments, ready);
+    if (ready)
+    {
+        String8 quoting_argument = {0};
+        String8 quoting = S8("plain \"double quoted\" 'single quoted' mixed\"quoted part\"tail \\\"escaped\\ space\\\" 'it\\'s' \"a\\\\b\" \"\" ''\n"
+                             "\ttab-separated\r\n'line one\nline two' x@y last-without-newline");
+        String8 expected[] = {
+            S8("first.c"), S8("plain"), S8("double quoted"), S8("single quoted"), S8("mixedquoted parttail"), S8("\"escaped space\""),
+            S8("it's"), S8("a\\b"), S8(""), S8(""), S8("tab-separated"), S8("line one\nline two"), S8("x@y"), S8("last-without-newline"),
+            S8("last.c"),
+        };
+        if (BUSTER_REQUIRE(arguments, compiler_driver_test_response_file_write(arena, root, S8("quoting.rsp"), quoting, &quoting_argument)))
+        {
+            String8 command[] = {S8("-fsyntax-only"), S8("first.c"), quoting_argument, S8("last.c")};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+            if (BUSTER_REQUIRE(arguments, parsed.input_count == BUSTER_ARRAY_LENGTH(expected)))
+            {
+                u32 terminated = 0;
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                {
+                    BUSTER_STRING_TEST(arguments, parsed.input_paths[index], expected[index]);
+                    terminated += (u32)(parsed.input_paths[index].pointer[parsed.input_paths[index].length] == 0);
+                }
+                // Expanded arguments are NUL-terminated like argv entries.
+                BUSTER_TEST(arguments, terminated == BUSTER_ARRAY_LENGTH(expected));
+            }
+        }
+
+        // Options read from a file act as if typed in its place; after `--`
+        // the same arguments are inputs, because expansion precedes parsing.
+        String8 options_argument = {0};
+        if (BUSTER_REQUIRE(arguments, compiler_driver_test_response_file_write(arena, root, S8("options.rsp"),
+                                                                                S8("-c -DRESPONSE_VALUE=\"two words\" -o 'out file.o' source.c\n"),
+                                                                                &options_argument)))
+        {
+            String8 command[] = {options_argument};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+            BUSTER_TEST(arguments, parsed.action == COMPILER_DRIVER_ACTION_OBJECT);
+            BUSTER_STRING_TEST(arguments, parsed.output_path, S8("out file.o"));
+            if (BUSTER_REQUIRE(arguments, parsed.macro_operation_count == 1 && parsed.input_count == 1))
+            {
+                BUSTER_STRING_TEST(arguments, parsed.macro_operations[0].operand, S8("RESPONSE_VALUE=two words"));
+                BUSTER_STRING_TEST(arguments, parsed.input_paths[0], S8("source.c"));
+            }
+            String8 ended[] = {S8("--"), options_argument};
+            CompilerDriverInvocation inputs = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ended));
+            BUSTER_TEST(arguments, inputs.error == COMPILER_DRIVER_ERROR_NONE && inputs.action == COMPILER_DRIVER_ACTION_LINK && inputs.input_count == 5);
+        }
+
+        // Empty and whitespace-only files contribute no arguments, and an
+        // argv without a leading '@' is used as given.
+        String8 empty_argument = {0};
+        String8 blank_argument = {0};
+        bool empty_written = compiler_driver_test_response_file_write(arena, root, S8("empty.rsp"), S8(""), &empty_argument) &&
+                             compiler_driver_test_response_file_write(arena, root, S8("blank.rsp"), S8(" \n\t\r\n\v\f"), &blank_argument);
+        if (BUSTER_REQUIRE(arguments, empty_written))
+        {
+            String8 command[] = {S8("-fsyntax-only"), empty_argument, S8("only.c"), blank_argument};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+            BUSTER_TEST(arguments, parsed.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY && parsed.input_count == 1 &&
+                                       string_equal(parsed.input_paths[0], S8("only.c")));
+            String8 only_empty[] = {empty_argument};
+            CompilerDriverInvocation nothing = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(only_empty));
+            BUSTER_TEST(arguments, nothing.error == COMPILER_DRIVER_ERROR_ARGUMENT && string_equal(nothing.diagnostic, S8("no input files")));
+        }
+        String8 plain[] = {S8("-fsyntax-only"), S8("a@b.c")};
+        CompilerDriverInvocation unexpanded = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(plain));
+        BUSTER_TEST(arguments, unexpanded.error == COMPILER_DRIVER_ERROR_NONE && unexpanded.input_count == 1 &&
+                                   unexpanded.input_paths[0].pointer == plain[1].pointer);
+
+        // An unreadable response file is a structured driver.file-read error.
+        String8 missing_path = string_format_z(arena, S8("{S8}/missing.rsp"), root);
+        String8 missing_argument = string_format_z(arena, S8("@{S8}"), missing_path);
+        String8 missing[] = {S8("-c"), missing_argument};
+        CompilerDriverInvocation unreadable = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing));
+        BUSTER_TEST(arguments, unreadable.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        BUSTER_STRING_TEST(arguments, unreadable.diagnostic, string_format(arena, S8("could not read response file {S8}"), missing_path));
+        CompilerDriverResult executed = compiler_driver_execute_invocation(arena, unreadable);
+        BUSTER_TEST(arguments, executed.error == COMPILER_DRIVER_ERROR_FILE_READ && !executed.has_object);
+        if (BUSTER_REQUIRE(arguments, executed.diagnostic_count == 1))
+        {
+            BUSTER_STRING_TEST(arguments, executed.diagnostics[0].code, S8("driver.file-read"));
+            BUSTER_STRING_TEST(arguments, executed.diagnostics[0].message, unreadable.diagnostic);
+        }
+        String8 directory[] = {string_format_z(arena, S8("@{S8}"), root)};
+        CompilerDriverInvocation not_a_file = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(directory));
+        BUSTER_TEST(arguments, not_a_file.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        String8 bare[] = {S8("-c"), S8("@")};
+        CompilerDriverInvocation unnamed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bare));
+        BUSTER_TEST(arguments, unnamed.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                   string_equal(unnamed.diagnostic, S8("expected a response file path after @")));
+
+        // Malformed text and nesting are refused, naming the file.
+        typedef struct CompilerDriverTestResponseFileRejection CompilerDriverTestResponseFileRejection;
+        struct CompilerDriverTestResponseFileRejection
+        {
+            String8 content;
+            String8 diagnostic;
+        };
+        CompilerDriverTestResponseFileRejection rejections[] = {
+            {S8("a.c \"open"), S8("ends inside a quoted argument")},
+            {S8("a.c 'open"), S8("ends inside a quoted argument")},
+            {S8("a.c\\"), S8("ends with an unfinished backslash escape")},
+            {S8("a.c\0b.c"), S8("contains a NUL byte")},
+            {S8("a.c @nested.rsp"), S8("nested response files are not supported")},
+            {S8("a.c \"@quoted.rsp\""), S8("nested response files are not supported")},
+            {S8("a.c \\@escaped.rsp"), S8("nested response files are not supported")},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejections); index += 1)
+        {
+            String8 argument = {0};
+            String8 name = string_format(arena, S8("rejected-{u32}.rsp"), index);
+            if (BUSTER_REQUIRE(arguments, compiler_driver_test_response_file_write(arena, root, name, rejections[index].content, &argument)))
+            {
+                String8 command[] = {S8("-c"), argument};
+                CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_ARGUMENT && !parsed.input_count &&
+                                               string_first_sequence(parsed.diagnostic, rejections[index].diagnostic) != BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(parsed.diagnostic, string_slice(argument, 1, argument.length)) != BUSTER_STRING_NO_MATCH,
+                                parsed.diagnostic);
+            }
+        }
+
+        // The byte bound covers every response file of one invocation; the
+        // argument bound covers the whole expanded command line.
+        u64 byte_limit = COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT;
+        u64 argument_limit = COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT;
+        char8* spaces = arena_allocate(arena, char8, byte_limit + 1);
+        memset(spaces, ' ', byte_limit + 1);
+        char8* lines = arena_allocate(arena, char8, argument_limit * 2);
+        for (u64 index = 0; index < argument_limit; index += 1)
+        {
+            lines[index * 2] = 'a';
+            lines[index * 2 + 1] = '\n';
+        }
+        String8 exact_argument = {0};
+        String8 over_argument = {0};
+        String8 one_argument = {0};
+        String8 count_argument = {0};
+        bool bounds_written =
+            compiler_driver_test_response_file_write(arena, root, S8("exact.rsp"), (String8){.pointer = spaces, .length = byte_limit}, &exact_argument) &&
+            compiler_driver_test_response_file_write(arena, root, S8("over.rsp"), (String8){.pointer = spaces, .length = byte_limit + 1}, &over_argument) &&
+            compiler_driver_test_response_file_write(arena, root, S8("one.rsp"), S8("x.c"), &one_argument) &&
+            compiler_driver_test_response_file_write(arena, root, S8("count.rsp"), (String8){.pointer = lines, .length = argument_limit * 2},
+                                                     &count_argument);
+        if (BUSTER_REQUIRE(arguments, bounds_written))
+        {
+            String8 exact[] = {S8("-fsyntax-only"), S8("x.c"), exact_argument};
+            CompilerDriverInvocation at_limit = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
+            BUSTER_TEST_RAW(arguments, at_limit.error == COMPILER_DRIVER_ERROR_NONE && at_limit.input_count == 1, at_limit.diagnostic);
+            String8 byte_diagnostic = string_format(arena, S8("{u64}-byte limit at "), byte_limit);
+            String8 argument_diagnostic = string_format(arena, S8("past {u64} arguments at "), argument_limit);
+            String8 over[] = {S8("-fsyntax-only"), S8("x.c"), over_argument};
+            CompilerDriverInvocation oversized = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(over));
+            BUSTER_TEST_RAW(arguments, oversized.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                           string_first_sequence(oversized.diagnostic, byte_diagnostic) != BUSTER_STRING_NO_MATCH,
+                            oversized.diagnostic);
+            String8 combined[] = {S8("-fsyntax-only"), exact_argument, one_argument};
+            CompilerDriverInvocation aggregate = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(combined));
+            BUSTER_TEST_RAW(arguments, aggregate.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                           string_first_sequence(aggregate.diagnostic, byte_diagnostic) != BUSTER_STRING_NO_MATCH,
+                            aggregate.diagnostic);
+            String8 counted[] = {count_argument};
+            CompilerDriverInvocation most = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(counted));
+            BUSTER_TEST_RAW(arguments, most.error == COMPILER_DRIVER_ERROR_NONE && most.input_count == argument_limit, most.diagnostic);
+            String8 past[] = {S8("x.c"), count_argument};
+            CompilerDriverInvocation too_many = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(past));
+            BUSTER_TEST_RAW(arguments, too_many.error == COMPILER_DRIVER_ERROR_ARGUMENT && !too_many.input_count &&
+                                           string_first_sequence(too_many.diagnostic, argument_diagnostic) != BUSTER_STRING_NO_MATCH,
+                            too_many.diagnostic);
+        }
+    }
+    if (root.length)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    if (arena)
+    {
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Contract amendment A1 of #881 compiles each ~400-input batch in one
+// `ide cc -c` whose input list arrives as a response file. The same inputs on
+// the command line and through `@file` must write identical objects; 64
+// inputs keep the fixture cheap on slow CI hosts (argument-count and byte
+// limits are covered by compiler_driver_test_response_file_arguments). The run
+// happens in a private work directory because -c writes each object there by
+// basename. An unreadable response file fails the process with a driver error.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_batch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    enum
+    {
+        RESPONSE_FILE_BATCH_INPUTS = 64,
+        RESPONSE_FILE_BATCH_PREFIX = 3,
+    };
+    Arena* arena = arguments->arena;
+    String8 compiler = program_state->input.arguments.pointer[0];
+    // The child runs in the work directory; a bare name still resolves in PATH.
+    if (string_first_code_unit(compiler, '/') != BUSTER_STRING_NO_MATCH || string_first_code_unit(compiler, '\\') != BUSTER_STRING_NO_MATCH)
+    {
+        compiler = os_path_absolute(arena, compiler, true);
+    }
+    String8 root = buster_test_temporary_path(arena, S8("buster-response-file-batch"), S8(""));
+    String8 root_absolute = root.length && os_make_directory_attempt(root) ? os_path_absolute(arena, root, true) : (String8){0};
+    String8 original_directory = os_path_absolute(arena, S8("."), true);
+    if (BUSTER_REQUIRE(arguments, compiler.length && root_absolute.length && original_directory.length))
+    {
+        String8 missing_path = string_format_z(arena, S8("{S8}/missing.rsp"), root_absolute);
+        String8 missing[] = {compiler, S8("cc"), S8("-c"), string_format_z(arena, S8("@{S8}"), missing_path)};
+        ProcessWaitResult refused = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing));
+        String8 refused_error = BYTE_SLICE_TO_STRING(8, refused.streams[STANDARD_STREAM_ERROR]);
+        BUSTER_TEST(arguments, !refused.timed_out && refused.result != PROCESS_RESULT_SUCCESS);
+        BUSTER_TEST(arguments, refused.streams[STANDARD_STREAM_OUTPUT].length == 0);
+        BUSTER_STRING_TEST(arguments, refused_error, string_format(arena, S8("cc: error: could not read response file {S8}\n"), missing_path));
+
+        String8 input_directory = string_format_z(arena, S8("{S8}/inputs"), root_absolute);
+        String8 work_directory = string_format_z(arena, S8("{S8}/work"), root_absolute);
+        String8 response_path = string_format_z(arena, S8("{S8}/batch.rsp"), root_absolute);
+        String8* command = arena_allocate(arena, String8, RESPONSE_FILE_BATCH_PREFIX + RESPONSE_FILE_BATCH_INPUTS);
+        String8* lines = arena_allocate(arena, String8, RESPONSE_FILE_BATCH_INPUTS);
+        String8* objects = arena_allocate(arena, String8, RESPONSE_FILE_BATCH_INPUTS);
+        ByteSlice* expected = arena_allocate(arena, ByteSlice, RESPONSE_FILE_BATCH_INPUTS);
+        command[0] = compiler;
+        command[1] = S8("cc");
+        command[2] = S8("-c");
+        bool written = os_make_directory_attempt(input_directory) && os_make_directory_attempt(work_directory);
+        for (u32 index = 0; index < RESPONSE_FILE_BATCH_INPUTS && written; index += 1)
+        {
+            String8 source = string_format_z(arena, S8("{S8}/input-{u32}.c"), input_directory, index);
+            String8 text = string_format(arena, S8("int response_file_input_{u32}(int value) {{ return value * {u32} + {u32}; }}\n"), index, index,
+                                         RESPONSE_FILE_BATCH_INPUTS - index);
+            written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text));
+            // Relative to the work directory, where both runs execute.
+            command[RESPONSE_FILE_BATCH_PREFIX + index] = string_format_z(arena, S8("../inputs/input-{u32}.c"), index);
+            lines[index] = string_format(arena, S8("{S8}\n"), command[RESPONSE_FILE_BATCH_PREFIX + index]);
+            objects[index] = string_format_z(arena, S8("{S8}/input-{u32}.o"), work_directory, index);
+        }
+        String8 response = written ? string_join_arena(arena, (SliceString8){.pointer = lines, .length = RESPONSE_FILE_BATCH_INPUTS}, false)
+                                   : (String8){0};
+        written = written && file_write(response_path, BUSTER_SLICE_TO_BYTE_SLICE(response));
+        BUSTER_TEST(arguments, written);
+        bool changed = written && compiler_driver_test_response_file_change_directory(work_directory);
+        BUSTER_TEST(arguments, changed);
+        if (changed)
+        {
+            ProcessWaitResult direct = compiler_driver_test_response_file_run(
+                arena, (SliceString8){.pointer = command, .length = RESPONSE_FILE_BATCH_PREFIX + RESPONSE_FILE_BATCH_INPUTS});
+            BUSTER_TEST_RAW(arguments, !direct.timed_out && direct.result == PROCESS_RESULT_SUCCESS,
+                            BYTE_SLICE_TO_STRING(8, direct.streams[STANDARD_STREAM_ERROR]));
+            u32 direct_objects = 0;
+            for (u32 index = 0; index < RESPONSE_FILE_BATCH_INPUTS; index += 1)
+            {
+                expected[index] = file_read(arena, objects[index], (FileReadOptions){0});
+                direct_objects += (u32)(expected[index].length != 0 && os_file_delete(objects[index]));
+            }
+            BUSTER_TEST(arguments, direct_objects == RESPONSE_FILE_BATCH_INPUTS);
+
+            String8 batch[] = {compiler, S8("cc"), S8("-c"), S8("@../batch.rsp")};
+            ProcessWaitResult expanded = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(batch));
+            BUSTER_TEST_RAW(arguments, !expanded.timed_out && expanded.result == PROCESS_RESULT_SUCCESS,
+                            BYTE_SLICE_TO_STRING(8, expanded.streams[STANDARD_STREAM_ERROR]));
+            BUSTER_TEST(arguments, expanded.streams[STANDARD_STREAM_OUTPUT].length == 0 && expanded.streams[STANDARD_STREAM_ERROR].length == 0);
+            u32 identical_objects = 0;
+            for (u32 index = 0; index < RESPONSE_FILE_BATCH_INPUTS; index += 1)
+            {
+                ByteSlice actual = file_read(arena, objects[index], (FileReadOptions){0});
+                identical_objects += (u32)(actual.length != 0 &&
+                                           string_equal(BYTE_SLICE_TO_STRING(8, actual), BYTE_SLICE_TO_STRING(8, expected[index])));
+            }
+            BUSTER_TEST(arguments, identical_objects == RESPONSE_FILE_BATCH_INPUTS);
+            BUSTER_TEST(arguments, compiler_driver_test_response_file_change_directory(original_directory));
+        }
+    }
+    if (root_absolute.length)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(root_absolute));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // The function the one R_X86_64_64 in `.rela<section>` registers, for an
 // initializer array section.  A relocated slot carries no name of its own, so
 // naming its symbol is the only way to prove a `.init_array.NNNNN` group holds
@@ -10043,6 +10386,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
