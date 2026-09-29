@@ -806,6 +806,10 @@ struct CMember
 {
     String8 name;
     CSourceLocation location;
+    // Interned id of `name`, carried from the declarator token; 0 for an
+    // unnamed member or a parse without a symbol table. Member lookups key
+    // on it and compare spellings only when either side lacks one.
+    u32 symbol;
     CTypeId type;
     u32 alignment_start;
     u32 alignment_count;
@@ -1303,6 +1307,15 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // c_parse_scope_for_token's answer for every token of one function body
+    // under one root scope (c_parse_body_scopes_build), installed while that
+    // body's lowering constraints are checked so each query inside it is one
+    // load instead of a binary-search descent per scope level. Null outside
+    // that window.
+    u32* body_scopes;
+    u32 body_scope_start;
+    u32 body_scope_count;
+    CScopeId body_scope_root;
     // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is

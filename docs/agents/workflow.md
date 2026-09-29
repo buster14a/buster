@@ -205,8 +205,9 @@ generated-file edits are rejected for every class. See
 
 The `merge-conflict-preflight` status is a cheap read-only answer for one exact
 triple: current `main`, candidate head and merge base. Its description embeds
-the full main and head SHAs; the retained JSON also records their trees, every
-merge-base SHA/tree and the exact combined tree when clean. A result for
+the full main and head SHAs, plus a trailing `q=queued` when the trusted job
+read that exact head as queued; the retained JSON also records their trees,
+every merge-base SHA/tree and the exact combined tree when clean. A result for
 `m=<old-main> h=<head>` is not authoritative after `main` moves, even when the
 same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
@@ -252,6 +253,18 @@ Respond to its numbered classification exactly as follows:
    again: independent review by default, or the explicitly configured admin
    dispatch in the documented solo-maintainer policy.
 
+**Dequeue a conflicted queued PR before pushing its fix.** GitHub keeps a
+queued PR that starts conflicting with `main` in the queue, and it refuses
+every push to that PR's branch with `GH006` ("Branches that are queued for
+merging cannot be updated"). Any of these signals means the PR is in that
+state: a conflicted status that ends in `q=queued`, a preflight summary that
+names the PR as queued, or that push error. Dequeue the PR first, with
+**Remove from queue** or the GraphQL `dequeuePullRequest` mutation. Then push
+the resolution and re-enqueue the PR after its checks pass. Do not retry the
+push or use a queue bypass. If you cannot dequeue the PR, say so on the PR.
+Nothing dequeues it automatically; see
+[queued PRs that start conflicting](../merge-queue-admission.md#queued-prs-that-start-conflicting).
+
 For a local diagnosis with already-fetched immutable commits, run:
 
 ```sh
@@ -291,9 +304,10 @@ replacement head after its checks pass. No manual generated-file repair is neede
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
 All eight documented checks are required from GitHub Actions. The repository
-contract permits up to 20 speculative combined-head builds while allowing only
-one validated candidate to merge at a time. `ALLGREEN` requires every queued
-group's checks, and `MERGE` retains merge commits. The initial activation had
+contract permits up to 4 speculative combined-head builds (lowered from 20 by
+#1805) while allowing only one validated candidate to merge at a time.
+`ALLGREEN` requires every queued group's checks, and `MERGE` retains merge
+commits. The initial activation had
 one build slot and no bypass; the administrator must read back the current live
 settings before relying on them. On 2026-09-24 the administrator added two
 standing `always` bypass actors to the live main ruleset: Repository admin
