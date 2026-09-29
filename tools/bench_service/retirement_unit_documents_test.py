@@ -3,11 +3,12 @@
 
 Usage: retirement_unit_documents_test.py DIRECTORY
 
-The prep runner (retirement_prepare_tests.c, bq_prep_campaign_documents)
-writes the oracle, execution-plan (v3), result-input-plan (v3), pre-sample and
-post-A/A documents with retirement_unit_documents.h into DIRECTORY, beside
-context.json naming the installed census the rows were pinned from and the
-values the unit derived. This script rederives every source it can from the
+The prep runner (retirement_prepare_tests.c, bq_prep_campaign_documents) has
+the unit driver's document steps (bq_retirement_unit_campaign_documents and
+_post_aa_document) write the oracle, execution-plan (v3), result-input-plan
+(v3), pre-sample and post-A/A documents into DIRECTORY, beside context.json
+naming each document's role, path and descriptor, the installed census the
+rows were pinned from and the values the driver derived. This script rederives every source it can from the
 census itself and runs the validator's own checks over the documents:
 _performance_rows_with_sources and _family_member_counts (the family and its
 counts), _check_execution_plan (group, untimed and row contracts joined to
@@ -32,8 +33,8 @@ sys.path.insert(0, str(REPOSITORY / "tools"))
 import native_retirement_performance_binding as binding
 
 
-DOCUMENTS = ("oracle.json", "execution-plan.json", "result-input-plan.json",
-             "pre-sample-plan.json", "post-aa-binding.json")
+DOCUMENTS = ("oracle", "execution_plan", "result_input_plan", "pre_sample_plan",
+             "post_aa_binding")
 
 
 def fail(message):
@@ -183,7 +184,7 @@ def validate(root, context):
     documents = context["documents"]
     if set(documents) != set(DOCUMENTS):
         fail("the context does not name the five documents")
-    oracle = canonical(root, documents["oracle.json"], "workflow.records.oracle")
+    oracle = canonical(root, documents["oracle"], "workflow.records.oracle")
     check_oracle(oracle, parsed, support_output, binding.NATIVE_TIMED_TARGET)
     support_files = [{"path": role, "bytes": 1, "sha256": "0" * 64}
                      for role in binding.SUPPORT_FILE_ROLES]
@@ -191,12 +192,12 @@ def validate(root, context):
         "path": "performance-rows.json", "bytes": len(performance_bytes),
         "sha256": hashlib.sha256(performance_bytes).hexdigest()}
     record = {"support": {"files": support_files},
-              "workflow": {"records": {"oracle": documents["oracle.json"]}}}
-    execution_plan = documents["execution-plan.json"]
+              "workflow": {"records": {"oracle": documents["oracle"]}}}
+    execution_plan = documents["execution_plan"]
     canonical(root, execution_plan, "execution_plan")
     binding._check_execution_plan(root, execution_plan, record, parsed, sampling,
                                   context["cpu"], binding.NATIVE_TIMED_TARGET)
-    result_descriptor = documents["result-input-plan.json"]
+    result_descriptor = documents["result_input_plan"]
     canonical(root, result_descriptor, "workflow.result_input_plan")
     result_plan = binding._result_input_plan(root, result_descriptor, support_output, None,
                                              {"sampling": sampling})
@@ -217,9 +218,9 @@ def validate(root, context):
         "cell_members_per_scope": sampling["cell_members_per_scope"],
         "result_input_plan_sha256": result_descriptor["sha256"],
     }
-    pre_descriptor = documents["pre-sample-plan.json"]
+    pre_descriptor = documents["pre_sample_plan"]
     pre = check_phase(root, pre_descriptor, "pre_sample_plan", expected_sources, execution_plan)
-    post = check_phase(root, documents["post-aa-binding.json"], "post_aa_binding",
+    post = check_phase(root, documents["post_aa_binding"], "post_aa_binding",
                        expected_sources, execution_plan)
     if post["pre_sample_plan_sha256"] != pre_descriptor["sha256"]:
         fail("workflow.post_aa_binding does not bind pre-sample planning")
@@ -235,15 +236,17 @@ def refuses_tampered_plan(root, context, parsed, sampling, record):
     scratch = Path(tempfile.mkdtemp(prefix="bq-retirement-unit-documents-tamper-"))
     refused = False
     try:
-        for name in DOCUMENTS:
-            shutil.copyfile(root / name, scratch / name)
-        plan_path = scratch / "execution-plan.json"
+        for role in DOCUMENTS:
+            path = context["documents"][role]["path"]
+            shutil.copyfile(root / path, scratch / path)
+        plan_name = context["documents"]["execution_plan"]["path"]
+        plan_path = scratch / plan_name
         value = json.loads(plan_path.read_text(encoding="utf-8"))
         value["seed"] += 1
         data = json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False).encode("utf-8")
         plan_path.write_bytes(data)
-        descriptor = {"path": "execution-plan.json", "bytes": len(data),
+        descriptor = {"path": plan_name, "bytes": len(data),
                       "sha256": hashlib.sha256(data).hexdigest()}
         try:
             binding._check_execution_plan(scratch, descriptor, record, parsed, sampling,

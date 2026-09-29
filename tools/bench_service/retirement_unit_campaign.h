@@ -37,8 +37,8 @@
  *                                          the post-A/A binding over the
  *                                          admission receipt
  *   bq_retirement_unit_campaign_freeze     A/B launch freeze
- *   bq_retirement_unit_campaign_ready      post-sample context; the result is
- *                                          ready for lane E
+ *   bq_retirement_unit_campaign_ready      post-sample context and record; the
+ *                                          result is ready for lane E
  *   bq_retirement_unit_campaign_measured   MEASURED, after the caller confirms
  *                                          composition and authority handoff
  *
@@ -141,6 +141,20 @@ static char const* const bq_retirement_unit_campaign_document_paths[BQ_RETIREMEN
     "retirement-pre-sample-plan.json", "retirement-post-aa-binding.json"};
 /* #615's three-partition bound across both result populations. */
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS 3u
+/* The timed-row layout digest (bq_retirement_unit_campaign_timed_line). */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_TIMED_DOMAIN "bq-retirement-unit-campaign-timed-rows-v1"
+/* READY writes the post-sample record: the campaign's identity, its
+ * pre-sample, post-A/A and post-sample digests, the documents it bound and
+ * all three launch-log chains, as `key=value` lines under the header. The
+ * service publishes it as a retained store file at this path (lane E's
+ * retained manifest, which the producer authority binds, seals its digest),
+ * and MEASURED's measured digest covers it. The byte cap is a storage bound. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD "unit-campaign-post-sample.txt"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER "BQ-RETIREMENT-UNIT-POST-SAMPLE-V1\n"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX 4096u
+/* The #437 A/A admission receipt (the validator's AA_SCHEMA) and its cap. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "buster-native-retirement-aa-admission-v1"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX 4096u
 
 typedef struct BqRetirementUnitCampaignPins
 {
@@ -307,6 +321,25 @@ static inline void bq_retirement_unit_campaign_number(Sha256* hash, char const* 
     char text[24];
     int length = snprintf(text, sizeof(text), "%" PRIu64, value);
     bq_retirement_unit_campaign_text(hash, key, length > 0 ? text : "");
+}
+
+/* One timed row of the layout digest (BQ_RETIREMENT_UNIT_CAMPAIGN_TIMED_DOMAIN,
+ * then each row in ascending id order, then the row count): its id, campaign
+ * group, runtime flag and six dimension values in STATISTICAL_DIMENSIONS
+ * order, each value length-prefixed. The documents step forms it from the
+ * pinned rows; the lane E handoff must reproduce it from the caller's rows. */
+static inline void bq_retirement_unit_campaign_timed_line(Sha256* hash, unsigned id, unsigned group, unsigned runtime,
+    char const* const values[6], size_t const lengths[6])
+{
+    bq_retirement_unit_campaign_number(hash, "row", id);
+    bq_retirement_unit_campaign_number(hash, "group", group);
+    bq_retirement_unit_campaign_number(hash, "runtime", runtime);
+    for (unsigned dimension = 0; dimension < 6; ++dimension)
+    {
+        bq_retirement_unit_campaign_number(hash, "dimension-bytes", lengths[dimension]);
+        sha256_add(hash, values[dimension], (u64)lengths[dimension]);
+        sha256_add(hash, "\n", 1);
+    }
 }
 
 /* Candidate independent: the schedule, the pins, every #508 row's identity,
@@ -776,6 +809,11 @@ typedef struct BqRetirementUnitCampaign
     BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
     unsigned partition_counts[2], documented;
     char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65];
+    /* The support declaration and census manifest pins the documents named,
+     * the digest of the timed-row layout they derived
+     * (bq_retirement_unit_campaign_timed_line) and the post-sample record. */
+    char support_sha256[65], manifest_sha256[65], timed_rows_sha256[65];
+    BqRetirementUnitCampaignDocument record;
     TpRetirementExecutable untimed_executables[2];
     TpRetirementPlan plan;
     BqRetirementUnitCampaignFailure failure;
@@ -1040,14 +1078,15 @@ static inline int bq_retirement_unit_campaign_timed_row(BqRetirementCorrectness 
     return timed;
 }
 
-/* One observed side: artifact and reproduction equal, and the gate's
- * artifact, code-section digest and size where the gate has them. */
+/* One observed side: artifact and reproduction equal, the gate's artifact
+ * (a code-observed row always has one), and its code-section digest and size
+ * where the gate has them. */
 static inline int bq_retirement_unit_campaign_code_fact(BqRetirementCorrectness const* gate, unsigned row,
     unsigned variant, TpRetirementCodeSide const* side)
 {
     BqRetirementObservedSide const* fact = &gate->facts[row].side[variant];
     int ok = side->artifact_sha256[0] && !strcmp(side->artifact_sha256, side->reproduction_sha256) &&
-        (!fact->artifact_sha256[0] || !strcmp(fact->artifact_sha256, side->artifact_sha256)) &&
+        fact->artifact_sha256[0] && !strcmp(fact->artifact_sha256, side->artifact_sha256) &&
         (!fact->code_sha256[0] || (!strcmp(fact->code_sha256, side->code_sha256) &&
                                    fact->code_bytes == side->code_bytes));
     return ok;
@@ -1511,7 +1550,8 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
         sha256_finish_hex(&copy, driver->shard_chain_sha256[stage]);
         bq_retirement_unit_campaign_log_seal(driver, 1 + stage);
         ok = stage || bq_retirement_unit_campaign_post_aa(campaign, driver->context_sha256,
-            driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256, driver->shard_chain_sha256[0], (char const (*)[65])driver->log_chain_sha256, driver->post_aa_sha256);
+            driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256, driver->shard_chain_sha256[0],
+            (char const (*)[65])driver->log_chain_sha256, driver->post_aa_sha256);
     }
     if (ok) driver->step = stage ? BQ_RETIREMENT_UNIT_CAMPAIGN_AB : BQ_RETIREMENT_UNIT_CAMPAIGN_AA;
     else bq_retirement_unit_campaign_fail(driver);
@@ -1519,16 +1559,70 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
 }
 
 /* The A/A admission the service must present: the #426 decision bound to
- * this job's frozen plan, pre-sample context and post-A/A binding, delivered
- * as #1021's one-use capability. */
+ * this job's frozen plan, pre-sample context and post-A/A evidence digest,
+ * delivered as #1021's one-use capability, with the #437 admission receipt's
+ * bytes and digest. */
 typedef struct BqRetirementUnitCampaignAdmission
 {
     char const* plan_sha256;
     char const* context_sha256;
     char const* post_aa_sha256;
     char const* receipt_sha256;
+    unsigned char const* receipt;
+    size_t receipt_bytes;
     int admitted;
 } BqRetirementUnitCampaignAdmission;
+
+/* Whether the flat JSON object `text` holds `"key":value` with exactly that
+ * value (a member is followed by `,` or the closing `}`). */
+static inline int bq_retirement_unit_campaign_member(char const* text, size_t length, char const* key,
+    char const* value)
+{
+    char member[160];
+    int written = snprintf(member, sizeof(member), "\"%s\":%s", key, value);
+    size_t size = written > 0 && (size_t)written < sizeof(member) ? (size_t)written : 0;
+    int found = 0;
+    for (size_t at = 1; size && !found && at + size < length; ++at)
+        found = (text[at - 1] == ',' || text[at - 1] == '{') && !memcmp(text + at, member, size) &&
+            (text[at + size] == ',' || text[at + size] == '}');
+    return found;
+}
+
+/* The #437 receipt the admission carries: its bytes hash to the recorded
+ * digest, and it is this campaign's approved schema, admitted and native
+ * only, on the campaign's CPU and native target, over the family the
+ * pre-sample plan named. Its schema has no field for the post-A/A evidence
+ * digest (the validator refuses unknown receipt fields), so the admission
+ * capability names that digest and the post-A/A binding document binds this
+ * receipt. */
+static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign const* driver,
+    TpRetirementCampaign const* campaign, BqRetirementUnitCampaignAdmission const* admission)
+{
+    char digest[65] = {0}, family[80], cpu[24];
+    size_t length = admission->receipt_bytes;
+    char const* text = (char const*)admission->receipt;
+    int ok = text && length > 2 && length <= BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX && text[0] == '{' &&
+        text[length - 1] == '}' && campaign->cpu >= 0 && tp_retirement_digest(driver->family_sha256) &&
+        tp_retirement_digest(admission->receipt_sha256);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, text, (u64)length);
+        sha256_finish_hex(&hash, digest);
+        snprintf(family, sizeof(family), "\"%s\"", driver->family_sha256);
+        snprintf(cpu, sizeof(cpu), "%d", campaign->cpu);
+    }
+    ok = ok && !strcmp(digest, admission->receipt_sha256) &&
+        bq_retirement_unit_campaign_member(text, length, "schema", "\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\"") &&
+        bq_retirement_unit_campaign_member(text, length, "version", "1") &&
+        bq_retirement_unit_campaign_member(text, length, "admitted", "true") &&
+        bq_retirement_unit_campaign_member(text, length, "native_only", "true") &&
+        bq_retirement_unit_campaign_member(text, length, "native_target", "\"x86_64-unknown-linux-gnu\"") &&
+        bq_retirement_unit_campaign_member(text, length, "logical_cpu", cpu) &&
+        bq_retirement_unit_campaign_member(text, length, "family_sha256", family);
+    return ok;
+}
 
 /* Production has no admission authority, so it refuses and leaves the A/A
  * attempt awaiting one (A/B stays unreachable). The functional fixture build
@@ -1545,7 +1639,8 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
     ok = ok && admission->plan_sha256 && admission->context_sha256 && admission->post_aa_sha256 &&
         !strcmp(admission->plan_sha256, driver->plan_sha256) &&
         !strcmp(admission->context_sha256, driver->context_sha256) &&
-        !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) && tp_retirement_digest(admission->receipt_sha256) &&
+        !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) &&
+        bq_retirement_unit_campaign_receipt(driver, campaign, admission) &&
         tp_retirement_campaign_admit_aa_fixture(campaign, admission->admitted, admission->plan_sha256,
             admission->context_sha256, admission->receipt_sha256);
     if (ok)
@@ -1585,20 +1680,54 @@ static inline int bq_retirement_unit_campaign_freeze(BqRetirementUnitCampaign* d
     return ok;
 }
 
+/* The post-sample record's text (BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD). */
+static inline size_t bq_retirement_unit_campaign_record_text(BqRetirementUnitCampaign const* driver,
+    TpRetirementCampaign const* campaign, char text[BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX])
+{
+    int written = snprintf(text, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER
+        "job=%s\nattempt=%" PRIu64 "\nboot=%s\nplan=%s\npre-sample=%s\npre-sample-plan=%s\nexecution-plan=%s\n"
+        "result-input-plan=%s\npost-aa=%s\npost-aa-binding=%s\naa-admission=%s\nfamily=%s\ntimed-rows=%s\n"
+        "log-untimed=%s\nlog-aa=%s\nlog-ab=%s\nlaunches=%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\ncompleted-at=%" PRIu64
+        "\npost-sample=%s\n", campaign->job, campaign->attempt, campaign->boot, driver->plan_sha256,
+        driver->context_sha256, driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256,
+        driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].sha256,
+        driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256, driver->post_aa_sha256,
+        driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].sha256, driver->aa_admission_sha256,
+        driver->family_sha256, driver->timed_rows_sha256, driver->log_chain_sha256[0], driver->log_chain_sha256[1],
+        driver->log_chain_sha256[2], driver->launches[0], driver->launches[1], driver->launches[2],
+        campaign->samples[1]->transcript->completed_at_ns, driver->post_context_sha256);
+    size_t length = written > 0 && written < (int)BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX ? (size_t)written : 0;
+    return length;
+}
+
 /* READY: every code-observed row of the gate has its code facts (untimed
- * and timed), then the collected campaign's post-sample context. The result
- * is then available for lane E's composition and the producer authority
- * handoff; MEASURED is not sent yet. */
-static inline int bq_retirement_unit_campaign_ready(BqRetirementUnitCampaign* driver)
+ * and timed), then the collected campaign's post-sample context, written with
+ * the three launch-log chains and the bound documents to the post-sample
+ * record on `record` (a new, empty, service-owned stream it publishes as the
+ * retained BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD), flushed and synced. The
+ * result is then available for lane E's composition and the producer
+ * authority handoff; MEASURED is not sent yet. */
+static inline int bq_retirement_unit_campaign_ready(BqRetirementUnitCampaign* driver, FILE* record)
 {
     TpRetirementCampaign const* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
-    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_AB && campaign &&
-        bq_retirement_unit_campaign_codes_sealed(driver, 1) &&
+    char text[BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX];
+    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_AB && campaign && record &&
+        tp_retirement_metrics_stream_empty(record) && bq_retirement_unit_campaign_codes_sealed(driver, 1) &&
         bq_retirement_unit_campaign_post_context(campaign, driver->context_sha256,
             (char const (*)[65])driver->shard_chain_sha256, (char const (*)[65])driver->log_chain_sha256,
             driver->post_context_sha256) &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
-    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_READY;
+    size_t length = ok ? bq_retirement_unit_campaign_record_text(driver, campaign, text) : 0;
+    ok = ok && length && fwrite(text, 1, length, record) == length && fflush(record) == 0 && fsync(fileno(record)) == 0;
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, text, (u64)length);
+        sha256_finish_hex(&hash, driver->record.sha256);
+        driver->record.bytes = length;
+        driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_READY;
+    }
     else
     {
         if (driver) driver->post_context_sha256[0] = 0;
@@ -1615,13 +1744,14 @@ typedef struct BqRetirementUnitCampaignHandoff
     char const* authority_sha256;
 } BqRetirementUnitCampaignHandoff;
 
-/* The measured digest: the post-sample context chained to the sealed result
- * and producer authority digests the caller confirmed. */
-static inline int bq_retirement_unit_campaign_measured_digest(char const post_context[65],
+/* The measured digest: the post-sample context and the post-sample record
+ * chained to the sealed result and producer authority digests the caller
+ * confirmed. */
+static inline int bq_retirement_unit_campaign_measured_digest(char const post_context[65], char const* record_sha256,
     char const* sealed_result_sha256, char const* authority_sha256, char digest[65])
 {
-    int ok = post_context && tp_retirement_digest(post_context) && tp_retirement_digest(sealed_result_sha256) &&
-        tp_retirement_digest(authority_sha256) && digest;
+    int ok = post_context && tp_retirement_digest(post_context) && tp_retirement_digest(record_sha256) &&
+        tp_retirement_digest(sealed_result_sha256) && tp_retirement_digest(authority_sha256) && digest;
     if (ok)
     {
         Sha256 hash;
@@ -1629,6 +1759,7 @@ static inline int bq_retirement_unit_campaign_measured_digest(char const post_co
         static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_MEASURED_DOMAIN;
         sha256_add(&hash, domain, sizeof(domain) - 1);
         bq_retirement_unit_campaign_text(&hash, "post-sample", post_context);
+        bq_retirement_unit_campaign_text(&hash, "record", record_sha256);
         bq_retirement_unit_campaign_text(&hash, "sealed-result", sealed_result_sha256);
         bq_retirement_unit_campaign_text(&hash, "authority", authority_sha256);
         sha256_finish_hex(&hash, digest);
@@ -1639,14 +1770,17 @@ static inline int bq_retirement_unit_campaign_measured_digest(char const post_co
 
 /* MEASURED, only after READY and the caller's composition and authority
  * confirmation; the two confirmed digests are recorded and chained to the
- * post-sample context (measured_sha256). A failed or incomplete campaign
- * never sends it, which the supervisor requires for success. */
+ * post-sample context and record (measured_sha256). The fixed phase message
+ * carries no digest (phase_channel.h), so the post-sample record, sealed by
+ * lane E's retained manifest under the producer authority, is what keeps the
+ * A/B log chain durable. A failed or incomplete campaign never sends it,
+ * which the supervisor requires for success. */
 static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignHandoff const* handoff)
 {
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_READY && handoff &&
-        bq_retirement_unit_campaign_measured_digest(driver->post_context_sha256, handoff->sealed_result_sha256,
-            handoff->authority_sha256, driver->measured_sha256) &&
+        bq_retirement_unit_campaign_measured_digest(driver->post_context_sha256, driver->record.sha256,
+            handoff->sealed_result_sha256, handoff->authority_sha256, driver->measured_sha256) &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
         bq_phase_exchange_until(driver->phases, BQ_PHASE_MEASURED, driver->deadline_ns);
     if (ok)
@@ -1669,10 +1803,12 @@ static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign*
  * and post-sample digests, the untimed record stream, the code facts of
  * every code-observed row (ascending), the per-stage log chains
  * (0 untimed, 1 A/A, 2 A/B), which the post-A/A and post-sample digests
- * bind, and the five workflow documents with the partitions and digests
- * they bind (retirement_unit_handoff.h maps them onto lane E's request). After MEASURED it also carries the confirmed sealed-result and
- * authority digests and the measured digest over them. The driver writes no
- * receipt: the composer writes the post-sample one. */
+ * bind, the five workflow documents with the partitions and digests they
+ * bind, the timed-row layout digest and the post-sample record
+ * (retirement_unit_handoff.h maps them onto lane E's request). After
+ * MEASURED it also carries the confirmed sealed-result and authority digests
+ * and the measured digest over them. The driver writes no execution receipt:
+ * the composer writes the post-sample one. */
 typedef struct BqRetirementUnitCampaignResult
 {
     TpRetirementPlan plan;
@@ -1692,7 +1828,8 @@ typedef struct BqRetirementUnitCampaignResult
     BqRetirementUnitCampaignDocument documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
     BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
     unsigned partition_counts[2];
-    char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65];
+    char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65], timed_rows_sha256[65];
+    BqRetirementUnitCampaignDocument record;
 } BqRetirementUnitCampaignResult;
 
 static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign const* driver,
@@ -1731,6 +1868,8 @@ static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign co
             memcpy(result->family_sha256, driver->family_sha256, 65);
             memcpy(result->source_rows_sha256, driver->source_rows_sha256, 65);
             memcpy(result->aa_admission_sha256, driver->aa_admission_sha256, 65);
+            memcpy(result->timed_rows_sha256, driver->timed_rows_sha256, 65);
+            result->record = driver->record;
         }
     }
     return ok;

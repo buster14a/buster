@@ -1215,9 +1215,10 @@ static inline int bq_retirement_unit_campaign_document_close(FILE* stream, int w
 }
 
 /* The derived timed partition is the gate's: its rows are exactly the gate's
- * timed rows, every row's identity is the one the gate sealed, and its
- * groups are the campaign's (the object ones the gate's frozen batch
- * groups). */
+ * timed rows, every row's identity is the one the gate sealed and its
+ * runtime flag the gate's, and its groups are the campaign's: each object
+ * group's members are exactly the member inputs of both frozen contracts of
+ * its gate batch group, in order, and each other group is one row. */
 static inline int bq_retirement_unit_campaign_document_layout(BqRetirementCorrectness const* gate,
     TpRetirementCampaign const* campaign, BqRetirementDocumentPopulation const* population,
     BqRetirementDocumentPartition const* timed)
@@ -1227,17 +1228,76 @@ static inline int bq_retirement_unit_campaign_document_layout(BqRetirementCorrec
     for (uint32_t row = 0; ok && row < population->count; ++row)
     {
         char identity[65];
-        ok = bq_retirement_document_timed(population, row) == bq_retirement_unit_campaign_timed_row(gate, row) &&
+        int is_timed = bq_retirement_document_timed(population, row);
+        ok = is_timed == bq_retirement_unit_campaign_timed_row(gate, row) &&
             (population->rows[row].compile != 0) == (gate->trusted_rows[row].compiler_eligible != 0) &&
+            (!is_timed || (population->rows[row].runtime != 0) == (gate->facts[row].runtime_eligible != 0)) &&
             bq_retirement_document_identity(population, row, identity) &&
             !strcmp(identity, gate->trusted_rows[row].identity_sha256);
     }
+    for (uint32_t group = 0; ok && group < timed->count; ++group)
+    {
+        uint32_t first = timed->first[group], members = timed->first[group + 1] - first;
+        BqRetirementBatchGroup const* frozen = bq_retirement_document_frozen(gate, timed, group);
+        ok = timed->object[group] ? frozen != NULL : members == 1;
+        for (unsigned side = 0; ok && frozen && side < 2; ++side)
+        {
+            TpRetirementBatchContract const* contract = &frozen->contract[side];
+            uint32_t matched = 0;
+            for (unsigned input = 0; ok && input < contract->input_count; ++input)
+            {
+                if (!contract->inputs[input].member) continue;
+                ok = matched < members && contract->inputs[input].row == timed->rows[first + matched];
+                matched += 1;
+            }
+            ok = ok && matched == members;
+        }
+    }
+    return ok;
+}
+
+/* The timed-row layout digest from the pinned rows: each timed row, in
+ * ascending id order, with its partition group, runtime flag and six
+ * dimension values (bq_retirement_unit_campaign_timed_line). */
+static inline int bq_retirement_unit_campaign_document_timed_rows(BqRetirementDocumentPopulation const* population,
+    BqRetirementDocumentPartition const* timed, char digest[65])
+{
+    uint32_t* group_of = population->count ? calloc(population->count, sizeof(*group_of)) : NULL;
+    int ok = group_of != NULL;
+    for (uint32_t group = 0; ok && group < timed->count; ++group)
+        for (uint32_t member = timed->first[group]; member < timed->first[group + 1]; ++member)
+            group_of[timed->rows[member]] = group;
+    Sha256 hash;
+    sha256_init(&hash);
+    static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_TIMED_DOMAIN;
+    sha256_add(&hash, domain, sizeof(domain) - 1);
+    uint32_t rows = 0;
+    for (uint32_t row = 0; ok && row < population->count; ++row)
+    {
+        if (!bq_retirement_document_timed(population, row)) continue;
+        char const* values[6];
+        size_t lengths[6];
+        for (unsigned dimension = 0; dimension < 6; ++dimension)
+        {
+            String8 value = bq_retirement_document_value(population, row, bq_retirement_document_dimensions[dimension]);
+            values[dimension] = (char const*)value.pointer;
+            lengths[dimension] = (size_t)value.length;
+        }
+        bq_retirement_unit_campaign_timed_line(&hash, row, group_of[row], population->rows[row].runtime ? 1u : 0u,
+                                               values, lengths);
+        rows += 1;
+    }
+    bq_retirement_unit_campaign_number(&hash, "rows", rows);
+    if (ok) sha256_finish_hex(&hash, digest);
+    else digest[0] = 0;
+    free(group_of);
     return ok;
 }
 
 /* Before A/A: the oracle records, the execution plan, the result-input plan
  * and the pre-sample plan, written in that order into the evidence root and
- * recorded with the partitions and the family and source rows digests. The
+ * recorded with the partitions, the family and source pin digests and the
+ * timed-row layout digest (which the lane E handoff reproduces). The
  * partitions and family are derived here from the pinned rows (whose every
  * identity must be the gate's sealed one) and must be the bound campaign's:
  * its groups, the gate's frozen batch groups and the plan's two family
@@ -1254,6 +1314,7 @@ static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign
     BqRetirementDocumentPartition timed = {0}, untimed = {0};
     BqRetirementDocumentFamily family = {0};
     char support[65] = {0}, manifest[65] = {0}, rows[65] = {0}, performance[65] = {0}, budget[65] = {0};
+    char timed_rows[65] = {0};
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND && !driver->documented && campaign && gate &&
         population && population->count && sources->directory >= 0 && driver->budget && driver->untimed_batches &&
         bq_retirement_unit_campaign_document_pins(sources->profile, support, manifest, rows, performance) &&
@@ -1265,6 +1326,7 @@ static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign
         family.bootstrap_members == driver->plan.bootstrap_members_per_scope &&
         family.cell_members == driver->plan.cell_members_per_scope &&
         bq_retirement_unit_campaign_document_layout(gate, campaign, population, &timed) &&
+        bq_retirement_unit_campaign_document_timed_rows(population, &timed, timed_rows) &&
         driver->untimed_batch_count == 4u * untimed.count &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
     BqRetirementDocumentInputs inputs = {gate, population, &timed, &untimed, driver ? driver->budget : NULL,
@@ -1300,6 +1362,9 @@ static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign
         memcpy(driver->partition_counts, counts, sizeof(counts));
         memcpy(driver->family_sha256, family.sha256, 65);
         memcpy(driver->source_rows_sha256, rows, 65);
+        memcpy(driver->support_sha256, support, 65);
+        memcpy(driver->manifest_sha256, manifest, 65);
+        memcpy(driver->timed_rows_sha256, timed_rows, 65);
         driver->documented = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA;
     }
     else bq_retirement_unit_campaign_fail(driver);
@@ -1311,8 +1376,9 @@ static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign
 /* After the A/A admission, before the A/B freeze: the post-A/A binding over
  * the same sources, family, sampling values, result-input plan and
  * execution plan as the pre-sample plan, which it names, and over the
- * admission receipt the admission step recorded. The profile's source pins
- * must be the ones the pre-sample plan named. */
+ * admission receipt the admission step recorded. The profile's support
+ * declaration, census manifest and census rows pins must be the ones the
+ * pre-sample plan named. */
 static inline int bq_retirement_unit_campaign_post_aa_document(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignDocumentSources const* sources)
 {
@@ -1320,7 +1386,8 @@ static inline int bq_retirement_unit_campaign_post_aa_document(BqRetirementUnitC
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED &&
         driver->documented == BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA && sources && sources->directory >= 0 &&
         bq_retirement_unit_campaign_document_pins(sources->profile, support, manifest, rows, performance) &&
-        !strcmp(rows, driver->source_rows_sha256) && tp_retirement_digest(driver->aa_admission_sha256) &&
+        !strcmp(rows, driver->source_rows_sha256) && !strcmp(support, driver->support_sha256) &&
+        !strcmp(manifest, driver->manifest_sha256) && tp_retirement_digest(driver->aa_admission_sha256) &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
     BqRetirementDocumentFamily family = {{0}, driver ? driver->plan.bootstrap_members_per_scope : 0,
         driver ? driver->plan.cell_members_per_scope : 0, 0};
@@ -1337,8 +1404,8 @@ static inline int bq_retirement_unit_campaign_post_aa_document(BqRetirementUnitC
         driver ? driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256 : NULL,
         driver ? driver->aa_admission_sha256 : NULL};
     BqRetirementDocumentDescriptor descriptor = {0};
-    FILE* stream = ok ? bq_retirement_unit_campaign_document_open(sources->directory, BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA) :
-        NULL;
+    FILE* stream = ok ?
+        bq_retirement_unit_campaign_document_open(sources->directory, BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA) : NULL;
     int written = stream && bq_retirement_documents_phase(stream, &inputs, &phase, 1, &descriptor);
     ok = ok && bq_retirement_unit_campaign_document_close(stream, written);
     if (ok)

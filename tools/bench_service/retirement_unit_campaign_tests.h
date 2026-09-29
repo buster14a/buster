@@ -1153,12 +1153,13 @@ BUSTER_GLOBAL_LOCAL FILE* bq_prep_campaign_document_open(int directory, char con
     return stream;
 }
 
-/* The pre-sample and post-A/A documents the unit writes, accepted by the
- * validator itself: the documents, the pinned performance rows and the
- * expected context go to a scratch directory and
- * retirement_unit_documents_test.py runs the validator's own checks
- * (_performance_rows_with_sources, _check_execution_plan, _result_input_plan,
- * _workflow_phase and the pre-sample and post-A/A field joins) over them.
+/* The pre-sample and post-A/A documents the driver writes
+ * (bq_retirement_unit_campaign_documents, then _post_aa_document), accepted
+ * by the validator itself: the documents and the expected context go to a
+ * scratch evidence root and retirement_unit_documents_test.py runs the
+ * validator's own checks (_performance_rows_with_sources,
+ * _check_execution_plan, _result_input_plan, _workflow_phase and the
+ * pre-sample and post-A/A field joins) over them.
  * The untimed batches are synthetic (one per untimed group and variant, the
  * reproductions the gate's artifacts): they are never launched here. */
 BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign)
@@ -1254,54 +1255,81 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
         }
         codes[at] = moving;
     }
-    BqRetirementDocumentInputs inputs_view = {gate, &population, &timed, &untimed, &campaign->budget, &plan, batches,
-        groups * 4u, untimed_rows, codes, untimed.row_count, 2, support, manifest, rows_pin};
+    /* The documents through the driver's own steps, on a driver standing at
+     * BOUND over this gate (the throughput fixture reaches BOUND through the
+     * whole sequence): its campaign stand-in carries the bound groups, CPU
+     * and budget digest, its phase channel and cancellation descriptor are
+     * live and quiet, and its untimed batches, rows, codes and plan are the
+     * ones above. The admission itself is fixture-only, so the post-A/A step
+     * runs from ADMITTED over a stand-in receipt digest. */
     char root[] = "/tmp/bq-retirement-unit-documents-XXXXXX";
     bool made = ok && mkdtemp(root) != NULL;
     int directory = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    static char const* const names[5] = {"oracle.json", "execution-plan.json", "result-input-plan.json",
-        "pre-sample-plan.json", "post-aa-binding.json"};
-    BqRetirementDocumentDescriptor descriptors[5];
-    memset(descriptors, 0, sizeof(descriptors));
-    BqRetirementUnitCampaignPartition manifests[2][BQ_RETIREMENT_DOCUMENT_PARTITIONS];
-    unsigned manifest_counts[2] = {0, 0};
+    int pair[2] = {-1, -1}, quiet[2] = {-1, -1};
+    BqPhaseChannel phases = {.descriptor = -1, .failed = 1};
+    bool live = directory >= 3 && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0 &&
+        pipe2(quiet, O_CLOEXEC | O_NONBLOCK) == 0 && bq_phase_init(&phases, pair[0], 1, 1);
+    TpRetirementCampaign bound = {0};
+    bound.groups = timed.count;
+    bound.cpu = 2;
+    memcpy(bound.budget_sha256, campaign->budget_sha, 65);
+    BqRetirementCampaignBinding binding = {0};
+    binding.campaign = &bound;
+    BqRetirementUnitCampaign driver = {0};
+    driver.phases = &phases;
+    driver.gate = gate;
+    driver.binding = &binding;
+    driver.plan = plan;
+    driver.budget = &campaign->budget;
+    driver.untimed_batches = batches;
+    driver.untimed_batch_count = groups * 4u;
+    driver.untimed_rows = untimed_rows;
+    driver.codes = codes;
+    driver.code_count = untimed.row_count;
+    driver.cancellation_fd = quiet[0];
+    driver.deadline_ns = bq_phase_clock() + 300000000000ull;
+    driver.step = BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND;
+    BqRetirementUnitCampaignDocumentSources sources = {directory, &population, profile};
     static char const aa_admission[] = "abababababababababababababababababababababababababababababababab";
-    for (u32 index = 0; directory >= 3 && index < 5; index += 1)
+    bool written = live && bq_retirement_unit_campaign_documents(&driver, &sources) &&
+        driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA;
+    if (written)
     {
-        FILE* stream = bq_prep_campaign_document_open(directory, names[index]);
-        BqRetirementDocumentPhase phase = {&family, descriptors[2].sha256, names[1], &descriptors[1],
-            descriptors[3].sha256, aa_admission};
-        bool written = stream &&
-            (index == 0 ? bq_retirement_documents_oracle(stream, &inputs_view, &descriptors[0]) :
-             index == 1 ? bq_retirement_documents_execution_plan(stream, &inputs_view, &descriptors[1]) :
-             index == 2 ? bq_retirement_documents_result_input_plan(stream, &inputs_view, manifests, manifest_counts,
-                                                                    &descriptors[2]) :
-             bq_retirement_documents_phase(stream, &inputs_view, &phase, index == 4, &descriptors[index]));
-        if (stream && fclose(stream) != 0) written = false;
-        if (!written) fprintf(stderr, "RETIREMENT_PREP document %s was not written\n", names[index]);
-        BQ_PREP_CHECK(written);
+        driver.step = BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED;
+        memcpy(driver.aa_admission_sha256, aa_admission, 65);
     }
+    written = written && bq_retirement_unit_campaign_post_aa_document(&driver, &sources) &&
+        driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS && !strcmp(driver.family_sha256, family.sha256) &&
+        !strcmp(driver.support_sha256, support) && !strcmp(driver.manifest_sha256, manifest) &&
+        !strcmp(driver.source_rows_sha256, rows_pin);
+    if (!written) fprintf(stderr, "RETIREMENT_PREP the driver did not write its documents (step %u)\n", driver.step);
+    BQ_PREP_CHECK(written);
     /* The expected context: the census the rows were pinned from, and the
-     * values the unit derived (the test rederives every one it can). */
-    FILE* expected = directory >= 3 ? bq_prep_campaign_document_open(directory, "context.json") : NULL;
+     * values the driver derived (the test rederives every one it can). */
+    static char const* const roles[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS] = {"oracle", "execution_plan",
+        "result_input_plan", "pre_sample_plan", "post_aa_binding"};
+    FILE* expected = written ? bq_prep_campaign_document_open(directory, "context.json") : NULL;
     if (expected)
     {
-        fprintf(expected, "{\"census\":\"%s\",\"cpu\":2,\"seed\":%" PRIu64 ",\"pairs_per_round\":%u,\"resamples\":%u,"
-                "\"bootstrap_members_per_scope\":%u,\"cell_members_per_scope\":%u,\"family_sha256\":\"%s\","
-                "\"support_declaration_sha256\":\"%s\",\"manifest_sha256\":\"%s\",\"rows_sha256\":\"%s\","
-                "\"object_row_count\":%u,\"aa_admission_sha256\":\"%s\",\"performance_rows_sha256\":\"%s\","
-                "\"manifest_counts\":[%u,%u],\"documents\":{",
-                context->fixture->census, plan.seed, plan.pairs_per_round, plan.resamples, family.bootstrap_members, family.cell_members,
-                family.sha256, support, manifest, rows_pin, gate->prepared.object_rows, aa_admission,
-                population.performance_rows_sha256, manifest_counts[0], manifest_counts[1]);
-        for (u32 index = 0; index < 5; index += 1)
-            fprintf(expected, "%s\"%s\":{\"path\":\"%s\",\"bytes\":%" PRIu64 ",\"sha256\":\"%s\"}", index ? "," : "",
-                    names[index], names[index], descriptors[index].bytes, descriptors[index].sha256);
+        fprintf(expected, "{\"census\":\"%s\",\"cpu\":2,\"seed\":%" PRIu64 ",\"pairs_per_round\":%u,"
+                "\"resamples\":%u,\"bootstrap_members_per_scope\":%u,\"cell_members_per_scope\":%u,"
+                "\"family_sha256\":\"%s\",\"support_declaration_sha256\":\"%s\",\"manifest_sha256\":\"%s\","
+                "\"rows_sha256\":\"%s\",\"object_row_count\":%u,\"aa_admission_sha256\":\"%s\","
+                "\"performance_rows_sha256\":\"%s\",\"manifest_counts\":[%u,%u],\"documents\":{",
+                context->fixture->census, plan.seed, plan.pairs_per_round, plan.resamples,
+                driver.plan.bootstrap_members_per_scope, driver.plan.cell_members_per_scope, driver.family_sha256,
+                driver.support_sha256, driver.manifest_sha256, driver.source_rows_sha256, gate->prepared.object_rows,
+                driver.aa_admission_sha256, population.performance_rows_sha256, driver.partition_counts[0],
+                driver.partition_counts[1]);
+        for (u32 index = 0; index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+            fprintf(expected, "%s\"%s\":{\"path\":\"%s\",\"bytes\":%" PRIu64 ",\"sha256\":\"%s\"}",
+                    index ? "," : "", roles[index], bq_retirement_unit_campaign_document_paths[index],
+                    driver.documents[index].bytes, driver.documents[index].sha256);
         fprintf(expected, "}}\n");
         BQ_PREP_CHECK(fclose(expected) == 0);
     }
     char* argv[] = {"python3", "tools/bench_service/retirement_unit_documents_test.py", root, NULL};
-    bool accepted = directory >= 3 && bq_prep_test_run(argv);
+    bool accepted = expected && bq_prep_test_run(argv);
     if (!accepted) fprintf(stderr, "RETIREMENT_PREP the validator refused the unit's documents in %s\n", root);
     BQ_PREP_CHECK(accepted);
     /* A document over a gate row whose sealed identity changed is refused
@@ -1315,6 +1343,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
                   gate->prepared.rows, gate->prepared.native_target, &other) == BQ_SOURCE_MISMATCH && !other.rows);
     identity[0] = saved;
     if (directory >= 0) BQ_PREP_CHECK(close(directory) == 0);
+    if (phases.descriptor >= 0) BQ_PREP_CHECK(close(phases.descriptor) == 0);
+    else if (pair[0] >= 0) BQ_PREP_CHECK(close(pair[0]) == 0);
+    for (u32 side = 0; side < 2; side += 1)
+    {
+        if (side && pair[side] >= 0) BQ_PREP_CHECK(close(pair[side]) == 0);
+        if (quiet[side] >= 0) BQ_PREP_CHECK(close(quiet[side]) == 0);
+    }
     if (made && accepted) bq_prep_test_cleanup(root);
     free(batches);
     free(untimed_rows);

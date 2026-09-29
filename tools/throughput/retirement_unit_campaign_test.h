@@ -73,6 +73,8 @@ typedef struct TestUnitCampaign
     char list_leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP], list_argument[TP_RETIREMENT_INPUT_LIST_LEAF_CAP + 1];
     char leak_text[32], binary_sha[65], artifact_sha[65], code_sha[65], runtime_sha[65];
     char batch_output[65], object_output[65], budget_sha[65], profile[1024], documents_path[TP_PATH_CAP];
+    /* The #437 A/A admission receipt stand-in and its digest. */
+    char aa_receipt[1024], aa_receipt_sha[65];
     char* environment[3];
     char* arguments[2][6][11];
     char command_sha[2][6][65];
@@ -209,6 +211,28 @@ static int test_unit_campaign_population(TestUnitCampaign* fixture)
     return ok;
 }
 
+/* A canonical #437 A/A admission receipt (the validator's AA_SCHEMA keys,
+ * test identities) for `cpu` and `family`, and its digest. */
+static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, char const* family, char const* admitted)
+{
+    int length = snprintf(fixture->aa_receipt, sizeof(fixture->aa_receipt),
+        "{\"admitted\":%s,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
+        "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
+        "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
+        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\",\"version\":1}",
+        admitted, 1, 2, family, cpu);
+    int ok = length > 0 && (size_t)length < sizeof(fixture->aa_receipt);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, fixture->aa_receipt, (u64)length);
+        sha256_finish_hex(&hash, fixture->aa_receipt_sha);
+    }
+    return ok;
+}
+
 /* The campaign test's commands, gate and held pair, the untimed singleton
  * group's four batches, and the test profile's pins. */
 static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* executable_path, char const* root)
@@ -311,7 +335,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
                     .kind = slot == 2, .variant = variant, .arguments = argv, .argument_count = count,
                     .environment = fixture->environment, .environment_count = 2, .directory = fixture->directory,
                     .artifact = slot == 1 ? argv[3] : NULL, .batch = slot ? NULL : &fixture->batch.contract,
-                    .timeout_seconds = 2, .command_sha256 = fixture->command_sha[stage][index],
+                    .timeout_seconds = 30, .command_sha256 = fixture->command_sha[stage][index],
                     .output_sha256 = slot == 2 ? fixture->runtime_sha : slot ? fixture->batch_output :
                                                                               fixture->object_output,
                     .exit_status = slot ? 0 : 1};
@@ -330,7 +354,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         argv[5] = fixture->leak_text;
         TpRetirementMeasuredCommand command = {.unit = 0, .kind = 0, .variant = variant, .arguments = argv,
             .argument_count = 6, .environment = fixture->environment, .environment_count = 2,
-            .directory = fixture->directory, .artifact = argv[3], .timeout_seconds = 2,
+            .directory = fixture->directory, .artifact = argv[3], .timeout_seconds = 30,
             .command_sha256 = fixture->untimed_sha[variant], .output_sha256 = fixture->batch_output};
         ok = tp_retirement_command_hash(&command, fixture->untimed_sha[variant]);
         for (unsigned purpose = 0; ok && purpose < 2; ++purpose)
@@ -482,7 +506,8 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     ok = ok && bq_retirement_documents_partition(&fixture->population, 0, &timed) &&
         bq_retirement_documents_family(&fixture->population, &timed, &fixture->family) &&
         fixture->family.bootstrap_members == 37 && fixture->family.cell_members == 9 &&
-        tp_path(fixture->documents_path, fixture->directory, "unit-campaign-documents");
+        tp_path(fixture->documents_path, fixture->directory, "unit-campaign-documents") &&
+        test_unit_campaign_aa_receipt(fixture, fixture->cpu, fixture->family.sha256, "true");
     bq_retirement_documents_partition_release(&timed);
     return ok && fixture->cpu >= 0;
 }
@@ -688,7 +713,9 @@ enum
     TEST_UNIT_CAMPAIGN_TIMED_FACT, TEST_UNIT_CAMPAIGN_BOOTSTRAP, TEST_UNIT_CAMPAIGN_GATE_COPY,
     TEST_UNIT_CAMPAIGN_NO_DOCUMENTS, TEST_UNIT_CAMPAIGN_DOCUMENT_IDENTITY, TEST_UNIT_CAMPAIGN_DOCUMENT_FAMILY,
     TEST_UNIT_CAMPAIGN_DOCUMENT_EXISTS, TEST_UNIT_CAMPAIGN_DOCUMENT_PIN, TEST_UNIT_CAMPAIGN_NO_POST_DOCUMENT,
-    TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN,
+    TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN, TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST, TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY,
+    TEST_UNIT_CAMPAIGN_RECEIPT_CPU, TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED, TEST_UNIT_CAMPAIGN_POST_DOCUMENT_SUPPORT,
+    TEST_UNIT_CAMPAIGN_UNTIMED_NO_ARTIFACT,
     TEST_UNIT_CAMPAIGN_SCENARIOS
 };
 
@@ -755,7 +782,7 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
               failure.cancelled && failure.signal_number == SIGKILL && !failure.timed_out && !failure.group &&
               elapsed < UINT64_C(4000000000) && !driver->launches[0]);
     else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_DEADLINE)
-        /* A 2 s launch cannot finish before a deadline 1.5 s away. */
+        /* A 30 s launch cannot finish before a deadline 1.5 s away. */
         CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE && !failure.launched &&
               !failure.stage && !failure.group && !failure.variant && !failure.purpose && !driver->launches[0]);
     else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_REPRODUCTION)
@@ -779,8 +806,9 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
               tp_retirement_digest(failure.retained_sha256) && strcmp(failure.log_sha256, failure.retained_sha256) &&
               fstatat(fixture->cwd, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, &kept, AT_SYMLINK_NOFOLLOW) == 0 &&
               (uint64_t)kept.st_size == BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX && !driver->launches[0]);
-    else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_FACT)
-        /* Every batch ran, but row 3's code size is not the gate's. */
+    else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_FACT || scenario == TEST_UNIT_CAMPAIGN_UNTIMED_NO_ARTIFACT)
+        /* Every batch ran, but row 3's code size is not the gate's, or the
+         * gate has no artifact digest for it to be. */
         CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED && driver->launches[0] == 4 &&
               driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
     else
@@ -885,14 +913,38 @@ static void test_unit_campaign_result_documents(TestUnitCampaign* fixture, BqRet
     snprintf(expected, sizeof(expected), "\"pre_sample_plan_sha256\":\"%s\"",
              result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256);
     CHECK(length > 0 && strstr(text, expected) != NULL &&
-          strstr(text, "{\"aa_admission_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"") == text &&
-          !strcmp(result->aa_admission_sha256, test_unit_campaign_receipt) &&
+          !strncmp(text, "{\"aa_admission_sha256\":\"", 24) && !strncmp(text + 24, fixture->aa_receipt_sha, 64) &&
+          !strcmp(result->aa_admission_sha256, fixture->aa_receipt_sha) &&
           !strcmp(result->family_sha256, fixture->family.sha256) &&
           !strcmp(result->source_rows_sha256, "3333333333333333333333333333333333333333333333333333333333333333") &&
           result->partition_counts[0] == 1 && result->partition_counts[1] == 1 &&
           !strcmp(result->partitions[0][0].identity, "rows-0000") && result->partitions[0][0].records == 3u * 120u &&
           !strcmp(result->partitions[1][0].path, "retirement-result-batches-0000.json") &&
           result->partitions[1][0].records == 120u);
+}
+
+/* The post-sample record READY wrote: exactly its text, of the recorded
+ * size and digest, naming the post-sample digest and all three log chains. */
+static void test_unit_campaign_record(BqRetirementUnitCampaign const* driver, BqRetirementUnitCampaignResult const* result,
+    FILE* record)
+{
+    char text[BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX + 1], digest[65], line[96];
+    size_t length = record && fseek(record, 0, SEEK_SET) == 0 ? fread(text, 1, sizeof(text) - 1, record) : 0;
+    text[length] = 0;
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, text, (u64)length);
+    sha256_finish_hex(&hash, digest);
+    CHECK(length && length == result->record.bytes && !strcmp(digest, result->record.sha256) &&
+          !strncmp(text, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER, sizeof(BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER) - 1));
+    static char const* const keys[5] = {"post-sample", "log-untimed", "log-aa", "log-ab", "timed-rows"};
+    char const* const values[5] = {driver->post_context_sha256, driver->log_chain_sha256[0],
+        driver->log_chain_sha256[1], driver->log_chain_sha256[2], driver->timed_rows_sha256};
+    for (unsigned index = 0; index < 5; ++index)
+    {
+        snprintf(line, sizeof(line), "\n%s=%s\n", keys[index], values[index]);
+        CHECK(tp_retirement_digest(values[index]) && strstr(text, line) != NULL);
+    }
 }
 
 /* Lane E's request from the READY driver: the timed rows as compose rows
@@ -920,40 +972,57 @@ static void test_unit_campaign_compose_handoff(TestUnitCampaign* fixture, BqReti
     BqRetirementUnitHandoff* handoff = (BqRetirementUnitHandoff*)calloc(1, sizeof(*handoff));
     TpRetirementComposeRequest request = {0};
     CHECK(handoff && bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &request));
-    if (!handoff) return;
-    BqRetirementUnitCampaignResult const* result = &handoff->result;
-    CHECK(request.layout == &handoff->layout && handoff->layout.rows == rows && handoff->layout.row_count == 3 &&
-          handoff->layout.group_count == 2 && handoff->layout.group_kinds == kinds &&
-          kinds[0] == TP_RETIREMENT_GROUP_OBJECT && kinds[1] == TP_RETIREMENT_GROUP_SINGLETON &&
-          handoff->layout.population_rows == 7 && handoff->layout.untimed_groups == 1 &&
-          rows[2].id == 6 && rows[2].group == 1 && rows[2].runtime == 1 &&
-          !strcmp(rows[2].dimensions[5], "link") && rows[0].dimensions[0] == timed[0].dimensions[0] &&
-          request.statistics == &result->plan && !strcmp(request.job, "job-1") && request.attempt == 2 &&
-          request.completed_at_ns == result->completed_at_ns &&
-          !strcmp(request.execution_plan_sha256, result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].sha256) &&
-          !strcmp(request.result_input_plan_sha256,
-                  result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256) &&
-          !strcmp(request.post_aa_binding_sha256, result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].sha256) &&
-          !strcmp(request.family_sha256, fixture->family.sha256) &&
-          !strcmp(request.source_rows_sha256, result->source_rows_sha256) &&
-          request.partition_counts[0] == 1 && request.partition_counts[1] == 1 &&
-          !strcmp(request.partitions[0][0].identity, "rows-0000") && request.partitions[1][0].records == 120u &&
-          request.code == code && request.code_count == 4 && code[3].row == 6 &&
-          !strcmp(code[3].sides[1].code_sha256, fixture->code_side.code_sha256) &&
-          !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].name, "workflow.execution_plan") &&
-          !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].name, "workflow.phases.post_aa_binding") &&
-          !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].path, "retirement-post-aa-binding.json") &&
-          handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE].bytes ==
-              result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE].bytes &&
-          request.aa_metrics_tag && !strcmp(request.aa_metrics_tag, "aa") && !request.store && !request.binding_path &&
-          !request.transcript_paths);
-    /* A timed row outside the frozen sample layout, or too small a group
-     * array, is refused. */
-    TpRetirementComposeRequest other = {0};
-    timed[1].group = 1;
-    CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &other) && !other.layout);
-    timed[1].group = 0;
-    CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 1, code, 4, handoff, &other) && !other.layout);
+    BqRetirementUnitCampaignResult const* result = handoff ? &handoff->result : NULL;
+    if (handoff)
+    {
+        CHECK(request.layout == &handoff->layout && handoff->layout.rows == rows && handoff->layout.row_count == 3 &&
+              handoff->layout.group_count == 2 && handoff->layout.group_kinds == kinds &&
+              kinds[0] == TP_RETIREMENT_GROUP_OBJECT && kinds[1] == TP_RETIREMENT_GROUP_SINGLETON &&
+              handoff->layout.population_rows == 7 && handoff->layout.untimed_groups == 1 &&
+              rows[2].id == 6 && rows[2].group == 1 && rows[2].runtime == 1 &&
+              !strcmp(rows[2].dimensions[5], "link") && rows[0].dimensions[0] == timed[0].dimensions[0] &&
+              request.statistics == &result->plan && !strcmp(request.job, "job-1") && request.attempt == 2 &&
+              request.completed_at_ns == result->completed_at_ns &&
+              !strcmp(request.execution_plan_sha256, result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].sha256) &&
+              !strcmp(request.result_input_plan_sha256,
+                      result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256) &&
+              !strcmp(request.post_aa_binding_sha256, result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].sha256) &&
+              !strcmp(request.family_sha256, fixture->family.sha256) &&
+              !strcmp(request.source_rows_sha256, result->source_rows_sha256) &&
+              request.partition_counts[0] == 1 && request.partition_counts[1] == 1 &&
+              !strcmp(request.partitions[0][0].identity, "rows-0000") && request.partitions[1][0].records == 120u &&
+              request.code == code && request.code_count == 4 && code[3].row == 6 &&
+              !strcmp(code[3].sides[1].code_sha256, fixture->code_side.code_sha256) &&
+              !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].name, "workflow.execution_plan") &&
+              !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].name, "workflow.phases.post_aa_binding") &&
+              !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].path, "retirement-post-aa-binding.json") &&
+              handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE].bytes ==
+                  result->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE].bytes &&
+              request.aa_metrics_tag && !strcmp(request.aa_metrics_tag, "aa") && !request.store && !request.binding_path &&
+              !request.transcript_paths);
+        CHECK(!strcmp(handoff->retained[0].prefix, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD) && !handoff->retained[0].suffix &&
+              handoff->retained[0].files_max == 1 && !strcmp(handoff->retained[1].kind, "unitlogs") &&
+              handoff->retained[1].bytes_max == BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX);
+        /* A timed row outside the frozen sample layout, too small a group
+         * array, two swapped dimension columns or a foreign value is refused. */
+        TpRetirementComposeRequest other = {0};
+        timed[1].group = 1;
+        CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &other) && !other.layout);
+        timed[1].group = 0;
+        CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 1, code, 4, handoff, &other) && !other.layout);
+        char column[TP_RETIREMENT_TIMED_DIMENSION_BYTES + 1];
+        memcpy(column, timed[2].dimensions[4], sizeof(column));
+        memcpy(timed[2].dimensions[4], timed[2].dimensions[5], sizeof(column));
+        memcpy(timed[2].dimensions[5], column, sizeof(column));
+        CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &other) && !other.layout);
+        memcpy(timed[2].dimensions[5], timed[2].dimensions[4], sizeof(column));
+        memcpy(timed[2].dimensions[4], column, sizeof(column));
+        char saved = timed[0].dimensions[1][0];
+        timed[0].dimensions[1][0] = saved == 'x' ? 'y' : 'x';
+        CHECK(!bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &other) && !other.layout);
+        timed[0].dimensions[1][0] = saved;
+        CHECK(bq_retirement_unit_handoff(driver, timed, 3, rows, kinds, 2, code, 4, handoff, &other) && other.layout);
+    }
     free(handoff);
 }
 
@@ -984,6 +1053,13 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     if (changed)
     {
         *changed += 1;
+        bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
+    }
+    char* artifact = scenario == TEST_UNIT_CAMPAIGN_UNTIMED_NO_ARTIFACT ? fixture->facts[3].side[1].artifact_sha256 : NULL;
+    char saved_artifact = artifact ? artifact[0] : 0;
+    if (artifact)
+    {
+        artifact[0] = 0;
         bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
     }
     int ok = test_unit_campaign_untimed(fixture, &driver, &untimed, scenario, cancel[1]);
@@ -1149,15 +1225,39 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && !stages.ab.execution.sequence);
         ok = 0;
     }
-    BqRetirementUnitCampaignAdmission admission = {plan_sha, context_sha, driver.post_aa_sha256,
-        test_unit_campaign_receipt, scenario == TEST_UNIT_CAMPAIGN_DENIED ? 0 : 1};
+    /* The #437 receipt: the fixture's, or one whose bytes are not the named
+     * digest, over another family or CPU, or not admitted. */
+    TestUnitCampaign* receipt = fixture;
+    char const* receipt_sha = fixture->aa_receipt_sha;
+    char other_family[65];
+    memcpy(other_family, fixture->family.sha256, 65);
+    other_family[0] = other_family[0] == '0' ? '1' : '0';
+    TestUnitCampaign* other = (TestUnitCampaign*)calloc(1, sizeof(*other));
+    if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY)
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, other_family, "true"));
+    if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU)
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu + 1, fixture->family.sha256, "true"));
+    if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED)
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, fixture->family.sha256, "false"));
+    if (other && (scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU ||
+                  scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED))
+    {
+        receipt = other;
+        receipt_sha = other->aa_receipt_sha;
+    }
+    if (scenario == TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST) receipt_sha = test_unit_campaign_receipt;
+    BqRetirementUnitCampaignAdmission admission = {plan_sha, context_sha, driver.post_aa_sha256, receipt_sha,
+        (unsigned char const*)receipt->aa_receipt, strlen(receipt->aa_receipt),
+        scenario == TEST_UNIT_CAMPAIGN_DENIED ? 0 : 1};
     if (scenario == TEST_UNIT_CAMPAIGN_STALE_ADMISSION) admission.context_sha256 = test_unit_campaign_ready;
     if (scenario == TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION) admission.post_aa_sha256 = context_sha;
     if (ok)
     {
         ok = bq_retirement_unit_campaign_admit(&driver, &admission);
         if (scenario == TEST_UNIT_CAMPAIGN_DENIED || scenario == TEST_UNIT_CAMPAIGN_STALE_ADMISSION ||
-            scenario == TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION)
+            scenario == TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST ||
+            scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU ||
+            scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED)
             CHECK(!ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && !stages.ab.execution.sequence &&
                   driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
         else CHECK(ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_AB);
@@ -1169,15 +1269,20 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               !stages.ab.execution.sequence);
         ok = 0;
     }
-    if (ok && scenario == TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN)
+    if (ok && (scenario == TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN || scenario == TEST_UNIT_CAMPAIGN_POST_DOCUMENT_SUPPORT))
     {
-        /* The census rows pin changed since the pre-sample plan named it. */
-        char* at = strstr(fixture->profile, "census-rows-sha256=3333");
-        if (at) at[22] = '4';
+        /* The census rows (or support declaration) pin changed since the
+         * pre-sample plan named it. */
+        char const* key = scenario == TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN ? "census-rows-sha256=3333" :
+                                                                            "support-declaration-sha256=1111";
+        char* at = strstr(fixture->profile, key);
+        size_t digit = strlen(key) - 1;
+        char saved = at ? at[digit] : 0;
+        if (at) at[digit] = saved == '4' ? '5' : '4';
         CHECK(at && !bq_retirement_unit_campaign_post_aa_document(&driver, &sources) &&
               driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED &&
               driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA && !stages.ab.execution.sequence);
-        if (at) at[22] = '3';
+        if (at) at[digit] = saved;
         ok = 0;
     }
     if (ok)
@@ -1185,7 +1290,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         /* The post-A/A binding over the admission receipt. */
         CHECK(bq_retirement_unit_campaign_post_aa_document(&driver, &sources) &&
               driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS &&
-              !strcmp(driver.aa_admission_sha256, test_unit_campaign_receipt));
+              !strcmp(driver.aa_admission_sha256, fixture->aa_receipt_sha));
         ok = driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS;
     }
     if (ok && scenario == TEST_UNIT_CAMPAIGN_AB_WITHOUT_FREEZE)
@@ -1227,9 +1332,10 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     if (ok)
         CHECK(driver.launches[2] == 732 && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_AB &&
               campaign.phase == TP_RETIREMENT_CAMPAIGN_COLLECTED && phases.sequence == BQ_PHASE_MEASURING);
-    /* READY: the post-sample context and the result for lane E, while
-     * MEASURED waits for the composition and authority handoff. */
-    ok = ok && bq_retirement_unit_campaign_ready(&driver);
+    /* READY: the post-sample context and record and the result for lane E,
+     * while MEASURED waits for the composition and authority handoff. */
+    FILE* record = tmpfile();
+    ok = ok && bq_retirement_unit_campaign_ready(&driver, record);
     BqRetirementUnitCampaignResult result;
     if (ok)
         CHECK(driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_READY && phases.sequence == BQ_PHASE_MEASURING &&
@@ -1251,6 +1357,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     if (ok && scenario == TEST_UNIT_CAMPAIGN_COMPLETE)
     {
         test_unit_campaign_result_documents(fixture, &result, documents);
+        test_unit_campaign_record(&driver, &result, record);
         test_unit_campaign_compose_handoff(fixture, &driver);
     }
     BqRetirementUnitCampaignHandoff handoff = {test_unit_campaign_receipt,
@@ -1258,6 +1365,16 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     ok = ok && bq_retirement_unit_campaign_measured(&driver, &handoff);
     if (scenario == TEST_UNIT_CAMPAIGN_BAD_HANDOFF)
         CHECK(!ok && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && phases.sequence == BQ_PHASE_MEASURING);
+    if (scenario == TEST_UNIT_CAMPAIGN_COMPLETE && driver.step != BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED)
+    {
+        /* Name the step that stopped the complete run. */
+        BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(&driver);
+        fprintf(stderr, "unit campaign complete run stopped: step=%u reason=%u stage=%u launched=%u after=%u "
+                "status=%d exit=%d signal=%d timed_out=%d cancelled=%d group=%u row=%u variant=%u sequence=%" PRIu64
+                "\n", failure.step, failure.reason, failure.stage, failure.launched, failure.after, failure.status,
+                failure.exit_code, failure.signal_number, failure.timed_out, failure.cancelled, failure.group,
+                failure.row, failure.variant, failure.sequence);
+    }
     if (scenario == TEST_UNIT_CAMPAIGN_COMPLETE)
     {
         TpRetirementCampaignOutcome outcome = tp_retirement_campaign_outcome(&campaign);
@@ -1296,10 +1413,15 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         CHECK(bq_retirement_unit_campaign_result(&driver, &result) && result.code_count == 4 &&
               !strcmp(result.sealed_result_sha256, test_unit_campaign_receipt) &&
               !strcmp(result.authority_sha256, test_unit_campaign_ready) &&
-              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, test_unit_campaign_receipt,
-                  test_unit_campaign_ready, measured) && !strcmp(result.measured_sha256, measured) &&
-              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, test_unit_campaign_ready,
-                  test_unit_campaign_receipt, measured) && strcmp(result.measured_sha256, measured));
+              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, result.record.sha256,
+                  test_unit_campaign_receipt, test_unit_campaign_ready, measured) &&
+              !strcmp(result.measured_sha256, measured) &&
+              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, result.record.sha256,
+                  test_unit_campaign_ready, test_unit_campaign_receipt, measured) &&
+              strcmp(result.measured_sha256, measured) &&
+              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, driver.post_context_sha256,
+                  test_unit_campaign_receipt, test_unit_campaign_ready, measured) &&
+              strcmp(result.measured_sha256, measured));
         /* A finished driver runs no further step, and then has no result. */
         CHECK(!bq_retirement_unit_campaign_measured(&driver, &handoff) &&
               driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && !bq_retirement_unit_campaign_result(&driver, &result) &&
@@ -1312,6 +1434,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
             if (sample_streams[stage][shard]) CHECK(fclose(sample_streams[stage][shard]) == 0);
     if (stages.aa.stream || stages.ab.stream) test_retirement_campaign_close(&stages);
     if (records) CHECK(fclose(records) == 0);
+    if (record) CHECK(fclose(record) == 0);
+    free(other);
     for (unsigned side = 0; side < 2; ++side)
         if (cancel[side] >= 0) CHECK(close(cancel[side]) == 0);
     CHECK(test_unit_campaign_peer_join(&phases, peer));
@@ -1323,6 +1447,11 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     if (changed)
     {
         *changed -= 1;
+        bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
+    }
+    if (artifact)
+    {
+        artifact[0] = saved_artifact;
         bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
     }
 }
@@ -1353,7 +1482,7 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
         idle = (BqRetirementUnitCampaign){0};
         CHECK(!bq_retirement_unit_campaign_admit(&idle, &admission));
         idle = (BqRetirementUnitCampaign){0};
-        CHECK(!bq_retirement_unit_campaign_freeze(&idle) && !bq_retirement_unit_campaign_ready(&idle) &&
+        CHECK(!bq_retirement_unit_campaign_freeze(&idle) && !bq_retirement_unit_campaign_ready(&idle, NULL) &&
               !bq_retirement_unit_campaign_measured(&idle, &handoff));
         BqRetirementUnitCampaignDocumentSources sources = {fixture->cwd, &fixture->population,
             string_from_pointer(fixture->profile)};

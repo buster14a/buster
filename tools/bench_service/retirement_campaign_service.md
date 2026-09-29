@@ -188,13 +188,18 @@ The driver writes them in two steps, into the evidence root the caller passes
 synced). `bq_retirement_unit_campaign_documents` runs after attach and before
 A/A: it rederives the partitions and family, requires every pinned row's
 canonical identity (`bq_retirement_document_identity`) to be the gate's
-sealed one, the timed partition to be the campaign's groups and the gate's
-frozen batch groups, the family counts to be the plan's, the budget digest to
-be the campaign's and the performance-rows pin to be the parsed rows' digest,
-and writes the oracle, execution-plan, result-input and pre-sample documents.
-The A/A stage refuses until they exist. `bq_retirement_unit_campaign_post_aa_
-document` runs after the A/A admission: the post-A/A binding over the same
-sources and the admission receipt digest the admission step recorded. The
+sealed one and each timed row's runtime flag the gate's, the timed partition
+to be the campaign's groups with each object group's members exactly the
+member inputs of its gate batch group's frozen contracts (singletons one
+row), the family counts to be the plan's, the budget digest to be the
+campaign's and the performance-rows pin to be the parsed rows' digest, and
+writes the oracle, execution-plan, result-input and pre-sample documents. It
+keeps the three source pins and a digest of the timed-row layout (each timed
+row's id, group, runtime flag and six dimension values from the pinned rows,
+`bq_retirement_unit_campaign_timed_line`). The A/A stage refuses until they
+exist. `bq_retirement_unit_campaign_post_aa_document` runs after the A/A
+admission: the post-A/A binding over the same sources (all three pins must be
+unchanged) and the admission receipt digest the admission step recorded. The
 A/B freeze refuses until it exists.
 
 The admitted digest cannot be the validator's post-A/A document: that
@@ -204,8 +209,16 @@ instead, which binds the pre-sample plan document (and through it the
 execution plan, the result-input plan and the family), and the post-A/A
 document then binds the admission receipt and the pre-sample plan.
 
-The preparation runner writes all five documents from the issued unit gate
-over the real census fixture and runs `retirement_unit_documents_test.py`,
+The #437 receipt schema has no field that could name the post-A/A evidence
+digest (the validator refuses unknown receipt fields). The fixture admission
+therefore takes the receipt's bytes: they must hash to the named digest and
+be the approved schema, admitted and native only, on the campaign's CPU and
+native target, over the family the pre-sample plan named.
+
+The preparation runner has the driver's two steps write all five documents
+from the issued unit gate over the real census fixture (a driver standing at
+BOUND, then ADMITTED over a stand-in receipt digest) and runs
+`retirement_unit_documents_test.py`,
 which rederives the sources from the census files and applies the validator's
 own checks (`_performance_rows_with_sources`, `_family_member_counts`,
 `_check_execution_plan`, `_result_input_plan`, `_workflow_phase` and the
@@ -231,9 +244,10 @@ the attempt:
    code-observed untimed rows: every compile-eligible row, whose oracle parsed
    its code section, a zero baseline included (the validator's
    `_code_observed`; the gate's `code_eligible` is narrower, a nonzero
-   baseline section). Each side must equal the gate's artifact, code-section
-   digest and size. The driver keeps the batches, their singleton rows and
-   the reviewed budget (borrowed) for its documents.
+   baseline section). Each side must equal the gate's artifact (which a
+   code-observed row must have) and its code-section digest and size. The
+   driver keeps the batches, their singleton rows and the reviewed budget
+   (borrowed) for its documents.
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
 4. The store bind (above), then lane E's `tp_retirement_compose_plan` over
    the frozen capacity, then `bq_retirement_unit_campaign_attach`, which takes
@@ -259,8 +273,8 @@ the attempt:
    (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`, rejected with
    `BQ_SERVICE_INSTALLED`, as is the campaign's own fixture macro) enters A/B
    through the campaign's fixture stand-in, and only with this campaign's
-   plan, pre-sample and post-A/A digests. It records the admission receipt
-   digest.
+   plan, pre-sample and post-A/A digests and a #437 receipt (above). It
+   records the receipt digest.
 8. `bq_retirement_unit_campaign_post_aa_document`: the post-A/A binding.
 9. `bq_retirement_unit_campaign_freeze`: before the first candidate child, the
    post-A/A document, held join, sealed gate, frozen plan and context,
@@ -269,35 +283,48 @@ the attempt:
     launch, the first artifact of every code-observed timed row and variant
     is observed and must equal the gate's facts.
 11. `bq_retirement_unit_campaign_ready`: the code facts of every
-    code-observed row, then the post-sample context; the driver is READY and
+    code-observed row, then the post-sample context, written with the bound
+    documents, the timed-row layout digest and all three launch-log chains to
+    the post-sample record (`BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD`) on a
+    service stream, flushed and synced; the driver is READY and
     `bq_retirement_unit_campaign_result` returns what lane E's composer takes
     from it: job, attempt, boot, the pre-sample binding and A/B completion
     times, the frozen #619 plan, D's plan, pre-sample, post-A/A and
     post-sample digests, the untimed record stream, the code rows, the
     per-stage log chains, the five documents' sizes and digests (their paths
-    are fixed), the result-input partitions and the family, source rows and
-    admission receipt digests. The driver writes no execution receipt.
+    are fixed), the result-input partitions, the family, source rows,
+    admission receipt and timed-row layout digests and the record's size and
+    digest. The driver writes no execution receipt.
 12. `bq_retirement_unit_campaign_measured`: only after the caller confirms the
     composed sealed result and the producer authority handoff, the MEASURED
     acknowledgement, recording both confirmed digests and a measured digest
-    over them and the post-sample digest. A failed or incomplete campaign
-    never sends it.
+    over them, the post-sample digest and the record. A failed or incomplete
+    campaign never sends it. The fixed 48-byte phase message carries no
+    digest (`phase_channel.h`), so the record is what makes the post-sample
+    digest, and with it the A/B log chain, durable: the service publishes it
+    as a retained store file, and lane E's retained manifest, which the
+    producer authority binds, seals its digest.
 
 `retirement_unit_handoff.h` maps a READY driver onto lane E's
 `TpRetirementComposeRequest`: each `TpRetirementTimedRow` becomes a
-`TpRetirementComposeRow` (its dimension pointers point into it) after it is
-joined to the campaign's frozen sample row, the campaign groups' kinds form
-the layout, and the plan, identity and window, document digests, partitions,
-code facts and the A/A metrics tag fill the request; D's five documents are
-prior-closure entries under the validator's names. The caller supplies the
-rest (store, scratch, adapter, retained declaration, stream paths, the #511
-binding document and the rest of the prior closure).
+`TpRetirementComposeRow` (its dimension pointers point into it) after the
+rows reproduce the documents' timed-row layout digest and each is joined to
+the campaign's frozen sample row, the campaign groups' kinds form the layout,
+and the plan, identity and window, document digests, partitions, code facts
+and the A/A metrics tag fill the request; D's five documents are
+prior-closure entries under the validator's names, and the post-sample record
+and failure log are retained-file declarations. The caller supplies the rest
+(store, scratch, adapter, the rest of the retained declaration, stream paths,
+the #511 binding document and the rest of the prior closure).
 
 Every launch is refused when its timeout could outlive the absolute deadline
 (a frozen timeout is never shortened) and when the cancellation descriptor is
 readable; while a child runs, the process layer polls that descriptor with the
 child's pidfd and kills the process group when it becomes readable
-(`TpProcessInputs.cancellation`, `TpProcess.cancelled`).
+(`TpProcessInputs.cancellation`, `TpProcess.cancelled`). The process layer
+disarms the timeout alarm as soon as the child is reaped and reports a
+timeout only for a child the alarm's kill signalled, so a late alarm neither
+marks a clean exit as timed out nor kills a reaped group.
 
 The first failure is retained (`bq_retirement_unit_campaign_failure`): the
 reason (refused, cancelled, deadline, channel, launch), the step and stage,
@@ -341,10 +368,17 @@ post-A/A document's receipt and pre-sample joins and the partitions are
 checked), and the A/A stage refuses without them, as does the documents step
 for a row identity that is not the sealed one, a split object group, an
 existing document or a wrong performance-rows pin, the post-A/A step for a
-changed rows pin and the freeze without the post-A/A document. The READY
-driver is mapped onto lane E's request and each mapped field is checked; a
-timed row outside the frozen layout is refused. Its plan tests refuse
-`U = 0` and object-group members out of order or after a control input.
+changed rows or support pin and the freeze without the post-A/A document.
+The admission refuses a receipt whose bytes are not the named digest, over
+another family or CPU, or not admitted; the untimed step refuses a gate
+without an artifact digest for a code row. READY's post-sample record is read
+back and checked, and the measured digest changes with it. The READY driver
+is mapped onto lane E's request and each mapped field is checked; a timed row
+outside the frozen layout, two swapped dimension columns and a foreign
+dimension value are refused. Launch timeouts are 30 s, so the 1,468 pinned
+launches do not time out under sanitizers and load, and a complete run that
+stops prints its retained failure. Its plan tests refuse `U = 0` and
+object-group members out of order or after a control input.
 
 `retirement_unit_campaign_tests.h` uses the real unit-oracle attempt and its
 ready record. It covers the ready import, the template and inventory compare,
