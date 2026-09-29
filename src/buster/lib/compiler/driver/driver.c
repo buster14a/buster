@@ -3,7 +3,9 @@
 // argv into a CompilerDriverInvocation — dialect, target/CPU/features,
 // inputs classified as C source, objects, or archives, and every output
 // mode — rejecting unknown languages and retired options explicitly
-// rather than guessing. compiler_driver_execute_invocation then runs the
+// rather than guessing. It first replaces `@path` arguments through
+// compiler_driver_expand_response_files (bounded, one level, no nesting).
+// compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse, lowering, codegen, and object/executable
 // output (with -emit-llvm, WebAssembly, and eBPF as alternate emissions), the
@@ -845,6 +847,252 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_append_system_includes(Arena* arena, Co
     }
 }
 
+// Response files. Before any option is read, an argument that begins with '@'
+// is replaced by the arguments held in the file it names, as GCC's expandargv
+// and Clang's GNU tokenizer do, including after `--`. Whitespace separates
+// arguments; single and double quotes group bytes and are dropped, so ""
+// is an empty argument and a"b c"d is one; a backslash takes the next byte
+// literally inside or outside quotes. Text those compilers accept in
+// divergent ways is refused here instead: an unterminated quote, a trailing
+// backslash, a NUL byte and a bare "@". An expanded argument that itself
+// begins with '@' is refused rather than expanded: nesting is not supported.
+// Each expanded argument is NUL-terminated like an argv entry, and all of
+// them live in the invocation arena. Bounds are in driver.h.
+typedef enum CompilerDriverResponseFileStatus
+{
+    COMPILER_DRIVER_RESPONSE_FILE_READ,
+    COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE,
+    COMPILER_DRIVER_RESPONSE_FILE_OVERSIZED,
+} CompilerDriverResponseFileStatus;
+
+typedef struct CompilerDriverResponseFileSplit CompilerDriverResponseFileSplit;
+struct CompilerDriverResponseFileSplit
+{
+    // A diagnostic format taking the response-file path; empty on success.
+    String8 failure;
+    u64 argument_count;
+    // Unescaped argument bytes plus one terminator per argument.
+    u64 byte_count;
+};
+
+// Requests one byte past `limit`, so an oversized file, pipe or device is
+// detected without trusting a reported size or reading it to its end.
+BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileStatus compiler_driver_response_file_read(Arena* arena, String8 path, u64 limit, String8* content)
+{
+    CompilerDriverResponseFileStatus status = COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE;
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    if (opened.file)
+    {
+        u8* buffer = (u8*)arena_allocate_bytes(arena, limit + 1, 1);
+        OsFileReadResult read = os_file_read_exact(opened.file, (ByteSlice){.pointer = buffer, .length = limit + 1});
+        OsError close_error = os_file_close_checked(opened.file);
+        u64 kept = 0;
+        if (read.status != OS_FILE_READ_ERROR && !close_error.v)
+        {
+            if (read.transferred > limit)
+            {
+                status = COMPILER_DRIVER_RESPONSE_FILE_OVERSIZED;
+            }
+            else
+            {
+                status = COMPILER_DRIVER_RESPONSE_FILE_READ;
+                kept = read.transferred;
+                *content = (String8){.pointer = (char8*)buffer, .length = kept};
+            }
+        }
+        arena_set_position(arena, (u64)(buffer - (u8*)arena) + kept);
+    }
+    return status;
+}
+
+// With null `arguments` this only validates and counts. Otherwise it writes
+// the arguments into `bytes`, which holds the counted byte_count.
+BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileSplit compiler_driver_response_file_split(String8 content, String8* arguments, char8* bytes)
+{
+    CompilerDriverResponseFileSplit split = {0};
+    bool in_argument = false;
+    char8 quote = 0;
+    u64 argument_start = 0;
+    if (string_first_code_unit(content, 0) != BUSTER_STRING_NO_MATCH)
+    {
+        split.failure = S8("response file {S8} contains a NUL byte");
+    }
+    for (u64 index = 0; index <= content.length && !split.failure.length; index += 1)
+    {
+        bool end = index == content.length;
+        char8 byte = end ? (char8)0 : content.pointer[index];
+        bool literal = false;
+        bool separator = false;
+        if (end)
+        {
+            separator = true;
+            if (quote)
+            {
+                split.failure = S8("response file {S8} ends inside a quoted argument");
+            }
+        }
+        else if (byte == '\\')
+        {
+            if (index + 1 < content.length)
+            {
+                index += 1;
+                byte = content.pointer[index];
+                literal = true;
+            }
+            else
+            {
+                split.failure = S8("response file {S8} ends with an unfinished backslash escape");
+            }
+        }
+        else if (quote)
+        {
+            literal = byte != quote;
+            if (!literal)
+            {
+                quote = 0;
+            }
+        }
+        else if (byte == '"' || byte == '\'')
+        {
+            quote = byte;
+        }
+        else
+        {
+            separator = byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' || byte == '\v' || byte == '\f';
+            literal = !separator;
+        }
+        if (!in_argument && (literal || quote))
+        {
+            in_argument = true;
+            argument_start = split.byte_count;
+        }
+        if (literal)
+        {
+            if (byte == '@' && split.byte_count == argument_start)
+            {
+                split.failure = S8("response file {S8} names another response file; nested response files are not supported");
+            }
+            if (bytes)
+            {
+                bytes[split.byte_count] = byte;
+            }
+            split.byte_count += 1;
+        }
+        if (separator && in_argument && !split.failure.length)
+        {
+            if (arguments)
+            {
+                bytes[split.byte_count] = 0;
+                arguments[split.argument_count] = (String8){.pointer = bytes + argument_start, .length = split.byte_count - argument_start};
+            }
+            split.byte_count += 1;
+            split.argument_count += 1;
+            in_argument = false;
+        }
+    }
+    return split;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_expand_response_files(Arena* arena, CompilerDriverInvocation* invocation, SliceString8 arguments)
+{
+    SliceString8 result = arguments;
+    u64 response_file_count = 0;
+    for (u64 index = 0; index < arguments.length; index += 1)
+    {
+        String8 argument = arguments.pointer[index];
+        response_file_count += (u64)(argument.length && argument.pointer[0] == '@');
+    }
+    if (response_file_count)
+    {
+        // Every file is read and counted before the expanded array is sized;
+        // the second split copies arguments out of the retained contents.
+        String8* contents = arena_allocate(arena, String8, arguments.length);
+        CompilerDriverResponseFileSplit* splits = arena_allocate(arena, CompilerDriverResponseFileSplit, arguments.length);
+        u64 argument_count = arguments.length - response_file_count;
+        u64 content_bytes = 0;
+        for (u64 index = 0; index < arguments.length && invocation->error == COMPILER_DRIVER_ERROR_NONE; index += 1)
+        {
+            String8 argument = arguments.pointer[index];
+            if (argument.length && argument.pointer[0] == '@')
+            {
+                String8 path = string_slice(argument, 1, argument.length);
+                if (!path.length)
+                {
+                    invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                    invocation->diagnostic = S8("expected a response file path after @");
+                }
+                else
+                {
+                    path = string_duplicate_arena(arena, path, true);
+                    CompilerDriverResponseFileStatus status =
+                        compiler_driver_response_file_read(arena, path, COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT - content_bytes, &contents[index]);
+                    if (status == COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE)
+                    {
+                        invocation->error = COMPILER_DRIVER_ERROR_FILE_READ;
+                        invocation->diagnostic = string_format(arena, S8("could not read response file {S8}"), path);
+                    }
+                    else if (status == COMPILER_DRIVER_RESPONSE_FILE_OVERSIZED)
+                    {
+                        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation->diagnostic = string_format(arena, S8("response files exceed the {u64}-byte limit at {S8}"),
+                                                               (u64)COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT, path);
+                    }
+                    else
+                    {
+                        content_bytes += contents[index].length;
+                        splits[index] = compiler_driver_response_file_split(contents[index], 0, 0);
+                        argument_count += splits[index].argument_count;
+                        if (splits[index].failure.length)
+                        {
+                            compiler_driver_argument_error(arena, invocation, splits[index].failure, path);
+                        }
+                        else if (argument_count > COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT)
+                        {
+                            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                            invocation->diagnostic = string_format(arena, S8("response files expand the command line past {u64} arguments at {S8}"),
+                                                                   (u64)COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT, path);
+                        }
+                    }
+                }
+            }
+        }
+        result = (SliceString8){0};
+        if (invocation->error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8* expanded = arena_allocate(arena, String8, argument_count);
+            u64 expanded_count = 0;
+            if (!expanded && argument_count)
+            {
+                invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                invocation->diagnostic = S8("could not allocate expanded response-file arguments");
+            }
+            for (u64 index = 0; expanded && index < arguments.length; index += 1)
+            {
+                String8 argument = arguments.pointer[index];
+                if (argument.length && argument.pointer[0] == '@')
+                {
+                    char8* bytes = arena_allocate(arena, char8, splits[index].byte_count);
+                    if (bytes || !splits[index].byte_count)
+                    {
+                        compiler_driver_response_file_split(contents[index], expanded + expanded_count, bytes);
+                        expanded_count += splits[index].argument_count;
+                    }
+                    else
+                    {
+                        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation->diagnostic = S8("could not allocate expanded response-file arguments");
+                    }
+                }
+                else
+                {
+                    expanded[expanded_count++] = argument;
+                }
+            }
+            result = expanded && invocation->error == COMPILER_DRIVER_ERROR_NONE ? (SliceString8){.pointer = expanded, .length = expanded_count} : (SliceString8){0};
+        }
+    }
+    return result;
+}
 
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
@@ -868,6 +1116,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         return invocation;
     }
+    // A failed expansion leaves no arguments; every later step is gated on
+    // invocation.error, so the response-file diagnostic is the one reported.
+    arguments = compiler_driver_expand_response_files(arena, &invocation, arguments);
     // At most one resource directory plus four sysroot directories. Native
     // Windows INCLUDE entries reserve their own exact-sized array below.
     u64 default_include_capacity = 5;
