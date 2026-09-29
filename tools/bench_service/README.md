@@ -404,7 +404,10 @@ are separate translation units linked into the service. The service order is:
    observation that produced it: a singleton or batch sample is D's encoding of
    the supervised interval and RSS, an object member's sample is its metrics
    input's interval and arena high-water (members are a batch's first inputs,
-   in census order). It rehashes the prior closure below the store root (the
+   in census order). The A/A stage's retained metrics shards (its writer tag)
+   must be tiled, in order and completely, by its retained transcripts'
+   metrics artifacts, so a trailing unreferenced A/A shard is refused. It
+   rehashes the prior closure below the store root (the
    evidence root is the store root; entry count and bytes are exactly those
    reserved) and derives the post-sample `_execution_context` in C from the
    authenticated post-A/A binding document with the streamed numeric digest.

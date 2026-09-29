@@ -52,7 +52,8 @@ transcript|metrics|untimed|untimed-metrics PATH [SOURCE], samples
 rows|batches PATH [SOURCE], retain-file KIND PATH reserved|BYTES [SOURCE],
 retain-declared KIND PATH reserved|BYTES (declared but never imported),
 retain-group KIND PREFIX =SUFFIX FILES reserved|BYTES, retain-member PATH
-[SOURCE], prior NAME PATH BYTES SHA256. The store root is the evidence root:
+[SOURCE], aa-transcript PATH, aa-metrics-tag TAG, prior NAME PATH BYTES
+SHA256. The store root is the evidence root:
 the prior closure and the binding live beside the store files.
 No fixture here is service admission or performance evidence.
 """
@@ -155,10 +156,25 @@ def _fresh(root, pristine, name):
     return store, scratch
 
 
+def _aa_transcript(source, name, stage_tag, output):
+    """An A/A transcript standing in for lane D's: the A/B transcript with its
+    metrics artifacts renamed to the `aa` shards, which are byte copies of the
+    A/B shards, so the composer's A/A tiling checks them like A/B's."""
+    data = (source / name).read_bytes()
+    renamed = data.replace(f"retirement-metrics-{stage_tag}-".encode(), b"retirement-metrics-aa-")
+    if renamed == data:
+        raise AssertionError("the transcript references no metrics shard")
+    Path(output).write_bytes(renamed)
+    return str(output)
+
+
 def _retained_lines(transcript, rows, batches, metrics):
-    """The A/A stage's retained evidence (copies of the A/B streams stand in:
-    the composer never reads them) and an empty failure-log group."""
-    lines = [f"retain-file transcript retirement-execution-aa-0000.jsonl reserved {transcript}",
+    """The A/A stage's retained evidence (its transcript tiles the `aa`
+    metrics shards; copies of the A/B numeric shards stand in for its
+    samples, which the composer never reads) and an empty failure-log
+    group."""
+    lines = ["aa-transcript retirement-execution-aa-0000.jsonl", "aa-metrics-tag aa",
+             f"retain-file transcript retirement-execution-aa-0000.jsonl reserved {transcript}",
              f"retain-file samples retirement-samples-aa-0000.jsonl reserved {rows}",
              f"retain-file samples retirement-batches-aa-0000.jsonl reserved {batches}",
              "retain-group metrics retirement-metrics-aa- =.txt 8 reserved",
@@ -403,7 +419,9 @@ class ComposeEndToEndTests(unittest.TestCase):
             f"untimed retirement-untimed-batches.jsonl {untimed['path']}",
             *[f"untimed-metrics {path.name}" for path in sorted(source.glob("retirement-metrics-untimed-*.txt"))],
             *[f"prior {name} {artifact['path']} {artifact['bytes']} {artifact['sha256']}" for name, artifact in prior],
-            *_retained_lines("execution/invocations.jsonl", "retirement-samples-0000.jsonl",
+            *_retained_lines(_aa_transcript(source, "execution/invocations.jsonl", "ab",
+                                            source / "retirement-execution-aa.jsonl"),
+                             "retirement-samples-0000.jsonl",
                              "retirement-batches-0000.jsonl",
                              [path.name for path in sorted(source.glob("retirement-metrics-ab-*.txt"))]),
         ]
@@ -760,7 +778,9 @@ class ThroughputFixtureTests(unittest.TestCase):
                     f"prior workflow.phases.post_aa_binding {post['path']} {post['bytes']} {post['sha256']}",
                     f"prior workflow.records.result_input_plan {result_plan['path']} {result_plan['bytes']} "
                     f"{result_plan['sha256']}",
-                    *_retained_lines("retirement-execution.jsonl", "retirement-samples-0000.jsonl",
+                    *_retained_lines(_aa_transcript(fixture, "retirement-execution.jsonl", "rec",
+                                                    root / "retirement-execution-aa.jsonl"),
+                                     "retirement-samples-0000.jsonl",
                                      "retirement-batches-0000.jsonl", ["retirement-metrics-rec-0000.txt"]),
                 ]
                 composed = _run_compose(spec, root)

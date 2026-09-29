@@ -195,6 +195,15 @@ typedef struct TpRetirementComposeRequest
     char const* untimed_path;
     char const* const* untimed_metrics_paths;
     unsigned untimed_metrics_count;
+    /* The A/A stage: its transcript shards (declared retained files, in
+     * order) and its metrics writer tag. Every retained
+     * `retirement-metrics-<tag>-NNNN.txt` shard must be tiled, in order and
+     * completely, by those transcripts' metrics artifacts, as the A/B
+     * shards are by the A/B transcript. A NULL tag means the A/A stage wrote
+     * no metrics. */
+    char const* const* aa_transcript_paths;
+    unsigned aa_transcript_count;
+    char const* aa_metrics_tag;
     TpRetirementComposeCode const* code;
     unsigned code_count;
     TpRetirementComposeClosure const* prior;

@@ -309,11 +309,16 @@ class ExportReplayTest(unittest.TestCase):
 
     def test_service_job_label_matches_the_c_format(self):
         root = Path(replay.__file__).resolve().parents[2]
-        text = (root / "tools/bench_service/retirement_campaign_binding.h").read_text(encoding="utf-8")
-        match = re.search(r"bq_retirement_campaign_job_label\(char output\[129\], uint64_t job_id\)\s*\{"
-                          r"[^}]*snprintf\(output, 129, \"([^\"]*)\" PRIu64", text)
-        self.assertIsNotNone(match, "bq_retirement_campaign_job_label no longer formats job-<id>")
+        store = (root / "tools/throughput/retirement_store.h").read_text(encoding="utf-8")
+        match = re.search(r"tp_retirement_store_job_label\(char output\[TP_RETIREMENT_STORE_TOKEN_CAPACITY\], "
+                          r"uint64_t job\)\s*\{[^}]*snprintf\(output, TP_RETIREMENT_STORE_TOKEN_CAPACITY, "
+                          r"\"([^\"]*)\" PRIu64", store)
+        self.assertIsNotNone(match, "tp_retirement_store_job_label no longer formats job-<id>")
         self.assertEqual(match.group(1).replace("%", "{}"), replay.SERVICE_JOB_LABEL)
+        # The campaign binding labels its receipt through the same helper.
+        campaign = (root / "tools/bench_service/retirement_campaign_binding.h").read_text(encoding="utf-8")
+        self.assertRegex(campaign, r"bq_retirement_campaign_job_label\(char output\[129\], uint64_t job_id\)"
+                                   r"\s*\{[^}]*tp_retirement_store_job_label\(output, job_id\)")
         self.assertEqual(replay.SERVICE_JOB_LABEL.format(42), "job-42")
 
     def test_composer_constants_match_the_composer_source(self):
@@ -331,9 +336,15 @@ class ExportReplayTest(unittest.TestCase):
                  "TP_COMPOSE_MANIFEST_SHARD_BYTES": replay.COMPOSE_MANIFEST_SHARD_BYTES,
                  "TP_COMPOSE_BUNDLE_BYTES": replay.COMPOSE_BUNDLE_BYTES,
                  "TP_COMPOSE_SEAL_FIXED_BYTES": replay.COMPOSE_SEAL_FIXED_BYTES,
-                 "TP_COMPOSE_SEAL_ENTRY_BYTES": replay.COMPOSE_SEAL_ENTRY_BYTES}
+                 "TP_COMPOSE_SEAL_ENTRY_BYTES": replay.COMPOSE_SEAL_ENTRY_BYTES,
+                 "TP_COMPOSE_RETAINED_LINE_BYTES": replay.COMPOSE_RETAINED_LINE_BYTES}
         for name, value in pairs.items():
             self.assertEqual(c_define(root, "tools/bench_service/retirement_compose.c", name), value, name)
+        store = (root / "tools/throughput/retirement_store.h").read_text(encoding="utf-8")
+        match = re.search(r'^#define TP_RETIREMENT_RETAINED_MANIFEST_HEADER "((?:[^"\\]|\\.)*)"$', store, re.MULTILINE)
+        self.assertIsNotNone(match)
+        header_text = match.group(1).encode().decode("unicode_escape")
+        self.assertEqual(len(header_text) + 1, replay.RETAINED_MANIFEST_HEADER_SIZE)
         header = "tools/bench_service/retirement_compose.h"
         self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS"), replay.COMPOSE_FIXED_OUTPUTS)
         self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS"),
@@ -370,10 +381,13 @@ class ExportReplayTest(unittest.TestCase):
                 self.assertLessEqual(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
                 self.assertEqual(ledger["untimed_record_files"], 1)
                 # Every composer output is counted: manifests, code records,
-                # adapter input and output, bundle, receipt and seal.
+                # adapter input and output, bundle, receipt, retained
+                # manifest and seal.
                 self.assertEqual(set(composer["outputs"]), {
                     "result_input_manifests", "code_records", "adapter_input", "adapter_output",
-                    "result_bundle", "execution_receipt", "sealed_result"})
+                    "result_bundle", "execution_receipt", "retained_manifest", "sealed_result"})
+                self.assertEqual(composer["outputs"]["retained_manifest"],
+                                 replay.RETAINED_MANIFEST_HEADER_SIZE + replay.ENTRY_CAP * replay.COMPOSE_RETAINED_LINE_BYTES)
                 self.assertEqual(ledger["entries_left_for_projections_logs_and_directories"],
                                  replay.ENTRY_CAP - replay.WORKER_CONTROL_ENTRIES - prior - ledger["owned_files"])
                 # The single-file adapter input exceeds 64 MiB at A1 scale.

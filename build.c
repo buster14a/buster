@@ -40311,7 +40311,8 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
             if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
             os_argument_builder_append(&builder, sources[index]);
-            if (index == 0 || index == 3 || index == 5)
+            /* shared.c provides the arenas (and hash.c) the store uses. */
+            if (index == 0 || index == 2 || index == 3 || index == 5)
                 os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
             if (index == 5)
             {
@@ -40319,7 +40320,6 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_json.c"));
             }
             if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
-            if (index == 2) os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
             if (sanitize)
             {
                 os_argument_builder_append(&builder, S8("-g"));

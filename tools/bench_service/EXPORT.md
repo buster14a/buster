@@ -304,8 +304,8 @@ scenario of that model onto the export and worker limits. It adds:
 - the lane-E composer's outputs, mirroring `tp_retirement_compose_bounds`
   (#1879): the #615 result-input manifests, the code-record set (at most
   78,914 rows × 649 bytes), the #619 adapter input (series) and output
-  (replay), the result bundle, the execution receipt and the sealed-result
-  record;
+  (replay), the result bundle, the execution receipt, the retained manifest
+  (27 + 4,096 × 320 bytes) and the sealed-result record;
 - the prior sealed-closure files (at least 40, derived from the validator's
   `_all_artifacts` plus `contract.source` and the execution plan; census
   projections add more);
@@ -320,12 +320,12 @@ singletons:
 
 | Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter input | Verdict |
 |---:|---:|---:|---:|---:|---:|---:|---|
-| 60 | 4 KiB | 469 | 3,584 | 15,907,812,202 | 121,531,141,270 | 406,664,536 | refused (#1880) |
-| 60 | 8 KiB | 909 | 3,144 | 30,603,866,986 | 106,835,086,486 | 406,664,536 | refused (#1880) |
-| 60 | 16 KiB | 1,785 | 2,268 | 59,995,976,554 | 77,442,976,918 | 406,664,536 | refused (#1880) |
-| 254 | 4 KiB | 1,811 | 2,242 | 62,553,418,890 | 74,885,534,582 | 1,710,443,864 | refused (#1880) |
-| 254 | 8 KiB | 3,531 | 522 | 120,273,595,530 | 17,165,357,942 | 1,710,443,864 | refused (#1880) |
-| 254 | 16 KiB | 6,971 | -2,918 | 235,713,948,810 | -98,274,995,338 | 1,710,443,864 | refused (#1880, entries, bytes) |
+| 60 | 4 KiB | 470 | 3,583 | 15,909,122,949 | 121,529,830,523 | 406,664,536 | refused (#1880) |
+| 60 | 8 KiB | 910 | 3,143 | 30,605,177,733 | 106,833,775,739 | 406,664,536 | refused (#1880) |
+| 60 | 16 KiB | 1,786 | 2,267 | 59,997,287,301 | 77,441,666,171 | 406,664,536 | refused (#1880) |
+| 254 | 4 KiB | 1,812 | 2,241 | 62,554,729,637 | 74,884,223,835 | 1,710,443,864 | refused (#1880) |
+| 254 | 8 KiB | 3,532 | 521 | 120,274,906,277 | 17,164,047,195 | 1,710,443,864 | refused (#1880) |
+| 254 | 16 KiB | 6,972 | -2,919 | 235,715,259,557 | -98,276,306,085 | 1,710,443,864 | refused (#1880, entries, bytes) |
 
 **No A1 scenario fits today.** The composer writes the #619 adapter input as
 one file of about `8 × cells × 2P` 32-byte ratio lines. At A1 scale that is

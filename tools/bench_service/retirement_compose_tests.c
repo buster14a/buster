@@ -109,7 +109,8 @@ typedef struct Driver
     unsigned partition_counts[2];
     /* Sealed inputs, then retained files (exact declarations and group
      * members): every list is imported into the store. */
-    DriverList transcript, samples[2], metrics, untimed, untimed_metrics, retained_files;
+    DriverList transcript, samples[2], metrics, untimed, untimed_metrics, retained_files, aa_transcript;
+    char aa_tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1];
     DriverRetained retained_text[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES];
     TpRetirementComposeRetained retained[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES];
     unsigned retained_count;
@@ -238,8 +239,8 @@ BUSTER_GLOBAL_LOCAL int driver_retain(Driver* driver, char const* kind, char con
  * writes: source store scratch adapter authority binding sealed identity
  * digests statistics population metrics-budget group untimed-group row code
  * partition transcript samples metrics untimed untimed-metrics retain-file
- * retain-declared (declared, never imported) retain-group retain-member prior
- * timeout. */
+ * retain-declared (declared, never imported) retain-group retain-member
+ * aa-transcript (a retained A/A shard) aa-metrics-tag prior timeout. */
 BUSTER_GLOBAL_LOCAL int driver_parse(Driver* driver, char const* spec)
 {
     FILE* input = fopen(spec, "rb");
@@ -362,6 +363,10 @@ BUSTER_GLOBAL_LOCAL int driver_parse(Driver* driver, char const* spec)
         else if (!strcmp(key, "retain-file") && (count == 4 || count == 5))
             valid = driver_retain(driver, words[1], words[2], NULL, 1, words[3]) &&
                     driver_list_add(&driver->retained_files, words[2], count == 5 ? words[4] : NULL);
+        else if (!strcmp(key, "aa-transcript") && count == 2)
+            valid = driver_list_add(&driver->aa_transcript, words[1], NULL);
+        else if (!strcmp(key, "aa-metrics-tag") && count == 2)
+            valid = driver_copy(driver->aa_tag, sizeof(driver->aa_tag), words[1]);
         else if (!strcmp(key, "retain-declared") && count == 4)
             valid = driver_retain(driver, words[1], words[2], NULL, 1, words[3]);
         else if (!strcmp(key, "retain-group") && count == 6)
@@ -558,6 +563,8 @@ BUSTER_GLOBAL_LOCAL void driver_request(Driver* driver)
         .metrics_paths = driver->metrics.paths, .metrics_count = driver->metrics.count,
         .untimed_path = driver->untimed.count ? driver->untimed.paths[0] : NULL,
         .untimed_metrics_paths = driver->untimed_metrics.paths, .untimed_metrics_count = driver->untimed_metrics.count,
+        .aa_transcript_paths = driver->aa_transcript.paths, .aa_transcript_count = driver->aa_transcript.count,
+        .aa_metrics_tag = driver->aa_tag[0] ? driver->aa_tag : NULL,
         .code = driver->code, .code_count = driver->code_count, .prior = driver->prior,
         .prior_count = driver->prior_count, .sealed_path = driver->sealed};
 }
@@ -810,28 +817,25 @@ typedef struct FixtureObservations
     uint64_t batch_wall[TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2], batch_rss[TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2];
 } FixtureObservations;
 
-/* Lane D's streams for one A1 layout: an object batch group (census row 0),
- * a singleton link row with runtime (row 1) and one untimed object group
- * (cross-target code row 2), written with D's own encoders and cursor. Every
- * numeric sample is the observation D's collector derives from the same
- * invocation: its supervised interval and RSS, or the member's metrics. */
-BUSTER_GLOBAL_LOCAL int fixture_streams(Fixture* fixture, uint64_t* completed_at)
+/* One stage's transcript and metrics shard, written with D's own encoders
+ * and cursor from `start`; the sample-phase observations are recorded when
+ * `seen` is given. Returns the stage's last finish time (0 on failure). */
+BUSTER_GLOBAL_LOCAL uint64_t fixture_transcript(Fixture* fixture, char const* tag, uint64_t start,
+                                                FixtureObservations* seen)
 {
     Driver* driver = fixture->driver;
     unsigned runtime_rows[1] = {1}, workspace[7];
     TpRetirementExecution execution;
-    FixtureObservations* seen = (FixtureObservations*)tp_retirement_compose_allocate(driver->arena,
-                                                                                    sizeof(FixtureObservations));
-    int valid = seen && tp_retirement_execution_init(&execution, driver->statistics.seed, 2, runtime_rows, 1, 3,
-                                                     FIXTURE_PAIRS, workspace, 7);
+    int valid = tp_retirement_execution_init(&execution, driver->statistics.seed, 2, runtime_rows, 1, 3,
+                                             FIXTURE_PAIRS, workspace, 7);
     char path[512];
-    snprintf(path, sizeof(path), "%s/retirement-execution-ab-0000.jsonl", fixture->source);
+    snprintf(path, sizeof(path), "%s/retirement-execution-%s-0000.jsonl", fixture->source, tag);
     FILE* transcript = fopen(path, "wb");
-    snprintf(path, sizeof(path), "%s/retirement-metrics-ab-0000.txt", fixture->source);
+    snprintf(path, sizeof(path), "%s/retirement-metrics-%s-0000.txt", fixture->source, tag);
     FILE* metrics_stream = fopen(path, "w+b");
     TpRetirementMetricsShards metrics;
-    valid = valid && transcript && metrics_stream && tp_retirement_metrics_shards_init(&metrics, "ab", metrics_stream);
-    uint64_t now = driver->bound_at_ns;
+    valid = valid && transcript && metrics_stream && tp_retirement_metrics_shards_init(&metrics, tag, metrics_stream);
+    uint64_t now = start;
     TpRetirementInvocation invocation;
     while (valid && tp_retirement_execution_peek(&execution, &invocation) == TP_RETIREMENT_NEXT_READY)
     {
@@ -850,7 +854,7 @@ BUSTER_GLOBAL_LOCAL int fixture_streams(Fixture* fixture, uint64_t* completed_at
             size_t length = fixture_metrics(body, sizeof(body), interval, arena_peak);
             valid = length && tp_retirement_metrics_shards_append(&metrics, (unsigned char const*)body, length, &artifact);
         }
-        if (valid && invocation.phase)
+        if (valid && seen && invocation.phase)
         {
             unsigned r = (unsigned)invocation.round, p = (unsigned)invocation.pair, v = invocation.variant;
             if (invocation.kind) seen->runtime[r][p][v] = elapsed;
@@ -878,6 +882,25 @@ BUSTER_GLOBAL_LOCAL int fixture_streams(Fixture* fixture, uint64_t* completed_at
     valid = valid && tp_retirement_execution_complete(&execution) && tp_retirement_metrics_shards_finish(&metrics, &last);
     if (transcript && fclose(transcript) != 0) valid = 0;
     if (metrics_stream && fclose(metrics_stream) != 0) valid = 0;
+    return valid ? now : 0;
+}
+
+/* Lane D's streams for one A1 layout: an object batch group (census row 0),
+ * a singleton link row with runtime (row 1) and one untimed object group
+ * (cross-target code row 2), written with D's own encoders and cursor. Every
+ * numeric sample is the observation D's collector derives from the same
+ * invocation: its supervised interval and RSS, or the member's metrics. The
+ * A/A stage (tag `aa`) precedes the bound A/B window. */
+BUSTER_GLOBAL_LOCAL int fixture_streams(Fixture* fixture, uint64_t* completed_at)
+{
+    Driver* driver = fixture->driver;
+    FixtureObservations* seen = (FixtureObservations*)tp_retirement_compose_allocate(driver->arena,
+                                                                                    sizeof(FixtureObservations));
+    uint64_t now = seen && fixture_transcript(fixture, "aa", 1, NULL) ?
+                   fixture_transcript(fixture, "ab", driver->bound_at_ns, seen) : 0;
+    int valid = now != 0;
+    char path[512];
+    TpRetirementShardFile last;
     *completed_at = now + 1000;
     /* Row samples: row 0 (object member), then row 1 (singleton, runtime). */
     snprintf(path, sizeof(path), "%s/retirement-samples-0000.jsonl", fixture->source);
@@ -1046,9 +1069,11 @@ BUSTER_GLOBAL_LOCAL int fixture_start(Fixture* fixture, FixtureMutation mutation
         strcpy(driver->authority_path, fixture->authority);
         strcpy(driver->job, "job-7");
         strcpy(driver->boot, "boot-a");
+        strcpy(driver->aa_tag, "aa");
         strcpy(driver->sealed, "retirement-sealed-result.json");
         driver->attempt = 3;
-        driver->bound_at_ns = 1000;
+        /* After the A/A stage's window (which starts at 1). */
+        driver->bound_at_ns = UINT64_C(10000000);
         driver->population_rows = 3;
         driver->metrics_header = 4096;
         driver->metrics_input = 16384;
@@ -1105,14 +1130,14 @@ BUSTER_GLOBAL_LOCAL int fixture_start(Fixture* fixture, FixtureMutation mutation
                 driver_list_add(&driver->untimed, "retirement-untimed-batches.jsonl", NULL) &&
                 driver_list_add(&driver->untimed_metrics, "retirement-metrics-untimed-0000.txt", NULL) &&
                 driver_retain(driver, "transcript", "retirement-execution-aa-0000.jsonl", NULL, 1, "reserved") &&
-                driver_list_add(&driver->retained_files, "retirement-execution-aa-0000.jsonl",
-                                "retirement-execution-ab-0000.jsonl") &&
+                driver_list_add(&driver->retained_files, "retirement-execution-aa-0000.jsonl", NULL) &&
+                driver_list_add(&driver->aa_transcript, "retirement-execution-aa-0000.jsonl", NULL) &&
                 driver_retain(driver, "samples", "retirement-samples-aa-0000.jsonl", NULL, 1, "reserved") &&
                 driver_list_add(&driver->retained_files, "retirement-samples-aa-0000.jsonl", "retirement-samples-0000.jsonl") &&
                 driver_retain(driver, "samples", "retirement-batches-aa-0000.jsonl", NULL, 1, "reserved") &&
                 driver_list_add(&driver->retained_files, "retirement-batches-aa-0000.jsonl", "retirement-batches-0000.jsonl") &&
                 driver_retain(driver, "metrics", "retirement-metrics-aa-", ".txt", 4, "reserved") &&
-                driver_list_add(&driver->retained_files, "retirement-metrics-aa-0000.txt", "retirement-metrics-ab-0000.txt") &&
+                driver_list_add(&driver->retained_files, "retirement-metrics-aa-0000.txt", NULL) &&
                 driver_retain(driver, "record", "retirement-lifecycle.txt", NULL, 1, "4096") &&
                 driver_list_add(&driver->retained_files, "retirement-lifecycle.txt", NULL) &&
                 driver_retain(driver, "log", "retirement-failure-", ".log", 4, "4096") &&
@@ -1295,13 +1320,13 @@ typedef enum Refusal
     REFUSE_SAMPLE_ORDER, REFUSE_UNTIMED_MISSING, REFUSE_ADAPTER, REFUSE_WINDOW, REFUSE_DROPPED_RETAINED,
     REFUSE_DECLARATION_CHANGED, REFUSE_HALVED_WALL, REFUSE_MEMBER_MEMORY, REFUSE_ADAPTER_DIGEST,
     REFUSE_ADAPTER_TIMEOUT, REFUSE_ADAPTER_OUTPUT, REFUSE_GROUP_GAP, REFUSE_BINDING_POST, REFUSE_PRIOR_COUNT,
-    REFUSE_COUNT
+    REFUSE_AA_TRAILING_SHARD, REFUSE_AA_TRANSCRIPT_TAMPERED, REFUSE_COUNT
 } Refusal;
 
 BUSTER_GLOBAL_LOCAL char const* const refusal_stages[REFUSE_COUNT] = {"inventory", "inventory", "transcript", "prior",
     "context", "transcript", "prior", "bounds", "request", "partitions", "transcript", "samples", "untimed", "adapter",
     "transcript", "inventory", "retained", "samples", "samples", "adapter", "adapter", "adapter", "inventory", "context",
-    "prior"};
+    "prior", "aa-transcript", "aa-transcript"};
 
 /* Swap two lines of a source stream file before import. */
 BUSTER_GLOBAL_LOCAL int fixture_swap_lines(Fixture* fixture, char const* name, unsigned first, unsigned second)
@@ -1347,6 +1372,16 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusal(Refusal refusal)
     if (ready && refusal == REFUSE_EXTRA_FILE)
         ready = fixture_write(fixture.source, "retirement-extra.log", "log\n", 4) &&
                 driver_list_add(&driver->retained_files, "retirement-extra.log", NULL);
+    /* A second A/A metrics shard that no A/A artifact reaches (a trailing,
+     * never-referenced publication) passes the declaration but not tiling. */
+    if (ready && refusal == REFUSE_AA_TRAILING_SHARD)
+        ready = fixture_write(fixture.source, "retirement-metrics-aa-0001.txt", "CC_METRICS trailing\n", 20) &&
+                driver_list_add(&driver->retained_files, "retirement-metrics-aa-0001.txt", NULL);
+    /* The A/A transcript names the A/B shard: its artifacts do not tile. */
+    if (ready && refusal == REFUSE_AA_TRANSCRIPT_TAMPERED)
+        ready = driver_list_remove(&driver->retained_files, "retirement-execution-aa-0000.jsonl") &&
+                driver_list_add(&driver->retained_files, "retirement-execution-aa-0000.jsonl",
+                                "retirement-execution-ab-0000.jsonl");
     if (ready && refusal == REFUSE_GROUP_GAP)
         ready = fixture_write(fixture.source, "retirement-failure-0002.log", "log\n", 4) &&
                 driver_list_add(&driver->retained_files, "retirement-failure-0002.log", NULL);

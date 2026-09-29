@@ -11,6 +11,7 @@
  *                  tp_compose_tiling_*, tp_compose_metrics_input
  *   inputs         tp_compose_inventory, tp_compose_prior, tp_compose_transcript
  *                  (tp_compose_invocation, tp_compose_observe), tp_compose_untimed,
+ *                  tp_compose_aa (A/A metrics-shard tiling),
  *                  tp_compose_samples, tp_compose_partitions, tp_compose_context
  *   outputs        TpComposeWriter, tp_compose_manifests, tp_compose_code,
  *                  tp_compose_series, tp_compose_adapter (tp_compose_adapter_run,
@@ -1689,6 +1690,62 @@ BUSTER_GLOBAL_LOCAL int tp_compose_untimed(TpComposeState* state)
     return valid;
 }
 
+/* The A/A stage's retained metrics shards are exactly what its transcript
+ * references: the retained `retirement-metrics-<tag>-NNNN.txt` files, in
+ * index order, tiled completely by the A/A transcripts' artifacts (a shard
+ * that no artifact reaches, such as a trailing unpublished one, is refused).
+ * The A/A transcripts must be retained files; the tag must differ from the
+ * A/B and untimed writers'. */
+BUSTER_GLOBAL_LOCAL int tp_compose_aa(TpComposeState* state, char const* timed_tag, char const* untimed_tag)
+{
+    TpRetirementComposeRequest const* request = state->request;
+    char const* tag = request->aa_metrics_tag;
+    unsigned count = request->aa_transcript_count;
+    size_t tag_length = tag ? strnlen(tag, TP_RETIREMENT_METRICS_TAG_BYTES + 1) : 0;
+    int valid = count <= TP_RETIREMENT_TRANSCRIPT_SHARDS && (!count || request->aa_transcript_paths) &&
+                (!tag || (tag_length && tag_length <= TP_RETIREMENT_METRICS_TAG_BYTES && strcmp(tag, timed_tag) &&
+                          strcmp(tag, untimed_tag) && strcmp(tag, TP_RETIREMENT_UNTIMED_METRICS_TAG)));
+    char const** paths = valid ? (char const**)tp_retirement_compose_allocate(state->arena,
+                             (uint64_t)state->files * sizeof(char const*)) : NULL;
+    unsigned shards = 0;
+    valid = valid && paths;
+    for (unsigned i = 0; valid && tag && i < state->files; ++i)
+    {
+        unsigned index = state->by_path[i];
+        char shard_tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1];
+        unsigned ordinal = 0;
+        if (state->classes[index] == TP_COMPOSE_CLASS_RETAINED &&
+            tp_compose_shard_tag(state->store->files[index].path, shard_tag, &ordinal) && !strcmp(shard_tag, tag))
+            paths[shards++] = state->store->files[index].path;
+    }
+    TpComposeTiling tiling = {0};
+    char found[TP_RETIREMENT_METRICS_TAG_BYTES + 1];
+    valid = valid && tp_compose_tiling_init(&tiling, state->store, paths, shards, state->metrics_line, found);
+    for (unsigned s = 0; valid && s < count; ++s)
+    {
+        char const* path = request->aa_transcript_paths[s];
+        unsigned index = tp_compose_find(state, path);
+        TpComposeReader reader = {0};
+        valid = index != TP_COMPOSE_NONE && state->classes[index] == TP_COMPOSE_CLASS_RETAINED &&
+                tp_compose_reader_open(&reader, state->store, path);
+        int more = valid;
+        while (valid && more)
+        {
+            size_t length = 0;
+            int read = tp_compose_reader_line(&reader, state->line, TP_COMPOSE_LINE_BYTES, &length);
+            if (!read) more = 0;
+            else valid = read == 1 && reader.lines <= TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
+                         tp_compose_metrics_field(state->line, length, tag ? -1 : 0, &tiling, 0, NULL, NULL);
+        }
+        uint64_t records = reader.lines;
+        if (valid) valid = tp_compose_reader_close(&reader) && records;
+        else tp_compose_reader_abandon(&reader);
+    }
+    if (valid) valid = tp_compose_tiling_finish(&tiling);
+    else tp_compose_tiling_abandon(&tiling);
+    return valid;
+}
+
 /* A candidate/baseline ratio exactly as the validator recomputes it. */
 BUSTER_GLOBAL_LOCAL int tp_compose_ratio(double candidate, double baseline, double* output)
 {
@@ -2797,6 +2854,11 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
     {
         stage = "untimed";
         valid = tp_compose_untimed(&state);
+    }
+    if (valid)
+    {
+        stage = "aa-transcript";
+        valid = tp_compose_aa(&state, timed_tag, untimed_tag);
     }
     if (valid)
     {

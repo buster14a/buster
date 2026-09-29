@@ -1,6 +1,7 @@
 /* Focused Linux failure and receipt-authority fixtures for #1023.
  * Compile with BUSTER_RETIREMENT_STORE_TEST and link retirement_result.c and
- * src/buster/lib/hash.c; no benchmark result is produced by these fixtures.
+ * tools/throughput/shared.c (its arenas and hash); no benchmark result is
+ * produced by these fixtures.
  */
 #define _GNU_SOURCE 1
 #include "../throughput/retirement_store.h"

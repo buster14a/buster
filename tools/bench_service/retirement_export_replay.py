@@ -60,8 +60,10 @@ EXPORT_CONTROL_RESERVE = 2 * 32768
 SPOOL_INDEX_BYTES = ((ARCHIVE_CAP + CHUNK - 1) // CHUNK) * 64
 RECIPE = b"native-retirement-performance-v1"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-# bq_retirement_campaign_job_label: the service labels the execution receipt's
-# job as "job-<numeric job id>"; the export receipt carries the numeric id.
+# tp_retirement_store_job_label (tools/throughput/retirement_store.h), which
+# bq_retirement_campaign_job_label and the authority handoff share: the service
+# labels the execution receipt's job as "job-<numeric job id>"; the export
+# receipt carries the numeric id.
 SERVICE_JOB_LABEL = "job-{}"
 # HOOK(#1023, E composer): the reviewed composer fixes where the binding
 # record lives inside the finalized service result. Until it lands, the
@@ -133,13 +135,18 @@ COMPOSE_MANIFEST_SHARD_BYTES = 384
 COMPOSE_BUNDLE_BYTES = 16384
 COMPOSE_SEAL_FIXED_BYTES = 2048
 COMPOSE_SEAL_ENTRY_BYTES = 512
+# The retained manifest: sizeof(TP_RETIREMENT_RETAINED_MANIFEST_HEADER), the
+# 26-byte header line plus its NUL, then one bounded line per store file.
+RETAINED_MANIFEST_HEADER_SIZE = 27
+COMPOSE_RETAINED_LINE_BYTES = 320
 COMPOSE_DIMENSIONS = 6
 COMPOSE_BOOTSTRAP_MEMBERS = 80
 COMPOSE_CELL_MEMBERS = 300000
 COMPOSE_PARTITIONS = 3
 # Code records, series (adapter input), replay output, bundle, execution
-# receipt and sealed-result record, besides the result-input manifests.
-COMPOSE_FIXED_OUTPUTS = 6
+# receipt, retained manifest and sealed-result record, besides the
+# result-input manifests.
+COMPOSE_FIXED_OUTPUTS = 7
 # TP_RETIREMENT_CODE_RECORD_BYTES_MAX (tools/throughput/retirement_samples.h).
 CODE_RECORD_BYTES_MAX = 649
 SAMPLE_PARTITION_RECORDS = 16777216
@@ -216,6 +223,7 @@ def composer_bounds(model, code_rows, prior_entries, bootstrap_members=COMPOSE_B
         "adapter_output": COMPOSE_REPLAY_FIXED_BYTES + members * COMPOSE_REPLAY_MEMBER_BYTES,
         "result_bundle": COMPOSE_BUNDLE_BYTES,
         "execution_receipt": STORE_RECEIPT_BYTES,
+        "retained_manifest": RETAINED_MANIFEST_HEADER_SIZE + ENTRY_CAP * COMPOSE_RETAINED_LINE_BYTES,
         "sealed_result": COMPOSE_SEAL_FIXED_BYTES + (prior_entries + ENTRY_CAP) * COMPOSE_SEAL_ENTRY_BYTES,
     }
     if outputs["adapter_input"] > FILE_CAP:
@@ -235,8 +243,8 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
     stage (transcript, numeric, 64 MiB metrics shards), untimed metrics shards
     and the single untimed batch-record file. This adds the composer's
     outputs (``composer_bounds``: result-input manifests, code records,
-    adapter input and output, result bundle, execution receipt and sealed
-    record), the prior sealed-closure files (``prior_entries``) and the
+    adapter input and output, result bundle, execution receipt, retained
+    manifest and sealed record), the prior sealed-closure files (``prior_entries``) and the
     worker's three control entries. It checks every file kind against the
     per-file cap and reports the entries and bytes left for census
     projections, retained logs and directories. It is a model, not an

@@ -18,6 +18,7 @@
 #define _GNU_SOURCE 1
 #include "../throughput/retirement_store.h"
 #ifdef __linux__
+#include <buster/lib/arena.h>
 #include <buster/lib/hash.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -25,7 +26,6 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -39,6 +39,31 @@ unsigned tp_retirement_store_test_sync_calls, tp_retirement_store_test_fail_sync
 /* A retained manifest line: kind, digest, byte count and store path. */
 #define TP_RETIREMENT_STORE_RETAINED_KIND_BYTES 16u
 #define TP_RETIREMENT_STORE_RECEIPT_BYTES_MAX UINT64_C(1048576)
+
+/* Per-call working memory (a receipt, a retained manifest, a reopened
+ * inventory): reserved, committed as used and released on return. */
+#define TP_RETIREMENT_STORE_ARENA_BYTES (UINT64_C(256) << 20)
+#define TP_RETIREMENT_STORE_ALIGNMENT 16u
+
+BUSTER_GLOBAL_LOCAL Arena* tp_retirement_store_arena(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = TP_RETIREMENT_STORE_ARENA_BYTES,
+                                                .flags = {.no_pool = 1}});
+    return arena;
+}
+
+/* A zeroed allocation that refuses (NULL) instead of exhausting the arena. */
+BUSTER_GLOBAL_LOCAL void* tp_retirement_store_allocate(Arena* arena, uint64_t bytes)
+{
+    void* result = NULL;
+    uint64_t aligned = (bytes + TP_RETIREMENT_STORE_ALIGNMENT - 1) & ~(uint64_t)(TP_RETIREMENT_STORE_ALIGNMENT - 1);
+    int valid = arena && bytes && bytes <= UINT64_MAX - TP_RETIREMENT_STORE_ALIGNMENT &&
+                arena->position <= arena->reserved_size &&
+                arena->reserved_size - arena->position >= TP_RETIREMENT_STORE_ALIGNMENT &&
+                aligned <= arena->reserved_size - arena->position - TP_RETIREMENT_STORE_ALIGNMENT;
+    if (valid) result = arena_allocate_zeroed_bytes(arena, aligned, TP_RETIREMENT_STORE_ALIGNMENT);
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_sync(int fd)
 {
@@ -530,9 +555,9 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
     int fd = parent >= 0 ? openat(parent, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
     valid = valid && fd >= 0 && parent_info.st_dev == receipt->parent_device &&
             parent_info.st_ino == receipt->parent_inode;
-    char* bytes = valid ? mmap(NULL, (size_t)receipt->bytes, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    valid = valid && bytes != MAP_FAILED;
+    Arena* arena = valid ? tp_retirement_store_arena() : NULL;
+    char* bytes = arena ? (char*)tp_retirement_store_allocate(arena, receipt->bytes) : NULL;
+    valid = valid && bytes;
     size_t used = 0;
     Sha256 hash;
     sha256_init(&hash);
@@ -645,7 +670,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
             tp_retirement_store_receipt_literal(bytes, used, &offset, "],\"version\":1}\n") &&
             offset == used && tp_retirement_store_validate(store);
     if (valid && identity_sha256) sha256_finish_hex(&identity, (char8*)identity_sha256);
-    if (bytes != MAP_FAILED) munmap(bytes, (size_t)receipt->bytes);
+    if (arena) arena_destroy(arena, 1);
     return valid;
 }
 
@@ -680,9 +705,9 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_private_root(TpRetirementStore const
 }
 
 /* Read one named file after reopen_file proved its identity and digest, and
- * require the second read to hash identically. The caller munmaps. */
+ * require the second read to hash identically. The bytes live in `arena`. */
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_slurp(TpRetirementStore* store, char const* path, char const* digest,
-    uint64_t maximum, char** output, size_t* output_length)
+    uint64_t maximum, Arena* arena, char** output, size_t* output_length)
 {
     TpRetirementStoredFile file = {0};
     char leaf[TP_RETIREMENT_STORE_PATH_BYTES + 1] = {0};
@@ -690,9 +715,8 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_slurp(TpRetirementStore* store, char
     int valid = tp_retirement_store_reopen_file(store, path, digest, maximum, &file, NULL);
     int parent = valid ? tp_retirement_store_parent(store, path, leaf, &directory) : -1;
     int fd = parent >= 0 ? openat(parent, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
-    char* bytes = fd >= 0 ? mmap(NULL, (size_t)file.bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) :
-                  MAP_FAILED;
-    valid = bytes != MAP_FAILED;
+    char* bytes = fd >= 0 ? (char*)tp_retirement_store_allocate(arena, file.bytes) : NULL;
+    valid = bytes != NULL;
     size_t used = 0;
     while (valid && used < file.bytes)
     {
@@ -712,7 +736,6 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_slurp(TpRetirementStore* store, char
     }
     if (fd >= 0 && close(fd) != 0) valid = 0;
     if (parent >= 0 && close(parent) != 0) valid = 0;
-    if (!valid && bytes != MAP_FAILED) munmap(bytes, (size_t)file.bytes);
     *output = valid ? bytes : NULL;
     *output_length = valid ? used : 0;
     return valid;
@@ -803,11 +826,12 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_retained_reference(TpRetirementStore
         if (!strcmp(store->files[i].path, TP_RETIREMENT_RETAINED_MANIFEST_PATH)) manifest = store->files + i;
     char* bytes = NULL;
     size_t length = 0;
-    int valid = manifest ? tp_retirement_store_slurp(store, manifest->path, manifest->sha256,
-                                                     TP_RETIREMENT_STORE_FILE_BYTES, &bytes, &length) &&
+    Arena* arena = manifest ? tp_retirement_store_arena() : NULL;
+    int valid = manifest ? arena && tp_retirement_store_slurp(store, manifest->path, manifest->sha256,
+                                                              TP_RETIREMENT_STORE_FILE_BYTES, arena, &bytes, &length) &&
                            tp_retirement_store_retained_verify(store, bytes, length, 1) :
                            !store->retained_bound;
-    if (bytes) munmap(bytes, length);
+    if (arena) arena_destroy(arena, 1);
     if (valid) strcpy(output, manifest ? manifest->sha256 : TP_RETIREMENT_STORE_NO_RETAINED);
     return valid;
 }
@@ -925,9 +949,10 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
     }
     TpRetirementStore result_store, private_store;
     TpRetirementStoredFile private_file;
-    TpRetirementStoredFile* result_files = valid ? mmap(NULL, sizeof(*result_files) * TP_RETIREMENT_STORE_FILES,
-        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    int result_open = valid && result_files != MAP_FAILED &&
+    Arena* arena = valid ? tp_retirement_store_arena() : NULL;
+    TpRetirementStoredFile* result_files = arena ? (TpRetirementStoredFile*)tp_retirement_store_allocate(arena,
+        (uint64_t)sizeof(*result_files) * TP_RETIREMENT_STORE_FILES) : NULL;
+    int result_open = valid && result_files &&
         tp_retirement_store_open(&result_store, result_root, result_files, TP_RETIREMENT_STORE_FILES);
     int private_open = result_open && tp_retirement_store_open(&private_store, authority_root, &private_file, 1);
     valid = private_open && tp_retirement_store_private_root(&result_store, &private_store);
@@ -954,14 +979,13 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
         char* manifest = NULL;
         size_t manifest_length = 0;
         valid = tp_retirement_store_slurp(&result_store, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
-                                          trusted->retained_sha256, TP_RETIREMENT_STORE_FILE_BYTES, &manifest,
+                                          trusted->retained_sha256, TP_RETIREMENT_STORE_FILE_BYTES, arena, &manifest,
                                           &manifest_length) &&
                 tp_retirement_store_retained_verify(&result_store, manifest, manifest_length, 0);
-        if (manifest) munmap(manifest, manifest_length);
     }
     if (private_open) tp_retirement_store_close(&private_store);
     if (result_open) tp_retirement_store_close(&result_store);
-    if (result_files != MAP_FAILED) munmap(result_files, sizeof(*result_files) * TP_RETIREMENT_STORE_FILES);
+    if (arena) arena_destroy(arena, 1);
     return valid;
 }
 
