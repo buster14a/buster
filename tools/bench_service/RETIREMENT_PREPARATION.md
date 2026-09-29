@@ -373,9 +373,11 @@ units).
 ## Unit-side projection and oracle (#1020)
 
 After `bq_retirement_unit_build`, the unit runs design steps 6 to 8 in
-`retirement_unit.c`. Step 9, the correctness gate, stays fail-closed until
-#509 same-attempt receipts exist. Step 10, the ready record, and the
-coordinator replay are described in the
+`retirement_unit.c`. Step 9, the correctness gate, runs the installed #509
+required checks in the unit and issues the gate, but still refuses in
+production because no row-plan authority produces the per-row half
+([step 9](#step-9-509-receipts-and-the-gate-issuer-1020)). Step 10, the ready
+record, and the coordinator replay are described in the
 [next section](#ready-record-and-coordinator-replay-1020).
 
 `bq_retirement_unit_project` is step 6. It performs these steps in order:
@@ -513,46 +515,221 @@ still rejects the job first. `BqRetirementUnitOracle` also keeps, for each
 reference, the held binary and output directory numbers of its
 `/proc/self/fd` runtime command, so the replay can rebuild that command.
 
+## Step 9: #509 receipts and the gate issuer (#1020)
+
+Design step 9 has three parts: an installed authority that names every
+required #509 check, a runner that executes those checks inside the unit,
+and the issuer that joins their receipts with the per-row evidence in the
+correctness gate and seals the result. The unit still never reaches the
+queue or the lease.
+
+### The required-check authority
+
+`bq_retirement_required_checks_import` (in `retirement_correctness_service.c`)
+reads `recipes/native-retirement-performance-v1.required-checks` from the
+installed tree. The file's SHA-256 must equal the compiled profile's
+`required-checks-sha256=` pin. The candidate tree, the request and the result
+never name a check. The blocked profile carries no pin, so the import
+returns `BQ_RECIPE_MISMATCH` before it reads any file.
+
+The file is canonical LF-terminated text:
+
+```
+BQ-RETIREMENT-REQUIRED-CHECKS-V1
+support=<sha256>
+census=<sha256>
+population=<sha256>
+native-target=<id>
+tools=<n>
+tool=<i> <sha256> <name>
+checks=<m>
+check=<i> <kind> <target> <rows> <evidence> <timeout-s> <memory-MiB> <stdout-sha256>
+configuration=<text>
+argv=<a>
+arg=<argument>
+environment=<e>
+env=<NAME=value>
+```
+
+The `tool=` line repeats `n` times. The five lines from `check=` to
+`environment=` form one block, repeated `m` times, with `a` `arg=` lines and
+`e` `env=` lines inside each block.
+
+- **Joined facts.** `support`, `census`, `population` and `native-target`
+  must equal the sealed projection's values.
+- **Tools.** Each tool is an executable under
+  `recipes/native-retirement-performance-v1.checks/<name>`. It is held
+  read-only and close-on-exec, and must hash to its pinned digest; a
+  mismatch is `BQ_CONFIGURATION_MISMATCH`.
+- **Kind and evidence.** `kind` is one of `census`, `semantic`, `matrix`,
+  `no-fallback`, `self-host` or `fixed-point`. `evidence` is one of
+  `native`, `emulated`, `compile-only` or `link-only`.
+- **Tokens.** An argument or environment value may contain one token:
+  `{{binary:0|1}}` (a held matched binary), `{{source:0|1}}` (A's
+  materialized root), `{{tool:N}}` or `{{work}}` (the check's new working
+  directory). `argv[0]` must be exactly a binary or tool token, never a
+  path.
+- **Environment.** Entries must be strictly ascending, so the resolved
+  environment is canonical for the command digest.
+
+The import rejects the whole authority (`BQ_RECIPE_MISMATCH`) unless it
+meets every coverage rule below:
+
+- It has every check kind.
+- It has a semantic check for each of the six #509 native hosts: Linux,
+  macOS and Windows, each on x86-64 and AArch64 (targets 11, 5, 8, 2, 10
+  and 4).
+- It has a `native` semantic lane on the projection's native target.
+- No two checks share the same kind, target and configuration.
+- Census rows equal the object rows, and matrix and no-fallback rows equal
+  the compiler-eligible rows.
+- Only a check on the native target, or a host-wide check (target 0), is
+  labelled `native`.
+
+For each check the import derives three digests:
+
+- a configuration digest over kind, target, evidence label and the
+  configuration line;
+- a command digest over the argv and environment templates, both bounds
+  and every tool digest, with no descriptor numbers;
+- the receipt digest that a passing run of this exact attempt must produce.
+
+### The runner
+
+`bq_retirement_check_run` (in `retirement_check_runner.c`) runs one check
+in a bounded child, with these limits:
+
+- The child leads its own process group, runs under the check's
+  `RLIMIT_AS` with no core dumps, and reads `/dev/null`.
+- Its working directory is a new `retirement-work/check-work-<i>`.
+- It inherits only the held binaries, both source roots, the tools and that
+  directory.
+- It runs under the check's wall bound, the job's absolute deadline and the
+  cancellation self-pipe.
+
+stdout is the check's summary, bounded to 1 MiB and compared with the
+pinned digest. stderr is its log, bounded to 16 MiB.
+
+The runner rehashes both held binaries before and after the child. It then
+writes four files into the attempt's new `retirement-checks/`:
+`check-output-<i>`, `check-log-<i>`, `check-receipt-<i>` and a
+`check-run-<i>` record. The run record holds the concrete
+`/proc/self/fd` command digest, the output and log digests and the CPU
+model and affinity. Each file is created `O_EXCL`, then made 0400 and
+fsynced.
+
+The `BQ-RETIREMENT-CHECK-RECEIPT-V1` receipt binds:
+
+- the job, token, attempt identity and request;
+- A and the authority;
+- the check's index, kind, target, rows, evidence label and configuration
+  and command digests;
+- the sources and binaries the child actually ran against;
+- how the child ended: exit status, signal, timeout, OOM and failures;
+- its stdout digest.
+
+The runner classifies how the child ended:
+
+- A child killed by a SIGKILL that the runner did not send counts as out
+  of memory.
+- The check's own wall bound sets `timed_out`.
+- A capture overflow, a descendant that outlives the child, or wrong
+  output counts as a failure.
+- A cancelled or expired job returns `BQ_WORKER_CANCEL_SIGNAL` or
+  `BQ_WORKER_TIMEOUT` after killing the group and reaping the child, and
+  writes no receipt.
+
+The enclosing worker unit still owns whole-cgroup cleanup of any descendant
+that left the group.
+
+### The issuer
+
+`bq_retirement_unit_gate` imports the authority for the attempt and requires
+row evidence. It then creates a new `retirement-checks/` (mode 02700), with
+its directory entry made durable, and runs every check in authority order.
+The first failing check stops the gate with `BQ_RECIPE_MISMATCH`; its
+receipt stays in the unsealed directory.
+
+`bq_retirement_unit_gate_admit` then drives the correctness gate:
+
+1. `begin`, over the projection's sealed rows as the row plan completes
+   them;
+2. `check` for each observed result in order, which requires each receipt
+   to equal this attempt's expected receipt;
+3. `row` for each row fact;
+4. `batches` for the frozen plan-v3 batch groups;
+5. setting `batch_authority`, then `finish` and `ready`.
+
+This is the only code that sets `batch_authority`; a fixture scans the
+service sources to enforce that. The issuer also requires the projection's
+native target to be `BQ_RETIREMENT_UNIT_NATIVE_TARGET`, the A1 native-host
+target (x86_64-unknown-linux-gnu, id 11). The tests check that this target
+equals lane D's `BQ_RETIREMENT_NATIVE_TIMED_TARGET`.
+
+`bq_retirement_unit_gate_issue` ties the result to the attempt's joined
+objects. Its seal binds these facts:
+
+- the attempt identity and request;
+- A and the population;
+- the oracle attempt;
+- the authority digest and check count;
+- the ordered receipt aggregate;
+- the row-plan digest;
+- the correctness gate's own seal, which covers every check result, row
+  fact, frozen batch group and the batch authority.
+
+The issuer then seals `retirement-checks/` to `0500`.
+
+The gate refuses receipts from another job or token, a swapped or changed
+binary, a missing check, and changed row evidence.
+
+**Remaining work.** The per-row half has no production producer:
+`BqRetirementRowEvidence` is its interface. The per-row half means:
+
+- independently derived compiler and runtime argv, cwd and environment for
+  each row, with CPU provenance;
+- batch keys and controls;
+- observed artifacts, codes and diagnostics;
+- the frozen batch contracts.
+
+A pinned row-plan authority and its runner must supply these. Until then the
+public entry passes no row evidence and refuses before `retirement-checks/`
+exists or any child starts. The blocked profile, which has no pin, refuses
+first.
+
 ## Ready record and coordinator replay (#1020)
 
-`bq_retirement_unit_gate` is design step 9. It calls
-`bq_retirement_correctness_begin_service` over the sealed projection after a
-finished oracle. That begin still fails closed (`BQ_RECIPE_MISMATCH`, or
-`BQ_SOURCE_MISMATCH` for changed rows), and no #509 check or row facts exist
-to finish a begun gate, so the gate is never admitted in production.
+`bq_retirement_unit_ready` is design step 10. It first requires a gate that
+step 9 issued for exactly this attempt, with a seal that verifies against
+the live facts. Otherwise it returns `BQ_RECIPE_MISMATCH` before it examines
+any object or touches the attempt. It then requires every one of these, or
+returns `BQ_BAD_REQUEST`:
 
-`bq_retirement_unit_ready` is design step 10. It first requires an admitted
-gate for exactly this attempt, or returns `BQ_RECIPE_MISMATCH` before it
-examines any object or touches the attempt. It then requires every one of
-these, or returns `BQ_BAD_REQUEST`:
-
-- the prepared, built, projected and oracle objects are live and belong to
-  the same job and attempt;
-- the authority points at the prepared policy's template and the
-  projection's rows;
-- the projection still matches its population seal and names the held
-  binaries;
+- The prepared, built, projected and oracle objects are live and belong to
+  the same job and attempt.
+- The authority points at the prepared policy's template and the
+  projection's rows.
+- The projection still matches its population seal and names the held
+  binaries.
 - `authority_ready` holds.
+- The gate's correctness gate is ready, carries the batch authority and
+  binds this projection's A and binaries.
+- The gate's receipt aggregate still matches its required checks.
 
-A gate is admitted only when an accepted issuer set it and `bq_retirement_unit_gate_sealed` verifies
-its seal against the attempt's facts. The only issuer is the test fixture
-`bq_retirement_unit_gate_fixture_admit`. It and the fixture seal check that
-the verifier uses exist only under `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`.
-The service translation unit (`main.c`) never defines that macro, so there
-the verifier always refuses: production writes no ready record until #509
-provides a real issuer. This follows the oracle authority's `TEST_ONLY`
-issuer seam. `build.c` compiles the service and its `tests.c` with
-`BQ_SERVICE_INSTALLED`, and `retirement_unit.c` stops with `#error` if that
-build also defines the test macro. `tests.c` checks that its verifier refuses
-a well-formed seal over well-formed facts and that the writer refuses an
-issuer-marked gate without creating `retirement-ready/`.
+It then requires the sealed `retirement-checks/` to hold exactly those
+receipts (`BQ_SOURCE_MISMATCH` otherwise).
 
 `BqRetirementUnitGate.issuer` is only a marker, not a capability: any
-in-process caller can set it. Admission rests on the seal verifier alone,
-so #509 must bind an unforgeable, same-attempt receipt into the seal that
-the verifier checks, rather than trust the field.
+in-process caller can set it. Admission rests on the seal verifier and, on
+the coordinator side, on receipts re-derived from the pinned authority.
+`build.c` compiles the service and its `tests.c` with `BQ_SERVICE_INSTALLED`,
+and `retirement_unit.c` stops with `#error` if that build also defines
+`BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`. `tests.c` checks two things in the
+installed build: that the verifier refuses a well-formed seal over facts
+without check digests, and that the writer refuses an issuer-marked gate it
+does not own without creating `retirement-ready/`.
 
-With an admitted gate the writer performs these steps in order:
+With a verified gate the writer performs these steps in order:
 
 1. It seals `retirement-work/reference-oracle/` to `0500` and rehashes its
    exact closure (below). Each reference's binary, receipt and output must
@@ -606,8 +783,17 @@ order:
 Then one `observed=` line per reference, in template order: index, row,
 census row, target, the runtime command's binary and working-directory
 descriptor numbers, then the output, binary, receipt and concrete command
-SHA-256 values and the output name. The last line is
-`gate=admitted <seal>`.
+SHA-256 values and the output name. Then come the step 9 lines:
+
+| Key | Value |
+|---|---|
+| `checks-authority` | the installed required-check authority's SHA-256 |
+| `checks` | the number of required checks |
+| `check-receipts` | the ordered aggregate of their same-attempt receipt digests |
+| `row-plan` | the row-plan digest the row evidence carried |
+| `correctness` | the correctness gate's seal |
+
+The last line is `gate=admitted <seal>`.
 
 ### Replay
 
@@ -622,7 +808,8 @@ order:
    `ready-<digest>` as a single-link, owner-read-only regular file. It
    requires that file's SHA-256 to be the digest.
 3. It reads only these from the record: the two build record digests, the
-   gate seal, and each observed row's descriptor numbers and command digest.
+   row-plan digest, the correctness seal, the gate seal, and each observed
+   row's descriptor numbers and command digest.
    Observed lines must be consecutive and in index order, with canonical
    decimal fields bounded by their separators. With the build digests it
    re-imports the matched builds, holds both binaries and reruns the census
@@ -644,7 +831,12 @@ order:
    binary to differ from both matched binaries. It recomputes the ledger's spec and seal, the
    observation chain and the attempt digest with the authority's own
    hashes, and then calls `authority_ready`.
-7. It verifies the gate seal against the re-derived facts, formats the
+7. It re-imports the required-check authority for this attempt and
+   requires `retirement-checks/` to be sealed `0500` and to hold exactly the
+   four files of each check. Each receipt must be the one a passing run of
+   this attempt produces. Each run record must name that receipt and the
+   digests its output and log files rehash to.
+8. It verifies the gate seal against the re-derived facts, formats the
    record those facts give and requires the stored record to equal it byte
    for byte.
 
@@ -653,18 +845,25 @@ does an unsealed directory. A crash between the temporary and the link
 leaves only `ready-partial-<id>` in an unsealed directory, and a crash after
 the link leaves two links; both fail the replay, and the unit refuses to
 write into the leftover directory. The public wrapper uses the compiled
-profile, so the blocked profile fails closed, and without the test macro no
-gate seal verifies.
+profile, so the blocked profile fails closed, and a profile without the
+required-checks pin fails the authority import.
 
-The replay cannot re-derive two values from anything but the record and the
-receipt. These are the runtime command's descriptor numbers, which it
-rebinds through the command digest and the attempt digest, and the
-receipt's observed build command. The fixture gate seal binds only facts the
-replay recomputes, so anyone could recompute it. The record digest from the
-authenticated channel, and later the #509 gate, anchor the record. The
-fixture shows this: a record whose row descriptor, command digest,
-observation chain, oracle attempt and fixture seal are all changed together
-replays in the test build.
+The replay cannot re-derive four values from anything but the record and the
+receipt:
+
+- the runtime command's descriptor numbers, which it rebinds through the
+  command digest and the attempt digest;
+- the reference receipt's observed build command;
+- the row-plan digest;
+- the correctness seal.
+
+The row plan and the correctness seal stay unverified until the row-plan
+authority exists. Only the record digest from the authenticated channel
+anchors those values. The check receipts, by contrast, are re-derived from
+the pinned authority, so another job's or token's receipt, a swapped binary
+or a missing check fails the replay. The fixture shows the limit: a record
+whose row descriptor, command digest, observation chain, oracle attempt and
+gate seal are all changed together still replays.
 
 ## Capacity derivation
 

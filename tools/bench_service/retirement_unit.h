@@ -7,15 +7,18 @@
  * the export. bq_retirement_unit_project imports the B population from
  * #508's pinned performance rows joined to the pinned census, and bq_retirement_unit_oracle runs the oracle
  * authority and the reference producer over that same row array.
- * bq_retirement_unit_gate is the correctness gate, still fail-closed until
- * #509; bq_retirement_unit_ready writes the durable ready record only for an
- * admitted gate, and the coordinator's bq_retirement_unit_replay re-derives
- * every digest that record binds. The retirement recipe stays unadmitted and
- * bq_worker_unit calls none of these yet.
+ * bq_retirement_unit_gate is the correctness gate: it runs the installed #509
+ * required checks in the unit and issues the only production seal, but it
+ * still refuses without a pinned authority or row evidence, which has no
+ * producer yet; bq_retirement_unit_ready writes the durable ready record
+ * only for a gate whose seal verifies, and the coordinator's
+ * bq_retirement_unit_replay re-derives every digest that record binds,
+ * including each same-attempt check receipt. The retirement recipe stays
+ * unadmitted and bq_worker_unit calls none of these yet.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H
-#include "retirement_correctness_service.h"
+#include "retirement_check_runner.h"
 #include "phase_channel.h"
 
 /* Unit-written sibling of the coordinator's sealed export: four stage logs,
@@ -135,31 +138,62 @@ BUSTER_F_DECL BqError bq_retirement_unit_oracle(BqRetirementUnitPrepared const* 
     BqRetirementUnitOracle* oracle);
 BUSTER_F_DECL bool bq_retirement_unit_oracle_release(BqRetirementUnitOracle* oracle);
 
-/* Design step 9's outcome. Only an issuer the ready record accepts can make
- * one admitted; production has none until #509 same-attempt receipts exist,
- * so a filled-in struct is never an admission. */
+/* Design step 9's evidence directory, a sibling of retirement-ready/: the
+ * four files of every required check (bq_retirement_check_run), sealed 0500
+ * once the gate is issued. */
+#define BQ_RETIREMENT_UNIT_CHECKS_DIRECTORY "retirement-checks"
+
+/* Design step 9's outcome. correctness is the finished, sealed correctness
+ * gate lane D binds (batch_authority set); it points into rows, facts,
+ * check_facts and checks, which the gate owns, and into the row evidence's
+ * batch groups, which the caller keeps in place until release.
+ * seal_sha256 binds the attempt, A, the population, the oracle attempt, the
+ * required-check authority, the ordered receipts, the row plan and the
+ * correctness seal. issuer is only a marker: the ready record and the replay
+ * accept the gate only when the seal verifies against facts they re-derive.
+ * Zero-initialize; release on every path. */
 typedef struct BqRetirementUnitGate
 {
+    BqRetirementCorrectness correctness;
+    BqRetirementTrustedRow* rows;
+    BqRetirementRowFact* facts;
+    BqRetirementCheckResult* check_facts;
+    BqRetirementRequiredCheck* checks;
+    char authority_sha256[SHA256_HEX_CAPACITY], receipts_sha256[SHA256_HEX_CAPACITY];
+    char plan_sha256[SHA256_HEX_CAPACITY];
     char seal_sha256[SHA256_HEX_CAPACITY];
-    u32 issuer;
+    u32 check_count, issuer, owned;
 } BqRetirementUnitGate;
 
-/* Design step 9: bq_retirement_correctness_begin_service over the sealed
- * projection, after a finished oracle. It fails closed today
- * (BQ_RECIPE_MISMATCH, or BQ_SOURCE_MISMATCH for changed rows) and leaves
- * gate unadmitted; nothing else issues an admitted gate in production. */
-BUSTER_F_DECL BqError bq_retirement_unit_gate(BqRetirementProjection const* projection,
-    BqRetirementUnitOracle const* oracle, BqRetirementUnitGate* gate);
+/* Design step 9, after a finished oracle: imports the installed #509
+ * required-check authority (bq_retirement_required_checks_import) for this
+ * attempt, creates a new retirement-checks/, runs every check in order with
+ * the held binaries (bq_retirement_check_run) under cancellation_fd (the
+ * SIGTERM self-pipe) and the absolute deadline_ns, then joins the receipts
+ * and the per-row evidence in the correctness gate, sets its batch
+ * authority, finishes it and seals retirement-checks/. This is the only code
+ * that sets batch_authority. The row plan has no production producer yet, so
+ * this public entry refuses with BQ_RECIPE_MISMATCH before any child; the
+ * blocked profile, which has no required-checks pin, refuses first. A
+ * failing check stops the gate (BQ_RECIPE_MISMATCH) with its receipt kept in
+ * the unsealed directory. */
+BUSTER_F_DECL BqError bq_retirement_unit_gate(BqRetirementUnitPrepared const* prepared,
+    BqRetirementUnitBuilt const* built, BqRetirementProjection const* projection,
+    BqRetirementUnitOracle const* oracle, int workspaces, int installed, int cancellation_fd, u64 deadline_ns,
+    BqRetirementUnitGate* gate);
+BUSTER_F_DECL bool bq_retirement_unit_gate_release(BqRetirementUnitGate* gate);
 
 /* Design step 10's unit-written sibling of retirement-build/: one record,
  * named ready-<its SHA-256>, sealed 0500. */
 #define BQ_RETIREMENT_UNIT_READY_DIRECTORY "retirement-ready"
 
-/* Design step 10. Refuses an unadmitted gate with BQ_RECIPE_MISMATCH before
- * examining any object or the attempt, so production writes nothing until
- * #509. Otherwise it rechecks the prepared, built, projected and oracle
- * objects together, seals retirement-work/reference-oracle/ 0500, rehashes
- * its exact closure against the authority and formats the canonical
+/* Design step 10. Refuses a gate whose seal does not verify with
+ * BQ_RECIPE_MISMATCH before examining any object or the attempt, so
+ * production writes nothing until step 9 issues one. Otherwise it rechecks
+ * the prepared, built, projected and oracle objects and the finished
+ * correctness gate together, requires the sealed retirement-checks/ to hold
+ * exactly the gate's receipts, seals retirement-work/reference-oracle/ 0500,
+ * rehashes its exact closure against the authority and formats the canonical
  * BQ-RETIREMENT-READY-V1 record; only then does it create a new, durable
  * retirement-ready/ and publish the record (O_EXCL temporary, fsync, link
  * to ready-<digest>, unlink, seal 0500, fsync). A second record into one
@@ -176,11 +210,14 @@ BUSTER_F_DECL BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* p
  * digest. It re-imports A, the toolchain and the reference policy from the
  * export, the matched builds and both binaries from retirement-build/, the
  * census projection, and every reference-oracle/ file, rebuilds each runtime
- * command and the oracle attempt digest, verifies the gate and requires the
- * stored record to equal, byte for byte, the record those facts format. A
- * missing, extra, linked, writable or reordered entry fails closed, as does
- * an unsealed directory or a partial write. Compiled profile: the blocked
- * profile fails closed, and no production gate verifier exists yet. */
+ * command and the oracle attempt digest, re-imports the required-check
+ * authority, requires retirement-checks/ to hold exactly the receipts a
+ * passing run of this attempt produces, verifies the gate seal and requires
+ * the stored record to equal, byte for byte, the record those facts format.
+ * A missing, extra, linked, writable or reordered entry fails closed, as
+ * does an unsealed directory or a partial write. Compiled profile: the
+ * blocked profile fails closed. The row plan and correctness seal are read
+ * from the record, anchored only by its authenticated digest. */
 BUSTER_F_DECL BqError bq_retirement_unit_replay(BqRetirementStore store, int workspaces, int installed,
     u64 job_id, u64 attempt_token, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const ready_sha256[SHA256_HEX_CAPACITY]);

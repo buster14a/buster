@@ -18,6 +18,16 @@
  * them to A, the support/census/toolchain pins and a held bin/clang, and
  * keeps the read inventory descriptor held for producer_begin; its
  * synthetic-profile seam is bq_retirement_reference_policy_import_pinned.
+ * bq_retirement_required_checks_import (after it) reads the installed,
+ * profile-pinned #509 required-check authority for one attempt: it decodes
+ * the canonical text (bq_retirement_required_checks_decode,
+ * bq_retirement_check_plan_decode), derives each check's configuration and
+ * descriptor-free command digests (bq_retirement_check_plan_digests), checks
+ * lane and label coverage against the projection
+ * (bq_retirement_required_checks_cover), holds the pinned tools and derives
+ * the receipt digest a passing run of this attempt must produce
+ * (bq_retirement_check_receipt_format); its profile seam is
+ * bq_retirement_required_checks_import_profile.
  */
 #include "retirement_correctness_service.h"
 #include <stdlib.h>
@@ -3002,5 +3012,551 @@ BqError bq_retirement_reference_policy_import(int installed,
     String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
     BqError result = bq_retirement_reference_policy_import_profile(installed, profile, preparation,
         toolchain, policy);
+    return result;
+}
+
+/* #509 required-check authority importer (#1020 design step 9).
+ *
+ * The installed authority is exactly this canonical text (LF-terminated
+ * lines, no other bytes):
+ *
+ *   BQ-RETIREMENT-REQUIRED-CHECKS-V1
+ *   support=<sha256>         the support pin the projection joined
+ *   census=<sha256>          the census-rows pin the projection joined
+ *   population=<sha256>      the projection's population seal
+ *   native-target=<id>       the projection's native target
+ *   tools=<n>                then, for i in 0..n-1:
+ *   tool=<i> <sha256> <name> an executable under ..._TOOLS_DIRECTORY/<name>
+ *   checks=<m>               then, for i in 0..m-1:
+ *   check=<i> <kind> <target> <rows> <evidence> <timeout-s> <memory-MiB> <stdout-sha256>
+ *   configuration=<text>     the check's configuration (no tokens)
+ *   argv=<a>                 then a lines arg=<argument>
+ *   environment=<e>          then e lines env=<NAME=value>
+ *
+ * kind is census, semantic, matrix, no-fallback, self-host or fixed-point;
+ * evidence is native, emulated, compile-only or link-only; numbers are
+ * canonical decimals. Nothing here comes from a request or a candidate. */
+BUSTER_GLOBAL_LOCAL char const* const bq_retirement_check_kind_names[BQ_RETIREMENT_CHECK_COUNT] = {
+    "", "census", "semantic", "matrix", "no-fallback", "self-host", "fixed-point"
+};
+BUSTER_GLOBAL_LOCAL char const* const bq_retirement_check_evidence_names[BQ_RETIREMENT_CHECK_EVIDENCE_COUNT] = {
+    "", "native", "emulated", "compile-only", "link-only"
+};
+/* The six #509 native semantic hosts, in the TARGETS order the rows use:
+ * Linux x86-64 and AArch64 (11, 5), macOS (8, 2) and Windows (10, 4). */
+BUSTER_GLOBAL_LOCAL u32 const bq_retirement_509_native_hosts[6] = {11, 5, 8, 2, 10, 4};
+
+typedef enum BqRetirementCheckToken
+{
+    BQ_RETIREMENT_CHECK_TOKEN_NONE,
+    BQ_RETIREMENT_CHECK_TOKEN_BINARY,
+    BQ_RETIREMENT_CHECK_TOKEN_SOURCE,
+    BQ_RETIREMENT_CHECK_TOKEN_TOOL,
+    BQ_RETIREMENT_CHECK_TOKEN_WORK
+} BqRetirementCheckToken;
+
+bool bq_retirement_oracle_file_hash(int descriptor, uint64_t cap, bool executable, char digest[65]);
+
+/* The token starting at text, if any: its length, kind and index. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_token(char const* text, u32 tool_count, u32* kind, u32* index)
+{
+    static char const* const fixed[] = {"{{binary:0}}", "{{binary:1}}", "{{source:0}}", "{{source:1}}", "{{work}}"};
+    static u32 const kinds[] = {BQ_RETIREMENT_CHECK_TOKEN_BINARY, BQ_RETIREMENT_CHECK_TOKEN_BINARY,
+                                BQ_RETIREMENT_CHECK_TOKEN_SOURCE, BQ_RETIREMENT_CHECK_TOKEN_SOURCE,
+                                BQ_RETIREMENT_CHECK_TOKEN_WORK};
+    static u32 const indices[] = {0, 1, 0, 1, 0};
+    u32 length = 0;
+    *kind = BQ_RETIREMENT_CHECK_TOKEN_NONE;
+    *index = 0;
+    for (u32 candidate = 0; !length && candidate < BUSTER_ARRAY_LENGTH(fixed); candidate += 1)
+    {
+        size_t size = strlen(fixed[candidate]);
+        if (!strncmp(text, fixed[candidate], size))
+        {
+            length = (u32)size;
+            *kind = kinds[candidate];
+            *index = indices[candidate];
+        }
+    }
+    if (!length && !strncmp(text, "{{tool:", 7))
+    {
+        u32 digits = 0, value = 0;
+        while (digits < 2 && text[7 + digits] >= '0' && text[7 + digits] <= '9')
+        {
+            value = value * 10u + (u32)(text[7 + digits] - '0');
+            digits += 1;
+        }
+        bool canonical = digits > 0 && !(digits == 2 && text[7] == '0') && value < tool_count &&
+                         text[7 + digits] == '}' && text[8 + digits] == '}';
+        if (canonical)
+        {
+            length = 9u + digits;
+            *kind = BQ_RETIREMENT_CHECK_TOKEN_TOOL;
+            *index = value;
+        }
+    }
+    return length;
+}
+
+/* A printable-ASCII field of at most FIELD_CAP bytes (empty only when
+ * allowed) with at most one token; "{{" only ever opens a valid token. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_field(char const* text, u32 tool_count, bool allow_empty)
+{
+    size_t length = text ? strnlen(text, BQ_RETIREMENT_CHECK_FIELD_CAP + 1u) : 0;
+    bool ok = text && length <= BQ_RETIREMENT_CHECK_FIELD_CAP && (allow_empty || length > 0);
+    u32 tokens = 0;
+    size_t offset = 0;
+    while (ok && offset < length)
+    {
+        u8 byte = (u8)text[offset];
+        bool opens = byte == '{' && text[offset + 1] == '{';
+        u32 kind = 0, index = 0;
+        u32 token = opens ? bq_retirement_check_token(text + offset, tool_count, &kind, &index) : 0;
+        ok = byte >= 0x20 && byte <= 0x7e && (!opens || token);
+        tokens += token != 0;
+        offset += token ? token : 1u;
+    }
+    ok = ok && tokens <= 1;
+    return ok;
+}
+
+/* The NAME of a NAME=value environment entry: its length, or 0. */
+BUSTER_GLOBAL_LOCAL size_t bq_retirement_check_environment_name(char const* entry)
+{
+    size_t length = 0;
+    bool ok = entry && ((entry[0] >= 'A' && entry[0] <= 'Z') || (entry[0] >= 'a' && entry[0] <= 'z') ||
+                        entry[0] == '_');
+    while (ok && entry[length] && entry[length] != '=')
+    {
+        char c = entry[length];
+        ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+        length += 1;
+    }
+    size_t result = ok && entry[length] == '=' ? length : 0;
+    return result;
+}
+
+/* A tool's installed name: one path component of printable ASCII. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_tool_name(char const* name)
+{
+    size_t length = name ? strnlen(name, BQ_RETIREMENT_OUTPUT_NAME_CAP) : 0;
+    bool ok = length > 0 && length < BQ_RETIREMENT_OUTPUT_NAME_CAP && strcmp(name, ".") && strcmp(name, "..");
+    for (size_t index = 0; ok && index < length; index += 1)
+        ok = name[index] > 0x20 && name[index] <= 0x7e && name[index] != '/';
+    return ok;
+}
+
+typedef struct BqRetirementCheckCursor
+{
+    String8 bytes;
+    char* text;
+    u64 offset;
+    bool ok;
+} BqRetirementCheckCursor;
+
+/* The next line, which must start with key: its value, NUL-terminated in
+ * the decoded text. */
+BUSTER_GLOBAL_LOCAL char* bq_retirement_check_line(BqRetirementCheckCursor* cursor, char const* key)
+{
+    String8 line = {0};
+    u64 start = cursor->offset;
+    size_t key_length = strlen(key);
+    cursor->ok = cursor->ok && bq_next_line(cursor->bytes, &cursor->offset, &line) && line.length >= key_length &&
+                 !memcmp(line.pointer, key, key_length);
+    char* value = cursor->ok ? cursor->text + start + key_length : NULL;
+    return value;
+}
+
+/* A canonical decimal (no sign, no leading zero) of at most maximum. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_decimal(char const* text, u64 maximum, u32* value)
+{
+    u64 number = 0;
+    bool ok = text && text[0] && (text[0] != '0' || !text[1]) &&
+              bq_retirement_number(string_from_pointer(text), &number) && number <= maximum && number <= UINT32_MAX;
+    *value = ok ? (u32)number : 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_count(BqRetirementCheckCursor* cursor, char const* key, u32 minimum,
+    u32 maximum)
+{
+    char const* value = bq_retirement_check_line(cursor, key);
+    u32 number = 0;
+    cursor->ok = cursor->ok && bq_retirement_check_decimal(value, maximum, &number) && number >= minimum;
+    return cursor->ok ? number : 0;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_check_digest_line(BqRetirementCheckCursor* cursor, char const* key,
+    char const expected[SHA256_HEX_CAPACITY])
+{
+    char const* value = bq_retirement_check_line(cursor, key);
+    cursor->ok = cursor->ok && bq_retirement_hex(string_from_pointer(value), 64) && !memcmp(value, expected, 64);
+}
+
+/* Splits value in place at single spaces into exactly count non-empty fields. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_check_fields(char* value, char** fields, u32 count)
+{
+    bool ok = value != NULL;
+    char* cursor = value;
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        fields[index] = cursor;
+        char* space = strchr(cursor, ' ');
+        bool last = index + 1u == count;
+        ok = last ? space == NULL : space != NULL;
+        if (ok && !last)
+        {
+            *space = 0;
+            cursor = space + 1;
+        }
+        ok = ok && fields[index][0] != 0;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_check_name(char const* text, char const* const* names, u32 count)
+{
+    u32 found = 0;
+    for (u32 index = 1; !found && index < count; index += 1)
+        if (!strcmp(text, names[index])) found = index;
+    return found;
+}
+
+/* One check block, in place: check=, configuration=, argv= and its arg=
+ * lines, environment= and its env= lines. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_check_plan_decode(BqRetirementCheckCursor* cursor,
+    BqRetirementRequiredChecks* checks, u32 index, BqRetirementPrepared const* prepared)
+{
+    BqRetirementCheckPlan* plan = checks->plans + index;
+    char* fields[8] = {0};
+    u32 number = 0;
+    char* value = bq_retirement_check_line(cursor, "check=");
+    cursor->ok = cursor->ok && bq_retirement_check_fields(value, fields, 8) &&
+                 bq_retirement_check_decimal(fields[0], index, &number) && number == index;
+    if (cursor->ok)
+    {
+        plan->kind = bq_retirement_check_name(fields[1], bq_retirement_check_kind_names, BQ_RETIREMENT_CHECK_COUNT);
+        plan->evidence = bq_retirement_check_name(fields[4], bq_retirement_check_evidence_names,
+                                                  BQ_RETIREMENT_CHECK_EVIDENCE_COUNT);
+        cursor->ok = plan->kind && plan->evidence && bq_retirement_check_decimal(fields[2], 12, &plan->target) &&
+                     bq_retirement_check_decimal(fields[3], prepared->rows, &plan->rows) && plan->rows > 0 &&
+                     bq_retirement_check_decimal(fields[5], BQ_RETIREMENT_CHECK_TIMEOUT_MAX_SECONDS,
+                                                 &plan->timeout_seconds) && plan->timeout_seconds > 0 &&
+                     bq_retirement_check_decimal(fields[6], BQ_RETIREMENT_CHECK_MEMORY_MAX_MIB, &plan->memory_mib) &&
+                     plan->memory_mib >= BQ_RETIREMENT_CHECK_MEMORY_MIN_MIB &&
+                     bq_retirement_hex(string_from_pointer(fields[7]), 64);
+        if (cursor->ok) memcpy(plan->output_sha256, fields[7], SHA256_HEX_CAPACITY);
+    }
+    char const* configuration = bq_retirement_check_line(cursor, "configuration=");
+    cursor->ok = cursor->ok && bq_retirement_check_field(configuration, 0, false) && !strstr(configuration, "{{");
+    plan->configuration = configuration;
+    plan->argument_count = bq_retirement_check_count(cursor, "argv=", 1, BQ_RETIREMENT_CHECK_ARGUMENTS_CAP);
+    for (u32 argument = 0; cursor->ok && argument < plan->argument_count; argument += 1)
+    {
+        plan->arguments[argument] = bq_retirement_check_line(cursor, "arg=");
+        cursor->ok = cursor->ok && bq_retirement_check_field(plan->arguments[argument], checks->tool_count, false);
+    }
+    /* The executable is a held binary or tool, never a path. */
+    u32 kind = 0, which = 0;
+    cursor->ok = cursor->ok &&
+                 bq_retirement_check_token(plan->arguments[0], checks->tool_count, &kind, &which) ==
+                 strlen(plan->arguments[0]) &&
+                 (kind == BQ_RETIREMENT_CHECK_TOKEN_BINARY || kind == BQ_RETIREMENT_CHECK_TOKEN_TOOL);
+    plan->environment_count = bq_retirement_check_count(cursor, "environment=", 0,
+                                                        BQ_RETIREMENT_CHECK_ENVIRONMENT_CAP);
+    for (u32 entry = 0; cursor->ok && entry < plan->environment_count; entry += 1)
+    {
+        char const* text = bq_retirement_check_line(cursor, "env=");
+        size_t name = bq_retirement_check_environment_name(text);
+        cursor->ok = cursor->ok && name && strlen(text) <= BQ_RETIREMENT_CHECK_FIELD_CAP &&
+                     bq_retirement_check_field(text + name + 1u, checks->tool_count, true);
+        /* Entries are strictly ascending and so unique by name, as the
+         * canonical command identity requires; distinct names order the
+         * resolved entries the same way. */
+        cursor->ok = cursor->ok && (!entry || strcmp(plan->environment[entry - 1u], text) < 0);
+        for (u32 previous = 0; cursor->ok && previous < entry; previous += 1)
+            cursor->ok = !(bq_retirement_check_environment_name(plan->environment[previous]) == name &&
+                           !memcmp(plan->environment[previous], text, name));
+        plan->environment[entry] = text;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_decode(BqRetirementCheckCursor* cursor,
+    BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks, char const** tool_names)
+{
+    BqRetirementPrepared const* prepared = &projection->prepared;
+    String8 line = {0};
+    cursor->ok = cursor->ok && bq_next_line(cursor->bytes, &cursor->offset, &line) &&
+                 string_equal(line, S8("BQ-RETIREMENT-REQUIRED-CHECKS-V1"));
+    bq_retirement_check_digest_line(cursor, "support=", prepared->support_sha256);
+    bq_retirement_check_digest_line(cursor, "census=", prepared->census_sha256);
+    bq_retirement_check_digest_line(cursor, "population=", projection->population_sha256);
+    u32 native = bq_retirement_check_count(cursor, "native-target=", 1, 12);
+    cursor->ok = cursor->ok && native == prepared->native_target;
+    u32 tools = bq_retirement_check_count(cursor, "tools=", 1, BQ_RETIREMENT_CHECK_TOOLS_CAP);
+    for (u32 index = 0; cursor->ok && index < tools; index += 1)
+    {
+        char* fields[3] = {0};
+        u32 number = 0;
+        char* value = bq_retirement_check_line(cursor, "tool=");
+        cursor->ok = cursor->ok && bq_retirement_check_fields(value, fields, 3) &&
+                     bq_retirement_check_decimal(fields[0], index, &number) && number == index &&
+                     bq_retirement_hex(string_from_pointer(fields[1]), 64) && bq_retirement_check_tool_name(fields[2]);
+        for (u32 previous = 0; cursor->ok && previous < index; previous += 1)
+            cursor->ok = strcmp(tool_names[previous], fields[2]) != 0;
+        if (cursor->ok)
+        {
+            memcpy(checks->tool_sha256[index], fields[1], SHA256_HEX_CAPACITY);
+            tool_names[index] = fields[2];
+        }
+    }
+    checks->tool_count = cursor->ok ? tools : 0;
+    u32 count = bq_retirement_check_count(cursor, "checks=", BQ_RETIREMENT_CHECK_COUNT - 1,
+                                          BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP);
+    checks->plans = cursor->ok ? calloc(count, sizeof(*checks->plans)) : NULL;
+    checks->checks = cursor->ok ? calloc(count, sizeof(*checks->checks)) : NULL;
+    cursor->ok = cursor->ok && checks->plans && checks->checks;
+    for (u32 index = 0; cursor->ok && index < count; index += 1)
+        bq_retirement_check_plan_decode(cursor, checks, index, prepared);
+    cursor->ok = cursor->ok && cursor->offset == cursor->bytes.length;
+    if (cursor->ok) checks->count = count;
+    return cursor->ok;
+}
+
+/* The configuration digest binds kind, target, evidence label and the
+ * configuration line; the command digest binds the descriptor-free argv and
+ * environment templates, both bounds and every pinned tool. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_check_plan_digests(BqRetirementRequiredChecks const* checks,
+    BqRetirementCheckPlan const* plan, char configuration[SHA256_HEX_CAPACITY], char command[SHA256_HEX_CAPACITY])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    static char const configuration_domain[] = "bq-retirement-check-configuration-v1";
+    sha256_add(&hash, configuration_domain, sizeof(configuration_domain) - 1);
+    bq_retirement_correctness_number(&hash, plan->kind);
+    bq_retirement_correctness_number(&hash, plan->target);
+    bq_retirement_correctness_number(&hash, plan->evidence);
+    sha256_add(&hash, plan->configuration, strlen(plan->configuration) + 1u);
+    sha256_finish_hex(&hash, configuration);
+    sha256_init(&hash);
+    static char const command_domain[] = "bq-retirement-check-command-v1";
+    sha256_add(&hash, command_domain, sizeof(command_domain) - 1);
+    bq_retirement_correctness_number(&hash, plan->argument_count);
+    for (u32 index = 0; index < plan->argument_count; index += 1)
+        sha256_add(&hash, plan->arguments[index], strlen(plan->arguments[index]) + 1u);
+    bq_retirement_correctness_number(&hash, plan->environment_count);
+    for (u32 index = 0; index < plan->environment_count; index += 1)
+        sha256_add(&hash, plan->environment[index], strlen(plan->environment[index]) + 1u);
+    bq_retirement_correctness_number(&hash, plan->timeout_seconds);
+    bq_retirement_correctness_number(&hash, plan->memory_mib);
+    bq_retirement_correctness_number(&hash, checks->tool_count);
+    for (u32 index = 0; index < checks->tool_count; index += 1) sha256_add(&hash, checks->tool_sha256[index], 64);
+    sha256_finish_hex(&hash, command);
+}
+
+/* The coverage rules begin also enforces, plus the six #509 native semantic
+ * hosts, a native semantic lane on the native target and honest evidence
+ * labels. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_cover(BqRetirementRequiredChecks const* checks,
+    BqRetirementProjection const* projection)
+{
+    BqRetirementPrepared const* prepared = &projection->prepared;
+    u32 eligible = 0, kinds = 0;
+    for (u32 row = 0; row < prepared->rows; row += 1) eligible += projection->rows[row].compiler_eligible != 0;
+    bool hosts[BUSTER_ARRAY_LENGTH(bq_retirement_509_native_hosts)] = {0};
+    bool native_lane = false, ok = checks->count >= BQ_RETIREMENT_CHECK_COUNT - 1;
+    for (u32 index = 0; ok && index < checks->count; index += 1)
+    {
+        BqRetirementCheckPlan const* plan = checks->plans + index;
+        ok = (plan->evidence != BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE || plan->target == 0 ||
+              plan->target == prepared->native_target) &&
+             (plan->kind != BQ_RETIREMENT_CHECK_SEMANTIC || plan->target >= 1) &&
+             (plan->kind != BQ_RETIREMENT_CHECK_CENSUS || plan->rows == prepared->object_rows) &&
+             ((plan->kind != BQ_RETIREMENT_CHECK_MATRIX && plan->kind != BQ_RETIREMENT_CHECK_NO_FALLBACK) ||
+              plan->rows == eligible);
+        kinds |= 1u << plan->kind;
+        for (u32 host = 0; ok && host < BUSTER_ARRAY_LENGTH(bq_retirement_509_native_hosts); host += 1)
+            if (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC && plan->target == bq_retirement_509_native_hosts[host])
+                hosts[host] = true;
+        native_lane = native_lane || (plan->kind == BQ_RETIREMENT_CHECK_SEMANTIC &&
+                                      plan->target == prepared->native_target &&
+                                      plan->evidence == BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE);
+        for (u32 previous = 0; ok && previous < index; previous += 1)
+            ok = !(checks->plans[previous].kind == plan->kind && checks->plans[previous].target == plan->target &&
+                   !strcmp(checks->checks[previous].configuration_sha256, checks->checks[index].configuration_sha256));
+    }
+    for (u32 host = 0; ok && host < BUSTER_ARRAY_LENGTH(hosts); host += 1) ok = hosts[host];
+    ok = ok && native_lane && kinds == ((1u << BQ_RETIREMENT_CHECK_COUNT) - 2u);
+    return ok;
+}
+
+bool bq_retirement_check_receipt_format(BqRetirementRequiredChecks const* checks, u32 index,
+    BqRetirementCheckOutcome const* outcome, char* text, u32 capacity, u32* length)
+{
+    BqRetirementCheckPlan const* plan = checks && checks->plans && index < checks->count ? checks->plans + index : NULL;
+    BqRetirementRequiredCheck const* required = plan ? checks->checks + index : NULL;
+    bool ok = plan && outcome && text && length && outcome->timed_out <= 1 && outcome->out_of_memory <= 1 &&
+              bq_retirement_hex(string_from_pointer(outcome->output_sha256), 64);
+    for (u32 side = 0; ok && side < 2; side += 1)
+        ok = bq_retirement_hex(string_from_pointer(outcome->source_sha256[side]), 64) &&
+             bq_retirement_hex(string_from_pointer(outcome->binary_sha256[side]), 64);
+    int used = ok ? snprintf(text, capacity, "BQ-RETIREMENT-CHECK-RECEIPT-V1\njob=%" PRIu64 "\nattempt=%" PRIu64
+        "\nattempt-identity=%s\nrequest=%s\npreparation=%s\nauthority=%s\ncheck=%u\nkind=%s\ntarget=%u\nrows=%u\n"
+        "evidence=%s\nconfiguration=%s\ncommand=%s\nsource-base=%s\nsource-candidate=%s\nbinary-base=%s\n"
+        "binary-candidate=%s\nexit=%d\nsignal=%d\ntimed-out=%u\nout-of-memory=%u\nfailures=%u\noutput=%s\n",
+        (uint64_t)checks->job_id, (uint64_t)checks->attempt_token, checks->attempt_sha256, checks->request_sha256,
+        checks->preparation_sha256, checks->authority_sha256, index, bq_retirement_check_kind_names[plan->kind],
+        plan->target, plan->rows, bq_retirement_check_evidence_names[plan->evidence], required->configuration_sha256,
+        required->command_sha256, outcome->source_sha256[0], outcome->source_sha256[1], outcome->binary_sha256[0],
+        outcome->binary_sha256[1], outcome->exit_code, outcome->signal, outcome->timed_out, outcome->out_of_memory,
+        outcome->failures, outcome->output_sha256) : -1;
+    ok = ok && used > 0 && (u32)used < capacity;
+    if (length) *length = ok ? (u32)used : 0;
+    return ok;
+}
+
+bool bq_retirement_required_checks_release(BqRetirementRequiredChecks* checks)
+{
+    bool ok = checks != NULL;
+    if (checks && checks->owned)
+    {
+        for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1)
+            if (checks->tools[index] >= 0 && close(checks->tools[index]) != 0) ok = false;
+        free(checks->checks);
+        free(checks->plans);
+        free(checks->text);
+    }
+    if (checks)
+    {
+        *checks = (BqRetirementRequiredChecks){0};
+        for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1) checks->tools[index] = -1;
+    }
+    return ok;
+}
+
+/* Holds every pinned tool read-only and close-on-exec (at least 3) after
+ * rehashing it against the authority. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_required_checks_hold_tools(int recipes, BqRetirementRequiredChecks* checks,
+    char const* const* tool_names)
+{
+    int directory = openat(recipes, BQ_RETIREMENT_CHECK_TOOLS_DIRECTORY,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = directory >= 0 && bq_owned_directory(directory, false, true);
+    for (u32 index = 0; ok && index < checks->tool_count; index += 1)
+    {
+        int tool = openat(directory, tool_names[index], O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (tool >= 0 && tool < 3)
+        {
+            int promoted = fcntl(tool, F_DUPFD_CLOEXEC, 3);
+            close(tool);
+            tool = promoted;
+        }
+        checks->tools[index] = tool;
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        ok = tool >= 3 && bq_retirement_oracle_file_hash(tool, BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP, true, digest) &&
+             !strcmp(digest, checks->tool_sha256[index]);
+    }
+    if (directory >= 0 && close(directory) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_required_checks_import_profile(int installed, String8 profile,
+    BqJob const* job, BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks)
+{
+    bool fresh = checks && !checks->owned;
+    if (fresh) bq_retirement_required_checks_release(checks);
+    char pin[SHA256_HEX_CAPACITY] = {0}, population[SHA256_HEX_CAPACITY] = {0};
+    BqError result = fresh && installed >= 0 && job && projection && projection->owned && projection->rows &&
+                     projection->job_id == job->id && projection->attempt_token == job->token ?
+                     BQ_OK : BQ_BAD_REQUEST;
+    if (result == BQ_OK && !bq_retirement_profile_sha(profile, S8("required-checks-sha256="), pin))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK &&
+        !(bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population) &&
+          !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY)))
+        result = BQ_SOURCE_MISMATCH;
+    BqRetirementRequiredChecks imported = {.owned = 1};
+    for (u32 index = 0; index < BQ_RETIREMENT_CHECK_TOOLS_CAP; index += 1) imported.tools[index] = -1;
+    int recipes = result == BQ_OK ? openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    u8* bytes = NULL;
+    u32 length = 0;
+    if (result == BQ_OK)
+        result = recipes >= 0 && bq_owned_directory(recipes, false, true) &&
+                 bq_retirement_reference_read_installed(recipes, BQ_RETIREMENT_REQUIRED_CHECKS_NAME,
+                     BQ_RETIREMENT_REQUIRED_CHECKS_BYTES_CAP, &bytes, &length, imported.authority_sha256, NULL) ?
+                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK && memcmp(imported.authority_sha256, pin, SHA256_HEX_CAPACITY)) result = BQ_RECIPE_MISMATCH;
+    /* The decoded text: each line NUL-terminated in place of its LF. */
+    imported.text = result == BQ_OK ? malloc((size_t)length + 1u) : NULL;
+    if (result == BQ_OK && !imported.text) result = BQ_IO;
+    char const* tool_names[BQ_RETIREMENT_CHECK_TOOLS_CAP] = {0};
+    if (result == BQ_OK)
+    {
+        memcpy(imported.text, bytes, length);
+        imported.text[length] = 0;
+        for (u32 index = 0; index < length; index += 1)
+            if (imported.text[index] == '\n') imported.text[index] = 0;
+        BqRetirementCheckCursor cursor = {{(char8*)bytes, length}, imported.text, 0, memchr(bytes, 0, length) == NULL};
+        result = bq_retirement_required_checks_decode(&cursor, projection, &imported, tool_names) ?
+                 BQ_OK : BQ_RECIPE_MISMATCH;
+    }
+    /* This attempt's identities, which every expected receipt binds. */
+    if (result == BQ_OK)
+    {
+        BqRetirementPrepared const* prepared = &projection->prepared;
+        imported.job_id = job->id;
+        imported.attempt_token = job->token;
+        imported.native_target = prepared->native_target;
+        memcpy(imported.request_sha256, job->digest, SHA256_HEX_CAPACITY);
+        memcpy(imported.preparation_sha256, prepared->preparation_sha256, SHA256_HEX_CAPACITY);
+        memcpy(imported.population_sha256, projection->population_sha256, SHA256_HEX_CAPACITY);
+        for (u32 side = 0; side < 2; side += 1)
+        {
+            memcpy(imported.source_sha256[side], prepared->source_sha256[side], SHA256_HEX_CAPACITY);
+            memcpy(imported.binary_sha256[side], prepared->binary_sha256[side], SHA256_HEX_CAPACITY);
+        }
+        char seal[512];
+        u32 seal_size = 0;
+        bool identified = bq_workspace_seal_bytes(job, seal, &seal_size) && seal_size > 0 &&
+                          bq_retirement_hex(string_from_pointer(imported.request_sha256), 64);
+        if (identified) bq_digest(seal, seal_size, (char8*)imported.attempt_sha256);
+        for (u32 index = 0; identified && index < imported.count; index += 1)
+        {
+            BqRetirementCheckPlan const* plan = imported.plans + index;
+            BqRetirementRequiredCheck* required = imported.checks + index;
+            *required = (BqRetirementRequiredCheck){.kind = plan->kind, .target = plan->target, .rows = plan->rows};
+            bq_retirement_check_plan_digests(&imported, plan, required->configuration_sha256,
+                                             required->command_sha256);
+        }
+        result = identified && bq_retirement_required_checks_cover(&imported, projection) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    }
+    if (result == BQ_OK)
+        result = bq_retirement_required_checks_hold_tools(recipes, &imported, tool_names) ?
+                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    /* The receipt a passing run of this attempt must produce. */
+    for (u32 index = 0; result == BQ_OK && index < imported.count; index += 1)
+    {
+        BqRetirementCheckOutcome expected = {0};
+        memcpy(expected.source_sha256, imported.source_sha256, sizeof(expected.source_sha256));
+        memcpy(expected.binary_sha256, imported.binary_sha256, sizeof(expected.binary_sha256));
+        memcpy(expected.output_sha256, imported.plans[index].output_sha256, SHA256_HEX_CAPACITY);
+        char text[BQ_RETIREMENT_CHECK_RECEIPT_CAP];
+        u32 used = 0;
+        if (bq_retirement_check_receipt_format(&imported, index, &expected, text, sizeof(text), &used))
+            bq_digest(text, used, (char8*)imported.checks[index].receipt_sha256);
+        else result = BQ_CORRUPT;
+    }
+    free(bytes);
+    if (recipes >= 0 && close(recipes) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK) *checks = imported;
+    else bq_retirement_required_checks_release(&imported);
+    return result;
+}
+
+BqError bq_retirement_required_checks_import(int installed, BqJob const* job,
+    BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks)
+{
+    String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    BqError result = bq_retirement_required_checks_import_profile(installed, profile, job, projection, checks);
     return result;
 }

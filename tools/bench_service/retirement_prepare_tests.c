@@ -3261,10 +3261,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 }
 
 #include "retirement_campaign_service_tests.h"
+#include "retirement_check_runner_tests.h"
 #include "retirement_unit_oracle_tests.h"
 
 int main(void)
 {
+    bq_check_test_runner();
     bq_prep_test_support_population();
     bq_prep_test_raw_census_boundary();
     bq_prep_test_unit_oracle();

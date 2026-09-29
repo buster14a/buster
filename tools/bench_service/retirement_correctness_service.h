@@ -7,7 +7,9 @@
  * returns a failure because #509 checks and command plans are not
  * independently authenticated. The blocked production profile lacks these
  * pins and fails closed earlier. The reference-policy importer below has the
- * same property for its reference-template/-inventory pins.
+ * same property for its reference-template/-inventory pins, and the #509
+ * required-check importer (bq_retirement_required_checks_import) for its
+ * required-checks pin.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H
@@ -108,4 +110,104 @@ BUSTER_F_DECL BqError bq_retirement_correctness_begin_service(BqRetirementProjec
     BqRetirementRequiredCheck const* checks, u32 check_count, BqRetirementCheckResult* check_facts,
     BqRetirementRowFact* facts, u32* identity_workspace, u32 identity_slots, u8* census_workspace,
     u32 census_slots, BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate);
+
+/* #509 required-check authority (#1020 design step 9). The complete list of
+ * #509 checks a retirement attempt must pass comes from one installed file,
+ * recipes/BQ_RETIREMENT_REQUIRED_CHECKS_NAME, whose SHA-256 must equal the
+ * compiled profile's required-checks-sha256= pin; the candidate tree, the
+ * request and the result never name a check. Its executables are installed
+ * tools under recipes/BQ_RETIREMENT_CHECK_TOOLS_DIRECTORY/, each pinned by
+ * digest inside the authority, and the two held matched binaries. The
+ * blocked profile carries no pin, so the import fails closed. */
+#define BQ_RETIREMENT_REQUIRED_CHECKS_NAME "native-retirement-performance-v1.required-checks"
+#define BQ_RETIREMENT_CHECK_TOOLS_DIRECTORY "native-retirement-performance-v1.checks"
+#define BQ_RETIREMENT_REQUIRED_CHECKS_BYTES_CAP (4u * 1024u * 1024u)
+#define BQ_RETIREMENT_CHECK_TOOLS_CAP 16u
+#define BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP (512u * 1024u * 1024u)
+#define BQ_RETIREMENT_CHECK_ARGUMENTS_CAP 64u
+#define BQ_RETIREMENT_CHECK_ENVIRONMENT_CAP 32u
+/* One argument, environment entry or configuration line, in bytes. */
+#define BQ_RETIREMENT_CHECK_FIELD_CAP 4096u
+/* Each check's own wall bound; the job deadline still bounds every child. */
+#define BQ_RETIREMENT_CHECK_TIMEOUT_MAX_SECONDS 3500u
+#define BQ_RETIREMENT_CHECK_MEMORY_MIN_MIB 16u
+#define BQ_RETIREMENT_CHECK_MEMORY_MAX_MIB (1024u * 1024u)
+#define BQ_RETIREMENT_CHECK_RECEIPT_CAP 2048u
+
+/* How honestly a check's evidence is labelled (#509): only a check on the
+ * unit's native target (or a host-wide check, target 0) may claim native
+ * execution; emulated, compile-only and link-only never substitute for it. */
+typedef enum BqRetirementCheckEvidence
+{
+    BQ_RETIREMENT_CHECK_EVIDENCE_NATIVE = 1,
+    BQ_RETIREMENT_CHECK_EVIDENCE_EMULATED,
+    BQ_RETIREMENT_CHECK_EVIDENCE_COMPILE_ONLY,
+    BQ_RETIREMENT_CHECK_EVIDENCE_LINK_ONLY,
+    BQ_RETIREMENT_CHECK_EVIDENCE_COUNT
+} BqRetirementCheckEvidence;
+
+/* One decoded check. Arguments, environment and configuration point into
+ * the authority's decoded text. An argument or environment value may hold
+ * one {{binary:0|1}}, {{source:0|1}}, {{tool:N}} or {{work}} token, which
+ * the runner resolves to a held descriptor's /proc/self/fd path; argv[0] is
+ * exactly a binary or tool token. output_sha256 is the pinned digest of the
+ * passing check's complete stdout. */
+typedef struct BqRetirementCheckPlan
+{
+    char const* configuration;
+    char const* arguments[BQ_RETIREMENT_CHECK_ARGUMENTS_CAP];
+    char const* environment[BQ_RETIREMENT_CHECK_ENVIRONMENT_CAP];
+    u32 kind, target, rows, evidence, timeout_seconds, memory_mib;
+    u32 argument_count, environment_count;
+    char output_sha256[SHA256_HEX_CAPACITY];
+} BqRetirementCheckPlan;
+
+/* The imported authority for one attempt. checks[i] is the gate's required
+ * check: kind, target, rows, the descriptor-free command digest, the
+ * configuration digest and the receipt digest a passing run of this exact
+ * attempt (job, token, request, A, sources and both binaries) must produce.
+ * tools are held read-only, close-on-exec descriptors (at least 3) of the
+ * pinned installed tools. Zero-initialize; release on every path. */
+typedef struct BqRetirementRequiredChecks
+{
+    BqRetirementRequiredCheck* checks;
+    BqRetirementCheckPlan* plans;
+    char* text;
+    int tools[BQ_RETIREMENT_CHECK_TOOLS_CAP];
+    char tool_sha256[BQ_RETIREMENT_CHECK_TOOLS_CAP][SHA256_HEX_CAPACITY];
+    char authority_sha256[SHA256_HEX_CAPACITY], attempt_sha256[SHA256_HEX_CAPACITY];
+    char request_sha256[SHA256_HEX_CAPACITY], preparation_sha256[SHA256_HEX_CAPACITY];
+    char population_sha256[SHA256_HEX_CAPACITY];
+    char source_sha256[2][SHA256_HEX_CAPACITY], binary_sha256[2][SHA256_HEX_CAPACITY];
+    u64 job_id, attempt_token;
+    u32 count, tool_count, native_target, owned;
+} BqRetirementRequiredChecks;
+
+/* The facts one check receipt records: the sources and binaries the check
+ * ran against, how its child ended and its stdout digest. signal is the
+ * terminating signal (0 for a normal exit, when exit_code is its status). */
+typedef struct BqRetirementCheckOutcome
+{
+    char source_sha256[2][SHA256_HEX_CAPACITY], binary_sha256[2][SHA256_HEX_CAPACITY];
+    char output_sha256[SHA256_HEX_CAPACITY];
+    int exit_code, signal;
+    u32 timed_out, out_of_memory, failures;
+} BqRetirementCheckOutcome;
+
+/* Imports the authority with the compiled profile for job's attempt over
+ * projection (the sealed B population, whose support, census, population,
+ * native target, row counts, A digest, sources and binaries the authority
+ * must name). It requires every check kind, a semantic check for each of the
+ * six #509 native hosts, no duplicate (kind, target, configuration), census
+ * rows equal to the object rows, matrix and no-fallback rows equal to the
+ * compiler-eligible rows, and honest evidence labels. The blocked profile
+ * has no pin: BQ_RECIPE_MISMATCH before any file is read. */
+BUSTER_F_DECL BqError bq_retirement_required_checks_import(int installed, BqJob const* job,
+    BqRetirementProjection const* projection, BqRetirementRequiredChecks* checks);
+BUSTER_F_DECL bool bq_retirement_required_checks_release(BqRetirementRequiredChecks* checks);
+/* The canonical BQ-RETIREMENT-CHECK-RECEIPT-V1 bytes of check index with
+ * outcome. The expected receipt uses the authority's sources and binaries,
+ * exit 0, no signal, timeout, OOM or failure and the pinned output. */
+BUSTER_F_DECL bool bq_retirement_check_receipt_format(BqRetirementRequiredChecks const* checks, u32 index,
+    BqRetirementCheckOutcome const* outcome, char* text, u32 capacity, u32* length);
 #endif
