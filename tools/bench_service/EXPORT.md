@@ -154,7 +154,16 @@ worker-unit producer writes it at the result root as `retirement-binding.json`
 (#881 PR 3), `COMPOSER_BINDING_PATH` in the script fixes that path, and any
 other `--binding` is refused. That record carries its sealed-result and
 independent-replay phases as pending descriptors (the sealed result binds the
-record's digest); lane F's final binding fills them.
+record's digest), so it never passes a replay itself. Lane F's final binding
+is produced after the export, so it lives outside the service result: the
+operator passes lane F's directory with `--lane-f`, holding
+`retirement-final-binding.json` (`FINAL_BINDING_NAME`) and the evidence it
+names. The replay copies that directory's single-link regular files into the
+clean replay destination, refusing any name the unpacked result already has
+(`lane_f_import`), requires the final binding to be the composed record with
+only its sealed-result phase set to the composed sealed result and its
+independent-replay phase set to a non-pending descriptor at the composed path
+(`final_binding_check`), and then runs the validator and the join over it.
 `retirement_export_replay_real_test.py`, run after `bench_throughput self-test`
 with its output directory, drives real A1 output (metrics shards, untimed
 batches, the two-shard execution receipt and numeric samples) through these
@@ -162,11 +171,14 @@ readers and the publication path, including reordered, missing, truncated and
 forged inputs. With the real binding validator the CLI chain stops there,
 because its minimal join record is no complete binding. With a validator test
 double, the CLI's `authenticated_attempt_join` accepts the genuine receipt and
-refuses a wrong attempt or a forged receipt. After `bench_service self-test`
-it also reads the worker unit's composed job-82 result: over lane F's final
-binding (the composed record with its sealed-result phase filled) the join
-accepts the producer authority's receipt digest and refuses another job,
-attempt or trust root and a tampered receipt. The archive and the unpacker in that test
+refuses a wrong attempt or a forged receipt. `--worker-unit DIRECTORY`, which
+`bench_service self-test` runs right after the preparation runner, reads the
+worker unit's composed job-82 result: the whole CLI (publication, separate
+retrieval, unpack stand-in, lane F import and final-binding check, validator
+double, join) accepts it with lane F's final binding and refuses a final
+binding that changes anything else; the join accepts the producer authority's
+receipt digest and refuses another job, attempt or trust root and a tampered
+receipt. The archive and the unpacker in that test
 are Python stand-ins. The native `unpack-export` needs a receipt the service
 itself sealed for a finalized service result, and the worker's full-result
 binding; the blocked retirement recipe cannot finalize such a result. A failed, interrupted or

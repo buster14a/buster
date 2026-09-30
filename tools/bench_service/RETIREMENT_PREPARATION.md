@@ -1405,12 +1405,17 @@ stand-in.
    anything is written: the contract pin, each support file's digest against
    its profile pin, the population's rows digest, count and statistical
    family, the gate's two binaries and lane D's frozen sampling values, and
-   exactly one admission-receipt sentinel. The writer then emits the binding
-   in canonical key order with the A/A admission receipt
+   exactly one admission-receipt sentinel, which must be
+   `execution.host.aa_admission_receipt` itself (canonical key order puts it
+   first in the execution section). The writer renders the binding in
+   canonical key order (`bq_retirement_worker_binding_render`, which the
+   coordinator reuses) with the A/A admission receipt
    (`retirement-aa-admission.json`) in place of the sentinel and the
-   workflow phases and records from D's documents. The sealed-result and
-   independent-replay phases are pending descriptors: the sealed result
-   binds this record's digest, so lane F's final binding fills them. The
+   workflow phases and records from D's documents. The admitted receipt
+   must be present and within the driver's receipt cap, or the campaign
+   refuses at admission. The sealed-result and independent-replay phases
+   are pending descriptors: the sealed result binds this record's digest, so
+   lane F's final binding fills them (see `EXPORT.md`). The
    preparation fixture's context comes from
    `retirement_binding_context_fixture.py`, and its bytes pass the #511
    validator structurally.
@@ -1608,16 +1613,22 @@ during the handoff withholds the acknowledgement (`BQ_WORKER_TIMEOUT`). Only
 a completed handoff writes MEASURED's record and receipt, so a durable
 `worker-phase-4` means the authority was copied and journalled.
 
-**The derivation (PR 3, review item M1 of #1961).** Naming alone would
-let a same-UID unit write a chain with the right digests beside a plan and
-context it made up. At finalization `bq_retirement_coordinator_derive`
-therefore trusts neither: over its own replay (`bq_retirement_unit_replay_kept`,
-from its A digest and the channel's ready digest) it requires, in order:
+**The derivation (PR 3, review items M1 of #1961 and #1964).** Naming alone
+would let a same-UID unit write a chain with the right digests beside a
+plan, context or binding it made up. At finalization
+`bq_retirement_coordinator_derive` therefore trusts none of them: over its
+own replay (`bq_retirement_unit_replay_kept`, from its A digest and the
+channel's ready digest; the replay marks its re-admitted gate issued only
+through `bq_retirement_unit_gate_reissue`, over the seal it just verified)
+it requires, in order:
 
-1. the authority's plan to be lane D's execution-plan document it
-   recomputes itself (`bq_retirement_coordinator_plan_document`: the
-   replayed gate and row plan, the pinned budget, rows and untimed-command
-   contract, the untimed batches rebuilt without writing anything);
+1. lane D's five documents recomputed itself
+   (`bq_retirement_coordinator_documents`: the replayed gate and row plan,
+   the pinned budget, rows and untimed-command contract, the untimed batches
+   rebuilt without writing anything, and the digest of the result's
+   `retirement-aa-admission.json`, with the pre-timing checks of
+   `bq_retirement_unit_campaign_documents_derive`), the authority's plan
+   being the execution-plan document;
 2. the carried pre-sample context to be the one it recomputes from the
    replayed gate (which binds its A digest), the ready digest, D's plan
    digest, the pinned budget, the campaign commands rebuilt from the row
@@ -1627,20 +1638,30 @@ from its A digest and the channel's ready digest) it requires, in order:
    over the carried log chains and stage facts
    (`bq_retirement_unit_campaign_post_digest`);
 4. lane D's post-sample record, found through the retained manifest the
-   authority binds, to name the same job, attempt, plans, contexts and log
-   chains;
-5. the binding the chain names to carry the record's pre-sample plan and
-   post-A/A binding digests, and the authority's context to be the
-   validator's `_execution_context` of that binding over the A/B stage's
-   numeric digest.
+   authority binds, to name the same job, attempt, plans, contexts, log
+   chains, admission receipt, family and timed rows and the recomputed
+   pre-sample plan, result-input plan and post-A/A documents;
+5. the binding the chain names to be, byte for byte, the one it renders
+   itself (`bq_retirement_worker_binding_render`) from the pinned binding
+   context, checked against the replayed gate and plan
+   (`bq_retirement_worker_binding_check`), the recomputed documents and the
+   admission receipt; and the authority's context to be the validator's
+   `_execution_context` of that binding over the A/B stage's numeric digest.
+
+**Boot identity.** Step 2 uses the coordinator's boot identity at
+finalization, and the pre-sample context binds the unit's at bind time. A
+reboot between the bind and finalization therefore refuses the derivation:
+an attempt still running fails, and a success already durable (FINALIZING
+or later, for example one recovered after the reboot) is held for
+reconciliation by `bq_worker_finish`, never rewritten. A campaign cannot
+survive a reboot anyway (its processes and lease are gone), so this only
+makes the loss explicit.
 
 What remains unverifiable by the coordinator, bound only by digest: the bind
 time, the stage facts and log chains (measurement outputs the post-sample
-record and the receipt also bind), the untimed records' contents, the
-binding's content beyond what it checks here (its pinned context is checked
-against its pin by the producer, in the same unit), and the fixture's A/A
-admission receipt (production admission has no authority). The two pending
-binding phases are lane F's.
+record and the receipt also bind), the untimed records' contents and the
+fixture's A/A admission receipt (production admission has no authority).
+The two pending binding phases are lane F's.
 
 On the producer side, the version-2 MEASURED acknowledgement window
 (`bq_phase_ack_deadline`) is the job's remaining execution deadline, not the

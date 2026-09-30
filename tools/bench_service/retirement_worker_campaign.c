@@ -1268,8 +1268,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWor
 #endif
     if (result == BQ_OK && !bq_retirement_unit_campaign_admit(driver, &admission))
         result = driver->failure.reason ? BQ_RECIPE_MISMATCH : BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED;
-    /* The admitted receipt's bytes, which the binding names. */
-    if (result == BQ_OK && admission.receipt && admission.receipt_bytes <= sizeof(campaign->aa_receipt))
+    /* The admitted receipt's bytes, which the binding names: an admission
+     * without them, or with more than the driver's receipt cap, refuses
+     * here rather than at composition. */
+    if (result == BQ_OK && !(admission.receipt && admission.receipt_bytes &&
+                             admission.receipt_bytes <= sizeof(campaign->aa_receipt)))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK)
     {
         memcpy(campaign->aa_receipt, admission.receipt, admission.receipt_bytes);
         campaign->aa_receipt_bytes = admission.receipt_bytes;

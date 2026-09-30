@@ -44,7 +44,8 @@
  * bq_retirement_worker_json_text, bq_retirement_worker_json_integer,
  * bq_retirement_worker_binding_parse (the canonical-section check),
  * bq_retirement_worker_binding_import, bq_retirement_worker_binding_check,
- * bq_retirement_worker_admission_write, bq_retirement_worker_binding_write,
+ * bq_retirement_worker_admission_write, bq_retirement_worker_binding_render
+ * (also the coordinator's re-rendering), bq_retirement_worker_binding_write,
  * BqRetirementWorkerCompose, bq_retirement_worker_compose_request,
  * bq_retirement_worker_authority_publish, bq_retirement_worker_chain_carried,
  * bq_retirement_worker_bundle_write, bq_retirement_worker_manifest_format
@@ -73,7 +74,13 @@
 #define BQ_RETIREMENT_WORKER_BINDING_SCHEMA "buster-native-retirement-performance-binding-v1"
 #define BQ_RETIREMENT_WORKER_BINDING_DECISION "native-retirement-performance-v1"
 #define BQ_RETIREMENT_WORKER_WORKFLOW_SCHEMA "buster-native-retirement-performance-workflow-v1"
-/* The admission receipt sentinel the context's execution.host carries. */
+/* The admission receipt sentinel the context's execution.host carries, and
+ * where it sits: canonical JSON sorts keys, so the execution section opens
+ * with its host object (host < job_ownership < lease < native_execution <
+ * profile < service) and host with its admission receipt
+ * (aa_admission_receipt < machine_id < qualification_receipt), the key sets
+ * the #511 validator requires exactly. */
+#define BQ_RETIREMENT_WORKER_ADMISSION_PREFIX "{\"host\":{"
 #define BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL \
     "\"aa_admission_receipt\":{\"bytes\":1,\"path\":\"" BQ_RETIREMENT_WORKER_ADMISSION_PATH "\",\"sha256\":\"" \
     BQ_RETIREMENT_WORKER_PENDING_SHA256 "\"}"
@@ -299,10 +306,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_check(BqRetirementWorkerBi
     TpComposeJson const* execution = &json[BQ_RETIREMENT_WORKER_BINDING_EXECUTION];
     String8 section = context->sections[BQ_RETIREMENT_WORKER_BINDING_EXECUTION];
     size_t sentinel = strlen(BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL);
+    size_t prefix = strlen(BQ_RETIREMENT_WORKER_ADMISSION_PREFIX);
     u32 occurrences = 0;
     for (u64 at = 0; ok && at + sentinel <= section.length; at += 1)
         occurrences += !memcmp(section.pointer + at, BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL, sentinel);
-    ok = ok && occurrences == 1 &&
+    /* Exactly once, and as execution.host.aa_admission_receipt itself. */
+    ok = ok && occurrences == 1 && section.length > prefix + sentinel &&
+         !memcmp(section.pointer, BQ_RETIREMENT_WORKER_ADMISSION_PREFIX, prefix) &&
+         !memcmp(section.pointer + prefix, BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL, sentinel) &&
          bq_retirement_worker_json_text(execution, 0, receipt_path, 3, BQ_RETIREMENT_WORKER_ADMISSION_PATH) &&
          bq_retirement_worker_json_text(execution, 0, receipt_sha, 3, BQ_RETIREMENT_WORKER_PENDING_SHA256) &&
          bq_retirement_worker_json_integer(execution, 0, receipt_bytes, 3, 1);
@@ -363,18 +374,20 @@ typedef struct BqRetirementWorkerPiece
  * receipt's descriptor in place of the sentinel, and the workflow: lane D's
  * pre-sample plan and post-A/A binding, the pending sealed-result and
  * independent-replay phases, the context's admission record and D's oracle
- * and result-input plan. The file is new, read-only and synced; *bytes and
- * digest receive its size and SHA-256. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_write(int result_root, BqRetirementWorkerBindingContext const* context,
+ * and result-input plan. The producer writes these bytes
+ * (bq_retirement_worker_binding_write); the coordinator renders them again
+ * from the documents it derives and requires the same bytes
+ * (bq_retirement_coordinator_derive). *bytes receives arena memory. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_render(BqRetirementWorkerBindingContext const* context,
     BqRetirementUnitCampaignDocument const documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS], u32 admission_bytes,
-    char const admission_sha256[SHA256_HEX_CAPACITY], u64* bytes, char digest[SHA256_HEX_CAPACITY])
+    char const admission_sha256[SHA256_HEX_CAPACITY], Arena* arena, char** bytes, u64* length)
 {
     char receipt[256], workflow[2048], phases[4][256], records[2][256];
     int receipt_length = snprintf(receipt, sizeof(receipt), "\"aa_admission_receipt\":");
-    int descriptor = receipt_length > 0 ?
+    int descriptor = receipt_length > 0 && admission_sha256 ?
         bq_retirement_worker_descriptor(receipt + receipt_length, sizeof(receipt) - (size_t)receipt_length,
                                         BQ_RETIREMENT_WORKER_ADMISSION_PATH, admission_bytes, admission_sha256) : -1;
-    bool ok = context && documents && descriptor > 0 &&
+    bool ok = context && documents && arena && bytes && length && descriptor > 0 &&
               bq_retirement_worker_descriptor(phases[0], sizeof(phases[0]), BQ_RETIREMENT_WORKER_REPLAY_PATH, 1,
                                               BQ_RETIREMENT_WORKER_PENDING_SHA256) > 0 &&
               bq_retirement_worker_descriptor(phases[1], sizeof(phases[1]),
@@ -402,20 +415,15 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_write(int result_root, BqR
         "\"version\":1}}", phases[0], phases[1], phases[2], phases[3], (int)admission.length,
         (char const*)admission.pointer, records[0], records[1]) : -1;
     ok = ok && workflow_length > 0 && (size_t)workflow_length < sizeof(workflow);
-    /* The execution section around its sentinel (checked to occur once). */
+    /* The execution section around its sentinel, which the context check
+     * placed as execution.host's first member. */
     String8 execution = ok ? context->sections[BQ_RETIREMENT_WORKER_BINDING_EXECUTION] : (String8){0};
     size_t sentinel = strlen(BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL);
-    u64 at = 0;
-    while (ok && at + sentinel <= execution.length &&
-           memcmp(execution.pointer + at, BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL, sentinel))
-        at += 1;
-    ok = ok && at + sentinel <= execution.length;
-    int file = ok ? openat(result_root, BQ_RETIREMENT_WORKER_BINDING_PATH,
-                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    FILE* stream = file >= 0 ? fdopen(file, "wb") : NULL;
-    if (!stream && file >= 0) close(file);
-    ok = ok && stream;
-    /* The pieces in canonical key order, hashed as they are written. */
+    u64 at = strlen(BQ_RETIREMENT_WORKER_ADMISSION_PREFIX);
+    ok = ok && at + sentinel < execution.length &&
+         !memcmp(execution.pointer, BQ_RETIREMENT_WORKER_ADMISSION_PREFIX, at) &&
+         !memcmp(execution.pointer + at, BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL, sentinel);
+    /* The pieces in canonical key order. */
     static char const* const middle[] = {"measurement", "population", "producer", "provenance", "requested_work",
                                          "rules"};
     char keys[BUSTER_ARRAY_LENGTH(middle)][32];
@@ -454,24 +462,34 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_write(int result_root, BqR
         pieces[count++] = (BqRetirementWorkerPiece){workflow, (u64)workflow_length};
         ok = ok && count == BUSTER_ARRAY_LENGTH(pieces);
     }
-    Sha256 hash;
-    sha256_init(&hash);
     u64 total = 0;
+    for (u32 index = 0; ok && index < count; index += 1) total += pieces[index].length;
+    ok = ok && total && total <= BQ_WORKER_BUNDLE_FILE_CAP;
+    char* rendered = ok ? bq_retirement_worker_allocate(arena, total, 1) : NULL;
+    ok = ok && rendered;
+    u64 used = 0;
     for (u32 index = 0; ok && index < count; index += 1)
     {
-        ok = fwrite(pieces[index].pointer, 1, (size_t)pieces[index].length, stream) == pieces[index].length;
-        if (ok)
-        {
-            sha256_add(&hash, pieces[index].pointer, pieces[index].length);
-            total += pieces[index].length;
-        }
+        memcpy(rendered + used, pieces[index].pointer, (size_t)pieces[index].length);
+        used += pieces[index].length;
     }
-    ok = ok && total <= BQ_WORKER_BUNDLE_FILE_CAP && fflush(stream) == 0 && fchmod(fileno(stream), 0400) == 0 &&
-         fsync(fileno(stream)) == 0;
-    if (stream && fclose(stream) != 0) ok = false;
-    ok = ok && fsync(result_root) == 0;
-    if (ok) sha256_finish_hex(&hash, (char8*)digest);
-    if (bytes) *bytes = ok ? total : 0;
+    if (bytes) *bytes = ok ? rendered : NULL;
+    if (length) *length = ok ? total : 0;
+    return ok;
+}
+
+/* The rendered binding as a new, read-only, synced result-root file; *bytes
+ * and digest receive its size and SHA-256. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_write(int result_root, BqRetirementWorkerBindingContext const* context,
+    BqRetirementUnitCampaignDocument const documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS], u32 admission_bytes,
+    char const admission_sha256[SHA256_HEX_CAPACITY], Arena* arena, u64* bytes, char digest[SHA256_HEX_CAPACITY])
+{
+    char* rendered = NULL;
+    u64 length = 0;
+    bool ok = bq_retirement_worker_binding_render(context, documents, admission_bytes, admission_sha256, arena,
+                                                  &rendered, &length) &&
+              bq_retirement_worker_file_write(result_root, BQ_RETIREMENT_WORKER_BINDING_PATH, rendered, length, digest);
+    if (bytes) *bytes = ok ? length : 0;
     return ok;
 }
 
@@ -829,7 +847,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_compose(BqRetirementWorkerCampa
         !(bq_retirement_worker_admission_write(result_root, campaign->aa_receipt, campaign->aa_receipt_bytes,
                                                campaign->driver.aa_admission_sha256, compose->admission_sha256) &&
           bq_retirement_worker_binding_write(result_root, &context, campaign->driver.documents,
-                                             campaign->aa_receipt_bytes, compose->admission_sha256,
+                                             campaign->aa_receipt_bytes, compose->admission_sha256, campaign->arena,
                                              &compose->binding_bytes, compose->binding_sha256)))
         result = BQ_IO;
     if (result == BQ_OK) result = bq_retirement_unit_stop_reason(campaign->driver.cancellation_fd, deadline_ns, BQ_OK);

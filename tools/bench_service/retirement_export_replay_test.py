@@ -228,7 +228,8 @@ class ExportReplayTest(unittest.TestCase):
         wrong = identities.copy()
         wrong[wrong.index("--export-receipt-sha256") + 1] = "c" * 64
         second = subprocess.run(command + [str(published), str(clean_root / "new-result"),
-                                          "--consume-published", "--retrieval", str(clean)] + wrong,
+                                          "--consume-published", "--retrieval", str(clean),
+                                          "--lane-f", str(clean_root / "lane-f")] + wrong,
                                 cwd=clean_root, env={"PATH": os.environ.get("PATH", ""),
                                                      "LANG": "C"},
                                 check=False, capture_output=True, text=True)
@@ -461,6 +462,77 @@ class ExportReplayTest(unittest.TestCase):
             replay.composer_binding_path("../binding.json")
         with mock.patch.object(replay, "COMPOSER_BINDING_PATH", None):
             self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
+
+    def lane_f_fixture(self):
+        """A composed record with both late phases pending, its sealed
+        result, and lane F's directory with the matching final binding."""
+        result = self.root / "result"
+        lane_f = self.root / "lane-f"
+        result.mkdir(mode=0o700)
+        lane_f.mkdir(mode=0o700)
+        sealed = b'{"sealed":1}\n'
+        (result / "retirement-sealed-result.json").write_bytes(sealed)
+        pending = dict(replay.PENDING_DESCRIPTOR)
+        composed = {"subjects": {"candidate": "c"}, "workflow": {"phases": {
+            "sealed_result": dict(pending, path="retirement-sealed-result.json"),
+            "independent_replay": dict(pending, path="retirement-independent-replay.json")}}}
+        (result / replay.COMPOSER_BINDING_PATH).write_text(json.dumps(composed))
+        replayed = b'{"replayed":1}\n'
+        (lane_f / "retirement-independent-replay.json").write_bytes(replayed)
+        final = json.loads(json.dumps(composed))
+        final["workflow"]["phases"]["sealed_result"] = {
+            "path": "retirement-sealed-result.json", "bytes": len(sealed),
+            "sha256": hashlib.sha256(sealed).hexdigest()}
+        final["workflow"]["phases"]["independent_replay"] = {
+            "path": "retirement-independent-replay.json", "bytes": len(replayed),
+            "sha256": hashlib.sha256(replayed).hexdigest()}
+        return result, lane_f, composed, final
+
+    def test_final_binding_is_the_composed_record_with_lane_f_phases(self):
+        result, lane_f, composed, final = self.lane_f_fixture()
+        (lane_f / replay.FINAL_BINDING_NAME).write_text(json.dumps(final))
+        path = replay.lane_f_import(lane_f, result)
+        self.assertEqual(path, result / replay.FINAL_BINDING_NAME)
+        self.assertEqual(replay.final_binding_check(result, path), final)
+        # A second import collides with the files already placed.
+        with self.assertRaisesRegex(ValueError, "collides"):
+            replay.lane_f_import(lane_f, result)
+        mutations = {
+            "other field": lambda value: value["subjects"].__setitem__("candidate", "other"),
+            "sealed digest": lambda value: value["workflow"]["phases"]["sealed_result"].__setitem__("sha256", "f" * 64),
+            "pending replay": lambda value: value["workflow"]["phases"]["independent_replay"].update(
+                replay.PENDING_DESCRIPTOR),
+            "replay elsewhere": lambda value: value["workflow"]["phases"]["independent_replay"].__setitem__(
+                "path", "elsewhere.json"),
+        }
+        for name, mutate in mutations.items():
+            changed = json.loads(json.dumps(final))
+            mutate(changed)
+            other = self.root / f"final-{len(name)}.json"
+            other.write_text(json.dumps(changed))
+            with self.subTest(mutation=name), self.assertRaises(ValueError):
+                replay.final_binding_check(result, other)
+        # The composed record itself can never stand in for the final one.
+        with self.assertRaises(ValueError):
+            replay.final_binding_check(result, result / replay.COMPOSER_BINDING_PATH)
+        # A composed record whose sealed phase is already filled is refused.
+        (result / replay.COMPOSER_BINDING_PATH).chmod(0o600)
+        (result / replay.COMPOSER_BINDING_PATH).write_text(json.dumps(final))
+        with self.assertRaisesRegex(ValueError, "pending"):
+            replay.final_binding_check(result, path)
+
+    def test_lane_f_directory_holds_only_regular_files_and_the_final_binding(self):
+        result, lane_f, _composed, final = self.lane_f_fixture()
+        with self.assertRaisesRegex(ValueError, "lacks the final binding"):
+            replay.lane_f_import(lane_f, result)
+        (lane_f / replay.FINAL_BINDING_NAME).write_text(json.dumps(final))
+        os.symlink("retirement-independent-replay.json", lane_f / "link.json")
+        with self.assertRaisesRegex(ValueError, "regular files"):
+            replay.lane_f_import(lane_f, result)
+        (lane_f / "link.json").unlink()
+        (lane_f / replay.COMPOSER_BINDING_PATH).write_text("{}")
+        with self.assertRaisesRegex(ValueError, "collides"):
+            replay.lane_f_import(lane_f, result)
 
     def test_publish_only_capacity_output_does_not_claim_replay(self):
         command = [sys.executable, str(Path(replay.__file__).resolve()),

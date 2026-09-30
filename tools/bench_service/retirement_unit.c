@@ -36,7 +36,9 @@
  *   bq_retirement_unit_replay       coordinator side: re-derive and compare
  *                                   every digest the record binds
  *   bq_retirement_unit_replay_kept  the same, keeping the replayed objects
- *                                   and a re-issued gate (BqRetirementUnitReplayed,
+ *                                   and a gate re-issued over the verified
+ *                                   seal (bq_retirement_unit_gate_reissue,
+ *                                   BqRetirementUnitReplayed,
  *                                   bq_retirement_unit_replayed_release) for
  *                                   the coordinator's derivation of the
  *                                   authority's plan and contexts (#881 PR 3)
@@ -1064,6 +1066,31 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_gate_issue(BqRetirementUnitPrepar
     return result;
 }
 
+/* Step 9's second issuer, for the coordinator's replay
+ * (bq_retirement_unit_replay_kept): a gate the replay re-admitted over the
+ * persisted row evidence is marked issued only when `seal` verifies against
+ * the facts the replay re-derived (bq_retirement_unit_gate_sealed); it then
+ * owns the joined batch groups and carries the evidence digests and seal,
+ * as bq_retirement_unit_gate_issue leaves an issued gate. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_gate_reissue(BqRetirementUnitGate* gate,
+    BqRetirementUnitReadyFacts const* facts, char const seal[SHA256_HEX_CAPACITY], BqRetirementRowJoined* joined,
+    char const check_evidence_sha256[SHA256_HEX_CAPACITY], char const row_evidence_sha256[SHA256_HEX_CAPACITY])
+{
+    bool ok = gate && gate->owned && gate->issuer != BQ_RETIREMENT_UNIT_GATE_ISSUED && facts && joined &&
+              joined->owned && bq_retirement_unit_hex(check_evidence_sha256) &&
+              bq_retirement_unit_hex(row_evidence_sha256) && bq_retirement_unit_gate_sealed(seal, facts);
+    if (ok)
+    {
+        gate->joined = *joined;
+        *joined = (BqRetirementRowJoined){0};
+        memcpy(gate->evidence_sha256, check_evidence_sha256, SHA256_HEX_CAPACITY);
+        memcpy(gate->row_evidence_sha256, row_evidence_sha256, SHA256_HEX_CAPACITY);
+        memcpy(gate->seal_sha256, seal, SHA256_HEX_CAPACITY);
+        gate->issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED;
+    }
+    return ok;
+}
+
 /* The canonical BQ-RETIREMENT-READY-V1 bytes for facts. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_format(BqRetirementUnitReadyFacts const* facts, char* text,
     u32 capacity, u32* length)
@@ -1932,18 +1959,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_kept(BqRetirementStore sto
                  expected_length == length && !memcmp(expected, text, length) ? BQ_OK : BQ_CORRUPT;
     /* A kept replay hands over what it re-derived; the locals are left in
      * their released state. */
+    /* The frozen batch groups the correctness gate points into move with it
+     * (as bq_retirement_unit_gate_pinned keeps them), and the replay's issuer
+     * marks it issued over the seal just verified, for the derivation's
+     * command builder, which requires that marker. */
+    if (result == BQ_OK && kept &&
+        !bq_retirement_unit_gate_reissue(&gate, &facts, gate_seal, &joined, check_evidence, row_evidence))
+        result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && kept)
     {
-        /* The frozen batch groups the correctness gate points into move with
-         * it (as bq_retirement_unit_gate_pinned keeps them), and the seal the
-         * replay just verified against the re-derived facts marks it issued
-         * for the derivation's command builder, which requires that marker. */
-        gate.joined = joined;
-        joined = (BqRetirementRowJoined){0};
-        memcpy(gate.evidence_sha256, check_evidence, SHA256_HEX_CAPACITY);
-        memcpy(gate.row_evidence_sha256, row_evidence, SHA256_HEX_CAPACITY);
-        memcpy(gate.seal_sha256, gate_seal, SHA256_HEX_CAPACITY);
-        gate.issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED;
         *kept = (BqRetirementUnitReplayed){prepared, built, projection, plan, gate, true};
         prepared = (BqRetirementUnitPrepared){.policy = {.clang = -1, .inventory = -1}};
         built = (BqRetirementUnitBuilt){.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}}};
