@@ -34,11 +34,14 @@
  * journalled authority in bq_worker_finish. Recovery reloads those digests
  * from the durable queue records (bq_worker_retirement_reload,
  * bq_worker_phase_record_digest) and never rewrites a durable success.
- * Before finishing a recovered retirement job, bq_worker_retirement_recover_hold
- * classifies its MEASURED handoff (bq_retirement_coordinator_handoff_class,
- * recovery L2); an incomplete or inconsistent one is poisoned
- * (bq_worker_retirement_poison_write, bq_worker_retirement_poisoned) and held
- * for reconciliation with its evidence kept.
+ * Before recovery finishes a retirement job, and before bq_worker_finish
+ * records any failed, cancelled or interrupted outcome for one (a failed
+ * MEASURED handoff in the live run among them),
+ * bq_worker_retirement_handoff_hold classifies its MEASURED handoff
+ * (bq_retirement_coordinator_handoff_class, recovery L2). An incomplete or
+ * inconsistent one is poisoned (bq_retirement_poison_write in workspace.c) and
+ * held for reconciliation with its evidence kept; a poisoned job never
+ * finalizes, reconciles succeeded or exports (bq_retirement_poisoned).
  *
  * Manager seam: bq_worker_backend_systemd (bq_systemd_observe, bq_systemd_signal,
  * bq_systemd_join); readback checks bq_worker_observed and
@@ -2087,6 +2090,8 @@ struct BqWorkerFinalization
     char retirement_preparation_sha256[SHA256_HEX_CAPACITY];
     char retirement_ready_sha256[SHA256_HEX_CAPACITY];
     char retirement_authority_sha256[SHA256_HEX_CAPACITY];
+    /* #881 recovery L2: bq_worker_retirement_handoff_hold held this job. */
+    bool retirement_held;
 };
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_expired(BqWorkerFinalization const* finalization)
@@ -4058,27 +4063,6 @@ BUSTER_GLOBAL_LOCAL void bq_worker_retirement_reload(BqQueue* queue, BqJob const
         bq_worker_phase_record_digest(queue, job, BQ_PHASE_MEASURED, finalization->retirement_authority_sha256);
 }
 
-/* #881 recovery L2: the queue's poison record for a retirement attempt whose
- * MEASURED handoff recovery could not classify COMPLETE. It lives in the
- * queue directory, beside the worker-phase records the unit cannot reach, and
- * is never removed by the service: any record under this name, well formed or
- * not, poisons the job (bq_worker_retirement_poisoned). */
-#define BQ_WORKER_RETIREMENT_POISON "retirement-poison"
-#define BQ_WORKER_RETIREMENT_POISON_MAGIC "BQ-RETIREMENT-POISON-V1"
-#define BQ_WORKER_RETIREMENT_POISON_CAP 384u
-
-/* Whether job carries a poison record; an unreadable directory counts as
- * poisoned (fail closed). */
-BUSTER_GLOBAL_LOCAL bool bq_worker_retirement_poisoned(BqQueue* queue, BqJob const* job)
-{
-    char name[48];
-    u8 bytes[BQ_WORKER_RETIREMENT_POISON_CAP];
-    u32 size = 0;
-    bool poisoned = !queue || !job || !bq_record_name(name, BQ_WORKER_RETIREMENT_POISON, job->id) ||
-                    bq_record_read(queue, name, bytes, sizeof(bytes), &size) != BQ_NOT_FOUND;
-    return poisoned;
-}
-
 BUSTER_GLOBAL_LOCAL char const* bq_worker_retirement_state_name(TpRetirementAuthorityState state)
 {
     char const* const names[] = {"invalid", "absent", "incomplete", "damaged", "complete"};
@@ -4086,42 +4070,28 @@ BUSTER_GLOBAL_LOCAL char const* bq_worker_retirement_state_name(TpRetirementAuth
     return name;
 }
 
-/* The immutable record of what recovery found: the class, whether the
- * worker-phase-4 record existed and the store state it observed. */
-BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_poison_write(BqQueue* queue, BqJob const* job,
-    BqRetirementHandoffClass handoff, bool measured, TpRetirementAuthorityState state)
+/* #881 recovery L2, called by bq_worker_recover before bq_worker_finish and by
+ * bq_worker_finish before any failed, cancelled or interrupted outcome (the
+ * live run's failures, a failed MEASURED handoff among them). A retirement job
+ * whose MEASURED handoff bq_retirement_coordinator_handoff_class finds
+ * INCOMPLETE or INCONSISTENT, or that already carries a poison record
+ * (queue.h, bq_retirement_poison_read), is held: the poison record is written
+ * once, a job with no durable outcome gets its failure record unless it was
+ * cancelled (reason: the caller's for an incomplete handoff, worker-mismatch
+ * for an inconsistent or unreadable one; an existing record's class decides
+ * after a crash between the two writes), and nothing is advanced, published
+ * or removed. The attempt workspace, the result root and the queue-private
+ * copy and journal stay as evidence, finalization->retirement_held is set,
+ * and the caller does not finish, so the queue keeps needing reconciliation
+ * and admits no job. A COMPLETE or ABSENT handoff, and every other recipe,
+ * proceed as before. Any error also holds. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_handoff_hold(BqQueue* queue, BqJob const* job,
+    BqWorkerFinalization* finalization, BqError reason, bool* held)
 {
-    char name[48], body[BQ_WORKER_RETIREMENT_POISON_CAP];
-    int length = snprintf(body, sizeof(body), BQ_WORKER_RETIREMENT_POISON_MAGIC "\njob=%" PRIu64 "\ntoken=%" PRIu64
-                          "\nhandoff=%s\nmeasured-record=%s\nauthority-state=%s\n", (uint64_t)job->id,
-                          (uint64_t)job->token, handoff == BQ_RETIREMENT_HANDOFF_INCOMPLETE ? "incomplete" :
-                          "inconsistent", measured ? "present" : "absent", bq_worker_retirement_state_name(state));
-    BqError error = length > 0 && (u32)length < sizeof(body) &&
-                    bq_record_name(name, BQ_WORKER_RETIREMENT_POISON, job->id) ?
-                    bq_record_write(queue, name, (u8 const*)body, (u32)length, false) : BQ_IO;
-    return error;
-}
-
-/* #881 recovery L2, called by bq_worker_recover before bq_worker_finish. A
- * retirement job whose MEASURED handoff bq_retirement_coordinator_handoff_class
- * finds INCOMPLETE or INCONSISTENT, or that is already poisoned, is held:
- * the poison record is written once, a job with no durable outcome gets its
- * failure record (reason: the recovery's interrupted reason, or
- * BQ_WORKER_MISMATCH for an inconsistent handoff) unless it was cancelled,
- * and nothing is advanced, published or removed. The attempt workspace, the
- * result root and the queue-private copy and journal stay as evidence, and
- * *held tells recovery not to finish, so the queue keeps needing
- * reconciliation and admits no job until an operator's cleanup proof
- * (bq_workspace_reconcile, which finishes a job without a durable outcome
- * interrupted or cancelled, never succeeded). A COMPLETE or ABSENT handoff,
- * and every other recipe, proceed as before. Any error also holds. */
-BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_recover_hold(BqQueue* queue, BqJob const* job,
-    BqWorkerFinalization const* finalization, BqError reason, bool* held)
-{
-    bool retirement = job && bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
-    bool poisoned = retirement && bq_worker_retirement_poisoned(queue, job);
+    bool retirement = queue && job && bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    bool inconsistent = false;
+    bool poisoned = retirement && bq_retirement_poison_read(queue, job, &inconsistent) != BQ_NOT_FOUND;
     BqError error = BQ_OK;
-    BqRetirementHandoffClass handoff = BQ_RETIREMENT_HANDOFF_ABSENT;
     if (retirement && !poisoned)
     {
         char name[48], digest[SHA256_HEX_CAPACITY] = {0};
@@ -4132,20 +4102,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_recover_hold(BqQueue* queue, Bq
         bool measured = record != BQ_NOT_FOUND;
         if (measured) bq_worker_phase_record_digest(queue, job, BQ_PHASE_MEASURED, digest);
         TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
-        handoff = bq_retirement_coordinator_handoff_class(finalization ? finalization->result_directory : -1,
-                                                          queue->directory_fd, job->id, job->token, measured, digest,
-                                                          &state);
-        poisoned = handoff == BQ_RETIREMENT_HANDOFF_INCOMPLETE || handoff == BQ_RETIREMENT_HANDOFF_INCONSISTENT;
-        if (poisoned) error = bq_worker_retirement_poison_write(queue, job, handoff, measured, state);
+        BqRetirementHandoffClass handoff = bq_retirement_coordinator_handoff_class(
+            finalization ? finalization->result_directory : -1, queue->directory_fd, job->id, job->token, measured,
+            digest, &state);
+        inconsistent = handoff == BQ_RETIREMENT_HANDOFF_INCONSISTENT;
+        poisoned = inconsistent || handoff == BQ_RETIREMENT_HANDOFF_INCOMPLETE;
+        if (poisoned)
+            error = bq_retirement_poison_write(queue, job, inconsistent, measured,
+                                               bq_worker_retirement_state_name(state));
     }
     if (error == BQ_OK && poisoned && !job->cancel_requested && job->phase < BQ_FINALIZING)
     {
         BqError prior = bq_failure_evidence(queue, job);
-        error = prior == BQ_NOT_FOUND ?
-                bq_failure_write(queue, job, handoff == BQ_RETIREMENT_HANDOFF_INCONSISTENT ? BQ_WORKER_MISMATCH : reason) :
+        error = prior == BQ_NOT_FOUND ? bq_failure_write(queue, job, inconsistent ? BQ_WORKER_MISMATCH : reason) :
                 prior == BQ_CORRUPT || prior == BQ_IO ? prior : BQ_OK;
     }
     *held = poisoned || (retirement && error != BQ_OK);
+    if (finalization && *held) finalization->retirement_held = true;
     return error;
 }
 
@@ -4156,8 +4129,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_recover_hold(BqQueue* queue, Bq
  * PR 3) that authority's plan and final context are the ones the coordinator
  * derives itself from the replay (bq_retirement_coordinator_finalize).
  * Missing digests are reloaded from the durable records first; a missing
- * digest or seam fails, and so does a job recovery poisoned
- * (bq_worker_retirement_poisoned). A cancellation or the execution deadline (backend
+ * digest or seam fails, and so does a poisoned job
+ * (bq_retirement_poisoned, recovery L2). A cancellation or the execution deadline (backend
  * clock) before or after the replay stops it. Other recipes pass unchanged. */
 BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_finalize(BqQueue* queue, BqJob const* job,
                                                            BqWorkerFinalization* finalization)
@@ -4167,7 +4140,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_finalize(BqQueue* queue, BqJob 
     bool bound = finalization && finalization->config && finalization->retirement && queue &&
                  finalization->retirement_ready_sha256[0] && finalization->retirement_preparation_sha256[0] &&
                  finalization->retirement_authority_sha256[0];
-    BqError error = !retirement ? BQ_OK : !bound || bq_worker_retirement_poisoned(queue, job) ? BQ_WORKER_MISMATCH :
+    BqError error = !retirement ? BQ_OK : !bound || bq_retirement_poisoned(queue, job) ? BQ_WORKER_MISMATCH :
                     bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
                     bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT :
                     bq_retirement_coordinator_finalize(finalization->retirement, finalization->config->workspace_root,
@@ -4214,6 +4187,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
         outcome = BQ_FAILED;
         error = BQ_OK;
     }
+    /* #881 recovery L2: a retirement job about to end failed, cancelled or
+     * interrupted (a failed MEASURED handoff in the live run among them) is
+     * classified first; an incomplete or inconsistent handoff is poisoned and
+     * held with its workspace, never advanced, published or cleaned. */
+    bool poisoned = false;
+    if (error == BQ_OK && outcome != BQ_SUCCEEDED)
+    {
+        error = bq_worker_retirement_handoff_hold(queue, job, finalization, reason, &poisoned);
+        if (poisoned && error == BQ_OK) error = BQ_RECONCILIATION_REQUIRED;
+    }
     if (outcome == BQ_SUCCEEDED)
     {
         for (BqPhase phase = (BqPhase)(job->phase + 1); error == BQ_OK && phase <= BQ_CLEANING; phase = (BqPhase)(phase + 1))
@@ -4232,7 +4215,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
             }
         }
     }
-    else
+    else if (!poisoned && error == BQ_OK)
     {
         BqError prior = bq_failure_evidence(queue, job);
         if (outcome != BQ_CANCELLED && prior == BQ_NOT_FOUND) error = bq_failure_write(queue, job, reason);
@@ -5132,9 +5115,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
         error = bq_worker_recover_outcome(job, finalization, durable_outcome ? job->outcome : BQ_NO_OUTCOME,
                                           &outcome, &reason);
     /* #881 recovery L2: a retirement handoff that is not complete or absent
-     * is poisoned and held for an operator's cleanup proof, never finished. */
+     * is poisoned and held, never finished. */
     bool held = false;
-    if (error == BQ_OK) error = bq_worker_retirement_recover_hold(queue, job, finalization, reason, &held);
+    if (error == BQ_OK) error = bq_worker_retirement_handoff_hold(queue, job, finalization, reason, &held);
     if (held)
     {
         queue->needs_reconciliation = true;
@@ -5507,7 +5490,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_run_pinned(BqQueue* queue, BqWorkerConfig 
                 error = stopped;
             }
         }
-        if (queue->state.active_id == job->id)
+        /* A job bq_worker_retirement_handoff_hold held keeps its evidence as
+         * it was: nothing more is published or bound for it. */
+        if (queue->state.active_id == job->id && !finalization.retirement_held)
         {
             BqError evidence_reason = error == BQ_CLEANUP_FAILED ? BQ_CLEANUP_FAILED :
                                       error == BQ_RESOURCE_MISMATCH ? BQ_RESOURCE_MISMATCH : BQ_WORKER_MISMATCH;

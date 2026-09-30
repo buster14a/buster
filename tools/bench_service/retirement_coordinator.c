@@ -378,7 +378,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_replay(BqRetirementWorkerU
  * without a COMPLETE state, or a COMPLETE state without the record. The record
  * is written only after the handoff completes, so recovery cannot tell a crash
  * between the two from forged records: both are never acknowledged, and
- * bq_worker_retirement_recover_hold poisons and holds INCOMPLETE and
+ * bq_worker_retirement_handoff_hold poisons and holds INCOMPLETE and
  * INCONSISTENT alike. */
 typedef enum BqRetirementHandoffClass
 {
@@ -469,7 +469,12 @@ BUSTER_GLOBAL_LOCAL BqRetirementHandoffClass bq_retirement_coordinator_handoff_c
         tp_retirement_store_authority_state(result_directory, queue_root, job_id, attempt_token, copied.plan_sha256,
                                             copied.context_sha256, &copied) :
         present ? TP_RETIREMENT_AUTHORITY_INVALID : TP_RETIREMENT_AUTHORITY_ABSENT;
-    if (queue_root >= 0 && close(queue_root) != 0) observed = TP_RETIREMENT_AUTHORITY_INVALID;
+    /* A root that fails to close proves nothing either. */
+    if (queue_root >= 0 && close(queue_root) != 0)
+    {
+        observed = TP_RETIREMENT_AUTHORITY_INVALID;
+        present = true;
+    }
     bool complete = observed == TP_RETIREMENT_AUTHORITY_COMPLETE;
     BqRetirementHandoffClass handoff = measured ? (complete ? BQ_RETIREMENT_HANDOFF_COMPLETE :
                                                    BQ_RETIREMENT_HANDOFF_INCONSISTENT) :

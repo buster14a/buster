@@ -5696,6 +5696,219 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
 
 #include "export_tests.c"
 
+#ifdef __linux__
+/* #881 recovery L2 poison guards, without the retirement producer. The
+ * retirement request is spelled field by field because the portable queue's
+ * gate refuses the blocked recipe; the hold reads only its recipe. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_job(BqJob* job, u64 id)
+{
+    String8 fields[BQ_FIELD_COUNT] = {
+        S8("test-principal"), S8("retirement-poison"), S8("native-retirement-performance-v1"),
+        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    *job = (BqJob){.id = id, .token = id + 10u, .phase = BQ_MEASURING};
+    for (u32 index = 0; index < BQ_FIELD_COUNT; index += 1)
+    {
+        bq_put32(job->request.bytes + job->request.size, (u32)fields[index].length);
+        job->request.size += 4;
+        memcpy(job->request.bytes + job->request.size, fields[index].pointer, (size_t)fields[index].length);
+        job->request.size += (u32)fields[index].length;
+    }
+    memset(job->digest, 'c', 64);
+    job->digest[64] = 0;
+}
+
+/* The records one case leaves in the queue directory, removed. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_clean(BqQueue* queue, BqJob const* job)
+{
+    char name[48];
+    char const* const prefixes[] = {BQ_RETIREMENT_POISON_RECORD, "failure", "worker-phase-4"};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+        if (bq_record_name(name, prefixes[index], job->id)) unlinkat(queue->directory_fd, name, 0);
+}
+
+/* One hold, with its verdict and the failure record it left. */
+BUSTER_GLOBAL_LOCAL bool bq_test_retirement_hold(BqQueue* queue, BqJob const* job, BqError expected,
+                                                 bool expected_held, BqError reason)
+{
+    BqWorkerFinalization finalization = {.result_directory = -1};
+    bool held = !expected_held;
+    BqError error = bq_worker_retirement_handoff_hold(queue, job, &finalization, BQ_WORKER_INTERRUPTED, &held);
+    bool ok = error == expected && held == expected_held && finalization.retirement_held == expected_held &&
+              bq_failure_evidence(queue, job) == reason;
+    return ok;
+}
+
+/* The classifier and the hold over leftovers built in the queue directory:
+ * nothing (absent, never held); a `.pending` temporary alone (incomplete,
+ * never absent); a queue-private root that is not a directory (open fails
+ * other than ENOENT: something left); a malformed worker-phase-4 record
+ * (inconsistent); a failed poison write (held, BQ_IO, no record); a corrupt
+ * and an unreadable poison record (poisoned); a well-formed record whose class
+ * decides the failure reason after a crash before that record; a cancelled
+ * job (held, no failure record); a smoke job (never held); and
+ * bq_worker_finish on a failing held job (held before any transition). */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_hold(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqJob job;
+        bq_test_retirement_poison_job(&job, 500);
+        char pending[64], poison[48];
+        snprintf(pending, sizeof(pending), "authority-job-%" PRIu64 "-%" PRIu64 ".txt.pending", (uint64_t)job.id,
+                 (uint64_t)job.token);
+        BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, job.id) &&
+                 mkdirat(queue->directory_fd, "retirement-authority", 0700) == 0);
+        int authority = openat(queue->directory_fd, "retirement-authority", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(authority >= 0);
+        TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
+        /* Nothing left: absent, not held, nothing written. */
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_ABSENT &&
+                 state == TP_RETIREMENT_AUTHORITY_ABSENT);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, false, BQ_NOT_FOUND) && !bq_retirement_poisoned(queue, &job));
+        /* A `.pending` temporary alone is incomplete, never absent. */
+        int file = openat(authority, pending, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        BQ_CHECK(file >= 0 && close(file) == 0);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCOMPLETE &&
+                 state == TP_RETIREMENT_AUTHORITY_INVALID);
+        bool inconsistent = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED) &&
+                 bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_OK && !inconsistent);
+        /* A second hold finds the record and holds again. */
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED));
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A failed poison write holds and reports BQ_IO, writing nothing. */
+        bq_test_poison_write_failure = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_IO, true, BQ_NOT_FOUND) &&
+                 !bq_retirement_poisoned(queue, &job));
+        bq_test_poison_write_failure = false;
+        /* A cancelled job is held without a failure record. */
+        job.cancel_requested = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_NOT_FOUND) && bq_retirement_poisoned(queue, &job));
+        job.cancel_requested = false;
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A smoke job is never classified. */
+        BqJob smoke = job;
+        smoke.request = bq_test_real_request(500);
+        BQ_CHECK(bq_test_retirement_hold(queue, &smoke, BQ_OK, false, BQ_NOT_FOUND) &&
+                 !bq_retirement_poisoned(queue, &smoke));
+        /* bq_worker_finish holds a failing job before any journal transition
+         * (the job is not even in the queue). */
+        BqWorkerFinalization finishing = {.result_directory = -1};
+        queue->needs_reconciliation = false;
+        BQ_CHECK(bq_worker_finish(queue, &fixture.config, &job, BQ_FAILED, BQ_WORKER_FAILED, &finishing) ==
+                 BQ_RECONCILIATION_REQUIRED && finishing.retirement_held && queue->needs_reconciliation &&
+                 bq_retirement_poisoned(queue, &job) && bq_failure_evidence(queue, &job) == BQ_WORKER_FAILED);
+        queue->needs_reconciliation = false;
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(unlinkat(authority, pending, 0) == 0);
+        /* A malformed worker-phase-4 record with nothing copied: inconsistent. */
+        char measured[48];
+        BQ_CHECK(bq_record_name(measured, "worker-phase-4", job.id) &&
+                 bq_record_write(queue, measured, (u8 const*)"malformed\n", 10, false) == BQ_OK);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, true, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCONSISTENT &&
+                 state == TP_RETIREMENT_AUTHORITY_ABSENT);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH) &&
+                 bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_OK && inconsistent);
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A queue-private root that is not a directory proves nothing absent. */
+        BQ_CHECK(renameat(queue->directory_fd, "retirement-authority", queue->directory_fd, "aside-authority") == 0);
+        file = openat(queue->directory_fd, "retirement-authority", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        BQ_CHECK(file >= 0 && close(file) == 0);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCOMPLETE &&
+                 state == TP_RETIREMENT_AUTHORITY_INVALID);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED));
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(unlinkat(queue->directory_fd, "retirement-authority", 0) == 0 &&
+                 renameat(queue->directory_fd, "aside-authority", queue->directory_fd, "retirement-authority") == 0);
+        /* With nothing left, only the poison record holds. A corrupt record
+         * (writable) and an unreadable one (a symlink) poison and count as
+         * inconsistent; a well-formed record's class decides the reason. */
+        file = openat(queue->directory_fd, poison, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        BQ_CHECK(file >= 0 && write(file, "x\n", 2) == 2 && close(file) == 0);
+        BQ_CHECK(bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_CORRUPT && inconsistent &&
+                 bq_retirement_poisoned(queue, &job));
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH));
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(symlinkat("missing-target", queue->directory_fd, poison) == 0);
+        BQ_CHECK(bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_IO && inconsistent &&
+                 bq_retirement_poisoned(queue, &job));
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH));
+        bq_test_retirement_poison_clean(queue, &job);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            BQ_CHECK(bq_retirement_poison_write(queue, &job, index == 1, false, "incomplete") == BQ_OK);
+            BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true,
+                                             index == 1 ? BQ_WORKER_MISMATCH : BQ_WORKER_INTERRUPTED));
+            bq_test_retirement_poison_clean(queue, &job);
+        }
+        BQ_CHECK(unlinkat(queue->directory_fd, "retirement-authority", AT_REMOVEDIR) == 0);
+        if (authority >= 0) close(authority);
+        bq_test_worker_end(&fixture);
+    }
+}
+
+/* The reviewer's probe through the admitted smoke recipe: a durable success
+ * left at FINALIZING or CLEANING normally reconciles FINISHED/SUCCEEDED
+ * without any finalization. With a poison record present it reconciles
+ * failed (FINALIZING, with a worker-mismatch failure record) or interrupted
+ * (CLEANING), never succeeded, and export refuses it. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_reconcile(void)
+{
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        BqWorkerFixture fixture;
+        if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+        {
+            BqQueue* queue = &fixture.material.queue.queue;
+            BqRequest request = bq_test_real_request(501 + index);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                     bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id,
+                                    &token) == BQ_OK);
+            BqJob* job = bq_job(&queue->state, id);
+            BqPhase last = index ? BQ_CLEANING : BQ_FINALIZING;
+            for (BqPhase phase = BQ_SETTLING; job && phase <= last; phase = (BqPhase)(phase + 1))
+            {
+                BQ_CHECK(bq_real_advance(queue, job, phase, phase >= BQ_FINALIZING ? BQ_SUCCEEDED : BQ_NO_OUTCOME) ==
+                         BQ_OK);
+                job = bq_job(&queue->state, id);
+            }
+            BQ_CHECK(job && bq_retirement_poison_write(queue, job, true, true, "damaged") == BQ_OK);
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+            BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, id, token) == BQ_OK);
+            job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == (index ? BQ_INTERRUPTED : BQ_FAILED) &&
+                     bq_failure_evidence(queue, job) == BQ_WORKER_MISMATCH && !queue->needs_reconciliation);
+            /* The journal replays the same verdict. */
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK);
+            job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome != BQ_SUCCEEDED);
+            BqPacket packet = {0};
+            BqJob* authorized = NULL;
+            if (job)
+            {
+                bq_test_export_request(&packet, job, 0, job->result_full_digest);
+                BQ_CHECK(bq_export_authorize(queue, packet.bytes + BQ_CONTROL_HEADER, S8("test-principal"),
+                                             &authorized) == BQ_EXPORT_INVALID && !authorized);
+            }
+            char poison[48];
+            BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, id) &&
+                     unlinkat(queue->directory_fd, poison, 0) == 0);
+            bq_test_worker_end(&fixture);
+        }
+    }
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
 #ifdef __linux__
@@ -5794,6 +6007,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_export_inventory();
     bq_test_export(true);
     bq_test_export(false);
+    bq_test_retirement_poison_hold();
+    bq_test_retirement_poison_reconcile();
     bq_test_worker_result_bundle_and_evidence();
     bq_test_worker_failure_bundle_replay();
     bq_test_worker_failure_bundle_coverage();

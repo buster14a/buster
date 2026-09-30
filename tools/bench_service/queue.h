@@ -186,6 +186,19 @@ BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, Str
 BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
 BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
 BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);
+/* #881 recovery L2 (workspace.c): the immutable queue record
+ * retirement-poison-<id> that marks a job whose retirement handoff recovery
+ * or a failed run could not classify complete. bq_retirement_poison_read is
+ * BQ_NOT_FOUND without one and BQ_OK for a well-formed one; a malformed or
+ * unreadable record is BQ_CORRUPT or BQ_IO and still poisons (fail closed).
+ * *inconsistent is true for an inconsistent or unreadable record.
+ * bq_retirement_poisoned is any answer but BQ_NOT_FOUND. Reconciliation
+ * never finishes a poisoned job succeeded, and export refuses it. */
+#define BQ_RETIREMENT_POISON_RECORD "retirement-poison"
+BUSTER_F_DECL BqError bq_retirement_poison_read(BqQueue* queue, BqJob const* job, bool* inconsistent);
+BUSTER_F_DECL bool bq_retirement_poisoned(BqQueue* queue, BqJob const* job);
+BUSTER_F_DECL BqError bq_retirement_poison_write(BqQueue* queue, BqJob const* job, bool inconsistent, bool measured,
+                                                 char const* state);
 BUSTER_F_DECL BqError bq_result_bind(BqQueue* queue, BqJob const* job, String8 result_root,
                                      char const manifest_digest[SHA256_HEX_CAPACITY],
                                      char const bundle_digest[SHA256_HEX_CAPACITY],

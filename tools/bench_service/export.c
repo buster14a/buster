@@ -482,13 +482,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_prepare(BqQueue* queue, BqJob const* job)
     return error;
 }
 
-/* Unknown and foreign jobs are deliberately the same public error. */
+/* Unknown and foreign jobs are deliberately the same public error. A job
+ * carrying the #881 recovery L2 poison record (bq_retirement_poisoned) never
+ * exports. */
 BUSTER_GLOBAL_LOCAL BqError bq_export_authorize(BqQueue* queue, u8 const* request, String8 principal, BqJob** output)
 {
     BqJob* job = bq_job(&queue->state, bq_u64(request));
     BqError error = !job || !string_equal(bq_field(&job->request, 0), principal) ? BQ_NOT_FOUND :
                     job->token != bq_u64(request + 8) ? BQ_CONFLICT :
                     job->phase != BQ_FINISHED ? BQ_EXPORT_NOT_FINALIZED :
+                    bq_retirement_poisoned(queue, job) ? BQ_EXPORT_INVALID :
                     !job->result_bound ? (job->outcome == BQ_INTERRUPTED ? BQ_EXPORT_INTERRUPTED : BQ_EXPORT_INVALID) :
                     memcmp(job->result_full_digest, request + 16, 64) ? BQ_CONFLICT :
                     job->validity == BQ_INVALID ? BQ_EXPORT_INVALID : BQ_OK;

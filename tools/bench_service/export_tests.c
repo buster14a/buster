@@ -360,6 +360,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
         BQ_CHECK(bq_export_authorize(queue, request.bytes + BQ_CONTROL_HEADER, S8(BQ_EXPORT_PRINCIPAL), &authorized) == BQ_EXPORT_INTERRUPTED);
         job->outcome = saved_outcome;
         job->result_bound = bound;
+        /* #881 recovery L2: a bound, finished result with a poison record
+         * never exports; without the record it is authorized again. */
+        BQ_CHECK(bq_export_authorize(queue, request.bytes + BQ_CONTROL_HEADER, S8(BQ_EXPORT_PRINCIPAL), &authorized) == BQ_OK &&
+                 bq_retirement_poison_write(queue, job, false, false, "incomplete") == BQ_OK);
+        BQ_CHECK(bq_export_authorize(queue, request.bytes + BQ_CONTROL_HEADER, S8(BQ_EXPORT_PRINCIPAL), &authorized) ==
+                 BQ_EXPORT_INVALID && !authorized);
+        char poison[48];
+        BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, id) && unlinkat(queue->directory_fd, poison, 0) == 0 &&
+                 bq_export_authorize(queue, request.bytes + BQ_CONTROL_HEADER, S8(BQ_EXPORT_PRINCIPAL), &authorized) == BQ_OK);
         if (finalization.result_directory >= 0) close(finalization.result_directory);
         bq_test_worker_end(&fixture);
     }
