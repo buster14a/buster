@@ -742,7 +742,8 @@ OsFileDescriptor* os_get_stdout(void)
 // is only sound to build while this is zero, which is what
 // os_is_only_live_thread() reports and BUSTER_CHECK_SERIAL_INITIALIZATION
 // states. Counted rather than derived from the lane context because a raw
-// os_thread_create thread is a lane of one and would look serial.
+// os_thread_create thread is a lane of one and would look serial. Untracked
+// threads promise never to touch such a global and are not counted.
 BUSTER_GLOBAL_LOCAL AtomicU64 os_live_thread_count;
 
 bool os_is_only_live_thread(void)
@@ -751,7 +752,7 @@ bool os_is_only_live_thread(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument)
+BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument, bool untracked)
 {
     ThreadContext* thread_context = thread_context_allocate();
     thread_context_select(thread_context);
@@ -766,21 +767,24 @@ BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, vo
 #endif
     // Last, so the count covers every instant this thread could still have
     // touched a shared global. os_thread_join returns after this store.
-    atomic_u64_decrement(&os_live_thread_count);
+    if (!untracked)
+    {
+        atomic_u64_decrement(&os_live_thread_count);
+    }
 }
 
 #if defined(__linux__) || defined(__APPLE__)
 BUSTER_GLOBAL_LOCAL void* pthread_entry_point(void* argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.untracked);
     return (void*)0;
 }
 #elif defined(_WIN32)
 BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.untracked);
     return 0;
 }
 #endif
@@ -797,15 +801,19 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
         result->thread.callback = options.callback;
         result->thread.argument = options.argument;
+        result->thread.untracked = options.untracked;
         // Counted before the thread exists rather than from inside it, so no
         // window has the new thread running while the process still looks serial.
-        atomic_u64_increment(&os_live_thread_count);
+        // The addend is zero for an untracked thread; the failure paths add its
+        // two's complement to undo exactly what was counted.
+        u64 counted = options.untracked ? 0 : 1;
+        atomic_u64_add(&os_live_thread_count, counted);
 #if defined(__linux__) || defined(__APPLE__)
         int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
         bool os_result = create_result == 0;
         if (!os_result)
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -817,7 +825,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         }
         else
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -2092,6 +2100,10 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
                 else if (S_ISLNK(stats.st_mode))
                 {
                     result.kind = OS_FILE_KIND_LINK;
+                }
+                else if (S_ISCHR(stats.st_mode) || S_ISFIFO(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_STREAM;
                 }
                 else
                 {

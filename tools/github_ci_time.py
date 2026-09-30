@@ -27,24 +27,31 @@ import time
 import urllib.parse
 import urllib.request
 
-PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
+# Current scheduling policy; historical inventories are timing inputs only.
+PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
-MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
-SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
-UNIX_NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+MOBILE = ("Android x86-64", "iOS AArch64")
 NATIVE = tuple(name + " native" for name in PLATFORMS)
-LEGACY_PARTITIONED_JOBS = SHARDED_JOBS + UNIX_NATIVE
-PARTITIONED_JOBS = SHARDED_JOBS + NATIVE
+UNIX_NATIVE = tuple(name for name in NATIVE if not name.startswith("Windows"))
+HISTORICAL_PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
+                        "Windows x86-64", "Windows AArch64")
+HISTORICAL_MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
+HISTORICAL_NATIVE = tuple(name + " native" for name in HISTORICAL_PLATFORMS)
+HISTORICAL_UNIX_NATIVE = tuple(name for name in HISTORICAL_NATIVE if not name.startswith("Windows"))
+SHARDED_JOBS = HISTORICAL_PLATFORMS + HISTORICAL_MOBILE + ("Workflow lint", "CI complete")
+LEGACY_PARTITIONED_JOBS = SHARDED_JOBS + HISTORICAL_UNIX_NATIVE
+PARTITIONED_JOBS = SHARDED_JOBS + HISTORICAL_NATIVE
 UEFI = ("UEFI firmware boot",)
 ANALYZER = ("Clang analyzer shards",)
 LEGACY_SUITE_JOBS = LEGACY_PARTITIONED_JOBS + UEFI + ANALYZER
 SUITE_JOBS = PARTITIONED_JOBS + UEFI + ANALYZER
 COMBINATION_SHARDS = ("release", "checks")
+HISTORICAL_COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in HISTORICAL_PLATFORMS for shard in COMBINATION_SHARDS)
 COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
-LEGACY_COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-# The eight jobs that hold macOS runners. A first-attempt draft pull-request
-# run reports each as a named Linux no-op instead (#1825); nothing else may.
+# Only these four retained Apple jobs may defer on first-attempt draft PRs.
 MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBILE
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
@@ -81,15 +88,15 @@ def timestamp(value):
 
 
 def measure(run):
-    """A successful six-platform first attempt, or an explicit exclusion reason."""
+    """A successful declared-inventory first attempt, or an explicit exclusion reason."""
     reason = None
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
                        sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS),
-                       sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+                       sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -97,7 +104,7 @@ def measure(run):
         reason = run.get("conclusion") or "no-conclusion"
     elif run.get("run_attempt") != 1:
         reason = "rerun"
-    elif names != sorted(PLATFORMS) and not sharded:
+    elif names != sorted(HISTORICAL_PLATFORMS) and not sharded:
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
         reason = "unknown-workflow-revision"
@@ -111,7 +118,7 @@ def measure(run):
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in PLATFORMS or name in COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS or name in HISTORICAL_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -125,7 +132,7 @@ def measure(run):
                         required.add("Test (iOS simulator)")
                     if name == "Linux x86-64":
                         required.add("Test (Android)")
-            elif name in NATIVE:
+            elif name in HISTORICAL_NATIVE:
                 required.add("Execution-mode matrix (Windows)" if name.startswith("Windows")
                              else "Execution-mode matrix")
                 if not name.startswith("Windows"):
