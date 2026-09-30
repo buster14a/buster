@@ -4645,13 +4645,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u16 width, AssemblyRegister fir
            (width == 8 && ((first.index >= 4 && !first.high_byte) || (second.index >= 4 && !second.high_byte)));
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_extension_rex_needed(u16 width, AssemblyRegister destination, AssemblyRegister source,
-                                                            u16 source_width)
-{
-    return assembly_x86_rex_needed(width, destination, source) ||
-           (source_width == 8 && source.index >= 4 && !source.high_byte);
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_displacement_size(AssemblyMemory memory, u32* result)
 {
     if (memory.rip_relative || !memory.has_base)
