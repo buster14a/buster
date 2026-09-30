@@ -1691,7 +1691,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_old_replay(u8 const* image, u32 size, u32 maxim
             bq_digest(frame + BQ_HEADER_SIZE, length, digest);
             ok = !memcmp(frame + 96, digest, 64) &&
                  bq_apply(&state, bq_u32(frame + 8), (BqRecordKind)bq_u32(frame + 12), bq_u64(frame + 24),
-                          frame + BQ_HEADER_SIZE, length) == BQ_OK;
+                          frame + BQ_HEADER_SIZE, length, true) == BQ_OK;
         }
         if (ok)
         {
@@ -5694,6 +5694,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
 }
 #endif
 
+#include "retirement_admission_tests.h"
 #include "export_tests.c"
 
 #ifdef __linux__
@@ -5924,6 +5925,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_codec();
     bq_test_typed_client();
+    bq_test_retirement_admission();
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();

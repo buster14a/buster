@@ -363,6 +363,12 @@ Other architectures print `unsupported-architecture` and do not count as
 sandbox coverage. These tests do not reproduce the full systemd sandbox or
 qualify a dedicated host.
 
+The sanitized service build adds `-fno-inline-functions`: AddressSanitizer
+keeps a distinct stack slot for every inlined callee's locals, so the inlined
+`bq_test_*` cases previously grew `bq_test_run_all` past the default 8 MiB
+main-thread stack. The TCC bootstrap lane runs the sanitized self-test with
+`ulimit -S -s 8192` so a larger runner stack cannot hide a frame regression.
+
 `test_all_combinations` runs the normal service self-test beside the existing
 throughput self-test on each desktop lane, and also runs its AddressSanitizer
 and UndefinedBehaviorSanitizer variant on POSIX hosts. Existing compiler,
@@ -653,6 +659,19 @@ they are not authentication or tamper-proof evidence. Replay also checks event
 sizes, installed recipes, unique keys, FIFO order, ownership tokens and legal
 state transitions, not merely checksums.
 
+A retirement SUBMIT record is valid only in schema 3. Replay accepts it
+whatever the build admits, and journalled jobs of either service recipe follow
+the real transitions (`bq_recipe_real_journal`). So a journal written while the
+retirement profile was admitted still opens under a blocked build. Its
+retirement jobs are then inert, because `bq_recipe_real` refuses them: they are
+never materialized, dispatched or reconciled, `serve` refuses to start while
+one is unfinished, and schema-1 clients see them as unsupported. `status` and
+`result` of a finished, bound retirement job fail with
+`configuration-mismatch`, because the public result-binding check admits a
+retirement result only through a complete profile.
+Queued work can still be cancelled locally. An active attempt stays
+`reconciliation-required` until an admitting build reconciles it.
+
 An incomplete **final** record is a short header, or a complete valid header
 with the expected sequence and an incomplete payload. Recovery truncates only
 that final incomplete record to its starting offset, syncs the truncation, and
@@ -705,7 +724,26 @@ registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
 landed performance contract, support declaration, binding validator and
 statistics implementation by SHA-256 and records the remaining execution
 requirements. It has no admitted executable command or installed `.recipe`, and
-is rejected by request validation and `worker-unit`. Its private build-driver
+is rejected by request validation and `worker-unit`. One portable predicate,
+`bq_recipe_retirement_admitted` (`queue.c`), decides admission: it is true
+only when the compiled profile has exactly one line, `status=admitted`
+(`bq_recipe_profile_admitted`). `bq_recipe_admitted`, `bq_recipe_service`,
+`bq_recipe_real` and `bq_request_valid` all use it, so submission, transport,
+exclusive admission, materialization, dispatch, reconciliation and export open
+together when the compiled profile is admitted, and stay closed while it is
+blocked. The Linux coordinator's gates still require the seams'
+profile to pass `bq_retirement_profile_complete` (every pin), whatever the
+predicate says. The portable predicate cannot see the pins, so the Linux
+service fails closed on an admitted but incomplete compiled profile
+(`bq_retirement_compiled_servable`): `serve` refuses to start
+(`recipe-mismatch`), the transport refuses a retirement submission before
+it is sent or accepted, and the worker refuses the queued head job before
+taking the lease or reserving it. `recipe-identity` reports such a profile as
+`status=incomplete`. Only the test builds (`BUSTER_BENCH_SERVICE_TEST`,
+`BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`) can substitute an admitted stand-in
+profile (`bq_retirement_profile_test_override`); the installed service has no
+override. An installed profile may be up to `BQ_RECIPE_PROFILE_CAP` (4352)
+bytes, enough for an admitted profile with every worker-unit pin. Its private build-driver
 parser accepts the lease-bound preparation digest, phase descriptor and deadline
 but deliberately builds no timed-child graph. This prevents the one-pair
 smoke recipe from being relabelled as a retirement result while preserving a
@@ -894,6 +932,7 @@ cannot produce a performance qualification or #512 acceptance result.
 ```sh
 ./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
 ./build.sh bench_service client SOCKET capabilities
+./build.sh bench_service client SOCKET recipe-identity
 ./build.sh bench_service client SOCKET submit PRINCIPAL KEY validate-buster-v1 BASE_SHA CANDIDATE_SHA
 ./build.sh bench_service client SOCKET status JOB
 ./build.sh bench_service client SOCKET result JOB
@@ -917,7 +956,9 @@ The installed executable also provides a fixed smoke request encoder:
 
 ```sh
 /usr/local/libexec/buster-bench-service gateway capabilities
+/usr/local/libexec/buster-bench-service gateway recipe-identity
 /usr/local/libexec/buster-bench-service gateway submit KEY BASE_SHA CANDIDATE_SHA
+/usr/local/libexec/buster-bench-service gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway status JOB
 /usr/local/libexec/buster-bench-service gateway result JOB
 /usr/local/libexec/buster-bench-service gateway logs JOB [AFTER_SEQUENCE]
@@ -925,9 +966,18 @@ The installed executable also provides a fixed smoke request encoder:
 ```
 
 `gateway` fixes `/run/buster-bench/control.sock`, principal `github-actions`
-and recipe `validate-buster-v1`. It accepts full lowercase immutable source
-identities and bounded keys, never a recipe override, path, command, flag or
-environment override. It shares `client`'s typed transport and reply validator;
+and recipe `validate-buster-v1`; `submit-retirement` fixes
+`native-retirement-performance-v1` instead and is refused before transport
+while the compiled profile is blocked. It accepts full lowercase immutable source
+identities and bounded keys, never a recipe override, path, command, flag,
+sample count, threshold, workload or environment override. A retirement job
+needs an idle host, so the transport accepts the retirement recipe only
+through the gateway's exclusive (idle-only) submit; `client SOCKET submit` of
+the retirement recipe is refused before transport with `unsupported`.
+`recipe-identity` is read-only: it prints the retirement recipe's
+`status=blocked`, `status=admitted` or `status=incomplete` (admitted but
+missing pins, which the service refuses to serve) and the SHA-256 of its
+compiled profile, contract and support declaration. It shares `client`'s typed transport and reply validator;
 it never opens the queue. Installed-source allowlisting and all materialization
 checks remain service-owned under the host lease.
 
@@ -1005,7 +1055,15 @@ path length u32, workspace path length u32, then both paths), and
 workspace-reconcile (job u64, token u64, workspace path length u32, path).
 Operation 11 is worker-run (installed/workspace/lease path lengths and CPU u32,
 then the three paths). Paths are absolute and at most 192 bytes; their combined
-worker payload must also fit the fixed 512-byte body.
+worker payload must also fit the fixed 512-byte body. Operation 12 is the
+gateway's exclusive submit, operation 13 is export ([EXPORT.md](EXPORT.md)).
+Operation 14 is recipe-identity (schema 2, empty request). Its reply is fixed
+text after the error code:
+`schema=1 recipe=native-retirement-performance-v1 status=blocked|admitted|incomplete`,
+then `profile-sha256=`, `contract-sha256=` and `support-declaration-sha256=`
+lines, each with 64 lowercase hex digits. Capabilities v2 is unchanged byte for
+byte (the dispatch workflow greps it, and it has no room for digests); it still
+lists the recipe under `blocked-recipes=`.
 
 Schema 2 status-like replies have 124-byte bodies: error at 0; job/token/journal-sequence
 u64 at 4/12/20; phase/outcome/validity/cancel-intent/reconciliation/pending/retained

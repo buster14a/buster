@@ -1138,7 +1138,7 @@ BqError bq_failure_evidence(BqQueue* queue, BqJob const* job)
     {
         result = bq_failure_record(queue, job, "failure", BQ_RECIPE_MISMATCH, BQ_BOOT_INTERRUPTED);
     }
-    if (result == BQ_NOT_FOUND && job && bq_recipe_real(&job->request) && job->outcome == BQ_FAILED)
+    if (result == BQ_NOT_FOUND && job && bq_recipe_real_journal(&job->request) && job->outcome == BQ_FAILED)
     {
         result = BQ_CORRUPT;
     }
