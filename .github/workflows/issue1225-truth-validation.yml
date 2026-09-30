@@ -13,6 +13,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select Clang with Zen 5 reference support
+        run: |
+          if ! command -v clang-19; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes clang-19
+          fi
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
       - name: Bootstrap hosted driver
         run: |
           clang --version
