@@ -925,6 +925,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
+    IrSemanticCounters semantics = ir_semantic_counters();
     IrDiagnosticCensus diagnostic_census = ir_diagnostic_census();
 #endif
     String8 text = {0};
@@ -950,6 +951,12 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     {
         source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
                                     construction.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("overflowed"), semantics.overflowed);
+    for (u32 index = 0; index < IR_SEMANTIC_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("ir_semantics"), ir_semantic_counter_name((IrSemanticCounter)index), semantics.values[index]);
     }
     source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("version"), 1);
     source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("overflowed"), diagnostic_census.overflowed);

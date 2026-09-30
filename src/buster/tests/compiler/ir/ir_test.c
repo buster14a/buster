@@ -17,6 +17,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
 #include <buster/tests/compiler/ir/ir_promotion_test.c>
 #include <buster/tests/compiler/ir/ir_fast_test.c>
 #include <buster/tests/compiler/ir/ir_cfg_test.c>
+#include <buster/tests/compiler/ir/ir_integer_test.c>
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrBinaryOperation operation)
 {
@@ -739,6 +740,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+    UnitTestResult integer_semantics = ir_integer_tests(arguments);
+    result.test_count += integer_semantics.test_count;
+    result.succeeded_test_count += integer_semantics.succeeded_test_count;
     UnitTestResult relocation_overlap = ir_test_global_relocation_overlap(arguments);
     result.test_count += relocation_overlap.test_count;
     result.succeeded_test_count += relocation_overlap.succeeded_test_count;
