@@ -115,6 +115,20 @@ def cases() -> dict[str, dict]:
     add("width_floating_ice_arithmetic", layout_program("", "typedef struct { char c; unsigned b : (int)(1.0 + 2.0); char x; } T;"), 0, "oracle-sensitive", floating_note)
     add("bound_floating_ice_arithmetic", layout_program("", "typedef struct { char c; char x[(int)(1.0 + 2.0)]; } T;"), 0, "oracle-sensitive", floating_note)
     add("alignment_floating_ice_arithmetic", layout_program("", "typedef struct { char c; _Alignas((int)(4.0 + 4.0)) int x; } T;"), 0, "oracle-sensitive", floating_note)
+    order_note = "Source-order diagnostic: a later tag completion must not retroactively make an earlier sizeof operand complete; reference disagreement is retained."
+    for context in ("file", "function"):
+        width_same = "struct F; struct S { unsigned b : sizeof(struct F) + sizeof(struct F { char x; }); };"
+        width_later = "struct F; struct S { unsigned b : sizeof(struct F); }; enum { E = sizeof(struct F { char x; }) };"
+        inferred = "struct S; int a[] = { [sizeof(struct S)] = sizeof(struct S { int x; }) };"
+        for suffix, declarations in (("same_width", width_same), ("later_expression", width_later), ("inferred_designator", inferred)):
+            source = declarations + "\nint main(void) { return 0; }\n" if context == "file" else "int main(void) { " + declarations + " return 0; }\n"
+            add("declaration_order_" + context + "_" + suffix, source, 0, "invalid", order_note)
+    for suffix, expression in (("outer_then_inner", "sizeof(struct F) + sizeof(struct F { char x[2]; })"),
+                               ("inner_then_inner", "sizeof(struct F { char x[2]; }) + sizeof(struct F)")):
+        statements = "struct S { unsigned b : " + expression + "; }; struct S s = {0}; s.b = ~0u; unsigned width = 0; for (unsigned i = 0; i < 32; i += 1) { width += ((unsigned)s.b >> i) & 1u; } printf(\"width=%u local_tag=%zu\\n\", width, sizeof(struct F));"
+        add("declaration_order_function_" + suffix, statement_program("struct F { char x[10]; };", statements), 0, "valid",
+            "First sizeof names outer F[10] before local definition (width12); reverse names local F[2] twice (width4). Final local F has size2.")
+    add("declaration_order_later_file_name", "#include <stdio.h>\nstatic unsigned f(void) { enum { W = 12 }; struct S { unsigned b : W; }; struct S s = {0}; s.b = ~0u; unsigned width = 0; for (unsigned i = 0; i < 32; i += 1) { width += ((unsigned)s.b >> i) & 1u; } return width; }\nenum { W = 3 };\nint main(void) { printf(\"width=%u\\n\", f()); return 0; }\n", 0, "valid", "Later file W cannot replace visible local W; expected width12.")
     add("width_promotion", statement_program("", "struct S { unsigned b : (3); } s = {0}; printf(\"promotion=%d\\n\", _Generic(+s.b, int: 1, unsigned: 2, default: 3));"), 1)
     add("bound_inferred", statement_program("", "static char a[] = {1,2,3,4,5}; enum { N = sizeof a }; printf(\"inferred=%d,%zu\\n\", N, sizeof a);"), 3)
     add("bound_vla", statement_program("", "int n = 5; char a[n]; printf(\"vla=%zu\\n\", sizeof a);"), 3)

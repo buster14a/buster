@@ -1472,6 +1472,9 @@ struct CParseResult
     // True only after the selected analysis entry point completed its passes.
     // Resource-limit exits can otherwise look like a successful empty model.
     bool analysis_complete;
+    // Set only on protected constant-query copies. Machineless operand copies
+    // retain it so deferred token ranges cannot enter recursive type readers.
+    bool protected_type_constant_query;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase
