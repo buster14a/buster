@@ -162,7 +162,9 @@
   path order, so the home analysis observes every reload before every spill at
   that point, conservatively lengthening rather than shortening a range. Dense
   home IDs keep the CFG bit planes proportional to actually spilled values, not
-  all virtual registers. Branches, joins, loops, indirect edges, and
+  all virtual registers; selector slots likewise close over a dense index of
+  only the touched, non-fixed slots the color scan can share, because a fixed
+  slot's range is never read. Branches, joins, loops, indirect edges, and
   inline-assembly landings retain the conservative per-home lifetime guard until
   their path-specific repairs have the same proof. Both object classes are
   assigned by one linear scan in start order with a free-color stack; no
@@ -492,9 +494,10 @@
   through scalar MIR: CLZ normalization, exponent rebiasing, sign and payload
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
-  preserving subnormals even with flush-to-zero enabled. No libcall or direct
-  emitter is used. `compiler_driver_test_aarch64_float_to_f128` retains the
-  original created-NaN fixture and tests independent binary128 byte cases.
+  preserving subnormals even with flush-to-zero enabled. No libcall is used;
+  the canonical `none` emitter builds the same image with the same rows.
+  `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
+  fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
   Binary128 scalar signatures, arithmetic and truncation are separate gaps.

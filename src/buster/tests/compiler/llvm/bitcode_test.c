@@ -124,6 +124,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_addend_caller.c")},
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table_caller.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unprototyped_definition.c"), .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_block_function_declaration.c"), .both_optimizations = true},
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer_caller.c")},
@@ -136,7 +138,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("tests/basic_c_llvm_vector_abi.c"), .caller = S8("tests/basic_c_llvm_vector_abi_main.c")},
 #if BUSTER_LINUX || BUSTER_WINDOWS
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c"),
-         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"), .both_optimizations = true},
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
@@ -626,6 +629,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
         BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && !emitted.llvm_bitcode.bytes.length);
         String8 diagnostic = index == 2 ? S8("va_arg requires a promoted") : S8("va_list operations require x86-64 Linux SysV or Windows Win64");
         BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+        // The refusal names the function it stopped in and points at it.
+        String8 function = index == 2 ? S8(" (in function 'llvm_wide_arg')") : S8(" (in function 'llvm_sum_ints')");
+        BUSTER_TEST_RAW(arguments,
+                        string_starts_with_sequence(emitted.diagnostic, S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c:")) &&
+                            string_ends_with_sequence(emitted.diagnostic, function),
+                        emitted.diagnostic);
         FileMapRead absent = file_map_read(arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, !absent.bytes.pointer);
         file_map_unmap(absent);
@@ -1272,6 +1281,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     return result;
 }
 
+// Enough globals and initializer constants to grow the writer's hashed name
+// and constant indexes several times, with repeated initializers that must
+// share one pool entry and a late link name that must collide with an early
+// one (#1499).
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_indexed_lookups(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum
+    {
+        GLOBAL_COUNT = 300,
+        DISTINCT_INITIALIZERS = 200,
+        NAME_LENGTH = 4,
+    };
+    IrType types[2] = {0};
+    types[0] = (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}};
+    types[1] = (IrType){.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 32,
+                        .layout = {.size = 4, .alignment = 4, .resolved = true}};
+    IrSymbol* symbols = arena_allocate(arena, IrSymbol, GLOBAL_COUNT);
+    IrGlobal* globals = arena_allocate(arena, IrGlobal, GLOBAL_COUNT);
+    char8* names = arena_allocate(arena, char8, GLOBAL_COUNT * NAME_LENGTH);
+    for (u32 index = 0; index < GLOBAL_COUNT; index += 1)
+    {
+        char8* name = names + index * NAME_LENGTH;
+        name[0] = 'g';
+        name[1] = (char8)('0' + index / 100);
+        name[2] = (char8)('0' + index / 10 % 10);
+        name[3] = (char8)('0' + index % 10);
+        symbols[index] = (IrSymbol){.id = {.value = index}, .name = {.pointer = name, .length = NAME_LENGTH}, .type = {.value = 1},
+                                    .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true};
+        globals[index] = (IrGlobal){.symbol = {.value = index}, .type = {.value = 1}, .initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER,
+                                    .initializer_bits = index % DISTINCT_INITIALIZERS, .alignment = 4};
+    }
+    IrModule modules[1] = {{.name = S8("indexed_lookups"), .globals = globals, .global_count = GLOBAL_COUNT}};
+    IrProgram program = {.arena = arena, .modules = modules, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}, .symbols = {.symbols = symbols, .count = GLOBAL_COUNT}};
+    program.data_layout.pointer.size = 8;
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    options.validate_ir = false;
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.stats.global_count == GLOBAL_COUNT && first.stats.constant_count == DISTINCT_INITIALIZERS);
+    BUSTER_TEST(arguments, first.bytes.pointer && second.bytes.pointer && first.bytes.length == second.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+
+    symbols[GLOBAL_COUNT - 1].link_name = symbols[1].name;
+    LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
+    BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL &&
+                           collision.error.symbol.value == GLOBAL_COUNT - 1);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1674,6 +1740,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult integer_counts = llvm_bitcode_test_integer_counts(arguments);
     result.test_count += integer_counts.test_count;
     result.succeeded_test_count += integer_counts.succeeded_test_count;
+    UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
+    result.test_count += indexed_lookups.test_count;
+    result.succeeded_test_count += indexed_lookups.succeeded_test_count;
     return result;
 }
 #endif

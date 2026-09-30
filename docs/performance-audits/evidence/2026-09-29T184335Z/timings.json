@@ -1,0 +1,92 @@
+[
+  {
+    "pair": 0,
+    "name": "baseline",
+    "exit": 0,
+    "wall_ns": 2525808570,
+    "module_ns": 2477685516,
+    "passed": 524384,
+    "failed": 0
+  },
+  {
+    "pair": 0,
+    "name": "candidate",
+    "exit": 0,
+    "wall_ns": 720408660,
+    "module_ns": 669656121,
+    "passed": 524436,
+    "failed": 0
+  },
+  {
+    "pair": 1,
+    "name": "candidate",
+    "exit": 0,
+    "wall_ns": 771774445,
+    "module_ns": 721254022,
+    "passed": 524436,
+    "failed": 0
+  },
+  {
+    "pair": 1,
+    "name": "baseline",
+    "exit": 0,
+    "wall_ns": 2675575426,
+    "module_ns": 2620358493,
+    "passed": 524384,
+    "failed": 0
+  },
+  {
+    "pair": 2,
+    "name": "baseline",
+    "exit": 0,
+    "wall_ns": 2494549320,
+    "module_ns": 2445352815,
+    "passed": 524384,
+    "failed": 0
+  },
+  {
+    "pair": 2,
+    "name": "candidate",
+    "exit": 0,
+    "wall_ns": 758986939,
+    "module_ns": 709708455,
+    "passed": 524436,
+    "failed": 0
+  },
+  {
+    "pair": 3,
+    "name": "candidate",
+    "exit": 0,
+    "wall_ns": 718829718,
+    "module_ns": 672982742,
+    "passed": 524436,
+    "failed": 0
+  },
+  {
+    "pair": 3,
+    "name": "baseline",
+    "exit": 0,
+    "wall_ns": 2509337660,
+    "module_ns": 2456098017,
+    "passed": 524384,
+    "failed": 0
+  },
+  {
+    "pair": 4,
+    "name": "baseline",
+    "exit": 0,
+    "wall_ns": 2628286951,
+    "module_ns": 2580304458,
+    "passed": 524384,
+    "failed": 0
+  },
+  {
+    "pair": 4,
+    "name": "candidate",
+    "exit": 0,
+    "wall_ns": 687945248,
+    "module_ns": 640118350,
+    "passed": 524436,
+    "failed": 0
+  }
+]
