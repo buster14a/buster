@@ -152,10 +152,67 @@ python tools/ci_unit_tests_measure.py screen campaign.json --output screening.js
 python tools/ci_unit_tests_measure.py compare campaign.json --output comparison.json
 ~~~
 
-The integrity suite completed successfully with 19 tests in this implementation session. No hosted baseline/candidate performance result is accepted by that check. Every successful parser output keeps ci_complete=false and performance_accepted=false. A one-pair screen also keeps measurement_review_ready=false; formal review readiness only means the declared evidence population is complete.
+The integrity suite completed successfully with 20 tests in this implementation session. No hosted baseline/candidate performance result is accepted by that check. Every successful parser output keeps ci_complete=false and performance_accepted=false. A one-pair screen also keeps measurement_review_ready=false; formal review readiness only means the declared evidence population is complete.
 
 Report outer test wall time, every module's distribution and counts, the declared concurrent child-worker maximum, and summed child process wall separately. Summed child wall on one runner is not runner occupancy or CPU time. Full workflow latency, total runner occupancy, setup/build/transport cost, CPU/memory contention and ordinary supported-platform correctness remain separate acceptance evidence.
 
 The smallest implementation decision remains conditional: retain this opt-in diagnostic route for measurements; enable a production partition only after equivalent coverage and useful end-to-end improvement are demonstrated. An incomplete or neutral campaign leaves existing CI unchanged. Coordinating ownership is #1826 with #709/#949 cost attribution and the separate #1885/#1892 batching work.
 
 A source census found three `os_tests` concurrency assertions present at two test workers and absent at one. The diagnostic workflow therefore retains baseline workers=2 and candidate child workers=2 within an available overall budget of four, and records actual invocation workers separately from that budget. Current-source driver worker caps do not alter its passing assertion population between two and four; hosted counts must still establish equivalence. A strict four-worker production matrix cannot overlap two such partitions with concurrent compile/test trees. An all-build barrier plus serialized partitions preserves that quota but a fixed-duration Windows replay estimates only about 6.6% whole-matrix improvement, versus the optimistic 46% isolated test interval reduction. These remain proposals, not measured results.
+
+
+## First hosted screening and review corrections
+
+[Experiment 36749609684](https://github.com/buster14a/buster/actions/runs/36749609684)
+used merge source `9520dfde9539d073b55f8d03fd4b1fffc5e06e88`. Its Linux
+artifact `11115391066` records binary SHA-256
+`d0a043536a6560573efbdf1da5c012662340c2fbc8f5f7360abcc81740cdc408`, image
+`ubuntu26/20260927.149.1`, and Clang 23.1.2.
+
+| Linux screening evidence | Baseline | Candidate |
+| --- | ---: | ---: |
+| Complete target wall, seconds | 974.489791 | 581.412628 |
+| Passed enabled modules | 54 | 54 |
+| Passed assertions | 4,811,053 | 4,811,053 |
+| Driver module, seconds | 554.928048 | 573.931569 |
+| Frontend module, seconds | 131.062990 | 131.827525 |
+
+Exact per-module counts matched; both child exit, timeout, capture and cleanup
+proofs passed. Candidate wall was 40.34% shorter. Its summed child process wall
+was 1008.911861 seconds, 3.53% above baseline outer wall; that sum does not
+measure runner occupancy or CPU time. This one pair passes the screening stop
+rule on a dedicated four-CPU runner, with baseline workers=2 and two candidate
+children of two workers each. It does not establish a benefit within an
+ordinary two-worker tree quota, formal three-pair acceptance, or full-matrix
+throughput. All acceptance flags remain false.
+
+Windows failed before its candidate ran: nine driver assertions in the serial
+baseline, comprising one COFF linker-result failure and eight unresolved
+`_exit` links. The diagnostic workflow had switched from its Visual Studio
+PowerShell bootstrap into Git Bash for native commands. The source-level
+Windows environment-name incompatibility is tracked in
+[#2014](https://github.com/buster14a/buster/issues/2014); causality for this old
+attempt remains an inference because it did not retain environment names or
+the resolved linker path. The workflow correction keeps Windows native
+commands in PowerShell, retains SDK/CRT discovery across steps, and checks its
+MSVC linker and CRT before running a fresh pair.
+
+The [review on #2005](https://github.com/buster14a/buster/pull/2005) also corrected
+three behaviors: an omitted source revision now resolves through a bounded
+native Git query; source archives run with `unknown` identity and remain
+ineligible for measurement. The fallback inherits output handles and adds no
+capture quota or parent deadline. Every outer sample deadline is 6000 seconds,
+with headroom over the 5400-second native child deadline. Clang, GCC, serial
+Clang and TCC self-tests, ten synthetic native-invocation controls, twenty
+comparison controls, ten campaign controls and actionlint passed. Synthetic
+controls are functional evidence only; they execute no production compiler
+module and make no speed claim.
+
+Ordinary Windows x64 and Linux x64 checks at the first submitted head each
+recorded 108 passing module results across their two sanitizer suites, with
+partition mode disabled. Their run's required Windows ARM64 workflow-tools
+step exhausted its existing five-minute outer budget during the separately
+merged Visual Studio fixture suite. Exact evidence was posted to the owner
+[#1582](https://github.com/buster14a/buster/issues/1582#issuecomment-5916784757).
+The aggregate correctly remained failed; the reason those PowerShell fixtures
+ran slowly is unproved. This does not waive ordinary correctness admission.

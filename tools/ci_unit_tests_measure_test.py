@@ -195,6 +195,17 @@ class MeasurementTests(unittest.TestCase):
         with self.assertRaisesRegex(MEASURE.EvidenceError, "terminal counts"):
             MEASURE.validate_sample(self.sample(arm="candidate", log=log))
 
+    def test_archive_unknown_revision_cannot_be_measurement_evidence(self):
+        for arm in ("baseline", "candidate"):
+            with self.subTest(arm=arm):
+                path = self.sample(arm=arm)
+                self.mutate(path, lambda row: row["identity"].update(source_revision="unknown"))
+                with self.assertRaisesRegex(MEASURE.EvidenceError, "Unresolved exact source revision"):
+                    MEASURE.validate_sample(path)
+        log = parallel_log().replace("source_revision=" + "a" * 40, "source_revision=unknown")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "identity mismatch"):
+            MEASURE.validate_sample(self.sample(arm="candidate", log=log))
+
     def campaign(self, arms=None):
         arms = arms or ["baseline", "candidate"] * 3
         paths = [self.sample(f"sample{i}", arm).name for i, arm in enumerate(arms)]

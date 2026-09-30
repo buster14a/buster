@@ -214,7 +214,12 @@ It rejects missing/duplicate module evidence, failed assertions/processes,
 timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
 remain owned by the original tree policy. Each child retains at least two test
 workers. A single-threaded driver or a budget below four uses the ordinary full
-invocation, preserving the existing concurrency assertions.
+invocation with inherited output streams and no added capture limit or parent
+deadline, preserving the existing concurrency assertions. When no
+`BUSTER_TEST_SOURCE_REVISION` is supplied, a bounded native Git query resolves
+the current checkout's `HEAD`. A source archive without Git runs with
+`source_revision=unknown`; comparison rejects that identity. A malformed
+explicit revision fails before grouped child admission.
 
 The [diagnostic workflow](../.github/workflows/ci-unit-partitions.yml) runs only
 on its owning experiment branch or explicit dispatch. Both arms use the same
@@ -223,6 +228,10 @@ uses two test workers; the candidate uses two children with two workers each,
 within a four-worker available budget. One-worker children would omit three
 OS concurrency assertions relative to the standard two-worker invocation.
 Retained native phase intervals include identical CMake/Ninja launch scope.
+The observer allows 6000 seconds around the grouped driver's 5400-second child
+deadline, leaving headroom for startup, cleanup and diagnostic replay. Windows
+native commands use the Visual Studio environment in PowerShell, matching the
+ordinary Windows combination lane.
 The [postprocessor](../tools/ci_unit_tests_campaign.py) verifies every phase
 and submits the exact inventories, binary/source identities and module counts
 to the [comparison helper](../tools/ci_unit_tests_measure.py).

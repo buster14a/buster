@@ -4,9 +4,14 @@
 // terminal counts before ci_unit_pair merges stable driver/rest results. A
 // serial bootstrap or a quota below four retains the ordinary full invocation.
 // Each group needs at least two workers to retain OS multi-lane assertions.
+// ci_unit_source_revision uses a bounded Git HEAD query when the caller omits
+// provenance. Archives run with unknown identity; measurement rejects them.
+// ci_unit_serial_run preserves ordinary streaming and unlimited parent wait.
 #define CI_UNIT_MAX_MODULES 512
 #define CI_UNIT_CAPTURE_LIMIT BUSTER_MB(64)
 #define CI_UNIT_TIMEOUT_US (5400ull * 1000000ull)
+#define CI_UNIT_IDENTITY_CAPTURE_LIMIT BUSTER_KB(4)
+#define CI_UNIT_IDENTITY_TIMEOUT_US (5ull * 1000000ull)
 
 typedef struct CiUnitModule CiUnitModule;
 struct CiUnitModule
@@ -295,6 +300,60 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_hex(String8 text, u64 count)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ci_unit_revision_select(String8 supplied, String8 queried, String8* revision)
+{
+    bool result = true;
+    if (supplied.length)
+    {
+        result = ci_unit_hex(supplied, 40);
+        *revision = supplied;
+    }
+    else { *revision = ci_unit_hex(queried, 40) ? queried : S8("unknown"); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ci_unit_source_revision(Arena* arena, String8 supplied, String8* revision)
+{
+    String8 queried = {0};
+    bool query_safe = true;
+    if (!supplied.length)
+    {
+        String8 arguments[] = {S8("git"), S8("rev-parse"), S8("--verify"), S8("HEAD")};
+        ProcessSpawnOptions options = {.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1, .search_path = 1, .new_process_group = 1,
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE};
+        options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        options.capture_limits.total = 2 * CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), (SliceString8){0}, (SliceString8){0}, options);
+        ProcessWaitResult wait = {0};
+        if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, CI_UNIT_IDENTITY_TIMEOUT_US); }
+        query_safe = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+        if (ci_unit_clean(spawn, wait))
+        {
+            queried = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+        }
+    }
+    bool result = ci_unit_revision_select(supplied, queried, revision) && query_safe;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_serial_run(Arena* arena, SliceString8 command)
+{
+    SliceString8 keys = {0}, values = {0};
+    ci_unit_environment(arena, (String8){0}, (String8){0}, &keys, &values);
+    // Uncaptured streams inherit the ordinary parent handles. No process
+    // group, output quota or parent deadline is introduced on this path.
+    ProcessSpawnResult spawn = os_process_spawn(command, keys, values, (ProcessSpawnOptions){0});
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+        result = wait.result;
+    }
+    return result;
+}
+
 // Private process fixtures exercise the real native wait/capture path. They
 // are never part of a compiler test inventory or an accepted measurement.
 BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_self_test_child(String8 mode)
@@ -302,7 +361,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_self_test_child(String8 mode)
     bool driver = !string_equal(mode, S8("rest"));
     bool valid = string_equal(os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP")), driver ? S8("driver") : S8("rest")) &&
         string_equal(os_get_environment_variable(S8("BUSTER_TEST_JOBS")), S8("1"));
-    if (string_equal(mode, S8("hang")))
+    bool fallback = string_equal(mode, S8("fallback-pass")) || string_equal(mode, S8("fallback-fail"));
+    if (fallback)
+    {
+        valid = !os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP")).length &&
+            string_equal(os_get_environment_variable(S8("BUSTER_TEST_JOBS")), S8("2"));
+        string_print(S8("CI_UNIT_FALLBACK_STDOUT\n"));
+        ByteSlice message = BUSTER_SLICE_TO_BYTE_SLICE(S8("CI_UNIT_FALLBACK_STDERR\n"));
+        OsFileTransferResult written = os_file_write_checked(os_get_standard_stream(STANDARD_STREAM_ERROR), message);
+        valid = valid && !written.error.v && written.transferred == message.length;
+    }
+    else if (string_equal(mode, S8("hang")))
     {
         u64 start = os_now_microseconds();
         while (os_now_microseconds() - start < 10000000) {}
@@ -326,7 +395,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_self_test_child(String8 mode)
             "[2/2] Unit tests (1 of 2 modules selected)\n[1/1] Module tests\n[0/0] External tests\n"),
             (u32)driver, (u32)!driver, driver ? 0u : 1u, driver ? S8("compiler_driver_tests") : S8("other_tests"), driver ? S8("driver") : S8("rest"));
     }
-    ProcessResult result = valid && !string_equal(mode, S8("fail")) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    ProcessResult result = valid && !string_equal(mode, S8("fail")) && !string_equal(mode, S8("fallback-fail")) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     return result;
 }
 
@@ -394,6 +463,39 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_process_self_test(Arena* arena, String8 executa
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ci_unit_review_self_test(Arena* arena, String8 executable)
+{
+    String8 exact = S8("0123456789abcdef0123456789abcdef01234567");
+    String8 revision = {0};
+    bool result = ci_unit_revision_select((String8){0}, exact, &revision) && string_equal(revision, exact);
+    result = ci_unit_revision_select((String8){0}, (String8){0}, &revision) && string_equal(revision, S8("unknown")) && result;
+    result = ci_unit_revision_select((String8){0}, S8("invalid git output"), &revision) && string_equal(revision, S8("unknown")) && result;
+    result = !ci_unit_source_revision(arena, S8("malformed"), &revision) && result;
+    result = ci_unit_source_revision(arena, exact, &revision) && string_equal(revision, exact) && result;
+    result = ci_unit_source_revision(arena, (String8){0}, &revision) &&
+        (ci_unit_hex(revision, 40) || string_equal(revision, S8("unknown"))) && result;
+    String8 modes[] = {S8("fallback-pass"), S8("fallback-fail")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(modes); i += 1)
+    {
+        SliceString8 keys = {0}, values = {0};
+        ci_unit_environment(arena, S8("driver"), S8("2"), &keys, &values);
+        String8 command[] = {executable, S8("test_units_partitioned"), S8("--self-test-fallback"), modes[i]};
+        ProcessSpawnOptions options = ci_unit_spawn_options();
+        options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        options.capture_limits.total = 2 * CI_UNIT_IDENTITY_CAPTURE_LIMIT;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), keys, values, options);
+        ProcessWaitResult wait = {0};
+        if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, 5000000); }
+        bool status = spawn.handle && wait.result == (i ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS) && !wait.timed_out &&
+            !wait.capture_failed && !wait.output_truncated && !wait.process_tree_cleanup_failed &&
+            string_equal(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), S8("CI_UNIT_FALLBACK_STDOUT\n")) &&
+            string_equal(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]), S8("CI_UNIT_FALLBACK_STDERR\n"));
+        result = status && result;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ci_unit_self_test(void)
 {
     String8 inventory = S8("CI_UNIT_MODULE_V1 index=0 module=compiler_driver_tests table_audit=0 enabled=1 selected=1 group=driver\n"
@@ -441,10 +543,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
     {
         result = ci_unit_self_test_child(arguments.pointer[1]);
     }
+    else if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test-fallback")))
+    {
+        String8 command[] = {executable, S8("test_units_partitioned"), S8("--self-test-child"), arguments.pointer[1]};
+        result = ci_unit_serial_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    }
     else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test")))
     {
         bool valid = ci_unit_self_test();
         valid = ci_unit_process_self_test(arena, executable) && valid;
+        valid = ci_unit_review_self_test(arena, executable) && valid;
         string_print(S8("CI_UNIT_SELF_TEST_V1 status={S8}\n"), valid ? S8("pass") : S8("fail"));
         result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
@@ -458,19 +566,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
         bool grouped = valid_jobs && jobs_text.length && jobs.value >= 4 && !BUSTER_SINGLE_THREADED;
         if (path.length && valid_jobs && !grouped)
         {
-            SliceString8 keys = {0}, values = {0};
-            ci_unit_environment(arena, (String8){0}, (String8){0}, &keys, &values);
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), keys, values, ci_unit_spawn_options());
-            ProcessWaitResult wait = {0};
-            if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, CI_UNIT_TIMEOUT_US); }
-            bool replayed = ci_unit_replay(wait);
-            result = ci_unit_clean(spawn, wait) && replayed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+            result = ci_unit_serial_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         }
         else if (path.length && grouped)
         {
-            String8 revision = os_get_environment_variable(S8("BUSTER_TEST_SOURCE_REVISION"));
-            String8 digest = {0};
-            bool valid = ci_unit_hex(revision, 40) && stage_object_sha256_file(arena, path, &digest);
+            String8 supplied_revision = os_get_environment_variable(S8("BUSTER_TEST_SOURCE_REVISION"));
+            String8 revision = {0}, digest = {0};
+            bool valid = ci_unit_source_revision(arena, supplied_revision, &revision) && stage_object_sha256_file(arena, path, &digest);
             if (valid)
             {
                 u64 epoch = os_now_microseconds();
@@ -513,7 +615,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
                     jobs.value, os_now_microseconds() - epoch, modules, assertions, valid ? assertions : 0, valid ? 0ull : 1ull, valid ? S8("pass") : S8("fail"));
                 result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
             }
-            else { string_print(S8("error: partitioned tests require exact BUSTER_TEST_SOURCE_REVISION and readable binary\n")); }
+            else { string_print(S8("error: invalid BUSTER_TEST_SOURCE_REVISION or unreadable test binary\n")); }
         }
         else { string_print(S8("error: invalid unit-test path or BUSTER_TEST_JOBS quota\n")); }
     }
