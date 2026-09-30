@@ -880,7 +880,7 @@ struct CompilerDriverResponseFileSplit
 BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileStatus compiler_driver_response_file_read(Arena* arena, String8 path, u64 limit, String8* content)
 {
     CompilerDriverResponseFileStatus status = COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE;
-    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
     if (opened.file)
     {
         u8* buffer = (u8*)arena_allocate_bytes(arena, limit + 1, 1);
