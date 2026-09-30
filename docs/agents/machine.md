@@ -4,6 +4,14 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+Canonical fallback identity casts of structs and unions copy the complete
+resolved layout between value frame homes on x86-64 and AArch64. The frontend
+keeps these casts on aggregate comma results to preserve their non-lvalue
+semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
+returns, partial eightbytes and tail fields with canonical FAST disabled,
+both frontend forms and all four allocators; desktop lanes execute the native
+fixture as well as compiling both architectures.
+
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
