@@ -19959,11 +19959,16 @@ BUSTER_GLOBAL_LOCAL bool c_test_target_uses_x86_f80_abi(Target target)
            layout.long_double_type.alignment == 16;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_test_target_uses_aapcs64_f128_transport(Target target)
+BUSTER_GLOBAL_LOCAL bool c_test_target_uses_f128_transport(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);
-    return target.cpu_arch == CPU_ARCH_AARCH64 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64 &&
-           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    bool direct_register_abi =
+        (target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_AAPCS64) ||
+        (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    return direct_register_abi && layout.endianness == TARGET_ENDIAN_LITTLE &&
+           layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
            layout.long_double_type.alignment == 16;
 }
 
@@ -20019,8 +20024,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
-        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
-        u32 rejected_signature_count = f80_sysv || f128_aapcs64 || !wide_long_double ? 0 : 6;
+        bool f128_transport = c_test_target_uses_f128_transport(target) && wide_long_double;
+        u32 rejected_signature_count = f80_sysv || f128_transport || !wide_long_double ? 0 : 6;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                     (CPreprocessOptions){
@@ -20061,10 +20066,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 // because they are larger than two eightbytes -- so they
                 // travel as ordinary memory-class aggregates.  Clang compiles
                 // all five to byval/sret against the same declarations.
-                // AAPCS64 places every binary128 aggregate by its ordinary
-                // classification: an HFA in Q registers, the union in X
-                // registers and the large array through a caller copy.
-                bool expected_rejected = !f80_sysv && !f128_aapcs64 && wide_long_double && function_index < 6;
+                // The supported binary128 conventions apply their ordinary
+                // aggregate classification: AAPCS64 HFAs use Q registers,
+                // while System V wrappers use XMM or memory by size/class.
+                bool expected_rejected = !f80_sysv && !f128_transport && wide_long_double && function_index < 6;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
             }
             if (wide_long_double)
@@ -20083,10 +20088,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                                                           ir_abi_convention_for_target(target), IR_ABI_USE_RESULT);
                 BUSTER_TEST(arguments, struct_abi.part_count != 0);
                 BUSTER_TEST(arguments, large_abi.part_count != 0 && large_abi.indirect);
-                if (f128_aapcs64)
+                if (f128_transport)
                 {
-                    // A one-member binary128 HFA takes one whole Q register,
-                    // the same sixteen-byte vector part as the scalar.
+                    // A one-member binary128 wrapper takes one complete Q/XMM
+                    // register, the same sixteen-byte vector part as the scalar.
                     BUSTER_TEST(arguments, !struct_abi.memory && !struct_abi.indirect && struct_abi.part_count == 1 &&
                                            struct_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && struct_abi.parts[0].size == 16);
                 }
@@ -20190,8 +20195,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
-        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
-        u32 rejected_call_count = f80_sysv || f128_aapcs64 || !wide_long_double ? 0 : BUSTER_ARRAY_LENGTH(rejected_names);
+        bool f128_transport = c_test_target_uses_f128_transport(target) && wide_long_double;
+        u32 rejected_call_count = f80_sysv || f128_transport || !wide_long_double ? 0 : BUSTER_ARRAY_LENGTH(rejected_names);
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -20222,9 +20227,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 // single-member wrapper classifies identically, so both
                 // variadic calls lower.  The union's classification carries no
                 // x87 class at all, so it lowers as a memory-class aggregate.
-                // AAPCS64 places a variadic binary128 scalar or aggregate
-                // exactly as a named one, so every call lowers there too.
-                bool expected_rejected = !f80_sysv && !f128_aapcs64 && wide_long_double;
+                // Each supported binary128 convention places a variadic scalar
+                // or aggregate exactly as its named form, so every call lowers.
+                bool expected_rejected = !f80_sysv && !f128_transport && wide_long_double;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
                 if (expected_rejected)
                 {
@@ -20281,8 +20286,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
-        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
-        bool unsupported_signature = wide_long_double && !f80_sysv && !f128_aapcs64;
+        bool f128_transport = c_test_target_uses_f128_transport(target) && wide_long_double;
+        bool unsupported_signature = wide_long_double && !f80_sysv && !f128_transport;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -20608,18 +20613,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        // Android x86-64 uses binary128. Keep this row as an explicit
-        // unsupported-initializer control until that format is implemented;
-        // it must never silently inherit these x87 payload expectations.
+        // Android x86-64 uses binary128, whose static initializers lower as
+        // the exact IEEE image. The row must never inherit these x87 payload
+        // expectations, so it only checks that lowering succeeds here.
         if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
-            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
-            if (lowered.diagnostic_count)
-            {
-                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("C IR lowering: cannot fold '0x1.0000000000001p+0L' in a static initializer"));
-            }
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
             scratch_end(temporary);
             continue;
         }
@@ -20863,12 +20863,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_boundaries(UnitTest
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         bool x86_f80 = c_test_target_uses_x86_f80_abi(target);
-        bool binary128 = c_test_target_uses_aapcs64_f128_transport(target);
+        bool binary128 = c_test_target_uses_f128_transport(target);
         BUSTER_TEST(arguments, x86_f80 || binary128 ? lowered.diagnostic_count == 0 : lowered.diagnostic_count > 0);
         if (binary128)
         {
-            // AArch64 Android's binary128 addition is a compiler-runtime call
-            // and its static 1.0L is the exact IEEE image.
+            // Android binary128 addition is a compiler-runtime call on both
+            // supported architectures, and static 1.0L is the exact IEEE image.
             IrGlobal* global = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("android_value")) : 0;
             u8 expected[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x3f};
             BUSTER_TEST(arguments, global && global->bytes.length == sizeof(expected) &&
@@ -20962,18 +20962,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        // Android x86-64 uses binary128. Keep this row as an explicit
-        // unsupported-initializer control until that format is implemented;
-        // it must never silently inherit these x87 payload expectations.
+        // Android x86-64 uses binary128, whose static initializers lower as
+        // the exact IEEE image. The row must never inherit these x87 payload
+        // expectations, so it only checks that lowering succeeds here.
         if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
-            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
-            if (lowered.diagnostic_count)
-            {
-                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("C IR lowering: cannot fold '0x1p-16382L' in a static initializer"));
-            }
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
             scratch_end(temporary);
             continue;
         }
@@ -21020,18 +21015,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        // Android x86-64 uses binary128. Keep this row as an explicit
-        // unsupported-initializer control until that format is implemented;
-        // it must never silently inherit these x87 payload expectations.
+        // Android x86-64 uses binary128, whose static initializers lower as
+        // the exact IEEE image. The row must never inherit these x87 payload
+        // expectations; braced 1.0L must still produce the binary128 image.
         if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
-            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
-            if (lowered.diagnostic_count)
-            {
-                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("unsupported C global initializer for 'brace'"));
-            }
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+            u8 expected_binary128[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x3f};
+            IrGlobal* brace = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("brace")) : 0;
+            BUSTER_TEST(arguments, brace && brace->bytes.length == sizeof(expected_binary128) &&
+                                   memcmp(brace->bytes.pointer, expected_binary128, sizeof(expected_binary128)) == 0);
             scratch_end(temporary);
             continue;
         }
@@ -21144,18 +21138,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        // Android x86-64 uses binary128. Keep this row as an explicit
-        // unsupported-initializer control until that format is implemented;
-        // it must never silently inherit these x87 payload expectations.
+        // Android x86-64 uses binary128, whose static initializers lower as
+        // the exact IEEE image. The row must never inherit these x87 payload
+        // expectations, so it only checks that lowering succeeds here.
         if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
-            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
-            if (lowered.diagnostic_count)
-            {
-                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("C IR lowering: cannot fold '1' in a static initializer"));
-            }
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
             scratch_end(temporary);
             continue;
         }

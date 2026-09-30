@@ -101,14 +101,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
   source-format rounding on six layouts in both frontend forms, mixed-format
   identity, positive/negative builtin operands, and deep nested calls.
-- **Base AAPCS64 `long double` is IEEE binary128.** A scalar argument or
-  result is one complete sixteen-byte image in a Q register; after V0-V7 are
-  exhausted, named arguments occupy their sixteen-byte-aligned stack slot.
-  Canonical and MIR backends keep the value slot-backed internally and bridge
-  only at the ABI edges, so assignment, literal return, direct/indirect calls
-  and mixed Clang/Buster linkage preserve every payload bit, including negative
-  zero. `c_ir_target_supports_f128_transport` in `c_internal.h` is the one
-  target fact lowering and the parser's lowering-constraint mirror share.
+- **Base AAPCS64 and x86-64 Android `long double` are IEEE binary128.**
+  A scalar argument or result is one complete sixteen-byte image: AAPCS64
+  carries it in a Q register and Android System V x86-64 in an XMM register.
+  After the respective FP argument register file is exhausted, named arguments
+  occupy a sixteen-byte-aligned stack slot. Canonical and MIR backends keep the
+  value slot-backed internally and bridge only at ABI edges, so assignment,
+  literal return, direct/indirect calls and mixed Clang/Buster linkage preserve
+  every payload bit, including negative zero. `c_ir_target_supports_f128_transport`
+  in `c_internal.h` is the one target fact lowering and the parser's
+  lowering-constraint mirror share.
 
   There is no binary128 instruction vocabulary, so lowering calls the
   libgcc/compiler-rt soft-float entry points with `long double` operands and
@@ -120,35 +122,38 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   integer narrower than `int` converts through the `int` entry point.
   `c_ir_type_is_binary128_runtime` gates these in `c_ir_emit_binary_value`,
   `c_ir_emit_cast` (`c_ir_emit_binary128_conversion`) and `c_ir_truth_value`.
-  Exact binary16/32/64 widening remains the native MIR image, and negation
-  flips the high limb's sign bit through a slot (`c_ir_emit_float_image_negate`)
-  so NaN payloads survive. An invalid operation on constant operands folds to
-  the positive quiet NaN, as for the narrower formats. Hosted links therefore
-  need libgcc or compiler-rt, as x86-64 binary16 and complex links already do.
+  Exact binary16/32/64 widening remains a native MIR image on AArch64; x86-64
+  uses `__extend{hf,sf,df}tf2` because its selector has no binary128 conversion
+  row. Negation flips the high limb's sign bit through a slot
+  (`c_ir_emit_float_image_negate`) so NaN payloads survive. An invalid operation
+  on constant operands folds to the positive quiet NaN, as for narrower
+  formats. Hosted links therefore need libgcc or compiler-rt, as x86-64
+  binary16 and complex links already do.
 
   Static initializers store the constant evaluator's exact two-limb image
   (`c_ir_binary128_static_target`), for scalar globals and aggregate elements
   alike. A variadic binary128 argument, and `va_arg(ap, long double)`, travel
   as a sixteen-byte two-lane vector image (`c_ir_binary128_variadic_carrier_type`),
-  which AAPCS64 places identically, so the backends need no separate reader; a
-  named binary128 parameter before `...` is admitted for the same reason.
-  `ir_type_abi_value` gives an HFA of binary128 members one sixteen-byte
-  VECTOR part per member, so `struct { long double a, b; }` and
-  `long double _Complex` use Q registers; other aggregates holding binary128
-  are ordinary bytes. AAPCS64 places those aggregates identically when they
-  are variadic, so variadic calls and `va_arg` admit them through
-  `c_ir_type_is_binary128_aggregate` with no carrier. Complex arithmetic uses
-  the element operations above, including Smith's division with a high-limb
-  magnitude.
+  which both supported ABI classifiers place identically to the scalar, so the
+  backends need no separate reader; a named binary128 parameter before `...`
+  is admitted for the same reason. AAPCS64 gives each binary128 HFA member one
+  sixteen-byte VECTOR part, so `struct { long double a, b; }` and
+  `long double _Complex` use Q registers. System V x86-64 collapses a scalar
+  or one-member wrapper's SSE/SSEUP pair into one sixteen-byte VECTOR part;
+  larger or merged aggregates follow its ordinary register/memory classes.
+  Variadic aggregates therefore use their named classification through
+  `c_ir_type_is_binary128_aggregate` with no separate carrier. Complex
+  arithmetic uses the element operations above, including Smith's division
+  with a high-limb magnitude.
 
-  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument
-  stack spill and both mixed-compiler directions on native Linux AArch64.
-  `compiler_driver_test_aarch64_binary128_runtime` compiles a Clang-oracled
-  fixture strictly across the Linux/Android/UEFI mode/frontend/PIC matrix,
-  requires its soft-float imports, and on native Linux AArch64 links it with
-  the host runtime and executes it. The canonical `none` emitter still refuses
-  binary128 widening and loads through pointers; those functions need a MIR
-  allocator.
+  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1,
+  ninth-argument stack spill and both mixed-compiler directions on native Linux
+  AArch64. `compiler_driver_test_binary128_runtime` compiles a Clang-oracled
+  fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
+  MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
+  soft-float imports, and on native Linux AArch64 links with the host runtime
+  and executes. The canonical `none` emitter still refuses binary128 widening
+  and loads through pointers; those functions need a MIR allocator.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

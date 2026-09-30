@@ -7738,9 +7738,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_binary128_conversion(CIntegerIrBuilder* bu
     String8 link_name = {0};
     IrTypeId narrow_type = IR_TYPE_ID_INVALID;
     IrValueId result = IR_VALUE_ID_INVALID;
-    if (other->kind == IR_TYPE_FLOAT && source_wide && other->float_format == IR_FLOAT_FORMAT_IEEE && (width == 16 || width == 32 || width == 64))
+    if (other->kind == IR_TYPE_FLOAT && other->float_format == IR_FLOAT_FORMAT_IEEE &&
+        (width == 16 || width == 32 || width == 64))
     {
-        link_name = width == 16 ? S8("__trunctfhf2") : width == 32 ? S8("__trunctfsf2") : S8("__trunctfdf2");
+        link_name = source_wide
+                        ? width == 16 ? S8("__trunctfhf2") : width == 32 ? S8("__trunctfsf2") : S8("__trunctfdf2")
+                        : width == 16 ? S8("__extendhftf2") : width == 32 ? S8("__extendsftf2") : S8("__extenddftf2");
         narrow_type = width == 16 ? builder->f16_type : width == 32 ? builder->f32_type : builder->f64_type;
     }
     else if ((other->kind == IR_TYPE_INTEGER || other->kind == IR_TYPE_BOOLEAN) && width && width <= 128)
@@ -8030,7 +8033,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     bool source_binary128 = c_ir_type_is_binary128_runtime(builder, source_type);
     bool target_binary128 = c_ir_type_is_binary128_runtime(builder, target_type);
-    if (source_binary128 != target_binary128 && (source_binary128 || source_value->kind != IR_TYPE_FLOAT))
+    bool runtime_float_widening = target_binary128 && source_value->kind == IR_TYPE_FLOAT &&
+                                  builder->target.cpu_arch == CPU_ARCH_X86_64;
+    if (source_binary128 != target_binary128 &&
+        (source_binary128 || source_value->kind != IR_TYPE_FLOAT || runtime_float_widening))
     {
         return c_ir_emit_binary128_conversion(builder, value, source_value, target_type, target_value, source);
     }

@@ -668,17 +668,21 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(T
            layout.long_double_type.alignment == 16;
 }
 
-// Base AAPCS64 long double is IEEE binary128. This predicate deliberately
-// admits only the exact scalar representation whose shared ABI classification
-// is one sixteen-byte vector-file part. Lowering transports it directly and
-// carries its arithmetic, comparisons and rounding conversions as compiler-
-// runtime calls; the parser's lowering-constraint mirror asks the same fact.
+// The supported C long-double ABIs carry IEEE binary128 directly in one
+// sixteen-byte vector-file part: AAPCS64 in a Q register and Android System V
+// x86-64 in an XMM register. Keep this gate as narrow as the exact target data
+// layout so ordinary System V x87 long double remains on its separate path.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);
-    return target.cpu_arch == CPU_ARCH_AARCH64 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64 &&
-           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
-           layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    bool direct_register_abi =
+        (target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_AAPCS64) ||
+        (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    return direct_register_abi && layout.endianness == TARGET_ENDIAN_LITTLE &&
+           layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
 }
 
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
