@@ -549,6 +549,34 @@ with one or two census compilers, requires byte-identical objects and
 identical diagnostics between them, and writes the per-corpus fields and
 deltas to `census.json` and `census.md`.
 
+### Diagnostic-work census in allocation probes
+
+The same build also emits `diagnostic_census.*` (`version=1`, owned by
+`ir/ir_diagnostic_census.h`): work a compilation spends on information that
+only diagnostics, debug consumers or failure paths read. Counts are
+cumulative calling-thread events since process start, with the same
+saturation (`overflowed=1`) and failed-attempt rules as `ir_construction.*`.
+
+| Fields | Counted work |
+| --- | --- |
+| `position_queries`, `position_memo_hits`, `position_checkpoint_searches` | `ir_source_map_position` calls (line/column conversions), cursor memo answers, and checkpoint binary searches actually run. |
+| `source_queries` | `ir_source_map_source` calls: a region lookup without the per-line search. |
+| `original_queries`, `original_steps` | `ir_source_map_original_position` calls and the stamp-origin steps they walk. |
+| `text_position_queries`, `text_bytes_scanned` | `ir_source_text_position` calls and bytes rescanned for newlines. |
+| `c_record_sites`, `c_site_resolutions` | Record sites taken (offset plus source, no line/column; see `CSourceSite`), and sites later resolved to a full location. Before records kept sites, the parser resolved the full location eagerly (`c_eager_locations` in the first census revision). |
+| `c_visibility_locations` | Reference locations resolved by the declared-before fallback, a semantic read. |
+| `c_directive_locations`, `c_stamp_locations` | Lexer-local location recoveries for directive lines and macro-invocation stamps. |
+| `c_metrics_token_visits` | Tokens visited by the spelled-byte pass that feeds only `-v` and `-fsource-metrics`. |
+| `c_diagnostics_recorded` | C diagnostics recorded by the lexer, preprocessor, syntax and semantic funnels (lowering writes its rows directly and is not counted). |
+| `c_diagnostic_reservations`, `c_diagnostic_rows_reserved`, `c_diagnostic_bytes_reserved`, `c_diagnostic_{lex,preprocess,semantic,evaluation,lowering}_rows` | `CDiagnostic` storage reserved before any diagnostic exists, by reserving stage. Bytes are logical arena requests, not committed or touched pages. |
+| `debug_locals` | `IrDebugLocal` records lowering attaches to functions; zero under `-g0`. |
+| `c_lex_diagnostic_arenas`, `c_lex_diagnostic_arena_bytes` | Dedicated arenas the lexer creates for possible diagnostics when a file's worst case does not fit its scratch arena, and their reservations. |
+
+Measure successful and failing compilations separately:
+`tools/diagnostic_equivalence.py` sums these fields per mode and outcome when
+given census compilers. Like the construction census, these are populations,
+not timings or resident memory, and normal builds retain no counters.
+
 ## Frozen-source self-host stages
 
 ```sh

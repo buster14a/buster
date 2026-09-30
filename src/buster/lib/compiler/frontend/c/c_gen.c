@@ -107,12 +107,14 @@
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
 // Preprocess file indices are registered as IR sources in table order, so a
-// token's file index is also its IR source id.
-BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 length)
+// token's file index is also its IR source id. A range keeps exactly what a
+// record's site retains, the source and the mapped offset, and an unknown
+// site yields the zero range an unknown location did.
+BUSTER_C_INTERNAL IrSourceRange c_ir_site_source_range(CSourceSite site, u64 length)
 {
     return (IrSourceRange){
-        .source = {.value = location.file},
-        .offset = location.map_offset,
+        .source = {.value = site.file},
+        .offset = site.map_offset_plus_one ? site.map_offset_plus_one - 1 : 0,
         .length = (u32)length,
     };
 }
@@ -2999,7 +3001,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_builder_scalar_type(CIntegerIrBuilder* builder, 
     return type;
 }
 
-BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 length);
+BUSTER_C_INTERNAL IrSourceRange c_ir_site_source_range(CSourceSite site, u64 length);
 
 // The hot one: every lowered instruction asks for the range of the token it
 // came from. It is the token's own offset and length plus the source they
@@ -3017,6 +3019,12 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
 BUSTER_C_INTERNAL CSourceLocation c_ir_token_location(CIntegerIrBuilder* builder, CToken token)
 {
     return c_preprocess_token_location_cursor(&builder->preprocess, token, &builder->location_cursor);
+}
+
+// The site a declaration lowering builds keeps for `token` (see CSourceSite).
+BUSTER_C_INTERNAL CSourceSite c_ir_token_site(CIntegerIrBuilder* builder, CToken token)
+{
+    return c_preprocess_token_site_cursor(&builder->preprocess, token, &builder->location_cursor);
 }
 
 // A token over name bytes that live inside the spelling space (entity,
@@ -8925,6 +8933,55 @@ BUSTER_C_INTERNAL IrValueId c_ir_vla_pointer_rvalue(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// A comma yields its right operand's value, not that operand's lvalue.
+// Keep dynamic array extents, but remove both the array-lvalue witness and
+// recoverable scalar-load provenance. The existing canonical identity cast
+// supplies a value boundary only when place recovery would otherwise be
+// possible; constants and computed values need no extra instruction.
+BUSTER_C_INTERNAL IrValueId c_ir_comma_result(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return value;
+    }
+    value = c_ir_vla_pointer_rvalue(builder, value, source);
+    value = c_ir_decay_array_value_if_needed(builder, value, source);
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[value.value].category == IR_VALUE_PLACE)
+    {
+        IrTypeId type = builder->function->values[value.value].canonical_type;
+        value = c_ir_emit_load_place(builder, value, type, source);
+    }
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrValue* operand = builder->function->values + value.value;
+    bool recoverable = c_ir_ssa_read_place(builder, value, false).value != IR_ID_UNDERLYING_INVALID;
+    if (operand->definition.value < builder->function->instruction_count)
+    {
+        IrInstruction* definition = builder->function->instructions + operand->definition.value;
+        IrType* type = ir_type_from_id(&builder->program->types, operand->canonical_type);
+        IrType* element = type && type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, type->element_type) : 0;
+        recoverable = recoverable || definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD ||
+                      definition->opcode == IR_OPCODE_FUNCTION ||
+                      (definition->opcode == IR_OPCODE_ADDRESS_OF && element && element->kind == IR_TYPE_VA_LIST);
+    }
+    if (recoverable)
+    {
+        CIrVlaValue shape = c_ir_vla_value(builder, value);
+        value = c_ir_emit_cast_instruction(builder, value, operand->canonical_type, IR_CONVERSION_IDENTITY, source);
+        if (shape.counts && value.value != IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_vla_value_set(builder, value, shape);
+        }
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL void c_ir_vla_conditional_shape(CIntegerIrBuilder* builder, IrValueId place, IrValueId value)
 {
     CIrVlaValue shape = c_ir_vla_value(builder, value);
@@ -13480,6 +13537,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end);
+
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                              IrSourceRange source, IrTypeId cast_type);
 
@@ -13528,6 +13587,7 @@ typedef enum CIrLowerFrameKind
 {
     C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
     C_IR_LOWER_FRAME_COMMA_COMPLETION,
+    C_IR_LOWER_FRAME_COMMA_RESULT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION,
@@ -15169,7 +15229,7 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
             u32 tail_index = frame->as.statement_expression.tail_index;
             CDeclaration declaration = {
                 .name = S8("statement expression"),
-                .location = c_ir_token_location(builder, builder->preprocess.tokens[frame->as.statement_expression.tail_opens[tail_index]]),
+                .location = c_ir_token_site(builder, builder->preprocess.tokens[frame->as.statement_expression.tail_opens[tail_index]]),
                 .body_start = frame->as.statement_expression.tail_starts[tail_index],
                 .body_token_count = frame->as.statement_expression.tail_ends[tail_index] - frame->as.statement_expression.tail_starts[tail_index],
                 .kind = C_DECLARATION_FUNCTION,
@@ -15265,7 +15325,7 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
     frame->as.statement_expression.leaf_open = open;
     CDeclaration declaration = {
         .name = S8("statement expression"),
-        .location = c_ir_token_location(builder, builder->preprocess.tokens[open]),
+        .location = c_ir_token_site(builder, builder->preprocess.tokens[open]),
         .body_start = open + 1,
         .body_token_count = close - open - 1,
         .kind = C_DECLARATION_FUNCTION,
@@ -17658,6 +17718,22 @@ BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, 
     return false;
 }
 
+// A nested ?:, && or || group in a comma operand is prepared on its own, so a
+// comma group holding one must be owned whole like one holding an assignment.
+// Over-matching a label-address `&&` only routes the group through the full
+// expression machine.
+BUSTER_C_INTERNAL bool c_ir_has_control_operator_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    for (u32 index = start; index < end && !found; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        found = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE);
+    }
+    return found;
+}
+
 // A parenthesized comma expression may carry a nested assignment in its
 // right operand.  The control-expression prepass must own that whole group:
 // lowering the nested assignment group first would run the right operand
@@ -17854,7 +17930,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // `if ((p = get()) != 0)` and for assignment arms of `?:`.
         if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
             !c_ir_has_root_assignment(builder, index + 1, close) &&
-            !(c_ir_has_top_level_comma(builder, index + 1, close) && c_ir_has_assignment_anywhere(builder, index + 1, close)))
+            !(c_ir_has_top_level_comma(builder, index + 1, close) &&
+              (c_ir_has_assignment_anywhere(builder, index + 1, close) || c_ir_has_control_operator_anywhere(builder, index + 1, close))))
         {
             continue;
         }
@@ -22914,7 +22991,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         {
             return false;
         }
-        values[*value_count - 2] = c_ir_vla_pointer_rvalue(builder, values[*value_count - 1], source);
+        values[*value_count - 2] = c_ir_comma_result(builder, values[*value_count - 1], source);
         *value_count -= 1;
         return true;
     }
@@ -27870,6 +27947,18 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
         return false;
     }
     c_ir_sizeof_statement_expression_operand(builder, &start, &end);
+    // `&(0, a)` names no lvalue (C 6.5.17p2, 6.5.3.2p1). Record the constraint
+    // so the operand is refused rather than typed by the prediction fallback.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND) &&
+        c_ir_has_root_comma(builder, start + 1, end))
+    {
+        if (!builder->sizeof_operand_constraint.length)
+        {
+            builder->sizeof_operand_constraint = S8("cannot take the address of a comma expression");
+            builder->sizeof_operand_constraint_token = start;
+        }
+        return false;
+    }
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -29649,14 +29738,15 @@ c_ir_expression_core_loop:
                 index = prepared->close_index;
                 continue;
             }
-            // A control/assignment expression can be nested as an operand
+            // A control/assignment/comma expression can be nested as an operand
             // of a comparison or bitwise operation.  If the preparation pass
             // did not record it (for example while descending from another
             // prepared group), evaluate the group through the full
             // expression machine instead of leaving a C_CONDITIONAL_OPEN
             // marker for the arithmetic reducer.
             if (close < end && (c_ir_has_root_control_operator(builder, index + 1, close) ||
-                                c_ir_has_assignment_anywhere(builder, index + 1, close)))
+                                c_ir_has_assignment_anywhere(builder, index + 1, close) ||
+                                c_ir_has_root_comma(builder, index + 1, close)))
             {
                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
                                           close + 1, expect_operand);
@@ -30345,6 +30435,49 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
     return branched;
 }
 
+// Conditions and nested operands still obey comma precedence. Only commas outside
+// delimiter groups and the middle operand of ?: belong to its root. The full
+// expression machine already owns their ordered evaluation and result type.
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, start, end) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    u32 conditional_depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            break;
+        }
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            conditional_depth += 1;
+        }
+        else if (conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            conditional_depth -= 1;
+        }
+        else if (!conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -30523,6 +30656,33 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 }
                 continue;
             }
+        }
+        if (c_ir_has_root_comma(builder, task.start, task.end))
+        {
+            // Split the sequence before ?: or &&/||. In particular, a false
+            // left operand cannot suppress the final comma operand, and a
+            // deferred right-hand call must not enter the arithmetic core.
+            // The machine carries a void result as an integer placeholder, so
+            // the scalar constraint (C 6.8.4.1, 6.8.5) is checked on the type.
+            IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, task.start, task.end));
+            if (sequence_type && sequence_type->kind == IR_TYPE_VOID)
+            {
+                builder->failure_message = S8("controlling expression must have scalar type");
+                builder->failure_token_index = task.start;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.condition.leaf_true_block = task.true_block;
+            frame->as.condition.leaf_false_block = task.false_block;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression = {.start = task.start, .end = task.end},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
         }
         u32 conditional_start = 0;
         u32 conditional_question = 0;
@@ -30786,7 +30946,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         result->suffix_sizes = arena_allocate(builder->arena, IrValueId, result->dimension_count + 1);
         memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
         memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
-        state->source = c_ir_source_range(c_ir_token_location(builder, state->token), c_token_length(builder->preprocess.spelling_base, state->token));
+        state->source = c_ir_token_source_range(builder, state->token);
         state->dimension = 0;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
@@ -33060,7 +33220,9 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             // core is intentionally assignment-free, so inspect the whole
             // leaf before choosing it; otherwise the call is emitted but the
             // assignment side effect is silently dropped.
-            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end);
+            // A comma arm also owns sequencing, even without an assignment.
+            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end) ||
+                                   c_ir_has_root_comma(builder, leaf_start, leaf_end);
             if (!(assignment_leaf ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                     .as.expression =
@@ -33357,8 +33519,28 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 frame->as.expression.value = value;
                 continue;
             }
+            if (task.kind == C_IR_LOWER_FRAME_COMMA_RESULT)
+            {
+                IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[task.as.range.start]);
+                IrValueId result = c_ir_comma_result(builder, value, source);
+                if (value.value != IR_ID_UNDERLYING_INVALID && result.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = result;
+                continue;
+            }
             if (task.kind == C_IR_LOWER_FRAME_COMMA_COMPLETION)
             {
+                // Resume the right operand only after the left completes, then
+                // form the same non-lvalue result as the arithmetic comma path.
+                task.kind = C_IR_LOWER_FRAME_COMMA_RESULT;
+                if (!c_ir_expression_task_push(builder, frame, task, task.as.range.start))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
                 frame->as.expression.start = task.as.range.start;
                 frame->as.expression.end = task.as.range.end;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
@@ -34050,7 +34232,7 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
     {
         return false;
     }
-    IrSourceRange source = c_ir_source_range(entity->location, entity->name.length);
+    IrSourceRange source = c_ir_site_source_range(entity->location, entity->name.length);
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count; symbol_index += 1)
     {
@@ -34438,7 +34620,7 @@ BUSTER_C_INTERNAL bool c_ir_initialize_cleanup_flags(CIntegerIrBuilder* builder,
     if (builder->cleanup_flag_count)
     {
         CToken token = c_ir_space_name_token(builder, declaration.name);
-        IrSourceRange source = c_ir_source_range(declaration.location, declaration.name.length);
+        IrSourceRange source = c_ir_site_source_range(declaration.location, declaration.name.length);
         for (u32 cleanup_index = 0; cleanup_index < builder->cleanup_flag_count; cleanup_index += 1)
         {
             u32 entry_index = builder->cleanup_flag_base + cleanup_index;
@@ -35383,7 +35565,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaL
 {
     IrValueId storage = c_ir_add_result(builder, pointer_type_id);
     bool emitted = layout->runtime_size.value != IR_ID_UNDERLYING_INVALID && storage.value != IR_ID_UNDERLYING_INVALID;
-    IrSourceRange source = c_ir_source_range(c_ir_token_location(builder, name), name.length);
+    IrSourceRange source = c_ir_site_source_range(c_ir_token_site(builder, name), name.length);
     if (emitted)
     {
         IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, pointer_type_id);
@@ -35573,7 +35755,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         builder->failure_token_index = UINT32_MAX;
         CDeclaration local_declaration = {
             .name = c_token_spelling(builder->preprocess.spelling_base, name),
-            .location = c_ir_token_location(builder, name),
+            .location = c_ir_token_site(builder, name),
             .token_start = start,
             .token_count = end - start,
             .type = local_entity->type,
@@ -35684,7 +35866,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         };
         if (!c_ir_global_initializer(builder, (CDeclaration){
                                          .name = c_token_spelling(builder->preprocess.spelling_base, name),
-                                         .location = c_ir_token_location(builder, name),
+                                         .location = c_ir_token_site(builder, name),
                                          .token_start = start,
                                          .token_count = end - start,
                                          .type = local_entity->type,
@@ -35753,7 +35935,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_automatic_declaration(CIntegerIrBuilder* buil
     {
         c_ir_mark_local_read_only(builder, state->local);
         stored = c_ir_activate_cleanup(builder, state->local_entity ? (CEntityId){.value = (u32)(state->local_entity - builder->parse.entities)} : C_ENTITY_ID_INVALID,
-                                        c_ir_source_range(c_ir_token_location(builder, state->name), state->name.length));
+                                        c_ir_site_source_range(c_ir_token_site(builder, state->name), state->name.length));
     }
     return stored;
 }
@@ -37889,7 +38071,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
         .allow_trailing_expression = state->statement_expression_mode,
     };
     state->current_task = arena_allocate(builder->scratch_arena, CIrBodyTask, 1);
-    state->declaration_source = c_ir_source_range(declaration.location, declaration.name.length);
+    state->declaration_source = c_ir_site_source_range(declaration.location, declaration.name.length);
     state->initialized = true;
     return true;
 }
@@ -39758,7 +39940,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         symbol.value != IR_ID_UNDERLYING_INVALID &&
                         c_ir_global_initializer(builder, (CDeclaration){
                                                     .name = c_token_spelling(builder->preprocess.spelling_base, name),
-                                                    .location = c_ir_token_location(builder, name),
+                                                    .location = c_ir_token_site(builder, name),
                                                     .token_start = index,
                                                     .token_count = end - index,
                                                     },
@@ -39901,7 +40083,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         };
                         if (!c_ir_global_initializer(builder, (CDeclaration){
                                                          .name = c_token_spelling(builder->preprocess.spelling_base, name),
-                                                         .location = c_ir_token_location(builder, name),
+                                                         .location = c_ir_token_site(builder, name),
                                                          .token_start = index,
                                                          .token_count = end - index,
                                                          .type = local_c_type_id,
@@ -41311,8 +41493,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                                                                                  .element_count = element_count,
                                                                      });
                 String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
-                IrSourceRange source = c_ir_source_range(c_preprocess_token_location(&preprocess, preprocess.tokens[literal_index]),
-                                                         c_token_length(preprocess.spelling_base, preprocess.tokens[literal_index]));
+                IrSourceRange source = c_ir_site_source_range(c_preprocess_token_site(&preprocess, preprocess.tokens[literal_index]),
+                                                              c_token_length(preprocess.spelling_base, preprocess.tokens[literal_index]));
                 IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
                                                                                .name = literal_name,
                                                                                .link_name = literal_name,
@@ -43113,7 +43295,25 @@ BUSTER_C_INTERNAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* 
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result)
+// The next row of a lowering result's diagnostics. The table keeps the
+// capacity c_lower_to_ir_with_options derives, but its rows are allocated at
+// the first report instead of before lowering starts, so a successful lowering
+// reserves none. Every report is written by c_lower_to_ir_with_options or by
+// c_ir_infer_incomplete_array_bounds on its behalf, never inside a temporal
+// window over the result arena, so the rows live exactly as long as the
+// result that returns them.
+BUSTER_C_INTERNAL CDiagnostic* c_ir_lower_diagnostic_slot(CIRLowerResult* result, Arena* arena, u64 capacity)
+{
+    if (!result->diagnostics)
+    {
+        C_DIAGNOSTIC_RESERVATION_CENSUS(LOWERING, capacity);
+        result->diagnostics = arena_allocate(arena, CDiagnostic, capacity);
+    }
+    BUSTER_CHECK(result->diagnostic_count < capacity);
+    return result->diagnostics + result->diagnostic_count++;
+}
+
+BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result, Arena* diagnostic_arena, u64 diagnostic_capacity)
 {
     CIrIncompleteArrayInitializerIndex initializer_index = {0};
     c_ir_index_incomplete_array_initializers(builder, &initializer_index);
@@ -43176,7 +43376,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
                                                  ? failure
                                                  : string_format(builder->arena, S8("{S8} for incomplete array type {u32} '{S8}'"), failure, type_index,
                                                                  candidate_name);
-                result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+                *c_ir_lower_diagnostic_slot(result, diagnostic_arena, diagnostic_capacity) = (CDiagnostic){
                     .message = string_format(builder->arena, S8("C IR lowering: {S8}"), diagnostic_message),
                     .location = failure_token < builder->preprocess.token_count ? c_ir_token_location(builder, builder->preprocess.tokens[failure_token]) : (CSourceLocation){0},
                     .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -44832,8 +45032,8 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
                 walked = false;
             }
             String8 literal_name = walked ? string_format(builder->arena, S8(".L.compoundliteral.{u32}"), program->symbols.count) : (String8){0};
-            IrSourceRange source = c_ir_source_range(c_preprocess_token_location(&preprocess, preprocess.tokens[cursor]),
-                                                     c_token_length(preprocess.spelling_base, preprocess.tokens[cursor]));
+            IrSourceRange source = c_ir_site_source_range(c_preprocess_token_site(&preprocess, preprocess.tokens[cursor]),
+                                                          c_token_length(preprocess.spelling_base, preprocess.tokens[cursor]));
             IrSymbolId literal_symbol = walked ? ir_program_add_symbol(program, (IrSymbol){
                                                                                    .name = literal_name,
                                                                                    .link_name = literal_name,
@@ -49419,7 +49619,6 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
         tokens[token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
     }
     CPreprocessResult evaluation = {
-        .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
         .target = preprocess.target,
         .dialect = preprocess.dialect,
     };
@@ -49737,9 +49936,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
-    result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
-                                            parse.array_bound_count + 2);
+    // The rows themselves wait for the first report (c_ir_lower_diagnostic_slot).
+    u64 lowering_diagnostic_capacity = 4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                       parse.array_bound_count + 2;
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -49836,7 +50035,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         program->source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
     }
     // Register the preprocess file table in order so token file indices double
-    // as IR source ids (see c_ir_source_range).
+    // as IR source ids (see c_ir_site_source_range).
     IrSourceId source_id = {0};
     if (preprocess.file_count)
     {
@@ -49897,9 +50096,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         valid_assembly &= token_index == declaration_end;
         if (!valid_assembly)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("invalid GNU global assembly declaration"),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -49917,7 +50116,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     .pointer = source,
                     .length = source_length,
                 },
-            .source_range = c_ir_source_range(declaration.location, declaration.token_count),
+            .source_range = c_ir_site_source_range(declaration.location, declaration.token_count),
         };
     }
     IrTypeId void_type = c_ir_scalar_type(&type_context, C_TYPE_VOID);
@@ -50263,7 +50462,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                                 u32 rejection_token = type_alignment->alignment_start < parse.alignment_count
                                                           ? parse.alignments[type_alignment->alignment_start].token_start
                                                           : (u32)preprocess.token_count;
-                                result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                                *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                                     .message = alias_rejection,
                                     .location = rejection_token < preprocess.token_count
                                                     ? c_preprocess_token_location(&preprocess, preprocess.tokens[rejection_token])
@@ -50579,7 +50778,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     u32 bit_offset = member->is_bit_field ? (u32)(placement.bit_position - offset * 8) : 0;
                     aggregate_type->fields[field_index] = (IrField){
                         .name = member->name,
-                        .source = c_ir_source_range(member->location, member->name.length),
+                        .source = c_ir_site_source_range(member->location, member->name.length),
                         .type = field_type_id,
                         .offset = offset,
                         .bit_offset = bit_offset,
@@ -50607,10 +50806,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 }
                 if (definition_rejection.length)
                 {
-                    result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                    *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                         .message = definition_rejection,
                         .location = definition_rejection_member < c_type->member_count
-                                        ? parse.members[c_type->member_start + definition_rejection_member].location
+                                        ? c_preprocess_site_location(&preprocess, parse.members[c_type->member_start + definition_rejection_member].location)
                                     : c_type->definition_start < preprocess.token_count
                                         ? c_preprocess_token_location(&preprocess, preprocess.tokens[c_type->definition_start])
                                         : (CSourceLocation){0},
@@ -50808,7 +51007,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (type_mapping_round == 0)
         {
-            c_ir_infer_incomplete_array_bounds(&constant_builder, &result);
+            c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);
         }
     }
     // An array element has to be addressable at its own alignment in every
@@ -50862,7 +51061,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         // where Clang's own caret points, and is a real token even for the
         // empty bound `[]`, whose token_start is the closing bracket.
         u32 bracket = parse.array_bounds[c_type->array_bound].token_start;
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
                                      element_type->layout.size, element_type->layout.alignment),
             .location = bracket && bracket <= preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[bracket - 1])
@@ -50902,9 +51101,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("static assertion expression is not an integer constant expression"),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
             };
         }
@@ -50914,9 +51113,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("static assertion expression is not a true integer constant expression"),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
             };
         }
@@ -50977,9 +51176,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                                                    : C_ENTITY_ID_INVALID;
         if (alias_target.value >= parse.entity_count || alias_target.value == declaration.entity.value)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("alias target '{S8}' is not declared in this translation unit"), binding.alias_target),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -51139,7 +51338,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+        IrSourceRange source = c_ir_site_source_range(first->location, first->name.length);
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
@@ -51162,13 +51361,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         String8 unsupported_output = c_section_attribute_unsupported_output(target);
         if (section_name.length && (unsupported_output.length || (is_thread_local && c_attribute_native_binding_target(target))))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = unsupported_output.length
                                ? string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
                                                entity->name, section_name, unsupported_output)
                                : string_format(arena, S8("thread-local '{S8}' is declared __attribute__((section(\"{S8}\"))), which cannot be placed"),
                                                entity->name, section_name),
-                .location = definition->location,
+                .location = c_preprocess_site_location(&preprocess, definition->location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
         }
@@ -51314,7 +51513,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+        IrSourceRange source = c_ir_site_source_range(first->location, first->name.length);
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
@@ -51363,7 +51562,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+        IrSourceRange source = c_ir_site_source_range(first->location, first->name.length);
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
@@ -51427,19 +51626,19 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (c_ir_type_is_void_object(program, type))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("variable '{S8}' may not have type 'void'"), entity->name),
-                .location = entity->location,
+                .location = c_preprocess_site_location(&preprocess, entity->location),
                 .kind = C_DIAGNOSTIC_INVALID_VOID_OBJECT,
             };
             continue;
         }
         if (!type_value || !type_value->layout.resolved)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
                                          c_ir_diagnostic_type_name(arena, type_value)),
-                .location = entity->location,
+                .location = c_preprocess_site_location(&preprocess, entity->location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -51483,12 +51682,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (!alignment_valid)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 // The specifier names itself when it was the thing at fault;
                 // "invalid object alignment" is left for the declarations that
                 // disagree with each other, where no single request is wrong.
                 .message = alignment_rejection.length ? alignment_rejection : S8("invalid object alignment"),
-                .location = definition->location,
+                .location = c_preprocess_site_location(&preprocess, definition->location),
                 .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
             };
             continue;
@@ -51497,7 +51696,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             .symbol = symbol,
             .initializer_symbol = IR_SYMBOL_ID_INVALID,
             .type = type,
-            .source = c_ir_source_range(definition->location, definition->name.length),
+            .source = c_ir_site_source_range(definition->location, definition->name.length),
             .initializer_kind = IR_GLOBAL_INITIALIZER_NONE,
             .alignment = object_alignment,
             .is_read_only = definition->is_constexpr || c_ir_c_type_is_read_only(&constant_builder, definition->type),
@@ -51528,12 +51727,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     constant_builder.failure_token_index = initializer_start;
                 }
             }
-            CSourceLocation failure_location = definition->location;
+            CSourceLocation failure_location = c_preprocess_site_location(&preprocess, definition->location);
             if (constant_builder.failure_token_index < preprocess.token_count)
             {
                 failure_location = c_preprocess_token_location(&preprocess, preprocess.tokens[constant_builder.failure_token_index]);
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = constant_builder.failure_message.length
                                ? string_format(arena, S8("C IR lowering: {S8}"), constant_builder.failure_message)
                                : definition->is_constexpr
@@ -51546,9 +51745,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (definition->is_constexpr && !c_ir_constexpr_initializer_valid(type_value, &global))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("constexpr initializer is not a permitted constant expression"),
-                .location = definition->location,
+                .location = c_preprocess_site_location(&preprocess, definition->location),
                 .kind = C_DIAGNOSTIC_INVALID_CONSTEXPR,
             };
             continue;
@@ -51740,9 +51939,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("C IR lowering does not yet support the type of function '{S8}'"), declaration.name),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -51839,7 +52038,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 {
                     symbol->section_name = section_name;
                 }
-                existing_function->source = c_ir_source_range(declaration.location, declaration.name.length);
+                existing_function->source = c_ir_site_source_range(declaration.location, declaration.name.length);
                 existing_function->state = IR_FUNCTION_REJECTED;
             }
             continue;
@@ -51852,9 +52051,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("C IR lowering could not resolve the type of function '{S8}'"), declaration.name),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -51863,7 +52062,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         {
             continue;
         }
-        IrSourceRange source = c_ir_source_range(declaration.location, declaration.name.length);
+        IrSourceRange source = c_ir_site_source_range(declaration.location, declaration.name.length);
         IrSymbolId symbol = declaration.entity.value < parse.entity_count ? entity_symbols[declaration.entity.value] : IR_SYMBOL_ID_INVALID;
         if (symbol.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -51897,9 +52096,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     Arena* lowering_arena = arena_create((ArenaCreation){0});
     if (!lowering_arena)
     {
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = S8("could not allocate C function lowering arena"),
-            .location = parse.declaration_count ? parse.declarations[0].location : (CSourceLocation){0},
+            .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
             .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
         };
         scratch_end(temporary);
@@ -51958,9 +52157,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             preprocess, declaration.token_start, declaration.body_start + declaration.body_token_count, &unsupported_token_index);
         if (unsupported_construct.length)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("in function '{S8}': {S8}"), declaration.name, unsupported_construct),
-                .location = unsupported_token_index < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[unsupported_token_index]) : declaration.location,
+                .location = unsupported_token_index < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[unsupported_token_index]) : c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;
@@ -51969,10 +52168,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (!signatures[declaration_index].body_supported)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message =
                     string_format(arena, S8("C IR lowering does not yet support the parameter or return value types of function '{S8}'"), declaration.name),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;
@@ -52039,9 +52238,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {
             scratch_end(lowering_temporary);
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("C function body is too large to lower"),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;
@@ -52293,14 +52492,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0) ||
             !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa))
         {
-            CSourceLocation failure_location = declaration.location;
+            CSourceLocation failure_location = c_preprocess_site_location(&preprocess, declaration.location);
             String8 failure_token = {0};
             if (builder.failure_token_index < preprocess.token_count)
             {
                 failure_location = c_preprocess_token_location(&preprocess, preprocess.tokens[builder.failure_token_index]);
                 failure_token = c_token_spelling(preprocess.spelling_base, preprocess.tokens[builder.failure_token_index]);
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = builder.failure_message.length ? string_format(arena, S8("in function '{S8}': {S8}"), declaration.name, builder.failure_message)
                            : failure_token.length
                                ? string_format(arena, S8("in function '{S8}': unsupported C function-body statement or expression near '{S8}'"),
@@ -52316,9 +52515,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             continue;
         }
         function->state = IR_FUNCTION_LOWERED;
-        function->debug_local_count = builder.local_count;
-        function->debug_locals = arena_allocate(arena, IrDebugLocal, function->debug_local_count);
-        for (u32 local_index = 0; local_index < builder.local_count; local_index += 1)
+        function->debug_local_count = options.omit_debug_locals ? 0 : builder.local_count;
+        function->debug_locals = options.omit_debug_locals ? 0 : arena_allocate(arena, IrDebugLocal, function->debug_local_count);
+        IR_DIAGNOSTIC_CENSUS_RECORD(DEBUG_LOCALS, function->debug_local_count);
+        for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
         {
             CIntegerIrLocal* local = builder.locals + local_index;
             function->debug_locals[local_index] = (IrDebugLocal){
@@ -52365,13 +52565,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (!target_defined_here || alias_defined_here)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = alias_defined_here
                                ? string_format(arena, S8("'{S8}' is both defined here and aliased to '{S8}'"), parse.entities[entity_index].name,
                                                parse.entities[alias_target.value].name)
                                : string_format(arena, S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
                                                parse.entities[entity_index].name, parse.entities[alias_target.value].name),
-                .location = parse.entities[entity_index].location,
+                .location = c_preprocess_site_location(&preprocess, parse.entities[entity_index].location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -52412,11 +52612,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (!initializer_target)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("'{S8}' is declared __attribute__(({S8})), which {S8} has no initializer array for"), declaration.name,
                                          is_constructor ? S8("constructor") : S8("destructor"),
                                          target.cpu_arch == CPU_ARCH_WASM64 ? S8("wasm64") : S8("eBPF")),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
@@ -52451,10 +52651,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                                : 0;
         if (symbol && symbol->section_name.length)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
                                          declaration.name, symbol->section_name, section_unsupported_output),
-                .location = declaration.location,
+                .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
         }
@@ -52467,7 +52667,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     // is the same one, only the spelling that reaches it differs.
     if (over_aligned_array_name.bracket_token_plus_one && over_aligned_array_name.bracket_token_plus_one <= preprocess.token_count)
     {
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
                                      over_aligned_array_name.element_size, over_aligned_array_name.element_alignment),
             .location = c_preprocess_token_location(&preprocess, preprocess.tokens[over_aligned_array_name.bracket_token_plus_one - 1]),
