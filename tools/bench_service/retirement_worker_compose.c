@@ -633,6 +633,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* 
              c == '-';
     }
     u64 size = 0;
+    ok = ok && (json->nodes[bytes].length == 1u || json->nodes[bytes].text[0] != '0');
     for (u32 index = 0; ok && index < json->nodes[bytes].length; index += 1)
     {
         char c = json->nodes[bytes].text[index];
@@ -750,39 +751,68 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_held(int descriptor, u64 
     return ok;
 }
 
+/* One listed evidence file's bytes, from its held descriptor or the
+ * installed evidence directory, when they are exactly the listed size and
+ * SHA-256: BQ_OK with *output malloc'd, else BQ_SOURCE_MISMATCH (held) or
+ * BQ_RECIPE_MISMATCH (installed) and nothing kept. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_read(BqRetirementWorkerEvidence const* item, int evidence,
+    int const held[2], u8** output)
+{
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    u8* bytes = NULL;
+    u32 length = 0;
+    bool read = item->held ? bq_retirement_worker_evidence_held(held[item->held - 1u], item->bytes, &bytes) :
+                bq_retirement_reference_read_installed(evidence, item->path, (u32)BQ_WORKER_BUNDLE_FILE_CAP, &bytes,
+                                                       &length, digest, NULL);
+    if (read && item->held)
+    {
+        length = (u32)item->bytes;
+        bq_digest((char const*)bytes, length, (char8*)digest);
+    }
+    BqError result = read && length == item->bytes && !strcmp(digest, item->sha256) ? BQ_OK :
+                     item->held ? BQ_SOURCE_MISMATCH : BQ_RECIPE_MISMATCH;
+    if (result != BQ_OK)
+    {
+        free(bytes);
+        bytes = NULL;
+    }
+    *output = bytes;
+    return result;
+}
+
 /* Each listed evidence file as a new, read-only result-root file under its
  * listed name: the subjects' binaries from the held descriptors (baseline,
- * candidate), every other file from the installed evidence directory. The
- * bytes are read and hashed first and must be exactly the listed size and
- * SHA-256, else nothing is written for that file and the publication stops:
- * a changed installed file is BQ_RECIPE_MISMATCH, a changed held binary
- * BQ_SOURCE_MISMATCH, a write failure BQ_IO. Files published before a
- * refusal stay (the campaign then fails before MEASURED). */
+ * candidate), every other file from the installed evidence directory. Every
+ * source is read and verified first (bq_retirement_worker_evidence_read),
+ * then each is read, verified again and written, so a refused source leaves
+ * no evidence file: a changed installed file is BQ_RECIPE_MISMATCH, a changed
+ * held binary BQ_SOURCE_MISMATCH, a write failure BQ_IO; on any refusal of
+ * the second pass the files it wrote are unlinked again. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_publish(BqRetirementWorkerEvidenceList const* list,
     int evidence, int const held[2], int result_root)
 {
     BqError result = list && held && evidence >= 0 && result_root >= 0 ? BQ_OK : BQ_IO;
     for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
     {
-        BqRetirementWorkerEvidence const* item = &list->items[index];
-        char digest[SHA256_HEX_CAPACITY] = {0};
         u8* bytes = NULL;
-        u32 length = 0;
-        bool read = item->held ? bq_retirement_worker_evidence_held(held[item->held - 1u], item->bytes, &bytes) :
-                    bq_retirement_reference_read_installed(evidence, item->path, (u32)BQ_WORKER_BUNDLE_FILE_CAP, &bytes,
-                                                           &length, digest, NULL);
-        if (read && item->held)
-        {
-            length = (u32)item->bytes;
-            bq_digest((char const*)bytes, length, (char8*)digest);
-        }
-        if (!read || length != item->bytes || strcmp(digest, item->sha256))
-            result = item->held ? BQ_SOURCE_MISMATCH : BQ_RECIPE_MISMATCH;
-        if (result == BQ_OK &&
-            !bq_retirement_worker_file_write(result_root, item->path, (char const*)bytes, length, NULL))
-            result = BQ_IO;
+        result = bq_retirement_worker_evidence_read(&list->items[index], evidence, held, &bytes);
         free(bytes);
     }
+    u32 written = 0;
+    for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
+    {
+        BqRetirementWorkerEvidence const* item = &list->items[index];
+        u8* bytes = NULL;
+        result = bq_retirement_worker_evidence_read(item, evidence, held, &bytes);
+        if (result == BQ_OK &&
+            !bq_retirement_worker_file_write(result_root, item->path, (char const*)bytes, item->bytes, NULL))
+            result = BQ_IO;
+        free(bytes);
+        written += result == BQ_OK;
+    }
+    for (u32 index = 0; result != BQ_OK && list && result_root >= 0 && index < written; index += 1)
+        unlinkat(result_root, list->items[index].path, 0);
+    if (result != BQ_OK && written && result_root >= 0) fsync(result_root);
     return result;
 }
 

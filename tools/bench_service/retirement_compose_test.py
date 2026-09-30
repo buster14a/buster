@@ -71,6 +71,7 @@ the prior closure and the binding live beside the store files.
 No fixture here is service admission or performance evidence.
 """
 
+import collections
 from contextlib import closing, contextmanager
 import copy
 import hashlib
@@ -1125,28 +1126,108 @@ def _worker_unit_support_output(evidence, record):
 
 
 # The real validator's refusals of the job-82 fixture that are not about
-# the evidence the binding names (checked against the validator's messages;
-# each must still occur, so a fixed one is removed here):
+# the evidence the binding names. Each waiver matches one call site's exact
+# message and a predicate over that call's own values (the validator's frame
+# at its _fail call), and must fire exactly its count: any other refusal at
+# the same site, or a fixed gap, fails WorkerUnitEvidenceTests.
+WORKER_UNIT_STAND_IN_METRICS = "stand-in-batch.metrics"
+
+
+def _gap_metrics_reuse(frame, context):
+    """Every batch's metrics bytes repeat because the stand-in compilers
+    (retirement_stand_in_compiler.h) copy the one tests/batch.metrics record
+    into every timed and untimed batch; waived only for that record."""
+    return frame["metrics_artifact"]["sha256"] == context["stand_in_metrics_sha256"]
+
+
+def _gap_header(frame, _context):
+    """That record names allocator=none and target=x86_64-linux whatever the
+    batch: timed groups of the three other allocators, and the untimed
+    contract's cross-target (aarch64-unknown-linux-gnu) object groups, fail
+    the header check. Waived only when every other header field matches."""
+    header = dict(frame["header"])
+    configuration = frame["contract"]["configuration"]
+    expected_target = binding.TARGET_METRICS_NAMES[frame["target"]]
+    if (header["allocator"], header["target"]) == (configuration["allocator"], expected_target):
+        return False
+    header.update(allocator=configuration["allocator"], target=expected_target)
+    frozen, statuses, exit_status, elapsed = (frame["frozen_inputs"], frame["statuses"], frame["exit_status"],
+                                              frame["elapsed_ns"])
+    return not (header["schema"] != binding.CC_METRICS_SCHEMA
+                or header["inputs"] != len(frozen) or header["records"] != len(frozen)
+                or any(header[status] != statuses.count(status) for status in binding.CC_INPUT_STATUSES)
+                or header["not_run"] or header["prebuilt"]
+                or header["error"] != frame["first_error"] or header["exit_status"] != exit_status
+                or header["action"] != "object" or header["compile_jobs"] != 1
+                or header["compilation_workers"] != 1 or header["intervals"] != "serial"
+                or header["keep_going"] != 1 or header["function_sizes"] not in (0, 1) or not header["wall_ns"]
+                or (elapsed is not None and header["wall_ns"] > elapsed))
+
+
+def _gap_runtime_executable(frame, _context):
+    """Lane D records a runtime launch's executable as the side's compiler
+    binary (tp_retirement_measurement_run: executable->sha256) where the
+    validator binds the row's program artifact; waived only for a runtime
+    invocation whose output and command match and whose executable is
+    exactly that binary (lane D's codex/881-runtime-identity fixes it)."""
+    value = frame["value"]
+    binary = frame["binding"]["subjects"][frame["variant"]]["binary"]["sha256"]
+    return (not frame["compiler"] and value["kind"] == "runtime" and value["executable_sha256"] == binary
+            and binary != frame["expected_binary"] and value["output_sha256"] == frame["expected_output"]
+            and value["command_sha256"] == frame["expected_command"])
+
+
+def _gap_statistics_path(frame, _context):
+    """The validator pins measurement.statistics_implementation to
+    tools/throughput/retirement_stats.h, which the flat result root
+    (BQ-BUNDLE-V1) cannot hold; the context names the flat evidence entry of
+    the same bytes (lane F's replay maps it, #1995)."""
+    artifact = frame["binding"]["measurement"]["statistics_implementation"]
+    return (artifact["path"] == WORKER_UNIT_EVIDENCE_PREFIX + "retirement_stats.h"
+            and artifact["sha256"] == _sha256_file(frame["trusted_statistics_source"]))
+
+
+def _gap_adapter(frame, context):
+    """The fixture's composer adapter is the preparation runner's structural
+    stand-in (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
+    retirement-replay the validator rebuilds and re-runs; waived only when
+    the downloaded result is that stand-in's composed output."""
+    return Path(frame["trusted_result"]).read_bytes() == context["composed_replay"]
+
+
+# (name, exact message pattern, predicate, count) per waived call site.
 WORKER_UNIT_KNOWN_GAPS = (
-    # The stand-in compilers (retirement_stand_in_compiler.h) copy one fixed
-    # tests/batch.metrics record into every timed and untimed batch, so every
-    # batch's metrics bytes repeat ...
-    "reuses another batch's per-input metrics content",
-    # ... and name allocator=none whatever the group's allocator.
-    "header is not one serial continue-on-failure batch of the frozen inputs",
-    # Lane D records a runtime launch's executable as the side's compiler
-    # binary (tp_retirement_measurement_run: executable->sha256), where the
-    # validator binds the row's program artifact.
-    "execution invocation binary, command, or oracle output is mismatched",
-    # The validator pins measurement.statistics_implementation to the path
-    # tools/throughput/retirement_stats.h, which the flat result root
-    # (BQ-BUNDLE-V1) cannot hold; the context names the flat evidence entry.
-    "independent replay must bind the reviewed retirement_stats.h source",
-    # The fixture's composer adapter is this runner's structural stand-in
-    # (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
-    # retirement-replay the validator rebuilds and re-runs.
-    "C statistics adapter replay differs from independently downloaded output",
+    ("timed metrics reuse", r"batch invocation reuses another batch's per-input metrics content",
+     _gap_metrics_reuse, 3903),
+    ("untimed metrics reuse", r"untimed batch reuses another batch's per-input metrics content",
+     _gap_metrics_reuse, 576),
+    ("timed header", r"per-input metrics \d+ header is not one serial continue-on-failure batch of the frozen inputs",
+     _gap_header, 2928),
+    ("untimed header",
+     r"untimed batch metrics \d+ header is not one serial continue-on-failure batch of the frozen inputs",
+     _gap_header, 576),
+    ("runtime executable", r"execution invocation binary, command, or oracle output is mismatched",
+     _gap_runtime_executable, 488),
+    ("statistics path", r"independent replay must bind the reviewed retirement_stats\.h source",
+     _gap_statistics_path, 1),
+    ("stand-in adapter", r"#619 C statistics adapter replay differs from independently downloaded output",
+     _gap_adapter, 1),
 )
+
+
+class _Waiver:
+    """binding._fail replaced: a known gap whose predicate holds is counted
+    and skipped; every other refusal raises as before."""
+
+    def __init__(self, real_fail, context):
+        self.real_fail, self.context = real_fail, context
+        self.counts = collections.Counter()
+
+    def __call__(self, message):
+        gap = next((gap for gap in WORKER_UNIT_KNOWN_GAPS if re.fullmatch(gap[1], message)), None)
+        if gap is None or not gap[2](sys._getframe(1).f_locals, self.context):
+            self.real_fail(message)
+        self.counts[gap[0]] += 1
 
 
 class WorkerUnitEvidenceTests(unittest.TestCase):
@@ -1172,8 +1253,10 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
 
     The whole validate() still refuses the fixture for reasons outside the
     evidence (WORKER_UNIT_KNOWN_GAPS): it stops at the first, and with
-    exactly those refusals waived it accepts, so any other gap (evidence or
-    not) fails here. Skipped without the exported result.
+    exactly those refusals waived (each by its call site's predicate, each
+    firing exactly its count) it accepts, so any other gap, evidence or not,
+    fails here; a changed frozen compile command is refused even waived.
+    Skipped without the exported result.
     """
 
     @classmethod
@@ -1297,28 +1380,84 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
                 target.write_bytes(original)
             # Unwaived, the first refusal is the first known gap: every
             # evidence and execution-receipt check before it passed.
-            with self.assertRaisesRegex(ValueError, re.escape(WORKER_UNIT_KNOWN_GAPS[0])):
+            with self.assertRaisesRegex(ValueError, WORKER_UNIT_KNOWN_GAPS[0][1]):
                 self.validate(path, record)
-            # With exactly the known gaps waived, the validator accepts; each
-            # waived gap still occurs.
-            real_fail, waived = binding._fail, set()
-
-            def waive(message):
-                gap = next((gap for gap in WORKER_UNIT_KNOWN_GAPS if gap in message), None)
-                if gap is None:
-                    real_fail(message)
-                waived.add(gap)
-
-            with mock.patch.object(binding, "_fail", waive):
+            # With exactly the known gaps waived, the validator accepts, each
+            # gap firing exactly its count.
+            context = {"stand_in_metrics_sha256": _sha256_file(self.export / WORKER_UNIT_STAND_IN_METRICS),
+                       "composed_replay": (self.evidence / "retirement-statistics-replay.json").read_bytes()}
+            waiver = _Waiver(binding._fail, context)
+            with mock.patch.object(binding, "_fail", waiver):
                 result = self.validate(path, record)
-            self.assertEqual(waived, set(WORKER_UNIT_KNOWN_GAPS))
+            self.assertEqual(dict(waiver.counts), {name: count for name, _message, _predicate, count
+                                                   in WORKER_UNIT_KNOWN_GAPS})
             self.assertEqual(result["proof"], "evidence-and-receipts-checked-without-independent-git")
             for check in ("evidence_checked", "execution_checked", "invocations_checked", "bundle_checked",
                           "provenance_checked", "support_checked"):
                 self.assertTrue(result[check], check)
-            # Waived or not, another trust root is refused.
-            with mock.patch.object(binding, "_fail", waive), self.assertRaises(ValueError):
+            # The waivers hide nothing else: another trust root, and one frozen
+            # baseline compile command (every compile invocation of that group
+            # then fails the waived invocation site), are refused.
+            with mock.patch.object(binding, "_fail", _Waiver(binding._fail, context)), \
+                    self.assertRaises(ValueError):
                 self.validate(path, record, trusted="f" * 64)
+            real_plan = binding._check_execution_plan
+
+            def plan(*arguments, **keywords):
+                checked, groups, rows, untimed = real_plan(*arguments, **keywords)
+                first = sorted(groups)[0]
+                groups = dict(groups)
+                groups[first] = dict(groups[first], baseline=dict(groups[first]["baseline"], command_sha256="f" * 64))
+                return checked, groups, rows, untimed
+
+            with mock.patch.object(binding, "_fail", _Waiver(binding._fail, context)), \
+                    mock.patch.object(binding, "_check_execution_plan", plan), \
+                    self.assertRaisesRegex(ValueError, "binary, command, or oracle output is mismatched"):
+                self.validate(path, record)
+
+
+
+class WorkerUnitWaiverTests(unittest.TestCase):
+    """WORKER_UNIT_KNOWN_GAPS' predicates hold for their gap and for nothing
+    else at the same call site (no exported result needed)."""
+
+    def test_waiver_predicates_are_narrow(self):
+        # Each predicate over the frames its call site would pass: the known
+        # gap holds, and any other difference at the same site does not.
+        stand_in = "a" * 64
+        context = {"stand_in_metrics_sha256": stand_in, "composed_replay": b"stand-in\n"}
+        self.assertTrue(_gap_metrics_reuse({"metrics_artifact": {"sha256": stand_in}}, context))
+        self.assertFalse(_gap_metrics_reuse({"metrics_artifact": {"sha256": "b" * 64}}, context))
+        header = {"schema": binding.CC_METRICS_SCHEMA, "inputs": 1, "records": 1, "ok": 1, "rejected": 0,
+                  "failed": 0, "not_run": 0, "prebuilt": 0, "error": "driver.none", "exit_status": 0,
+                  "action": "object", "target": "x86_64-linux", "allocator": "none", "compile_jobs": 1,
+                  "compilation_workers": 1, "intervals": "serial", "keep_going": 1, "function_sizes": 0,
+                  "wall_ns": 1001}
+
+        def frame(allocator="fast", target="aarch64-unknown-linux-gnu", **changed):
+            return {"header": dict(header, **changed), "contract": {"configuration": {"allocator": allocator}},
+                    "target": target, "frozen_inputs": [{}], "statuses": ["ok"], "exit_status": 0,
+                    "elapsed_ns": 2000, "first_error": "driver.none"}
+
+        self.assertTrue(_gap_header(frame(), context))
+        self.assertTrue(_gap_header(frame(allocator="none"), context))
+        self.assertTrue(_gap_header(frame(target=binding.NATIVE_TIMED_TARGET), context))
+        self.assertFalse(_gap_header(frame(allocator="none", target=binding.NATIVE_TIMED_TARGET), context))
+        for field, value in (("inputs", 2), ("exit_status", 1), ("keep_going", 0), ("wall_ns", 3000),
+                             ("error", "driver.io"), ("intervals", "parallel")):
+            self.assertFalse(_gap_header(frame(**{field: value}), context), field)
+        subjects = {"baseline": {"binary": {"sha256": "c" * 64}}}
+        runtime = {"value": {"kind": "runtime", "executable_sha256": "c" * 64, "output_sha256": "d" * 64,
+                             "command_sha256": "e" * 64},
+                   "compiler": False, "variant": "baseline", "binding": {"subjects": subjects},
+                   "expected_binary": "f" * 64, "expected_output": "d" * 64, "expected_command": "e" * 64}
+        self.assertTrue(_gap_runtime_executable(runtime, context))
+        for changed in ({"compiler": True}, {"expected_output": "0" * 64}, {"expected_command": "0" * 64},
+                        {"expected_binary": "c" * 64},
+                        {"value": dict(runtime["value"], executable_sha256="1" * 64)},
+                        {"value": dict(runtime["value"], kind="compiler")}):
+            self.assertFalse(_gap_runtime_executable(dict(runtime, **changed), context), changed)
+
 
 if __name__ == "__main__":
     if len(sys.argv) not in (2, 3):

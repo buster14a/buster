@@ -1494,17 +1494,23 @@ BUSTER_GLOBAL_LOCAL int tp_compose_prior(TpComposeState* state)
             valid = 0;
     }
     valid = valid && plan == 1 && post == 1 && result_plan == 1 && total == request->declaration->prior_bytes;
-    /* The external closure: rehashed like the prior, never a store file;
-     * the seal refuses a repeated name or path. */
-    valid = valid && (!request->closure_count || request->closure);
+    /* The external closure: rehashed like the prior, never a store file,
+     * never a workflow phase, and no name or path repeating a prior or an
+     * earlier closure entry. */
+    valid = valid && request->closure_count <= TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES &&
+            (!request->closure_count || request->closure);
     for (unsigned i = 0; valid && i < request->closure_count; ++i)
     {
         TpRetirementComposeClosure const* entry = request->closure + i;
         valid = tp_compose_printable(entry->name, TP_RETIREMENT_COMPOSE_NAME_BYTES) && entry->bytes &&
+                strncmp(entry->name, "workflow.phases.", strlen("workflow.phases.")) &&
                 tp_compose_find(state, entry->path) == TP_COMPOSE_NONE &&
                 tp_compose_evidence_file(state->store->root, entry->path, entry->bytes, 0, entry->sha256, NULL, NULL,
-                                         NULL) &&
-                strncmp(entry->name, "workflow.phases.", strlen("workflow.phases."));
+                                         NULL);
+        for (unsigned j = 0; valid && j < request->prior_count; ++j)
+            valid = strcmp(entry->name, request->prior[j].name) && strcmp(entry->path, request->prior[j].path);
+        for (unsigned j = 0; valid && j < i; ++j)
+            valid = strcmp(entry->name, request->closure[j].name) && strcmp(entry->path, request->closure[j].path);
     }
     return valid;
 }
@@ -2936,13 +2942,16 @@ BUSTER_GLOBAL_LOCAL int tp_compose_store_entry_add(TpComposeState* state, TpComp
 BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    unsigned capacity = request->prior_count + request->closure_count + request->transcript_count +
-                        request->metrics_count +
-                        request->untimed_metrics_count + request->sample_counts[0] + request->sample_counts[1] +
-                        state->partitions + state->series_shard_count + 8;
-    TpComposeEntry* entries = (TpComposeEntry*)tp_retirement_compose_allocate(state->arena,
-                                  (uint64_t)capacity * sizeof(TpComposeEntry));
-    unsigned* order = (unsigned*)tp_retirement_compose_allocate(state->arena, (uint64_t)capacity * 2 * sizeof(unsigned));
+    /* Summed in 64 bits: every count is bounded by its own stage, and the
+     * total must stay far below the index width. */
+    uint64_t total = (uint64_t)request->prior_count + request->closure_count + request->transcript_count +
+                     request->metrics_count + request->untimed_metrics_count + request->sample_counts[0] +
+                     request->sample_counts[1] + state->partitions + state->series_shard_count + 8u;
+    unsigned capacity = total <= UINT32_MAX / 4u ? (unsigned)total : 0;
+    TpComposeEntry* entries = capacity ? (TpComposeEntry*)tp_retirement_compose_allocate(state->arena,
+                                  (uint64_t)capacity * sizeof(TpComposeEntry)) : NULL;
+    unsigned* order = capacity ? (unsigned*)tp_retirement_compose_allocate(state->arena,
+                                  (uint64_t)capacity * 2 * sizeof(unsigned)) : NULL;
     unsigned count = 0;
     int valid = entries && order;
     for (unsigned i = 0; valid && i < request->prior_count; ++i)

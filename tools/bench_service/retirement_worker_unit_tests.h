@@ -1405,8 +1405,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_copy_tree(char const* from, char co
 /* The composed job-82 result for the Python checks
  * (retirement_compose_test.py, retirement_export_replay_real_test.py):
  * `retirement-worker-unit-result/` beside this runner, replaced, holding
- * `result/` (the result root, with every evidence file the binding names)
- * and `authority/` (the producer's authority and context chain). */
+ * `result/` (the result root, with every evidence file the binding names),
+ * `authority/` (the producer's authority and context chain) and
+ * `stand-in-batch.metrics` (the one metrics record every stand-in batch
+ * writes, whose repetition the Python checks waive by digest). */
 BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_export(BqPrepOracleFixture const* fixture,
     BqPrepWorkerUnitComposed const* composed, BqJob const* job)
 {
@@ -1423,6 +1425,12 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_export(BqPrepOracleFixture const* f
     snprintf(authority, sizeof(authority), "%s/authority", directory);
     ok = ok && mkdir(directory, 0700) == 0 && bq_prep_worker_unit_copy_tree(composed->result_root, result) &&
          bq_prep_worker_unit_copy_tree(source, authority);
+    char metrics_path[4200];
+    u32 metrics_length = 0;
+    char* metrics = ok ? bq_prep_test_oracle_output(0, &metrics_length) : NULL;
+    snprintf(metrics_path, sizeof(metrics_path), "%s/stand-in-batch.metrics", directory);
+    ok = ok && metrics && bq_prep_test_write_bytes(metrics_path, metrics, metrics_length);
+    free(metrics);
     /* The #511 validator accepts the written binding structurally here; the
      * Python checks run it over the evidence (WorkerUnitEvidenceTests). */
     char binding[4300];
@@ -1458,10 +1466,9 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_copy(int installed, BqReti
 }
 
 /* One publication of `list` from `evidence` (a directory path) into a new
- * result directory: its result, and whether the file named `absent` (when
- * not NULL) was left unwritten. */
+ * result directory: its result, and whether it left the directory empty. */
 BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_evidence_run(BqRetirementWorkerEvidenceList const* list,
-    char const* evidence, int const held[2], char const* absent, bool* unwritten)
+    char const* evidence, int const held[2], bool* empty)
 {
     char root[] = "/tmp/bq-worker-unit-evidence-result-XXXXXX";
     bool made = mkdtemp(root) != NULL;
@@ -1469,9 +1476,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_evidence_run(BqRetirementWorkerE
     int directory = open(evidence, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     BqError result = result_root >= 0 && directory >= 0 ?
                      bq_retirement_worker_evidence_publish(list, directory, held, result_root) : BQ_IO;
-    struct stat info = {0};
-    if (unwritten) *unwritten = absent && result_root >= 0 &&
-                                fstatat(result_root, absent, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+    DIR* listing = empty ? opendir(root) : NULL;
+    u32 entries = 0;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+        entries += strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..");
+    if (listing) closedir(listing);
+    if (empty) *empty = listing && !entries;
     /* A complete publication wrote every listed file at its listed digest. */
     for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
     {
@@ -1487,15 +1497,52 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_evidence_run(BqRetirementWorkerE
     return result;
 }
 
+/* The installed context with `count` more requested-work items (canonical:
+ * each item's keys and its artifact's keys in sorted order), each a distinct
+ * evidence path, inserted at the head of requested_work.items. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed, u32 length, u32 count,
+    BqRetirementWorkerBindingContext* grown)
+{
+    static char const marker[] = "\nrequested_work={\"closure\":";
+    char const* line = strstr(installed, marker);
+    char const* items = line ? strstr(line, "\"items\":[") : NULL;
+    char const* end = line ? strchr(line + 1, '\n') : NULL;
+    bool ok = items && end && items < end;
+    size_t at = ok ? (size_t)(items - installed) + strlen("\"items\":[") : 0;
+    char item[256];
+    size_t item_length = 0;
+    grown->bytes = ok ? malloc(length + (size_t)count * sizeof(item) + 1u) : NULL;
+    ok = ok && grown->bytes;
+    size_t used = at;
+    if (ok) memcpy(grown->bytes, installed, at);
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        int written = snprintf(item, sizeof(item), "{\"artifact\":{\"bytes\":1,\"path\":\""
+                               BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "extra-%02u\",\"sha256\":\"%064u\"},"
+                               "\"kind\":\"workloads\",\"name\":\"extra-%02u\"},", index, 0u, index);
+        ok = written > 0 && (size_t)written < sizeof(item);
+        item_length = ok ? (size_t)written : 0;
+        if (ok) memcpy(grown->bytes + used, item, item_length);
+        used += item_length;
+    }
+    if (ok)
+    {
+        memcpy(grown->bytes + used, installed + at, length - at + 1u);
+        grown->length = (u32)(used + length - at);
+    }
+    return ok;
+}
+
 /* (#881 P4) The evidence the binding context names: the installed context
  * lists all 39 files of the #511 record under their validator names, the
  * store plan's measure gives the same totals, and the publication from the
  * installed directory and job 81's frozen binaries (the held pair's bytes)
- * writes each at its listed digest. Refused, with nothing written under the
- * refused name: swapped held binaries (BQ_SOURCE_MISMATCH), an installed
- * file with one byte changed and a missing one (BQ_RECIPE_MISMATCH), and a
- * context naming a path outside the evidence prefix or with a slash, at
- * listing. */
+ * writes each at its listed digest. Refused, with no evidence file written
+ * at all: swapped held binaries (BQ_SOURCE_MISMATCH), an installed file with
+ * one byte changed and a missing one (BQ_RECIPE_MISMATCH). Refused at
+ * listing: a context naming a path outside the evidence prefix or with a
+ * slash, a byte count with a leading zero, and requested-work items beyond
+ * BQ_RETIREMENT_WORKER_EVIDENCE_CAP (the cap itself lists). */
 BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixture* fixture,
     BqRetirementWorkerUnitSeams const* seams, BqJob const* reference)
 {
@@ -1542,10 +1589,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
     BQ_PREP_CHECK(directory >= 0);
     if (directory >= 0) close(directory);
     bool unwritten = false;
-    BQ_PREP_CHECK(ready && bq_prep_worker_unit_evidence_run(list, evidence, held, NULL, NULL) == BQ_OK);
+    BQ_PREP_CHECK(ready && bq_prep_worker_unit_evidence_run(list, evidence, held, NULL) == BQ_OK);
     int swapped[2] = {held[1], held[0]};
-    BQ_PREP_CHECK(ready && bq_prep_worker_unit_evidence_run(list, evidence, swapped,
-                                                            list->items[binaries[0]].path, &unwritten) ==
+    BQ_PREP_CHECK(ready && bq_prep_worker_unit_evidence_run(list, evidence, swapped, &unwritten) ==
                            BQ_SOURCE_MISMATCH && unwritten);
     /* An installed receipt changed by one byte, then one missing. */
     char const* receipt = NULL;
@@ -1560,14 +1606,14 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
         BQ_PREP_CHECK(made &&
                       bq_prep_worker_unit_evidence_copy(installed_evidence, list, scratch, mode ? NULL : receipt,
                                                         mode ? receipt : NULL) &&
-                      bq_prep_worker_unit_evidence_run(list, scratch, held, receipt, &unwritten) ==
-                          BQ_RECIPE_MISMATCH &&
+                      bq_prep_worker_unit_evidence_run(list, scratch, held, &unwritten) == BQ_RECIPE_MISMATCH &&
                       unwritten);
         if (made && chmod(scratch, 0700) == 0) bq_prep_test_cleanup(scratch);
     }
     BQ_PREP_CHECK(receipt && installed_evidence >= 0);
     if (installed_evidence >= 0) close(installed_evidence);
-    /* A path outside the prefix, and one with a slash, refuse at listing. */
+    /* A path outside the prefix and one with a slash refuse at listing. (A
+     * leading zero never parses: canonical JSON has none.) */
     static char const* const finds[] = {"\"" BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "harness\"",
                                         "\"" BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "harness\""};
     static char const* const replacements[] = {"\"retirement-evidencx-harness\"", "\"retirement-evidence-harnes/\""};
@@ -1584,6 +1630,21 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
                       bq_retirement_worker_binding_parse(scratch_arena, &edited) &&
                       !bq_retirement_worker_evidence_list(&edited, list));
         bq_retirement_worker_binding_release(&edited);
+        if (scratch_arena) arena_destroy(scratch_arena, 1);
+    }
+    /* Requested-work items up to the cap list; one more refuses. */
+    u32 extra = BQ_RETIREMENT_WORKER_EVIDENCE_CAP - BQ_PREP_WORKER_UNIT_EVIDENCE;
+    for (u32 count = extra; installed && count <= extra + 1u; count += 1)
+    {
+        Arena* scratch_arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30,
+                                                             .flags = {.no_pool = 1}});
+        BqRetirementWorkerBindingContext grown = {0};
+        bool made = scratch_arena && bq_prep_worker_unit_evidence_grow(installed, length, count, &grown);
+        bool listed_grown = made && bq_retirement_worker_binding_parse(scratch_arena, &grown) &&
+                            bq_retirement_worker_evidence_list(&grown, list);
+        BQ_PREP_CHECK(made && listed_grown == (count == extra) &&
+                      (!listed_grown || list->count == BQ_RETIREMENT_WORKER_EVIDENCE_CAP));
+        bq_retirement_worker_binding_release(&grown);
         if (scratch_arena) arena_destroy(scratch_arena, 1);
     }
     for (u32 side = 0; side < 2; side += 1)
@@ -2622,9 +2683,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_plan(int root, TpRetirementStoredFile* f
  * worker-phase-N receipts (BQ_RETIREMENT_WORKER_RESULT_ENTRIES) beside D's
  * five documents, so the last payload file that fits leaves no entry and one
  * more is refused; the binding context's evidence files take one entry each
- * (the same campaign with them no longer fits), and more than
- * BQ_RETIREMENT_WORKER_EVIDENCE_CAP of them, or more bytes than their files'
- * cap, refuse. */
+ * (the same campaign with them no longer fits): the cap's worth is planned
+ * and one more is refused. */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_store_plan(void)
 {
     TpRetirementCampaignCapacity capacity = bq_prep_worker_plan_capacity(1);
@@ -2714,20 +2774,25 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_store_plan(void)
                   plan.entries == BQ_WORKER_BUNDLE_ENTRY_CAP && plan.remaining_entries == 0);
     BQ_PREP_CHECK(planned && !bq_prep_worker_plan(root, files, &over, &layout, &declared, 0, 0, &plan) &&
                   !plan.entries);
-    /* Evidence entries are external entries of the plan: 39 of them leave
-     * room for 39 fewer payload files, and the cap and byte bound refuse. */
-    TpRetirementCampaignCapacity evidenced = bq_prep_worker_plan_capacity(fitting - 39u);
-    TpRetirementCampaignCapacity crowded = bq_prep_worker_plan_capacity(fitting - 38u);
-    BQ_PREP_CHECK(planned &&
-                  bq_prep_worker_plan(root, files, &evidenced, &layout, &declared, 39u, 39u * 4096u, &plan) &&
-                  plan.entries == BQ_WORKER_BUNDLE_ENTRY_CAP &&
-                  plan.external_entries ==
-                      BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS + 39u);
-    BQ_PREP_CHECK(planned && !bq_prep_worker_plan(root, files, &crowded, &layout, &declared, 39u, 39u * 4096u, &plan));
+    /* Evidence entries are external entries of the plan: 39 of them (the
+     * fixture's) leave room for 39 fewer payload files; exactly
+     * BQ_RETIREMENT_WORKER_EVIDENCE_CAP plan and one more refuses. */
+    u32 const evidence_counts[] = {39u, BQ_RETIREMENT_WORKER_EVIDENCE_CAP};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(evidence_counts); index += 1)
+    {
+        u32 count = evidence_counts[index];
+        TpRetirementCampaignCapacity evidenced = bq_prep_worker_plan_capacity(fitting - count);
+        TpRetirementCampaignCapacity crowded = bq_prep_worker_plan_capacity(fitting - count + 1u);
+        BQ_PREP_CHECK(planned &&
+                      bq_prep_worker_plan(root, files, &evidenced, &layout, &declared, count, count * 4096u, &plan) &&
+                      plan.entries == BQ_WORKER_BUNDLE_ENTRY_CAP &&
+                      plan.external_entries ==
+                          BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS + count);
+        BQ_PREP_CHECK(planned &&
+                      !bq_prep_worker_plan(root, files, &crowded, &layout, &declared, count, count * 4096u, &plan));
+    }
     BQ_PREP_CHECK(planned && !bq_prep_worker_plan(root, files, &capacity, &layout, &declared,
                                                   BQ_RETIREMENT_WORKER_EVIDENCE_CAP + 1u, 4096u, &plan));
-    BQ_PREP_CHECK(planned && !bq_prep_worker_plan(root, files, &capacity, &layout, &declared, 1u,
-                                                  BQ_WORKER_BUNDLE_FILE_CAP + 1u, &plan));
     if (root >= 0) BQ_PREP_CHECK(close(root) == 0);
     if (made) BQ_PREP_CHECK(rmdir(root_path) == 0);
     free(files);

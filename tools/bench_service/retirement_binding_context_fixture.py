@@ -36,8 +36,9 @@ complete record of native_retirement_performance_binding_test, with
 * the provenance receipts binding those subjects, the producer toolchain and
   the harness, whose source identity is this checkout's HEAD (the validator
   compiles the #619 adapter from that commit);
-* the repository's contract source (CONTRACT_SHA256 must be its digest) and
-  statistics implementation, and the frozen campaign values;
+* the repository's contract source (CONTRACT_SHA256 must be its digest), the
+  statistics implementation at the harness commit, and the frozen campaign
+  values;
 * the admission-receipt sentinel the producer replaces.
 
 The subject commits, provenance receipts, host identities and other
@@ -66,7 +67,7 @@ PENDING = "0" * 64
 # (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX).
 PREFIX = "retirement-evidence-"
 CONTRACT_PATH = ROOT / "docs" / "native-retirement-performance-contract.md"
-STATISTICS_PATH = ROOT / "tools" / "throughput" / "retirement_stats.h"
+STATISTICS_PATH = "tools/throughput/retirement_stats.h"
 # The installed census file of each pinned #508 support role.
 CENSUS_FILES = {
     "support_declaration": "support.tsv",
@@ -99,6 +100,13 @@ def descriptor(path, data):
 def git(*arguments):
     return subprocess.run(["git", *arguments], cwd=ROOT, check=True, capture_output=True,
                           text=True).stdout.strip()
+
+
+def git_blob(commit, path):
+    """A file's bytes at `commit`, unnormalized (the harness identity the
+    context names is that commit, not the working tree)."""
+    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, check=True,
+                          capture_output=True).stdout
 
 
 class Evidence:
@@ -207,11 +215,12 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
         raise ValueError("the profile's contract pin is not the repository contract's digest")
     record["contract"]["source"] = evidence.put("contract.md", contract_data)
     measurement = record["measurement"]
+    harness = git("rev-parse", "HEAD")
     measurement.update({
-        "harness_source_commit": git("rev-parse", "HEAD"),
-        "harness_source_tree": git("rev-parse", "HEAD^{tree}"),
+        "harness_source_commit": harness,
+        "harness_source_tree": git("rev-parse", f"{harness}^{{tree}}"),
         "harness_binary": evidence.put("harness", contents[measurement["harness_binary"]["path"]]),
-        "statistics_implementation": evidence.put("retirement_stats.h", STATISTICS_PATH.read_bytes()),
+        "statistics_implementation": evidence.put("retirement_stats.h", git_blob(harness, STATISTICS_PATH)),
     })
 
     # Producer toolchain.

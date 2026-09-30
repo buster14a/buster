@@ -126,12 +126,21 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_directories[BQ_RETIRE
 #define BQ_RETIREMENT_WORKER_RESULT_ENTRIES \
     (BQ_WORKER_BUNDLE_CONTROL_ENTRIES + BQ_WORKER_RETIREMENT_PHASE_RECEIPTS + BQ_RETIREMENT_WORKER_BINDING_ENTRIES)
 #define BQ_RETIREMENT_WORKER_CONTROL_BYTES ((u64)BQ_RETIREMENT_WORKER_RESULT_ENTRIES * BQ_WORKER_BUNDLE_FILE_CAP)
-/* The most evidence files a binding context may name (the #511 record names
- * 39: nine support files, the validator source, six closures, both subjects'
- * snapshot, binary and build receipt, four producer, two measurement, four
- * execution and five provenance artifacts, the contract source and the
- * admission record). */
-#define BQ_RETIREMENT_WORKER_EVIDENCE_CAP 48u
+/* The evidence files a binding context may name. The #511 record fixes 33:
+ * nine support files (SUPPORT_FILE_ROLES), the validator source, both
+ * subjects' snapshot, binary and build receipt, four producer, two
+ * measurement, four execution (the A/A admission receipt is the producer's
+ * own) and five provenance artifacts, the contract source and the admission
+ * record. Requested-work items vary: the validator requires one per
+ * REQUIRED_WORK_CLOSURE_KINDS (six) and bounds none, so the reviewed context
+ * may name at most BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP, nine beyond
+ * the required closure; a larger reviewed closure needs a reviewed raise.
+ * Every evidence file is one bundle entry beside the store's. */
+#define BQ_RETIREMENT_WORKER_EVIDENCE_FIXED 33u
+#define BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP 15u
+#define BQ_RETIREMENT_WORKER_EVIDENCE_CAP (BQ_RETIREMENT_WORKER_EVIDENCE_FIXED + BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP)
+BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_WORKER_EVIDENCE_CAP +
+                BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_FILES <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
 /* One receipt per BQPHASE2 phase, RETIREMENT_READY the last-numbered. */
@@ -801,9 +810,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_store_plan(TpRetirementStore* stor
     TpRetirementComposeShape shape = {layout, pairs, code_rows, BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS};
     TpRetirementComposeBounds bounds = {0};
     u32 externals = BQ_RETIREMENT_WORKER_RESULT_ENTRIES + evidence_entries;
-    bool ok = evidence_entries <= BQ_RETIREMENT_WORKER_EVIDENCE_CAP &&
-              evidence_bytes <= (u64)evidence_entries * BQ_WORKER_BUNDLE_FILE_CAP &&
-              tp_retirement_compose_bounds(&shape, &bounds) &&
+    bool ok = evidence_entries <= BQ_RETIREMENT_WORKER_EVIDENCE_CAP && tp_retirement_compose_bounds(&shape, &bounds) &&
               tp_retirement_compose_plan(store, capacity, &shape, &declared->declaration, externals,
                   BQ_RETIREMENT_WORKER_CONTROL_BYTES + evidence_bytes, plan) &&
               plan->external_entries >= externals && plan->entries <= BQ_WORKER_BUNDLE_ENTRY_CAP;

@@ -1355,7 +1355,8 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`, each at the per-file cap; and the
    evidence files the pinned binding context names, at their exact count and
    bytes, `bq_retirement_worker_evidence_measure`, at most
-   `BQ_RETIREMENT_WORKER_EVIDENCE_CAP`), so store files plus those entries
+   `BQ_RETIREMENT_WORKER_EVIDENCE_CAP`: the record's 33 fixed artifacts and
+   up to 15 requested-work items), so store files plus those entries
    stay within `BQ_WORKER_BUNDLE_ENTRY_CAP`. Every other result-root file is
    a store file (the untimed streams, D's documents, the post-sample record,
    both stages' streams and the composer's outputs), so the plan covers the
@@ -1439,11 +1440,17 @@ stand-in.
    context check already requires); every other file comes from the
    installed evidence directory `native-retirement-performance-v1.evidence`
    under `recipes/` (service-owned, not writable; its files single-link and
-   read-only), whose files the pinned context covers by digest. The bytes
-   are read and hashed before anything is written and must be exactly the
-   descriptor's size and SHA-256: a changed installed file refuses with
-   `BQ_RECIPE_MISMATCH`, a changed held binary with `BQ_SOURCE_MISMATCH`, and
-   no copy is written under the refused name. Composition requires the same
+   read-only), whose files the pinned context covers by digest. Every
+   source is read and hashed before any file is written, and each again as
+   it is written; each must be exactly the descriptor's size (at most the
+   bundle's 64 MiB per-file cap, else the context refuses at listing) and
+   SHA-256: a changed installed file refuses with `BQ_RECIPE_MISMATCH`, a
+   changed held binary with `BQ_SOURCE_MISMATCH`, and a refusal leaves no
+   evidence file (a second-pass refusal unlinks what it wrote). The
+   composer's external closure is at most `TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES`
+   and refuses a digest mismatch, a missing or linked file, a path leaving
+   the root, a store path, a repeated prior or closure name or path and a
+   `workflow.phases.*` name. Composition requires the same
    count and bytes the store plan reserved, and passes the evidence and the
    A/A admission receipt to the composer as the rest of the validator's
    pre-replay closure (`TpRetirementComposeRequest.closure`), which it
@@ -1587,11 +1594,20 @@ replaced: the fixture census is not the approved #508 declaration): the
 execution, subject and provenance receipts pass the validator's own checks,
 each evidence file removed or changed is refused, and `validate()` accepts
 once exactly the fixture's known non-evidence refusals are waived
-(`WORKER_UNIT_KNOWN_GAPS`: the stand-in compilers' repeated, allocator-`none`
-batch metrics; lane D recording a runtime launch's executable as the
-compiler binary; the validator's nested `tools/throughput/retirement_stats.h`
-path, which the flat result root cannot hold; and the fixture's stand-in
-composer adapter). Unwaived, it stops at the first of them.
+(`WORKER_UNIT_KNOWN_GAPS`). Each waiver matches one call site's exact
+message and a predicate over that call's own values, and must fire exactly
+its count: the stand-in compilers copy one `tests/batch.metrics` into every
+batch, so metrics content repeats (3,903 timed and 576 untimed, waived only
+for that record's digest) and its header names `allocator=none` and
+`target=x86_64-linux` whatever the batch (2,928 timed batches of the other
+three allocators and 576 untimed batches of the untimed contract's
+cross-target `aarch64-unknown-linux-gnu` groups, waived only when every other
+header field matches); lane D records a runtime launch's executable as the
+compiler binary (488, waived only for runtime invocations whose output and
+command match); the validator's nested `tools/throughput/retirement_stats.h`
+path, which the flat result root cannot hold (1); and the fixture's stand-in
+composer adapter (1). Unwaived, it stops at the first of them; a changed
+frozen compile command is refused even with the waivers.
 Job 85 retains a failing untimed launch, job 86 a SIGTERM during A/A, job 87
 the deadline expiring during A/A, and job 88 a detached (`setsid`) sleeper
 left by its first second-label compile, found and killed right after that
