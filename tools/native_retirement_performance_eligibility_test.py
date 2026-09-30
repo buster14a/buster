@@ -1014,7 +1014,9 @@ class ApprovedSupplementSetTests(unittest.TestCase):
         ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-linux-gnu"),
         ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-uefi"),
     )
-    CENSUS_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+    # The census cross-product reads only subject rows; dependency-only support-file rows change with
+    # unrelated edits, so the pin covers the subject rows of the declaration the job-log report bound.
+    CENSUS_SUBJECT_ROWS_SHA256 = "7fd70733ce749ae7372a5e4b194eb9e6650d334388c966788e1c3feb8bfdaa7d"
     HOST_FIXTURES = ["tests/basic_c_asm_goto_identity.c", "tests/basic_c_compiler_barrier_fallback.c",
                      "tests/basic_c_wide_vector_abi.c", "tests/differential/native_aggregate_host.c",
                      "tests/differential/win64_vector.c", "tests/differential/win64_wide.c"]
@@ -1022,9 +1024,9 @@ class ApprovedSupplementSetTests(unittest.TestCase):
     def census(self):
         """The approved census row order: the checked-in declaration's cross-product."""
         root = Path(__file__).resolve().parents[1]
-        declaration = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes()
-        # The declaration the job-log report binds (support_contract_sha256).
-        self.assertEqual(hashlib.sha256(declaration).hexdigest(), self.CENSUS_DECLARATION_SHA256)
+        declaration = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes().splitlines(keepends=True)
+        subject_rows = b"".join(line for line in declaration[1:] if line.split(b"\t")[1] == b"subject")
+        self.assertEqual(hashlib.sha256(subject_rows).hexdigest(), self.CENSUS_SUBJECT_ROWS_SHA256)
         with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
             subjects = [row["path"] for row in csv.DictReader(stream, delimiter="\t")
                         if row["role"] == "subject"]
