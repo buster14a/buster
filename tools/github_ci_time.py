@@ -13,7 +13,8 @@ require-jobs is CI complete's inventory gate (require_jobs, validate_required_jo
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get) and an unsuccessful verdict is printed (report_gate_failure).
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
-deferral (#1825) and nothing else.
+deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
+keep a "Re-run failed jobs" attempt's re-stamped deferrals at attempt 1 (#2052).
 """
 import argparse
 from collections import Counter, defaultdict
@@ -444,7 +445,8 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
     A partial rerun may retain a successful job from an earlier attempt of the
     same immutable run/source. Failed historical attempts are not substituted
     for latest results, and timing cohorts still reject all reruns. A deferred
-    macOS-runner no-op counts only in a draft pull-request run's first attempt.
+    macOS-runner no-op counts only in a draft pull-request run's first attempt;
+    latest_run_jobs resolves its carried-forward copies to that record.
     """
     errors = []
     if not isinstance(jobs, list):
@@ -505,14 +507,35 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
     return sorted(set(errors))
 
 
+def _job_execution(job):
+    """The fields a carried-forward copy shares with its original: all but id and attempt."""
+    steps = job.get("steps")
+    if isinstance(steps, list):
+        steps = [tuple(step.get(key) for key in STEP_FIELDS) if isinstance(step, dict) else None for step in steps]
+    return (job.get("name"), job.get("status"), job.get("conclusion"),
+            job.get("started_at"), job.get("completed_at"), steps)
+
+
+def _carried_forward_copy(job, original):
+    """Whether job is GitHub's re-stamped copy of a completed earlier record (#2052).
+
+    "Re-run failed jobs" lists each retained success again under every later
+    attempt with a new id and run_attempt but the original timing and steps.
+    """
+    timed = all(isinstance(original.get(key), str) and original.get(key) for key in ("started_at", "completed_at"))
+    return timed and original.get("status") == "completed" and _job_execution(job) == _job_execution(original)
+
+
 def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     """Select by attempt, never by success; prior green cannot hide later red.
 
     A deferred draft no-op and its macOS job are one logical job, so a later
-    "Re-run all jobs" attempt replaces the deferral.
+    "Re-run all jobs" attempt replaces the deferral. When every later record of
+    a deferral is a carried-forward copy of its attempt-1 original, the
+    original is selected, so a "Re-run failed jobs" attempt judges the
+    deferral exactly as attempt 1 did (#2052); a deferral that ran again does not.
     """
-    latest = {}
-    seen = set()
+    records = defaultdict(dict)
     for job in jobs:
         if not isinstance(job, dict):
             raise ValueError("Malformed historical job")
@@ -522,13 +545,18 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
         if job.get("run_id") != run_id or job.get("head_sha") != head_sha:
             raise ValueError("Historical job belongs to another run or source")
         logical = logical_job_name(name)
-        identity = (logical, attempt)
-        if identity in seen:
+        if attempt in records[logical]:
             raise ValueError("Duplicate job identity within one attempt")
-        seen.add(identity)
-        if logical not in latest or attempt > latest[logical]["run_attempt"]:
-            latest[logical] = job
-    return list(latest.values())
+        records[logical][attempt] = job
+    latest = []
+    for attempts in records.values():
+        selected = attempts[max(attempts)]
+        original = attempts.get(1)
+        if original is not None and deferred_base_name(original.get("name")) is not None and \
+                all(_carried_forward_copy(job, original) for attempt, job in attempts.items() if attempt > 1):
+            selected = original
+        latest.append(selected)
+    return latest
 
 
 def require_jobs(args):
@@ -654,7 +682,8 @@ def report_deferrals(data, summary_path, notice):
         if notice:
             print(f"::notice title=macOS lanes deferred::Draft pull request: {len(deferred)} macOS-runner "
                   f"lanes did not run ({verdict} by CI complete). They run on the first push after the pull "
-                  "request is ready, on Re-run all jobs, and always in the merge queue.")
+                  "request is ready, on Re-run all jobs, and always in the merge queue; "
+                  "Re-run failed jobs keeps them deferred.")
         if summary_path:
             lines = [f"## macOS lanes deferred for this draft pull request ({verdict})", "",
                      "These lanes did not request a macOS runner. The merge queue always runs them; "

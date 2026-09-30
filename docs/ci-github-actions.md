@@ -89,7 +89,9 @@ The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
 The first attempt of a draft pull-request run defers the four macOS-runner
 jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
-always run them, and `CI complete` rejects a deferral anywhere else (see
+always run them, and `CI complete` rejects a deferral anywhere else. A
+"Re-run failed jobs" attempt of a draft run carries its attempt-1 deferrals
+forward unchanged (see
 [draft pull-request deferral](ci-runner-queue.md#draft-pull-request-deferral)).
 `fail-fast` is off
 in all three matrices. Native and mobile lanes have no desktop prerequisite;
