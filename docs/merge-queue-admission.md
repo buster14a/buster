@@ -9,9 +9,10 @@ and an initial build limit of one with a merge limit of one, ALLGREEN, and
 merge commits. The saved response passed `check-ruleset` at main
 `6929d847fbab0014284f698cd235ddb570d60e9d`. The live limit was later raised to
 20. On 2026-09-29, #1805 measured that limit exhausting the 50-job macOS runner
-ceiling ([ci-runner-queue.md](ci-runner-queue.md)); the checked-in ruleset now
-describes a build limit of 4. Verify live settings before relying on it. The
-checker has no write API.
+ceiling ([ci-runner-queue.md](ci-runner-queue.md)) and the policy was cut to 4.
+After #1986 halved `ci.yml`'s macOS jobs, the checked-in ruleset now describes
+a build limit of 6. Verify live settings before relying on it. The checker has
+no write API.
 
 On 2026-09-24, the administrator intentionally added Repository admin (role 5)
 and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
@@ -30,17 +31,18 @@ fixtures do not establish GitHub's live synthetic-commit shape or queue behavior
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 4`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 6`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
 `min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency permits up to 4 queued candidates to run speculative
-combined-head validation concurrently; it does not authorize 4 merges. Each
-`ci.yml` group needs eight macOS jobs, so four groups hold at most 32 of the 50
-observed macOS runners and leave room for pull-request and main validation. A
+Build concurrency permits up to 6 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 6 merges. Since
+#1986 each `ci.yml` group needs four macOS jobs, so six groups hold at most 24
+of the 50 observed macOS runners and leave room for pull-request and main
+validation. A
 later candidate may have the preceding unmerged synthetic commit as its base.
 Both admission jobs keep that exact group pending until the base lands on main;
 they never grant success while the predecessor is speculative. The merge limit
@@ -259,7 +261,7 @@ group base still equals live main and the queue ref still names this head, and v
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects
 visible bypass inventories other than the two reviewed actors and strict branch updates, and
-requires the exact 4-build/one-merge policy. The success artifact records each
+requires the exact 6-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
 
@@ -342,14 +344,14 @@ The merge-group workflow runs admission code from the main revision checked out
 as trusted policy, so a PR
 changing the repository queue contract must first pass the policy already on
 `main`. Keep the live `Build concurrency` field in ruleset `22537199` at the
-value the trusted policy accepts (20 before #1805) while the policy PR passes
-and merges through the existing queue with all required checks; do not bypass
-admission or edit the live value first. Resolve the exact resulting `main`
-commit before changing the live setting to `4`. Read the ruleset back, run
-`check-ruleset` on the saved response and observe `Main integration admission`
-accept a new exact merge group. Between the PR merge and the live edit, the
-trusted policy expects `4` while GitHub still reports `20`, so new groups fail
-closed; groups already dispatched keep their actual outcomes. Do not bulk-cancel
+value the trusted policy accepts (20 before #1805, 4 before the raise to 6)
+while the policy PR passes and merges through the existing queue with all
+required checks; do not bypass admission or edit the live value first. Resolve
+the exact resulting `main` commit before changing the live setting to the new
+value (`6`). Read the ruleset back, run `check-ruleset` on the saved response
+and observe `Main integration admission` accept a new exact merge group.
+Between the PR merge and the live edit, the trusted policy expects the new
+value while GitHub still reports the old one, so new groups fail closed; groups already dispatched keep their actual outcomes. Do not bulk-cancel
 or reorder the queue.
 Only the build limit changes; leave the merge limit, grouping strategy, merge
 method, timeout, checks, non-strict freshness and bypass settings untouched.

@@ -36551,6 +36551,15 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
     String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+    String8 test_root = service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests"));
+    // Throughput fixtures write fixed paths that the tool refuses to reuse
+    // (admit-workload rejects an existing --output), so a rerun over the
+    // previous root fails. Clear the driver-owned root before the argument
+    // builder opens: the removal allocates from the same arena.
+    if (self_test && !service)
+    {
+        remove_path_recursive(arena, test_root);
+    }
     ProcessRun* compile = run_add(arena, step_add(arena));
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, compiler);
@@ -36572,6 +36581,11 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
         os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
         os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
         os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
+        // ASan gives every inlined callee's locals a distinct frame slot, so
+        // inlining the single-call bq_test_* cases into bq_test_run_all grew
+        // its frame past the default 8 MiB main-thread stack (#1980).
+        // Out-of-line cases release their frames between tests.
+        if (service) os_argument_builder_append(&builder, S8("-fno-inline-functions"));
     }
 #if BUSTER_WINDOWS
     os_argument_builder_append(&builder, S8("-Wno-microsoft-enum-forward-reference"));
@@ -36589,7 +36603,7 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     os_argument_builder_append(&builder, executable);
     if (self_test)
     {
-        os_argument_builder_append(&builder, service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests")));
+        os_argument_builder_append(&builder, test_root);
 #if BUSTER_LINUX
         if (service)
         {

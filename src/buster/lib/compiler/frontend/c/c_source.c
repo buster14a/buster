@@ -13,6 +13,8 @@
 //                                              into
 //   c_source_map_append, c_source_map_sort,    location checkpoints (see
 //   c_lex_token_location                       CTranslatedSource below)
+//   c_preprocess_token_site,                   record sites and their on-demand
+//   c_preprocess_site_location                 recovery (CSourceSite in c.h)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
 //   c_translate_source                         phase-1/2 translation with
@@ -953,6 +955,43 @@ CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess,
     return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
 
+BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_RECORD_SITES, 1);
+    BUSTER_CHECK(token.offset < UINT32_MAX);
+    CSourceSite result = {
+        .map_offset_plus_one = token.offset + 1,
+        .file = c_preprocess_token_source(preprocess, token, cursor),
+    };
+#if !BUSTER_OPTIMIZE
+    // The source a region's key names is the source every position in that
+    // region resolves to (TEXT regions answer region->source, STAMP regions a
+    // stamp built with the same source), so the site agrees with the eager
+    // location it replaces.
+    BUSTER_CHECK(result.file == c_preprocess_token_location(preprocess, token).file);
+#endif
+    return result;
+}
+
+CSourceSite c_preprocess_token_site(CPreprocessResult const* preprocess, CToken token)
+{
+    return c_preprocess_token_site_cursor(preprocess, token, 0);
+}
+
+CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, CSourceSite site)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_SITE_RESOLUTIONS, 1);
+    CSourceLocation result = {0};
+    if (site.map_offset_plus_one)
+    {
+        CToken token = {
+            .offset = site.map_offset_plus_one - 1,
+        };
+        result = c_preprocess_token_location(preprocess, token);
+    }
+    return result;
+}
+
 // The amortized variant for consumers whose queries mostly ascend (parsing
 // walks tokens roughly in stream order).
 BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
@@ -964,8 +1003,9 @@ BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessRe
 
 // Which source a token belongs to, without recovering its line and column:
 // what lowering wants, since an IR source range is a source plus the offset
-// the token already carries.
-BUSTER_C_SHARED u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+// the token already carries. Forced inline with ir_source_map_source: every
+// lowered instruction asks, and record sites are a second caller.
+BUSTER_C_SHARED BUSTER_SHARED_INLINE u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;
@@ -1123,26 +1163,6 @@ BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource transl
         result->token_shapes[token_index] = c_token_shape_from_token(token);
     }
     result->token_count = token_index + 1;
-}
-
-BUSTER_C_INTERNAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic_arena, u64* diagnostic_capacity, u64 maximum_diagnostic_count,
-                                           u64 offset, CDiagnosticKind kind, String8 message)
-{
-    BUSTER_VALIDATE(result->diagnostic_count < maximum_diagnostic_count);
-    if (result->diagnostic_count == *diagnostic_capacity)
-    {
-        u64 capacity = *diagnostic_capacity > maximum_diagnostic_count / 2 ? maximum_diagnostic_count : *diagnostic_capacity * 2;
-        CDiagnostic* diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, capacity);
-        memcpy(diagnostics, result->diagnostics, sizeof(*diagnostics) * result->diagnostic_count);
-        result->diagnostics = diagnostics;
-        *diagnostic_capacity = capacity;
-    }
-    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
-        .message = message,
-        .location = c_lex_local_location(result, offset),
-        .kind = kind,
-        .severity = C_DIAGNOSTIC_ERROR,
-    };
 }
 
 // Indexed by CPunctuator, so the id and the spelling cannot drift apart.  The
@@ -1319,6 +1339,14 @@ BUSTER_C_INTERNAL bool c_literal_prefix(String8 source, u64 offset, u64* prefix_
 // same code.  The three line fields are the only state that crosses a
 // compaction window: they describe the line under construction, never the
 // tokenizer, so the window pipeline still starts every window from scratch.
+typedef enum CLexDiagnosticStorage
+{
+    C_LEX_DIAGNOSTIC_STORAGE_NONE,
+    C_LEX_DIAGNOSTIC_STORAGE_SCRATCH,
+    C_LEX_DIAGNOSTIC_STORAGE_DEDICATED,
+    C_LEX_DIAGNOSTIC_STORAGE_RESULT,
+} CLexDiagnosticStorage;
+
 typedef struct CLexState CLexState;
 struct CLexState
 {
@@ -1328,7 +1356,11 @@ struct CLexState
     // rewound or destroyed once lexing ends and the rows are copied out, so
     // anything a row points at -- a formatted message -- lives here instead.
     Arena* arena;
+    // Taken at the first diagnostic (c_lex_diagnostic_storage_begin); null
+    // and zero while the file lexes cleanly.
     Arena* diagnostic_arena;
+    TemporalArena diagnostic_temporary;
+    u64 diagnostic_reserve_size;
     u64 diagnostic_capacity;
     u64 maximum_diagnostic_count;
     // Offset just past the newline that ended the last line, so a file whose
@@ -1341,7 +1373,93 @@ struct CLexState
     // its comment and literal scans in 64-byte strides.  The reference path
     // keeps the byte loops, so the differential gate compares the two.
     u32 simd_scan;
+    CLexDiagnosticStorage diagnostic_storage;
 };
+
+// Where a lexer's diagnostic rows grow, chosen at its first diagnostic so a
+// file that lexes cleanly takes none: a scratch arena when the file's worst
+// case -- one diagnostic per byte, plus the growth copies -- fits it, else a
+// dedicated arena. Should that arena not be available the rows grow in the
+// result arena itself, which costs only the growth copies.
+BUSTER_C_INTERNAL void c_lex_diagnostic_storage_begin(CLexState* state)
+{
+    Arena* conflicts[] = {
+        state->arena,
+    };
+    state->diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    Arena* scratch = state->diagnostic_temporary.arena;
+    if (state->diagnostic_reserve_size <= scratch->reserved_size - scratch->position)
+    {
+        state->diagnostic_arena = scratch;
+        state->diagnostic_storage = C_LEX_DIAGNOSTIC_STORAGE_SCRATCH;
+    }
+    else
+    {
+        scratch_end(state->diagnostic_temporary);
+        u64 reserved_size = BUSTER_MAX(BUSTER_MB(64), state->diagnostic_reserve_size);
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENAS, 1);
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENA_BYTES, reserved_size);
+        state->diagnostic_arena = arena_create((ArenaCreation){
+            .reserved_size = reserved_size,
+        });
+        state->diagnostic_storage = state->diagnostic_arena ? C_LEX_DIAGNOSTIC_STORAGE_DEDICATED : C_LEX_DIAGNOSTIC_STORAGE_RESULT;
+        if (!state->diagnostic_arena)
+        {
+            state->diagnostic_arena = state->arena;
+        }
+    }
+}
+
+// Releases the storage c_lex_diagnostic_storage_begin took, once the rows are
+// copied into the result arena.
+BUSTER_C_INTERNAL void c_lex_diagnostic_storage_end(CLexState* state)
+{
+    if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_SCRATCH)
+    {
+        scratch_end(state->diagnostic_temporary);
+    }
+    else if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_DEDICATED)
+    {
+        arena_destroy(state->diagnostic_arena, 1);
+    }
+}
+
+// The capacity sequence is the one the rows had when 64 of them were reserved
+// before lexing: 64 (or one per byte for a shorter file), then doubling up to
+// one per byte.
+BUSTER_C_INTERNAL void c_diagnostic_push(CLexState* state, u64 offset, CDiagnosticKind kind, String8 message)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
+    CLexResult* result = state->result;
+    BUSTER_VALIDATE(result->diagnostic_count < state->maximum_diagnostic_count);
+    if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_NONE)
+    {
+        c_lex_diagnostic_storage_begin(state);
+    }
+    if (result->diagnostic_count == state->diagnostic_capacity)
+    {
+        u64 capacity = !state->diagnostic_capacity                                          ? BUSTER_MIN(state->maximum_diagnostic_count, UINT64_C(64))
+                       : state->diagnostic_capacity > state->maximum_diagnostic_count / 2 ? state->maximum_diagnostic_count
+                                                                                          : state->diagnostic_capacity * 2;
+        if (!state->diagnostic_capacity)
+        {
+            C_DIAGNOSTIC_RESERVATION_CENSUS(LEX, capacity);
+        }
+        CDiagnostic* diagnostics = arena_allocate(state->diagnostic_arena, CDiagnostic, capacity);
+        if (result->diagnostic_count)
+        {
+            memcpy(diagnostics, result->diagnostics, sizeof(*diagnostics) * result->diagnostic_count);
+        }
+        result->diagnostics = diagnostics;
+        state->diagnostic_capacity = capacity;
+    }
+    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+        .message = message,
+        .location = c_lex_local_location(result, offset),
+        .kind = kind,
+        .severity = C_DIAGNOSTIC_ERROR,
+    };
+}
 
 #if BUSTER_C_LEX_COMPACT
 
@@ -1494,8 +1612,7 @@ BUSTER_C_INTERNAL void c_lex_validate_word_utf8(CLexState* state, u64 offset, u6
         }
         if (!valid)
         {
-            c_diagnostic_push(state->result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count,
-                              offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
+            c_diagnostic_push(state, offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
             break;
         }
         offset += length;
@@ -1589,8 +1706,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         result->metrics.comments += 1;
         if (!terminated)
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, comment_start,
-                              C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
+            c_diagnostic_push(state, comment_start, C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
         }
         return offset;
     }
@@ -1644,8 +1760,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         result->metrics.literal_bytes += offset - start;
         if (!terminated)
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
+            c_diagnostic_push(state, start, literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
                               literal_delimiter == '\'' ? S8("unterminated character literal") : S8("unterminated string literal"));
         }
         return offset;
@@ -1666,8 +1781,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("identifier exceeds 65534 bytes"));
+            c_diagnostic_push(state, start, C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("identifier exceeds 65534 bytes"));
         }
         return offset;
     }
@@ -1695,8 +1809,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("preprocessing number exceeds 65534 bytes"));
+            c_diagnostic_push(state, start, C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("preprocessing number exceeds 65534 bytes"));
         }
         return offset;
     }
@@ -1708,7 +1821,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         return offset + punctuator_length;
     }
     c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
-    c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
+    c_diagnostic_push(state, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
                       string_format(state->arena, S8("invalid character byte {u32} in C source"), (u32)character));
     return offset + 1;
 }
@@ -2663,31 +2776,16 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
             if (diagnostic_bytes <= (UINT64_MAX - BUSTER_MB(1)) / 2)
             {
-                u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
-                Arena* conflicts[] = {
-                    arena,
-                };
-                TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                Arena* diagnostic_arena = diagnostic_temporary.arena;
-                bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
-                if (!diagnostic_arena_is_scratch)
-                {
-                    scratch_end(diagnostic_temporary);
-                    diagnostic_arena = arena_create((ArenaCreation){
-                        .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
-                    });
-                }
-                if (diagnostic_arena)
+                // Diagnostic storage waits for the first diagnostic; see
+                // c_lex_diagnostic_storage_begin.
                 {
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
                         .arena = arena,
-                        .diagnostic_arena = diagnostic_arena,
+                        .diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1),
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
-                    state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
-                    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
                     // Source measurement rides the branches the lexer already takes; see
                     // CSourceMetrics.
                     result.metrics.files = 1;
@@ -2722,14 +2820,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                         memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
                     }
                     result.diagnostics = diagnostics;
-                    if (diagnostic_arena_is_scratch)
-                    {
-                        scratch_end(diagnostic_temporary);
-                    }
-                    else
-                    {
-                        arena_destroy(diagnostic_arena, 1);
-                    }
+                    c_lex_diagnostic_storage_end(&state);
                 }
             }
         }
@@ -4021,6 +4112,7 @@ BUSTER_C_INTERNAL void c_preprocess_diagnostic_reserve(Arena* arena, CPreprocess
 BUSTER_C_INTERNAL void c_preprocess_diagnostic_push_severity(Arena* arena, CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind,
                                                                CDiagnosticSeverity severity, String8 message)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     c_preprocess_diagnostic_reserve(arena, result);
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
@@ -4901,6 +4993,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     // carries, and what its diagnostics point at.
                     if (!token.foreign && !token.stamp)
                     {
+                        IR_DIAGNOSTIC_CENSUS_RECORD(C_STAMP_LOCATIONS, 1);
                         token.stamp = c_pp_stamp_push(stamps, c_preprocess_recover_location(frame, file, token.token)) & C_PP_STAMP_MASK;
                     }
                     CMacroArgument* arguments = 0;
@@ -8305,6 +8398,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
     result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
     {
@@ -8962,6 +9056,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 {
                     token_index += 1;
                 }
+                IR_DIAGNOSTIC_CENSUS_RECORD(C_DIRECTIVE_LOCATIONS, 2);
                 u32 physical_directive_line = c_lex_token_location(&source_frame->lex, directive).line;
                 CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
                 u64 line_end = class_masks->word_count ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
@@ -9590,6 +9685,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;
+    if (!options.omit_spelled_bytes)
     {
         // The accumulator and both bases are locals on purpose. c_token_length
         // keeps a call in its oversized arm, so a member accumulator has to be
@@ -9600,6 +9696,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         char8 const* spelling_base = space->base;
         CToken const* stream = result.tokens;
         u64 spelled_bytes = 0;
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_METRICS_TOKEN_VISITS, output_count);
         for (u64 token_index = 0; token_index < output_count; token_index += 1)
         {
             spelled_bytes += c_token_length(spelling_base, stream[token_index]);

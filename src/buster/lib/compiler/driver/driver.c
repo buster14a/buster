@@ -503,6 +503,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
         compiler_driver_argument_error(arena, invocation, S8("the native C dialect option is not used by GPU target: {S8}"),
                                        gpu_target_to_string(arena, invocation->gpu_target));
     }
+    else if (invocation->plain_char_policy_explicit)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("plain-char signedness options are not supported for external GPU target: {S8}"),
+                                       gpu_target_to_string(arena, invocation->gpu_target));
+    }
     else if (invocation->source_metrics_path.length)
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
@@ -1595,6 +1600,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verify_codegen = true;
             continue;
         }
+        if (string_equal(argument, S8("-funsigned-char")) || string_equal(argument, S8("-fsigned-char")))
+        {
+            invocation.plain_char_policy = string_equal(argument, S8("-funsigned-char")) ?
+                                               TARGET_PLAIN_CHAR_POLICY_UNSIGNED : TARGET_PLAIN_CHAR_POLICY_SIGNED;
+            invocation.plain_char_policy_explicit = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-fsysv-unnamed-bitfields=")))
         {
             value = compiler_driver_option_value(argument, S8("-fsysv-unnamed-bitfields="));
@@ -1948,6 +1960,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action == COMPILER_DRIVER_ACTION_LINK)
     {
         invocation.position_independent = true;
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
+    {
+        invocation.target.plain_char_policy = invocation.plain_char_policy;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -3389,7 +3405,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         {
             return;
         }
-        ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
+        // The file is the only consumer of these bytes, and the object's
+        // section payloads stay live in this arena until it is written, so
+        // the image borrows them instead of copying every payload byte.
+        ObjectArtifact artifact = object_write_borrowing(arena, &object, object_format_for_target(invocation.target));
         result->object_write_statistics = artifact.statistics;
         if (artifact.error != OBJECT_ERROR_NONE)
         {
@@ -3404,7 +3423,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         }
         WORK_LEDGER_RECORD(OUTPUT_OBJECT_BYTES, artifact.bytes.length);
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_publish(output, artifact.bytes))
+        u32 slice_count = 0;
+        ByteSlice* slices = object_artifact_slices(arena, artifact, &slice_count);
+        if (!file_publish_slices(output, slices, slice_count))
         {
             result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3817,6 +3838,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+                                                    .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
@@ -3897,7 +3919,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
+                                                                    .omit_debug_locals = !invocation.debug_info});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -3951,15 +3974,25 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
+    // The preparation above is the module's validation boundary: it already
+    // scanned or certified these exact rows and they have not changed since.
+    // Hand that fact to the direct emitters, as native code generation and
+    // LLVM bitcode receive it, instead of letting each one re-prepare
+    // uncertified and walk the whole module again. (-fverify-codegen, which
+    // forces uncertified preparation, is refused for these targets.)
     if (compiler_driver_target_is_wasm(invocation.target))
     {
-        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
+        WasmOptions options = compiler_driver_wasm_options(invocation.target);
+        options.assume_validated = true;
+        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, options);
         compiler_driver_write_wasm(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
-        EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
+        EbpfOptions options = EBPF_OPTIONS_DEFAULT;
+        options.assume_validated = true;
+        EbpfArtifact artifact = ebpf_emit_with_options(arena, lowered.program, module, 1, options);
         compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }

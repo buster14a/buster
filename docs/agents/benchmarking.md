@@ -129,7 +129,11 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   measurement is always on and costs 0.19% of stage-1 instructions (measured
   on Clang 22/Linux x86-64), because every source unit falls out of a branch
   the lexer already takes rather than a second pass over the bytes, and the
-  output side is one linear sum over the finished token stream. The
+  output side is one linear sum over the finished token stream. That sum
+  feeds only the spelling-bytes figure, so the `cc` command skips it when it
+  prints neither this table nor `-fsource-metrics`
+  (`CompilerDriverInvocation.omit_spelled_bytes`); API callers get it by
+  default. The
   bootstrap's table does not match the self-hosted stages' and is not meant
   to: the bootstrap finds its host compiler's resource headers and the
   self-hosted stages fall back to the builtin ones, which is why the file
