@@ -10,6 +10,8 @@
 // separate from the declared qualification of parameter objects.
 // c_ir_record_local_place publishes canonical owner/place identities for
 // named and temporary locals; final SSA compaction remaps those identities.
+// c_ir_constant_truth certifies a scalar value before truth consumers fold;
+// its UNKNOWN outcome is distinct from a known false value.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -3361,7 +3363,14 @@ BUSTER_C_INTERNAL bool c_ir_query_offsetof(CIntegerIrBuilder* builder, u32 start
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value);
 BUSTER_C_INTERNAL bool c_ir_constant_type_is_integer(IrType* type);
-BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value);
+typedef enum CIrConstantTruth
+{
+    C_IR_CONSTANT_TRUTH_INVALID,
+    C_IR_CONSTANT_TRUTH_UNKNOWN,
+    C_IR_CONSTANT_TRUTH_FALSE,
+    C_IR_CONSTANT_TRUTH_TRUE,
+} CIrConstantTruth;
+BUSTER_C_INTERNAL CIrConstantTruth c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value);
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source, IrTypeId target_type, CIrConstantValue* result);
 BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* source_input, IrType* type, u32 precision);
 BUSTER_C_INTERNAL u64 c_ir_float16_bits_from_f64(f64 value);
@@ -38641,7 +38650,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 CIrConstantValue assertion = {0};
                 if (!c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end) ||
                     !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) ||
-                    assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(builder, &assertion))
+                    assertion.kind != C_IR_CONSTANT_INTEGER || c_ir_constant_truth(builder, &assertion) != C_IR_CONSTANT_TRUTH_TRUE)
                 {
                     builder->failure_message = S8("static assertion expression is not a true integer constant expression");
                     return false;
@@ -44974,32 +44983,41 @@ BUSTER_C_SHARED CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideIn
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value_input)
+BUSTER_C_INTERNAL CIrConstantTruth c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value_input)
 {
     CIrConstantValue value = *value_input;
     IrType* type = ir_type_from_id(&builder->program->types, value.type);
-    bool result;
-    if (value.kind == C_IR_CONSTANT_UNKNOWN)
+    // Array/function decay yields an address; a scalar place instead needs
+    // its stored value. Normalization may turn that read into UNKNOWN.
+    if (value.kind == C_IR_CONSTANT_LVALUE && type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_FUNCTION))
     {
-        result = false;
+        value.kind = C_IR_CONSTANT_POINTER;
     }
-    else if (value.kind == C_IR_CONSTANT_POINTER)
+    CIrConstantTruth result = C_IR_CONSTANT_TRUTH_INVALID;
+    if (c_ir_constant_normalize(builder, &value))
     {
-        result = value.symbol.value != IR_ID_UNDERLYING_INVALID || value.addend != 0;
-    }
-    else if (value.kind == C_IR_CONSTANT_LVALUE)
-    {
-        result = value.symbol.value != IR_ID_UNDERLYING_INVALID;
-    }
-    else if (value.kind == C_IR_CONSTANT_FLOAT)
-    {
-        result = type && type->bit_width > 64
-                     ? value.integer != 0 || (value.integer_high & (type->bit_width == 80 ? UINT64_C(0x7fff) : UINT64_C(0x7fffffffffffffff))) != 0
-                     : value.floating != 0.0;
-    }
-    else
-    {
-        result = c_ir_constant_type_is_integer(type) && ((value.integer & c_ir_integer_type_mask(type)) != 0 || value.integer_high != 0);
+        type = ir_type_from_id(&builder->program->types, value.type);
+        if (value.kind == C_IR_CONSTANT_UNKNOWN)
+        {
+            result = C_IR_CONSTANT_TRUTH_UNKNOWN;
+        }
+        else if (value.kind == C_IR_CONSTANT_POINTER)
+        {
+            result = value.symbol.value != IR_ID_UNDERLYING_INVALID || value.addend != 0
+                         ? C_IR_CONSTANT_TRUTH_TRUE : C_IR_CONSTANT_TRUTH_FALSE;
+        }
+        else if (value.kind == C_IR_CONSTANT_FLOAT && type && type->kind == IR_TYPE_FLOAT)
+        {
+            bool nonzero = type->bit_width > 64
+                               ? value.integer != 0 || (value.integer_high & (type->bit_width == 80 ? UINT64_C(0x7fff) : UINT64_C(0x7fffffffffffffff))) != 0
+                               : value.floating != 0.0;
+            result = nonzero ? C_IR_CONSTANT_TRUTH_TRUE : C_IR_CONSTANT_TRUTH_FALSE;
+        }
+        else if (value.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(type))
+        {
+            bool nonzero = (value.integer & c_ir_integer_type_mask(type)) != 0 || value.integer_high != 0;
+            result = nonzero ? C_IR_CONSTANT_TRUTH_TRUE : C_IR_CONSTANT_TRUTH_FALSE;
+        }
     }
 
     return result;
@@ -45166,6 +45184,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
                 return false;
             }
             IrType* type = ir_type_from_id(&builder->program->types, global->type);
+            if (!type || type->is_volatile || type->is_atomic)
+            {
+                return false;
+            }
             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO && c_ir_constant_type_is_integer(type))
             {
                 *result = c_ir_constant_integer(global->type, 0);
@@ -45175,6 +45197,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
             {
                 *result = (CIrConstantValue){
                     .type = global->type,
+                    .symbol = IR_SYMBOL_ID_INVALID,
                     .kind = C_IR_CONSTANT_POINTER,
                 };
                 return true;
@@ -45272,7 +45295,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
     }
     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
     {
-        *result = (CIrConstantValue){.type = builder->nullptr_type, .kind = C_IR_CONSTANT_POINTER};
+        *result = (CIrConstantValue){.type = builder->nullptr_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
         return true;
     }
     CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
@@ -45399,7 +45422,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrCo
         {
             return value->kind != C_IR_CONSTANT_INVALID;
         }
-        if (!c_ir_constant_from_global(builder, value->symbol, value))
+        IrType* access = ir_type_from_id(&builder->program->types, value->type);
+        if (!access || access->is_volatile || access->is_atomic || !c_ir_constant_from_global(builder, value->symbol, value))
         {
             value->kind = C_IR_CONSTANT_UNKNOWN;
         }
@@ -46266,6 +46290,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
             *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
             success = true;
         }
+        else if (target->kind == IR_TYPE_BOOLEAN)
+        {
+            CIrConstantTruth truth = c_ir_constant_truth(builder, &source);
+            success = truth != C_IR_CONSTANT_TRUTH_INVALID;
+            if (success)
+            {
+                *result = truth == C_IR_CONSTANT_TRUTH_UNKNOWN
+                              ? (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN}
+                              : c_ir_constant_integer(target_type, truth == C_IR_CONSTANT_TRUTH_TRUE);
+            }
+        }
         else if (target->kind == IR_TYPE_POINTER)
         {
             if (source.kind == C_IR_CONSTANT_POINTER ||
@@ -46284,12 +46319,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
         }
         else
         {
-            // An array decays before scalar conversion; a scalar lvalue must
-            // instead be read/normalized, not mistaken for its own address.
-            if (target->kind == IR_TYPE_BOOLEAN && source.kind == C_IR_CONSTANT_LVALUE && source_type && source_type->kind == IR_TYPE_ARRAY)
-            {
-                source.kind = C_IR_CONSTANT_POINTER;
-            }
             if (c_ir_constant_normalize(builder, &source))
             {
                 source_type = ir_type_from_id(&builder->program->types, source.type);
@@ -46297,16 +46326,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 {
                     *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
                     success = true;
-                }
-                else if (target->kind == IR_TYPE_BOOLEAN)
-                {
-                    // C 6.3.1.2: compare to zero before any truncation. This
-                    // includes floating fractions, NaNs, pointers and i128's
-                    // high limb; a one-bit integer mask cannot implement it.
-                    success = source.kind == C_IR_CONSTANT_POINTER || source.kind == C_IR_CONSTANT_FLOAT ||
-                              (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type));
-                    if (success)
-                        *result = c_ir_constant_integer(target_type, c_ir_constant_truth(builder, &source));
                 }
                 else if (target->kind == IR_TYPE_FLOAT)
                 {
@@ -46418,6 +46437,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
             }
         }
     }
+    else if (operation == C_CONDITIONAL_LOGICAL_NOT)
+    {
+        CIrConstantTruth truth = c_ir_constant_truth(builder, value);
+        success = truth != C_IR_CONSTANT_TRUTH_INVALID;
+        if (success)
+        {
+            *value = truth == C_IR_CONSTANT_TRUTH_UNKNOWN
+                         ? (CIrConstantValue){.type = builder->s32_type, .kind = C_IR_CONSTANT_UNKNOWN}
+                         : c_ir_constant_integer(builder->s32_type, truth == C_IR_CONSTANT_TRUTH_FALSE);
+        }
+    }
     else if (value->kind == C_IR_CONSTANT_UNKNOWN)
     {
         success = true;
@@ -46435,9 +46465,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
     else if (c_ir_constant_normalize(builder, value))
     {
         IrType* type = ir_type_from_id(&builder->program->types, value->type);
-        if (operation == C_CONDITIONAL_LOGICAL_NOT)
+        if (value->kind == C_IR_CONSTANT_UNKNOWN)
         {
-            *value = c_ir_constant_integer(builder->s32_type, !c_ir_constant_truth(builder, value));
             success = true;
         }
         else if (operation == C_CONDITIONAL_UNARY_PLUS || operation == C_CONDITIONAL_UNARY_MINUS || operation == C_CONDITIONAL_BITWISE_NOT)
@@ -46500,27 +46529,24 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     }
     if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
     {
-        if (left.kind != C_IR_CONSTANT_UNKNOWN && !c_ir_constant_normalize(builder, &left))
+        CIrConstantTruth left_truth = c_ir_constant_truth(builder, &left);
+        CIrConstantTruth right_truth = c_ir_constant_truth(builder, &right);
+        if (left_truth == C_IR_CONSTANT_TRUTH_INVALID || right_truth == C_IR_CONSTANT_TRUTH_INVALID)
         {
             return false;
         }
-        if (right.kind != C_IR_CONSTANT_UNKNOWN && !c_ir_constant_normalize(builder, &right))
-        {
-            return false;
-        }
-        bool left_known = left.kind != C_IR_CONSTANT_UNKNOWN;
-        bool right_known = right.kind != C_IR_CONSTANT_UNKNOWN;
+        bool left_known = left_truth != C_IR_CONSTANT_TRUTH_UNKNOWN;
+        bool right_known = right_truth != C_IR_CONSTANT_TRUTH_UNKNOWN;
         if (left_known && right_known)
         {
-            bool value = operation == C_CONDITIONAL_LOGICAL_AND ? c_ir_constant_truth(builder, &left) && c_ir_constant_truth(builder, &right)
-                                                                : c_ir_constant_truth(builder, &left) || c_ir_constant_truth(builder, &right);
+            bool value = operation == C_CONDITIONAL_LOGICAL_AND ? (left_truth == C_IR_CONSTANT_TRUTH_TRUE) && (right_truth == C_IR_CONSTANT_TRUTH_TRUE)
+                                                                : (left_truth == C_IR_CONSTANT_TRUTH_TRUE) || (right_truth == C_IR_CONSTANT_TRUTH_TRUE);
             *result = c_ir_constant_integer(builder->s32_type, value);
             return true;
         }
         if (left_known)
         {
-            bool left_truth = c_ir_constant_truth(builder, &left);
-            if ((operation == C_CONDITIONAL_LOGICAL_AND && !left_truth) || (operation == C_CONDITIONAL_LOGICAL_OR && left_truth))
+            if ((operation == C_CONDITIONAL_LOGICAL_AND && left_truth == C_IR_CONSTANT_TRUTH_FALSE) || (operation == C_CONDITIONAL_LOGICAL_OR && left_truth == C_IR_CONSTANT_TRUTH_TRUE))
             {
                 *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_LOGICAL_OR);
                 return true;
@@ -46528,8 +46554,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         }
         if (right_known)
         {
-            bool right_truth = c_ir_constant_truth(builder, &right);
-            if ((operation == C_CONDITIONAL_LOGICAL_AND && !right_truth) || (operation == C_CONDITIONAL_LOGICAL_OR && right_truth))
+            if ((operation == C_CONDITIONAL_LOGICAL_AND && right_truth == C_IR_CONSTANT_TRUTH_FALSE) || (operation == C_CONDITIONAL_LOGICAL_OR && right_truth == C_IR_CONSTANT_TRUTH_TRUE))
             {
                 *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_LOGICAL_OR);
                 return true;
@@ -46538,13 +46563,25 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         *result = (CIrConstantValue){.type = builder->s32_type, .kind = C_IR_CONSTANT_UNKNOWN};
         return true;
     }
+    IrType* left_type = ir_type_from_id(&builder->program->types, left.type);
+    IrType* right_type = ir_type_from_id(&builder->program->types, right.type);
+    // Materialize scalar places before pointer or arithmetic dispatch. A
+    // successful normalization can still mean UNKNOWN, never integer zero.
+    if (left.kind == C_IR_CONSTANT_LVALUE && left_type && left_type->kind != IR_TYPE_ARRAY && left_type->kind != IR_TYPE_FUNCTION)
+    {
+        c_ir_constant_normalize(builder, &left);
+    }
+    if (right.kind == C_IR_CONSTANT_LVALUE && right_type && right_type->kind != IR_TYPE_ARRAY && right_type->kind != IR_TYPE_FUNCTION)
+    {
+        c_ir_constant_normalize(builder, &right);
+    }
     if (left.kind == C_IR_CONSTANT_UNKNOWN || right.kind == C_IR_CONSTANT_UNKNOWN)
     {
         *result = (CIrConstantValue){.type = left.kind == C_IR_CONSTANT_UNKNOWN ? left.type : right.type, .kind = C_IR_CONSTANT_UNKNOWN};
         return true;
     }
-    IrType* left_type = ir_type_from_id(&builder->program->types, left.type);
-    IrType* right_type = ir_type_from_id(&builder->program->types, right.type);
+    left_type = ir_type_from_id(&builder->program->types, left.type);
+    right_type = ir_type_from_id(&builder->program->types, right.type);
     bool left_pointer = left.kind == C_IR_CONSTANT_POINTER;
     bool right_pointer = right.kind == C_IR_CONSTANT_POINTER;
     if (left.kind == C_IR_CONSTANT_LVALUE)
@@ -47659,13 +47696,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
                                                               c_ir_constant_is_null_pointer_constant(builder, &true_value),
                                                               c_ir_constant_is_null_pointer_constant(builder, &false_value));
             }
-            CIrConstantValue selected = c_ir_constant_truth(builder, &condition) ? true_value : false_value;
-            if (condition.kind == C_IR_CONSTANT_UNKNOWN)
+            CIrConstantTruth truth = c_ir_constant_truth(builder, &condition);
+            CIrConstantValue selected = truth == C_IR_CONSTANT_TRUTH_TRUE ? true_value : false_value;
+            if (truth == C_IR_CONSTANT_TRUTH_UNKNOWN)
             {
                 selected = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
                 success = common.value != IR_ID_UNDERLYING_INVALID;
             }
-            else if (common.value != IR_ID_UNDERLYING_INVALID)
+            else if (truth != C_IR_CONSTANT_TRUTH_INVALID && common.value != IR_ID_UNDERLYING_INVALID)
             {
                 // ?: converts the selected value to the common type before
                 // its consumer runs, even when its condition is constant.
@@ -50928,7 +50966,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
             };
         }
-        else if (assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(&constant_builder, &assertion))
+        else if (assertion.kind != C_IR_CONSTANT_INTEGER || c_ir_constant_truth(&constant_builder, &assertion) != C_IR_CONSTANT_TRUTH_TRUE)
         {
             if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
             {
