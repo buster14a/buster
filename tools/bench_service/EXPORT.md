@@ -173,7 +173,10 @@ clean replay destination, refusing any name the unpacked result already has
 (`lane_f_import`), requires the final binding to be the composed record with
 only its sealed-result phase set to the composed sealed result and its
 independent-replay phase set to a non-pending descriptor at the composed path
-(`final_binding_check`), and then runs the validator and the join over it.
+(`final_binding_check`), lays out the flat evidence entries at the paths that
+binding names with lane F's own `evidence_layout` and `lay_out_evidence`
+(see **Flat evidence** below), and then runs the validator and the join over
+it.
 `retirement_export_replay_real_test.py`, run after `bench_throughput self-test`
 with its output directory, drives real A1 output (metrics shards, untimed
 batches, the two-shard execution receipt and numeric samples) through these
@@ -187,8 +190,10 @@ wrong attempt or a forged receipt. `--worker-unit DIRECTORY`, which
 worker unit's composed job-82 result and runs lane F's production writer and
 the real validator over it, with no validator double (see below); the whole
 CLI (publication, separate retrieval, unpack stand-in, lane F import and
-final-binding check, validator) refuses it explicitly for missing context
-evidence and refuses a final binding that changes anything else before the
+final-binding check, flat-evidence layout, validator) reaches the verdict of
+lane F's `replay` (the validator refuses the fixture's unapproved #508
+support declaration), refuses a result missing a mapped flat evidence entry
+as missing, and refuses a final binding that changes anything else before the
 validator; the join accepts the producer authority's receipt digest and
 refuses another job, attempt or trust root and a tampered receipt. The
 archive and the unpacker in that test are Python stand-ins. The native `unpack-export` needs a receipt the service
@@ -328,11 +333,12 @@ The worker unit's job-82 result is not yet a replayable retirement result.
 Its sealed adapter result comes from the preparation runner's stand-in
 adapter (`bq_prep_worker_unit_adapter`) and its harness commit is a
 placeholder, so `bind` refuses it. Over a lane F directory written with the
-adapter replay replaced, the real validator refuses the final binding because
-the binding names context evidence the result does not contain, starting
-with `census/support.tsv` (`support.files[0]`). The `--worker-unit` tests
-assert each refusal. #1998 publishes that evidence. The validator fixes two
-of its paths (`docs/native-retirement-support-v1.tsv` and
+adapter replay replaced, the context evidence the binding names is in the
+result as flat entries (#1998), which both lane F's `replay` and the export
+CLI lay out (#2065); the real validator then refuses the final binding
+because the fixture's support declaration is not the approved #508 input.
+The `--worker-unit` tests assert each refusal. The validator fixes two of its
+paths (`docs/native-retirement-support-v1.tsv` and
 `tools/throughput/retirement_stats.h`), so the context's descriptors must
 name the original paths while the files are published under the flat names
 above.
