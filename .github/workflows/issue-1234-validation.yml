@@ -1,0 +1,120 @@
+name: Issue 1234 candidate validation
+on:
+  push:
+    branches: [codex/1234-vla-runtime-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_SHA: 7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+      BASELINE_SHA: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Require CI admission
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
+          path: baseline
+          persist-credentials: false
+      - name: Record exact revisions and build hosted drivers
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vla-validation"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          clang --version | tee "$RUNNER_TEMP/vla-validation/clang.txt"
+          printf 'candidate=%s\nbaseline=%s\n' "$CANDIDATE_SHA" "$BASELINE_SHA" | tee "$RUNNER_TEMP/vla-validation/revisions.txt"
+          (cd candidate && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-candidate-build")
+          (cd baseline && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-baseline-build")
+      - name: Build candidate compiler
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-candidate-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-build.log"
+      - name: Run embedded VLA source with Clang and all sixteen Buster profiles
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/vla-validation/vla-profiles.log"
+          import ast
+          import os
+          import pathlib
+          import re
+          import subprocess
+          text = pathlib.Path("src/buster/tests/compiler/driver/driver_test.c").read_text()
+          body = text.split("UnitTestResult compiler_driver_test_vla_runtime_types(", 1)[1]
+          literal = body.split("String8 source = S8(", 1)[1].split("\n    String8 input", 1)[0].rsplit(");", 1)[0]
+          source = "".join(ast.literal_eval(part) for part in re.findall(r'"(?:[^"\\]|\\.)*"', literal))
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "vla-validation"
+          fixture = root / "vla-runtime-types.c"
+          fixture.write_text(source)
+          oracle = root / "clang-oracle"
+          subprocess.run(["clang", "-std=gnu17", "-O0", str(fixture), "-o", str(oracle)], check=True)
+          subprocess.run([str(oracle)], check=True, timeout=30)
+          failures = 0
+          for optimization in ("O0", "O2"):
+              for mode in ("none", "mir-stack", "fast", "quality"):
+                  for frontend in ("-fno-frontend-ssa", "-ffrontend-ssa"):
+                      executable = root / (optimization + "-" + mode + "-" + frontend)
+                      args = ["build/Release/ide", "cc", "-" + optimization,
+                              "-fregister-allocator=" + mode, frontend, "-fverify-codegen"]
+                      if mode != "none":
+                          args.append("-fno-machine-fallback")
+                      args.extend(["-o", str(executable), str(fixture)])
+                      compiled = subprocess.run(args, timeout=120)
+                      status = compiled.returncode
+                      if status == 0:
+                          status = subprocess.run([str(executable)], timeout=30).returncode
+                      print("VLA_PROFILE optimization=" + optimization + " allocator=" + mode
+                            + " frontend=" + frontend + " status=" + str(status), flush=True)
+                      failures += status != 0
+          raise SystemExit(bool(failures))
+          PY
+      - name: Candidate full Release suite
+        if: ${{ !cancelled() }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-candidate-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-tests.log"
+      - name: Candidate self-host fixed point
+        if: ${{ !cancelled() }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-candidate-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-selfhost.log"
+      - name: Baseline self-host fixed point
+        if: ${{ !cancelled() }}
+        working-directory: baseline
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-baseline-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-baseline-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-validation/baseline-selfhost.log"
+      - name: Candidate ASan UBSan full suite
+        if: ${{ !cancelled() }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-candidate-build" generate --build-directory build/sanitized --cc clang --ci --sanitize --linker DEFAULT
+          "$RUNNER_TEMP/buster-candidate-build" build --build-directory build/sanitized -t test_all 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-sanitized-tests.log"
+      - name: Retain exact candidate evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1234-validation-7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+          path: ${{ runner.temp }}/vla-validation/
+          if-no-files-found: error
+          retention-days: 7
