@@ -989,6 +989,102 @@ class DraftMacosDeferralTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             github_ci_time.latest_run_jobs(first + [clash], 123, 1, "a" * 40)
 
+    def rerun_failed_inventory(self, attempts, deferred=True):
+        """Run 36717332363's shape (#2052): attempt 1's CI complete failed, then
+        "Re-run failed jobs" re-stamped every retained success under each later
+        attempt with a new id but the original timing and steps."""
+        first = self.sample(deferred)
+        for number, job in enumerate(first):
+            job.update(started_at=f"2026-09-30T12:{number:02}:04Z", completed_at=f"2026-09-30T12:{number:02}:09Z")
+            for step in job["steps"]:
+                step.update(started_at=job["started_at"], completed_at=job["completed_at"])
+            if job["name"] == "CI complete":
+                job.update(status="completed", conclusion="failure", steps=[])
+        inventory = list(first)
+        for attempt in range(2, attempts + 1):
+            for job in first:
+                copied = dict(copy.deepcopy(job), id=job["id"] + 1000 * attempt, run_attempt=attempt)
+                if job["name"] == "CI complete":
+                    copied.update(status="in_progress" if attempt == attempts else "completed",
+                                  conclusion=None if attempt == attempts else "failure",
+                                  started_at=f"2026-09-30T{12 + attempt}:00:00Z", completed_at=None)
+                inventory.append(copied)
+        return inventory
+
+    def gate_rerun(self, inventory, attempts, draft):
+        payload = {"pull_request": {"draft": draft, "head": {"sha": "a" * 40}}}
+        run = {"id": 123, "run_attempt": attempts, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+               "event": "pull_request"}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "event.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=attempts,
+                                   event_name="pull_request", event_path=str(path))
+            snapshots = len(github_ci_time.JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1
+            responses = [run] + [{"total_count": len(inventory), "jobs": inventory}] * snapshots
+            with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
+                    mock.patch.object(github_ci_time.time, "sleep"):
+                result = github_ci_time.require_jobs(args)
+        return result
+
+    def test_rerun_failed_jobs_carries_attempt_one_deferrals_forward(self):
+        # #2052: the re-stamped copies are judged as attempt 1 judged the originals.
+        for attempts in (2, 3):
+            with self.subTest(attempts=attempts):
+                inventory = self.rerun_failed_inventory(attempts)
+                latest = github_ci_time.latest_run_jobs(inventory, 123, attempts, "a" * 40)
+                deferred = [job for job in latest if github_ci_time.deferred_base_name(job["name"])]
+                self.assertEqual(len(deferred), 4)
+                self.assertEqual({job["run_attempt"] for job in deferred}, {1})
+                self.assertEqual(self.check(latest, draft=True, attempt=attempts), [])
+                result = self.gate_rerun(inventory, attempts, draft=True)
+                self.assertTrue(result["success"], result["errors"])
+                self.assertEqual(result["deferred_macos_jobs"], sorted(github_ci_time.MACOS_RUNNER_JOBS))
+                # Non-draft control: the same carried deferrals never substitute for macOS.
+                result = self.gate_rerun(inventory, attempts, draft=False)
+                self.assertFalse(result["success"])
+                self.assertEqual(sum("only the first attempt of a draft pull-request run" in error
+                                     for error in result["errors"]), 4)
+        # Non-draft control without deferrals: an ordinary partial rerun still passes.
+        result = self.gate_rerun(self.rerun_failed_inventory(2, deferred=False), 2, draft=False)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["deferred_macos_jobs"], [])
+
+    def test_rerun_failed_jobs_still_fails_closed(self):
+        def target(inventory, attempt):
+            return next(job for job in inventory if job["run_attempt"] == attempt
+                        and job["name"] == "macOS AArch64 native" + github_ci_time.DEFERRED_SUFFIX)
+        for mutate in ("reran", "failed", "cancelled", "skipped", "step", "untimed", "gap", "linux"):
+            with self.subTest(mutate=mutate):
+                inventory = self.rerun_failed_inventory(3)
+                if mutate == "reran":
+                    # A deferral that executed again in a later attempt is not a copy.
+                    target(inventory, 3).update(started_at="2026-09-30T20:00:00Z", completed_at="2026-09-30T20:00:05Z")
+                elif mutate in ("failed", "cancelled", "skipped"):
+                    for attempt in (1, 2, 3):
+                        target(inventory, attempt)["conclusion"] = "failure" if mutate == "failed" else mutate
+                elif mutate == "step":
+                    target(inventory, 3)["steps"][0]["conclusion"] = "skipped"
+                elif mutate == "untimed":
+                    for attempt in (1, 2, 3):
+                        target(inventory, attempt).update(started_at=None, completed_at=None)
+                elif mutate == "gap":
+                    # Attempt 2 carried a different record; attempt 3 cannot hide it.
+                    target(inventory, 2)["completed_at"] = "2026-09-30T13:30:00Z"
+                else:
+                    linux = [job for job in inventory if job["name"] == "Linux AArch64 native"]
+                    for job in linux:
+                        job["name"] += github_ci_time.DEFERRED_SUFFIX
+                latest = github_ci_time.latest_run_jobs(inventory, 123, 3, "a" * 40)
+                self.assertTrue(self.check(latest, draft=True, attempt=3))
+                self.assertFalse(self.gate_rerun(inventory, 3, draft=True)["success"])
+        # A non-deferred failure retained from attempt 1 is not rescued either.
+        inventory = self.rerun_failed_inventory(2)
+        for job in inventory:
+            if job["name"] == "Linux x86-64 release":
+                job["conclusion"] = "failure"
+        self.assertFalse(self.gate_rerun(inventory, 2, draft=True)["success"])
+
     def gate(self, payload, event="pull_request", event_name="pull_request", deferred=True):
         jobs = self.sample(deferred)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": event}
