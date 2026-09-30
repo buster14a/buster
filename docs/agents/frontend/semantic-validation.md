@@ -76,7 +76,7 @@ callers resolve missing answers through the same semantic helper.
 
 `c_test_type_identity_authority` inspects the independent expected return
 constants in raw canonical IR for both frontend forms on six native layouts.
-The reviewed `basic_c_generic.c` fixture repeats qualifier, decay, function
+The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
 pointer, conditional-pointer and GNU-compatibility answers across enumerators,
 static assertions, static initializers, array bounds, case labels and runtime
 values. Driver coverage runs it with strict codegen verification under both

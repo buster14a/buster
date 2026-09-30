@@ -15,35 +15,49 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
-      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
-      - run: ./build.sh generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
-      - run: ./build.sh build --config Release -t ide
-      - run: ./build.sh test_self_host --config Release
-      - run: ./build.sh build --config Release -t test_all
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y clang lld cmake ninja-build
+      - name: Hosted Clang bootstrap
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+      - run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - run: |
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+      - run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all
   candidate:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
-      - run: ./build.sh generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
-      - run: ./build.sh build --config Release -t ide
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y clang lld cmake ninja-build
+      - name: Hosted Clang bootstrap
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+      - run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
       - name: Independent reference compilers
         run: |
-          clang -std=gnu17 -Wno-generic-qual-type tests/basic_c_generic.c -o /tmp/generic-clang
+          clang -std=gnu17 -Wno-generic-qual-type src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-clang
           /tmp/generic-clang
-          gcc -std=gnu17 tests/basic_c_generic.c -o /tmp/generic-gcc
+          gcc -std=gnu17 src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-gcc
           /tmp/generic-gcc
       - name: Issue family in all frontend and allocator forms
         run: |
           set -euo pipefail
           for frontend in -ffrontend-ssa -fno-frontend-ssa; do
             for allocator in fast none quality mir-stack; do
-              build/Release/ide cc -std=gnu17 "$frontend" -fregister-allocator="$allocator" -fverify-codegen tests/basic_c_generic.c -o /tmp/generic-buster
+              build/Release/ide cc -std=gnu17 "$frontend" -fregister-allocator="$allocator" -fverify-codegen src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-buster
               /tmp/generic-buster
             done
           done
-      - run: ./build.sh test_self_host --config Release
-      - run: ./build.sh build --config Release -t test_all
-      - run: ./build.sh generate --cc clang --sanitize --no-fuzz --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
-      - run: ./build.sh build --config Release -t test_all
+      - run: |
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+      - run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all
+      - run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --sanitize --no-fuzz --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+      - run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all

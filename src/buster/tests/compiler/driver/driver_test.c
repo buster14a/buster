@@ -16877,7 +16877,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_generic_command_line[] = {
         S8("-o"),
         c_generic_path,
-        S8("tests/basic_c_generic.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
     };
     CompilerDriverResult c_generic = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_generic_command_line)));
@@ -22980,8 +22980,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
     String8 c_differential_regression_paths[] = {
-        S8("tests/basic_c_generic.c"),
-        S8("tests/basic_c_generic.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
@@ -23029,7 +23029,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // The promotion witness must not depend on the native selectors'
             // legacy local-to-mutable-register transformation.
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
-            bool generic_identity = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_generic.c"));
+            bool generic_identity = string_equal(c_differential_regression_paths[fixture_index], S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"));
             fixture_invocation.verify_codegen |= generic_identity;
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
