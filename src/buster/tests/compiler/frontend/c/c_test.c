@@ -27703,9 +27703,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "void take(int *p) { (void)p; }\n"
+        "int p1(const char *p) { return _Generic(p, char *: 1, default: 2); }\n"
+        "int l2(volatile int v) { return _Generic(v, int: 1, default: 2); }\n"
+        "int f1(void) { return _Generic(take, void (*)(int *): 1, default: 2); }\n"
+        "int b1(void) { return __builtin_types_compatible_p(const char *, char *); }\n");
+    String8 names[] = {S8("p1"), S8("l2"), S8("f1"), S8("b1")};
+    u64 expected[] = {2, 1, 1, 0};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("type-identity.c"), tokens, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 checked = 0;
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(names); test += 1)
+                        {
+                            if (string_equal(function->name, names[test]))
+                            {
+                                u32 returns = 0;
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrInstruction* instruction = function->instructions + row;
+                                    if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                                    {
+                                        IrValueId value = instruction->operands[0];
+                                        if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                        {
+                                            IrInstructionId definition = function->values[value.value].definition;
+                                            if (BUSTER_REQUIRE(arguments, definition.value < function->instruction_count))
+                                            {
+                                                IrInstruction* constant = function->instructions + definition.value;
+                                                if (BUSTER_REQUIRE(arguments, constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count))
+                                                    BUSTER_TEST(arguments, constant->immediates[0] == expected[test]);
+                                            }
+                                        }
+                                        returns += 1;
+                                    }
+                                }
+                                BUSTER_TEST(arguments, returns == 1);
+                                checked += 1;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(names));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);

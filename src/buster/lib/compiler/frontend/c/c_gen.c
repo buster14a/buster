@@ -17719,7 +17719,7 @@ struct CIrTypeCompatibilityTask
     IrTypeId right;
 };
 
-BUSTER_C_INTERNAL bool c_ir_types_compatible(CIntegerIrBuilder* builder, IrTypeId left_id, IrTypeId right_id)
+BUSTER_C_INTERNAL bool c_ir_representation_types_compatible(CIntegerIrBuilder* builder, IrTypeId left_id, IrTypeId right_id)
 {
     if (!builder || !builder->program || !builder->temporary_arena)
     {
@@ -40387,7 +40387,7 @@ BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* b
         return decoded.element_width == 1 && element->bit_width == 8;
     }
     IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
-    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, element_type, expected_type);
 }
 
 BUSTER_C_INTERNAL bool c_ir_string_pointer_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded)
@@ -40398,7 +40398,7 @@ BUSTER_C_INTERNAL bool c_ir_string_pointer_element_compatible(CIntegerIrBuilder*
         return element && element->kind == IR_TYPE_VOID;
     }
     IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
-    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, element_type, expected_type);
 }
 
 BUSTER_C_INTERNAL bool c_ir_label_address_expression(CIntegerIrBuilder* builder, u32 start, u32 end, u32* label_index_out, IrTypeId* cast_type_out)
@@ -40469,7 +40469,7 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
     IrType* cast_element = ir_type_from_id(&builder->program->types, cast->element_type);
     IrType* destination_element = ir_type_from_id(&builder->program->types, destination->element_type);
     if (!cast_element || !destination_element || (cast_element->kind != IR_TYPE_VOID && destination_element->kind != IR_TYPE_VOID &&
-                                                   !c_ir_types_compatible(builder, cast->element_type, destination->element_type)))
+                                                   !c_ir_representation_types_compatible(builder, cast->element_type, destination->element_type)))
     {
         return false;
     }
@@ -40619,7 +40619,7 @@ BUSTER_C_INTERNAL void c_ir_initializer_narrow_compound_literal_value(CIntegerIr
     if (c_ir_initializer_compound_literal_info(builder, *start, *end, &open, &close, &type_start, &type_end))
     {
         IrTypeId literal = c_ir_compound_literal_type(builder, type_start, type_end, open, close);
-        if (literal.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, literal, destination))
+        if (literal.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, literal, destination))
         {
             *start = open;
             *end = close + 1;
@@ -43993,7 +43993,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                     return c_ir_constant_initializer_fail(builder, S8("compound literal initializer exceeds the target object"), value_start);
                 }
                 IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
-                if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, child_type))
+                if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_representation_types_compatible(builder, compound_type, child_type))
                 {
                     return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), value_start);
                 }
@@ -44159,7 +44159,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
                                                           relocation_capacity);
         }
         IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
-        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, root_type))
+        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_representation_types_compatible(builder, compound_type, root_type))
         {
             return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), start);
         }
@@ -48261,7 +48261,7 @@ BUSTER_C_INTERNAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder*
         }
         IrType* cast_element = ir_type_from_id(&builder->program->types, cast_type->element_type);
         if (!cast_element || (destination_element->kind != IR_TYPE_VOID && cast_element->kind != IR_TYPE_VOID &&
-                              !c_ir_types_compatible(builder, cast_type->element_type, type->element_type)))
+                              !c_ir_representation_types_compatible(builder, cast_type->element_type, type->element_type)))
         {
             return false;
         }

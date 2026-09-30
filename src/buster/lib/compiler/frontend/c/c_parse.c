@@ -73,6 +73,7 @@
 //   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
 //   c_parse_validate_constexpr_declaration,       constexpr, type
 //   c_parse_types_compatible                      compatibility
+//   c_parse_type_identity_prepare                 retained C identity answers
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
@@ -15783,7 +15784,7 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
 }
 
 BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
-                                                       CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
+                                                       CTypeId left, CTypeId right)
 {
     Arena* conflicts[] = {
         result_arena,
@@ -15815,7 +15816,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             right_type.kind = c_parse_expression_value_kind(result, pair.right);
         }
         if (left_type.kind != right_type.kind ||
-            (!pair.ignore_qualifiers && !ignore_nested_qualifiers && (left_type.is_const != right_type.is_const || left_type.is_volatile != right_type.is_volatile ||
+            (!pair.ignore_qualifiers && (left_type.is_const != right_type.is_const || left_type.is_volatile != right_type.is_volatile ||
                                         left_type.is_restrict != right_type.is_restrict || left_type.is_atomic != right_type.is_atomic)))
         {
             compatible = false;
@@ -16060,13 +16061,13 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
 // sized by the whole type table, and without walking the structure the
 // shared id already identifies. The walk decides everything else.
 BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
-                                                       CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
+                                                       CTypeId left, CTypeId right)
 {
     CTypeSelfVerdict self = left.value == right.value ? c_parse_types_self_compatible(result, left) : C_TYPE_SELF_UNDECIDED;
     bool compatible = self == C_TYPE_SELF_COMPATIBLE;
     if (self == C_TYPE_SELF_UNDECIDED)
     {
-        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right, ignore_nested_qualifiers);
+        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right);
     }
     return compatible;
 }
@@ -16074,12 +16075,12 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParse
 #if BUSTER_INCLUDE_TESTS
 bool c_test_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
-    return c_parse_types_compatible_core(arena, result, preprocess, left, right, false);
+    return c_parse_types_compatible_core(arena, result, preprocess, left, right);
 }
 
 bool c_test_types_compatible_walk(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
-    return c_parse_types_compatible_walk(arena, result, preprocess, left, right, false);
+    return c_parse_types_compatible_walk(arena, result, preprocess, left, right);
 }
 
 bool c_test_parse_reserve_types(CParseResult* result, u32 additional)
@@ -16090,7 +16091,7 @@ bool c_test_parse_reserve_types(CParseResult* result, u32 additional)
 
 BUSTER_C_SHARED bool c_parse_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
-    return c_parse_types_compatible_core(arena, result, preprocess, left, right, false);
+    return c_parse_types_compatible_core(arena, result, preprocess, left, right);
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
