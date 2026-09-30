@@ -569,9 +569,13 @@ or start the socket until the operator has read back the binary and unit
 identities. A socket start is separate from enabling GitHub dispatch.
 
 The revised service binary changes the gateway executable digest. Update only
-the fixed `gateway` sudo rule to its reviewed new digest; retain the same
-three permitted operations and rerun positive and negative authorization
-tests. The candidate and runner must have no access to the broker directory,
+the fixed `gateway` sudo rule to its reviewed new digest. The dispatch
+workflow submits through `gateway submit-recipe RECIPE KEY BASE CANDIDATE`
+(#2071), so the permitted operations are `capabilities`, `submit-recipe`
+and `result`; when the rule pins arguments, replace the old
+`gateway submit` entry with `gateway submit-recipe`. Rerun positive and
+negative authorization tests, including a refused unknown recipe.
+The candidate and runner must have no access to the broker directory,
 socket, system manager or queue/lease state.
 
 ## Required acceptance receipts

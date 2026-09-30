@@ -959,21 +959,27 @@ The installed executable also provides a fixed smoke request encoder:
 /usr/local/libexec/buster-bench-service gateway recipe-identity
 /usr/local/libexec/buster-bench-service gateway submit KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA
+/usr/local/libexec/buster-bench-service gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway status JOB
 /usr/local/libexec/buster-bench-service gateway result JOB
 /usr/local/libexec/buster-bench-service gateway logs JOB [AFTER_SEQUENCE]
 /usr/local/libexec/buster-bench-service gateway cancel JOB
 ```
 
-`gateway` fixes `/run/buster-bench/control.sock`, principal `github-actions`
-and recipe `validate-buster-v1`; `submit-retirement` fixes
-`native-retirement-performance-v1` instead and is refused before transport
-while the compiled profile is blocked. It accepts full lowercase immutable source
-identities and bounded keys, never a recipe override, path, command, flag,
-sample count, threshold, workload or environment override. A retirement job
-needs an idle host, so the transport accepts the retirement recipe only
-through the gateway's exclusive (idle-only) submit; `client SOCKET submit` of
-the retirement recipe is refused before transport with `unsupported`.
+`gateway` fixes `/run/buster-bench/control.sock` and principal
+`github-actions`. `submit` fixes recipe `validate-buster-v1`;
+`submit-retirement` fixes `native-retirement-performance-v1` and is refused
+before transport while the compiled profile is blocked; `submit-recipe`
+names one recipe, which must pass the same compiled-registry
+`bq_recipe_service` check as every other submission, so unknown, blocked, fake
+and supervisor-internal names are refused before transport and again by the
+service. `submit` and `submit-recipe validate-buster-v1` encode identical
+request bytes. The gateway accepts full lowercase immutable source identities
+and bounded keys, never a path, command, flag, sample count, threshold,
+workload or environment override. A retirement job needs an idle host, so the
+transport accepts the retirement recipe only through the gateway's exclusive
+(idle-only) submit; `client SOCKET submit` of the retirement recipe is refused
+before transport with `unsupported`.
 `recipe-identity` is read-only: it prints the retirement recipe's
 `status=blocked`, `status=admitted` or `status=incomplete` (admitted but
 missing pins, which the service refuses to serve) and the SHA-256 of its

@@ -1,6 +1,8 @@
 /* Service and control entry points. No caller-selected commands or shell execution.
  * bq_client_arguments owns typed requests; gateway fixes socket/principal and
- * selects only between the two fixed service recipes (submit, submit-retirement).
+ * selects between the fixed service recipes (submit, submit-retirement) or names
+ * one registry service recipe (submit-recipe), which bq_recipe_service admits
+ * exactly as for the client.
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
  * Tests include this entry point, as the existing throughput tests do.
  */
@@ -89,23 +91,29 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
         valid = true;
     }
     else if ((argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit")) ||
-             (gateway && argc == 4 && !strcmp(argv[0], "submit-retirement")))
+             (gateway && argc == 4 && !strcmp(argv[0], "submit-retirement")) ||
+             (gateway && argc == 5 && !strcmp(argv[0], "submit-recipe")))
     {
-        /* The gateway's fixed recipes: submit-retirement selects the
-         * retirement recipe, which bq_recipe_service refuses until the
-         * compiled profile is admitted. Every other execution input is the
-         * installed recipe's; nothing here names a command, flag, sample,
-         * threshold, workload or environment. */
+        /* The gateway's submissions: submit fixes validate-buster-v1,
+         * submit-retirement fixes the retirement recipe (which
+         * bq_recipe_service refuses until the compiled profile is admitted),
+         * and submit-recipe only names the recipe. Every name passes the same
+         * bq_recipe_service registry check, so an unknown, blocked, fake or
+         * supervisor-internal name is refused here and again by the service.
+         * Every other execution input is the installed recipe's; nothing here
+         * names a command, flag, path, sample, threshold, workload or
+         * environment. */
         BqRequest submission;
         String8 fields[BQ_FIELD_COUNT];
         if (gateway)
         {
+            u32 selected = argc == 5 ? 1u : 0u;
             fields[0] = S8("github-actions");
-            fields[1] = string_from_pointer(argv[1]);
-            fields[2] = !strcmp(argv[0], "submit-retirement") ? S8("native-retirement-performance-v1") :
-                                                                 S8("validate-buster-v1");
-            fields[3] = string_from_pointer(argv[2]);
-            fields[4] = string_from_pointer(argv[3]);
+            fields[1] = string_from_pointer(argv[1 + selected]);
+            fields[2] = selected ? string_from_pointer(argv[1]) :
+                (!strcmp(argv[0], "submit-retirement") ? S8("native-retirement-performance-v1") : S8("validate-buster-v1"));
+            fields[3] = string_from_pointer(argv[2 + selected]);
+            fields[4] = string_from_pointer(argv[3 + selected]);
         }
         else
         {
@@ -498,6 +506,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "client SOCKET capabilities/recipe-identity/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway recipe-identity | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA | "
+                    "gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "gateway export JOB TOKEN FULL_SHA [EXPECTED_RECIPE] | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "
