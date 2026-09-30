@@ -109,6 +109,25 @@ struct CSourceLocation
     u32 map_offset;
 };
 
+// Where a semantic record (declaration, entity, member, parameter,
+// enumerator, deferred static assertion) was named, without its line and
+// column: the naming token's mapped offset, plus one so that a
+// zero-initialized site is the unknown location a zero CSourceLocation was,
+// and the source that offset lies in. A successful compilation reads only
+// these two fields, as the offset and source of an IrSourceRange; line,
+// column and physical offset are recovered by c_preprocess_site_location
+// only when a diagnostic or the declared-before fallback asks, from the
+// published source map the translation unit retains. Recovery is a pure
+// function of that map and the offset, so it returns the location
+// c_preprocess_token_location would have returned for the naming token when
+// the record was built.
+typedef struct CSourceSite CSourceSite;
+struct CSourceSite
+{
+    u32 map_offset_plus_one;
+    u32 file;
+};
+
 // A token no longer stores its spelling pointer or an eager source location.
 // The spelling is `spelling_base + offset` for `length` bytes, where the base
 // is the owning CLexResult's or CPreprocessResult's spelling space; the
@@ -465,6 +484,7 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
+    C_PREPROCESS_DIALECT_GNU89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -501,7 +521,11 @@ struct CPreprocessOptions
     // text macro expansion are not replayed. This consumes a reserved byte so
     // the public options record keeps its existing size.
     bool already_preprocessed;
-    u8 reserved[1];
+    // No report will read preprocessed.bytes (the driver passes its
+    // invocation's omit_spelled_bytes), so the pass over the output stream
+    // that sums spelling lengths is skipped and the field stays zero. Every
+    // other metric is still gathered. It takes the last reserved byte.
+    bool omit_spelled_bytes;
 };
 
 typedef struct CSymbolTable CSymbolTable;
@@ -747,7 +771,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
@@ -800,10 +827,21 @@ typedef struct CMember CMember;
 struct CMember
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
+    // Interned id of `name`, carried from the declarator token; 0 for an
+    // unnamed member or a parse without a symbol table. Member lookups key
+    // on it and compare spellings only when either side lacks one.
+    u32 symbol;
     CTypeId type;
     u32 alignment_start;
     u32 alignment_count;
+    // The value of the width expression, evaluated once where the member is
+    // declared, by the typed evaluator enumerators use. Every reader -- the
+    // sizeof folding in c_parse.c, bit-field promotion, the zero-width check
+    // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
+    // number; none re-evaluates [bit_width_token_start, +count), which remain
+    // only for diagnostics. An unresolved width holds a layout unresolved
+    // rather than reading as zero.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;
@@ -813,7 +851,8 @@ struct CMember
     // placed at byte alignment, which also stops it from raising the
     // aggregate's own alignment.
     bool is_packed;
-    u8 reserved[2];
+    bool bit_width_resolved;
+    u8 reserved;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
@@ -913,7 +952,7 @@ typedef struct CEnumMember CEnumMember;
 struct CEnumMember
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     // Interned id of `name`; zero when parsing without a symbol table.
     u32 symbol;
     // The source token and owning enum retain declaration order and scope for
@@ -932,19 +971,19 @@ struct CEnumMember
     bool is_published;
     u8 reserved[6];
 };
-BUSTER_CT_CHECK(sizeof(CEnumMember) == 104);
+BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
 typedef struct CParameter CParameter;
 struct CParameter
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     CTypeId type;
     CEntityId entity;
-    // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+    // Interned id of `name`, as CEnumMember.symbol.
     u32 symbol;
 };
-BUSTER_CT_CHECK(sizeof(CParameter) == 48);
+BUSTER_CT_CHECK(sizeof(CParameter) == 40);
 
 typedef struct CParserDeclaration CParserDeclaration;
 
@@ -966,7 +1005,7 @@ struct CEntity
     // Interned id of `name` (0 when the parse ran without a symbol table);
     // the scope-lookup buckets and chains key on it.
     u32 symbol;
-    CSourceLocation location;
+    CSourceSite location;
     CTypeId type;
     CScopeId scope;
     CEntityId next_in_scope;
@@ -998,6 +1037,9 @@ struct CEntity
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
     // but they name external storage rather than an automatic local place.
     bool is_extern;
+    // The function's only definition so far is GNU inline-only, so the unit
+    // may still give its external definition.
+    bool definition_is_gnu_inline_only;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1048,7 +1090,7 @@ typedef struct CDeclaration CDeclaration;
 struct CDeclaration
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     u32 token_start;
     u32 token_count;
     // The one declarator this declaration owns out of a comma-separated list,
@@ -1073,6 +1115,9 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    // A GNU `extern inline` function definition: its body is only for
+    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
     // recomputed.
@@ -1085,7 +1130,7 @@ struct CDeferredStaticAssert
     u32 token_start;
     u32 token_count;
     CScopeId scope;
-    CSourceLocation location;
+    CSourceSite location;
 };
 
 typedef enum CParserDeclarationKind
@@ -1125,7 +1170,6 @@ struct CParserStaticAssert
 struct CParserDeclaration
 {
     CParserDeclaration* next;
-    CSourceLocation location;
     u32 token_start;
     u32 token_count;
     // See CDeclaration: one declarator of a comma-separated list, or a zero
@@ -1165,6 +1209,36 @@ struct CParserResult
     u32 diagnostic_capacity;
 };
 
+// Definition token -> lowest type id ever given that definition_start.
+// c_parse_scalar_type_core_begin is the only writer of definition_start; a
+// row that holds a start later is that row, a younger copy of it, or one of
+// them restored by rollback, so no live row with the start is older than the
+// recorded id. A scan for rows defined at a token may therefore begin at that
+// id, and skip the table when the start was never assigned. Like the
+// aggregate lookup below, the header outlives rollback, recorded ids only
+// ever decrease, and at most half the slots are occupied; an exhausted arena
+// sets `incomplete` and sends every query back to a whole-table scan.
+typedef struct CDefinitionIndexSlot CDefinitionIndexSlot;
+struct CDefinitionIndexSlot
+{
+    u32 start_plus_one;
+    u32 lowest_type;
+};
+
+typedef struct CDefinitionIndex CDefinitionIndex;
+struct CDefinitionIndex
+{
+    CDefinitionIndexSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 search_count;
+    u64 probe_count;
+    u64 scan_row_count;
+#endif
+};
+
 // (kind, tag) -> oldest matching aggregate type id. Speculative rollback
 // restores CParseResult wholesale, so this header and its geometrically grown
 // slot arrays live in the unrewound parse arena. Rehash preserves stale and
@@ -1198,6 +1272,9 @@ struct CAggregateLookup
     u64 probe_count;
     u64 rehash_slot_count;
     u64 fallback_type_count;
+    // Rows lowering's tag type-name search visited because the index could
+    // not name the one candidate.
+    u64 lowering_search_type_count;
 #endif
 };
 
@@ -1230,10 +1307,44 @@ struct CTokenPositionIndex
     // fresh arena page already holds, and every reader subtracts one, which
     // turns that zero back into the UINT32_MAX the range tests already reject.
     u32* matching_delimiters_plus_one;
+    // Ascending positions of the words and token pairs the semantic validation
+    // families of c_parse_validate_lowering_constraints look for, recorded by
+    // the same pass so each family visits its candidates (CParseCandidates)
+    // instead of re-testing every body token. Keyword populations are exact
+    // for interned identifiers; an identifier the intern pass never saw
+    // (symbol 0) is recorded in all of them, because only its spelling can
+    // say, and every family re-checks the exact word per candidate.
+    u32* control_keyword_positions; // for while do switch break continue case default
+    u32* switch_positions;
+    u32* return_positions;
+    u32* goto_positions;
+    u32* asm_positions;    // asm __asm __asm__
+    u32* sizeof_positions; // sizeof _Alignof __alignof __alignof__
+    u32* brace_identifier_positions;     // an identifier directly followed by '{'
+    u32* statement_expression_positions; // a '{' directly preceded by '('
+    u32* label_address_positions;        // a '&&' directly followed by an identifier
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
     u32 attribute_count;
+    u32 control_keyword_count;
+    u32 switch_count;
+    u32 return_count;
+    u32 goto_count;
+    u32 asm_count;
+    u32 sizeof_count;
+    u32 brace_identifier_count;
+    u32 statement_expression_count;
+    u32 label_address_count;
+    // c_parse_scope_for_token's answer for every token of one function body
+    // under one root scope (c_parse_body_scopes_build), installed while that
+    // body's lowering constraints are checked so each query inside it is one
+    // load instead of a binary-search descent per scope level. Null outside
+    // that window.
+    u32* body_scopes;
+    u32 body_scope_start;
+    u32 body_scope_count;
+    CScopeId body_scope_root;
     // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
@@ -1242,6 +1353,34 @@ struct CTokenPositionIndex
     // to their exact scalar walks.
     u32 delimiter_mismatch_count;
     bool built;
+};
+
+// Work of the parse-side layout fold (c_parse_type_layout_core), the
+// sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
+// exists. Counts of actual operations, not timings; see
+// docs/agents/frontend/layout.md for each field's exact meaning.
+typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
+struct CTypeLayoutStatistics
+{
+    // Queries that needed a solve: not a builtin kind, not a committed entry.
+    u64 solves;
+    // Ordered-pass solves, the types their per-query state covered (the whole
+    // table without a cache, the uncommitted list with one) and their
+    // per-type attempts.
+    u64 pass_solves;
+    u64 pass_state_types;
+    u64 pass_attempts;
+    // Demand-driven solves, the entries each created (the distinct types it
+    // reached that the seed rule does not answer), their attempts,
+    // prerequisite edges registered, edge completions delivered, agenda pushes
+    // and solves abandoned to the ordered passes.
+    u64 agenda_solves;
+    u64 agenda_types;
+    u64 agenda_attempts;
+    u64 agenda_edges;
+    u64 agenda_notifications;
+    u64 agenda_pushes;
+    u64 agenda_fallbacks;
 };
 
 typedef struct CParseResult CParseResult;
@@ -1273,7 +1412,12 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
+    // Outside the checkpointed body, like position_index, so a rollback or a
+    // by-value operand copy keeps counting into the same record. Null for
+    // hand-built results, which then count nothing.
+    CTypeLayoutStatistics* type_layout_statistics;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
@@ -1373,6 +1517,11 @@ struct CIRLowerOptions
 {
     bool disable_direct_ssa;
     bool sysv_unnamed_bitfields_integer;
+    // No consumer will read debug information (-g0): lowered functions carry
+    // no IrDebugLocal records. Their only readers are the debug-value, debug
+    // location and debug-model builders, which run only with debug output;
+    // every other part of the program is unchanged.
+    bool omit_debug_locals;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -1392,6 +1541,7 @@ typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
@@ -1446,6 +1596,15 @@ BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preproces
 // of the final stream.
 BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
 BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
+// Whether printing `current` straight after `previous` would lex as different
+// tokens, so a printer that reproduces source adjacency must still separate
+// them. The -E printer and diagnostics quoting source text share this rule.
+BUSTER_F_DECL bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling);
+// A record's site for `token`: its mapped offset and source, without the
+// checkpoint search a line and column cost.
+BUSTER_F_DECL CSourceSite c_preprocess_token_site(CPreprocessResult const* preprocess, CToken token);
+// The location a site stands for, recovered on demand (see CSourceSite).
+BUSTER_F_DECL CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, CSourceSite site);
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
 {
     CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;

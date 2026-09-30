@@ -102,23 +102,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     }
                     program->fast_passes = IR_FAST_ALL;
                     IrValidationResult validation = ir_prepare_canonical_module(program, module, certified != 0);
-                    BUSTER_TEST(arguments, validation.error == expected);
-                    BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
-                                                                            : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
-                    BUSTER_TEST(arguments, !module->local_promotion_complete);
-                    BUSTER_TEST(arguments, certified ? module->local_promotion.promoted_locals > 0
-                                                    : module->local_promotion.promoted_locals == 0);
-                    BUSTER_TEST(arguments, certified ? function->instruction_count < old_instructions
-                                                    : function->instruction_count == old_instructions);
-                    BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
-                    BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
-                    BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
-                    // A failed scan must also keep the optional transforms off the module.
-                    BUSTER_TEST(arguments, module->fast.functions == 0 && !module->fast_complete);
+                    if (certified && variant >= 3)
+                    {
+                        // A fault inside one certified function predates
+                        // promotion, so the promotion-output check leaves it
+                        // to the consumers that accept it without transform
+                        // checks; FAST still declines the module.
+                        BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+                        BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0 && function->instruction_count < old_instructions);
+                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, validation.error == expected);
+                        BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
+                                                                                : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
+                        BUSTER_TEST(arguments, !module->local_promotion_complete);
+                        BUSTER_TEST(arguments, certified ? module->local_promotion.promoted_locals > 0
+                                                        : module->local_promotion.promoted_locals == 0);
+                        BUSTER_TEST(arguments, certified ? function->instruction_count < old_instructions
+                                                        : function->instruction_count == old_instructions);
+                        BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
+                        BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
+                        BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
+                        // A failed scan must also keep the optional transforms off the module.
+                        BUSTER_TEST(arguments, module->fast.functions == 0 && !module->fast_complete);
+                    }
                 }
             }
             scratch_end(temporary);
         }
+    }
+    // A certified function that already fails the strict validator and that
+    // promotion also rewrites must not be blamed on promotion in a checked
+    // build, and must not stop promotion of the other functions.
+    for (u32 certified = 0; certified < 2; certified += 1)
+    {
+        TemporalArena predating = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int test(int c){int x=3;if(c)x=7;return x;}int other(int c){int y=c;if(c)y=2;return y+1;}"), target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = 0;
+            IrFunction* other = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* candidate = module->functions + index;
+                if (string_equal(candidate->name, S8("test"))) function = candidate;
+                if (string_equal(candidate->name, S8("other"))) other = candidate;
+            }
+            bool corrupted = false;
+            for (u32 index = 0; other && index < other->instruction_count && !corrupted; index += 1)
+            {
+                IrInstruction* row = other->instructions + index;
+                if (row->opcode == IR_OPCODE_BINARY)
+                {
+                    row->binary_operation = IR_BINARY_COUNT;
+                    corrupted = true;
+                }
+            }
+            BUSTER_TEST(arguments, function && other && corrupted);
+            if (function && other && corrupted)
+            {
+                IrValidationResult original = ir_validate_canonical_module(program, module);
+                BUSTER_TEST(arguments, original.error != IR_VALIDATION_NONE && original.function.value == other->id.value);
+                program->fast_passes = IR_FAST_ALL;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, certified != 0);
+                if (certified)
+                {
+                    BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
+                    BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_LOCAL) == 0);
+                    BUSTER_TEST(arguments, ir_test_opcode_count(other, IR_OPCODE_LOCAL) == 0);
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    IrValidationResult after = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, after.error == original.error && after.function.value == other->id.value);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, prepared.error == original.error && prepared.function.value == other->id.value);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+                    BUSTER_TEST(arguments, module->local_promotion.promoted_locals == 0 && !module->local_promotion_complete);
+                }
+            }
+        }
+        scratch_end(predating);
     }
     // A preparation marker is not a certificate after a subsequent mutation.
     // The caller must revoke its input proof; preparation must then validate
@@ -185,6 +256,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         {S8("int test(int (*p)(int)){int v=1;return p(v);}"), false, false, false, true, false},
         {S8("int test(int c){void* p=c?&&a:&&b;goto *p;a:return 3;b:return 4;}"), false, false, false, true, false},
         {S8("__attribute__((noreturn))void stop(int);void test(int n){int x=n;stop(x);}"), true, false, false, false, false},
+        // A loop-header parameter becomes trivial only after a later join is
+        // removed; the earlier block must be revisited on the next sweep.
+        {S8("int test(int n,int x){int v=x;while(n--){if(n&1)v=x;}return v;}"), true, true, false, false, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixtures) * 2; index += 1)
     {
@@ -276,9 +350,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, stats.parameter_block_visits == stats.parameter_sweeps * function->block_count);
                 if (stats.promoted_locals)
                 {
-                    // Every changing sweep removes at least one parameter;
-                    // convergence includes one final sweep with no removals.
-                    BUSTER_TEST(arguments, stats.parameter_sweeps >= 1);
+                    // Only inserted parameters enter the simplifier. A changing
+                    // sweep removes at least one, then a final sweep converges.
+                    BUSTER_TEST(arguments, (stats.parameter_sweeps != 0) == (stats.inserted_parameters != 0));
                     BUSTER_TEST(arguments, stats.parameter_sweeps <= stats.removed_parameters + 1);
                     BUSTER_TEST(arguments, stats.parameter_visits >= stats.inserted_parameters);
                     if (fixture.trivial)
@@ -292,15 +366,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                         BUSTER_TEST(arguments, stats.parameter_visits == 1);
                         BUSTER_TEST(arguments, stats.parameter_incoming_visits == 2);
                     }
+                    if (index / 2 == BUSTER_ARRAY_LENGTH(fixtures) - 1)
+                    {
+                        BUSTER_TEST(arguments, stats.removed_parameters >= 2);
+                        BUSTER_TEST(arguments, stats.parameter_sweeps == 3);
+                    }
                     if (!stats.inserted_parameters && !joins)
                     {
-                        // Compaction with no parameters still visits each block
-                        // once, but has no parameter or incoming-list work.
-                        BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
+                        // Local-only compaction still remaps rows and values,
+                        // but executes no parameter-cleanup sweep.
+                        BUSTER_TEST(arguments, stats.parameter_sweeps == 0);
                         BUSTER_TEST(arguments, stats.parameter_visits == 0);
                         BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
                     }
-                    if (!stats.removed_parameters)
+                    if (stats.inserted_parameters && !stats.removed_parameters)
                     {
                         BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
                         BUSTER_TEST(arguments, stats.parameter_visits == joins);
@@ -323,6 +402,182 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, repeated.boundary == (input_certified ? IR_VALIDATION_BOUNDARY_UNSPECIFIED : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
                 BUSTER_TEST(arguments, memory_compare(&stats, &module->local_promotion, sizeof(stats)));
                 BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0);
+            }
+        }
+        scratch_end(temporary);
+    }
+    // Linked-builder input can have parameters before local promotion. The
+    // strict validator follows first/next but does not check last_parameter;
+    // the old unconditional sweep repaired a stale tail before publication.
+    for (u32 stale_tail = 0; stale_tail < 2; stale_tail += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int test(int c){int v=1;if(c)v=2;else v=3;v=4;return v;}"), target_native);
+        if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = module->functions;
+            BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, function).error == IR_VALIDATION_NONE);
+            ir_function_invalidate_cfg(function);
+            IrBlock* join = 0;
+            IrValueId argument = IR_VALUE_ID_INVALID;
+            IrInstructionId argument_row = IR_INSTRUCTION_ID_INVALID;
+            for (u32 block = 0; block < function->block_count; block += 1)
+            {
+                if (function->blocks[block].predecessor_count == 2) join = function->blocks + block;
+            }
+            for (u32 row = 0; row < function->instruction_count; row += 1)
+            {
+                if (function->instructions[row].opcode == IR_OPCODE_ARGUMENT)
+                {
+                    argument = function->instructions[row].result;
+                    argument_row.value = row;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, join && argument.value < function->value_count))
+            {
+                IrTypeId type = function->values[argument.value].canonical_type;
+                IrBlockParameter* parameters = arena_allocate(arguments->arena, IrBlockParameter, 2);
+                for (u32 index = 0; index < 2; index += 1)
+                {
+                    IrValueId value = ir_function_add_value(arguments->arena, function, (IrValue){
+                        .canonical_type = type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE,
+                    });
+                    IrIncoming* incoming = arena_allocate(arguments->arena, IrIncoming, join->predecessor_count);
+                    IrPredecessor* predecessor = join->first_predecessor;
+                    for (u32 pred = 0; pred < join->predecessor_count; pred += 1)
+                    {
+                        incoming[pred] = (IrIncoming){.predecessor = predecessor->block, .value = argument,
+                            .next = pred + 1 < join->predecessor_count ? incoming + pred + 1 : 0};
+                        predecessor = predecessor->next;
+                    }
+                    parameters[index] = (IrBlockParameter){.value = value, .canonical_type = type,
+                        .canonical_local = IR_LOCAL_ID_INVALID, .incoming_count = join->predecessor_count,
+                        .first_incoming = incoming, .last_incoming = incoming + join->predecessor_count - 1,
+                        .next = index ? 0 : parameters + 1};
+                }
+                join->first_parameter = parameters;
+                join->last_parameter = stale_tail ? parameters : parameters + 1;
+                join->parameter_count = 2;
+                IrInstructionExtra* retained_extra = ir_instruction_extra_ensure(arguments->arena, function, argument_row);
+                if (BUSTER_REQUIRE(arguments, retained_extra != 0)) retained_extra->literal = S8("retained-argument");
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0);
+                BUSTER_TEST(arguments, module->local_promotion.inserted_parameters == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_sweeps == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_block_visits == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_visits == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_incoming_visits == 0);
+                IrPublishedCfg const* cfg = function->published_cfg;
+                if (BUSTER_REQUIRE(arguments, cfg != 0))
+                {
+                    IrCfgBlock const* published = cfg->blocks + join->id.value;
+                    BUSTER_TEST(arguments, published->parameter_count == 2);
+                    BUSTER_TEST(arguments, !join->first_parameter && !join->last_parameter);
+                    BUSTER_TEST(arguments, cfg->parameters[published->parameter_offset].value.value !=
+                                           cfg->parameters[published->parameter_offset + 1].value.value);
+                    bool extra_retained = false;
+                    for (u32 extra = 0; extra < function->extra_count; extra += 1)
+                    {
+                        IrInstructionId row = function->extra_instructions[extra];
+                        extra_retained |= row.value < function->instruction_count &&
+                                          function->instructions[row.value].opcode == IR_OPCODE_ARGUMENT &&
+                                          string_equal(function->extras[extra].literal, S8("retained-argument"));
+                    }
+                    BUSTER_TEST(arguments, extra_retained);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                }
+                IrLocalPromotionStatistics stats = module->local_promotion;
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, memory_compare(&stats, &module->local_promotion, sizeof(stats)));
+            }
+        }
+        scratch_end(temporary);
+    }
+    // The two expressions deliberately share their source operand slice.
+    // Dense compaction must copy it per retained row before remapping IDs.
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int test(int a,int b){int x=3;return (a+b)+(a+b)+x;}"), target_native);
+        if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = module->functions;
+            IrInstruction* first = 0;
+            IrInstruction* second = 0;
+            for (u32 row = 0; row < function->instruction_count && !second; row += 1)
+            {
+                IrInstruction* candidate = function->instructions + row;
+                if (candidate->opcode == IR_OPCODE_BINARY && candidate->operand_count == 2)
+                {
+                    for (u32 previous = 0; previous < row && !second; previous += 1)
+                    {
+                        IrInstruction* prior = function->instructions + previous;
+                        bool same_inputs = prior->opcode == candidate->opcode &&
+                                           prior->binary_operation == candidate->binary_operation &&
+                                           prior->canonical_type.value == candidate->canonical_type.value &&
+                                           prior->operand_count == candidate->operand_count;
+                        for (u32 operand = 0; operand < 2 && same_inputs; operand += 1)
+                        {
+                            IrValueId left = prior->operands[operand];
+                            IrValueId right = candidate->operands[operand];
+                            if (left.value != right.value)
+                            {
+                                IrInstructionId left_def = function->values[left.value].definition;
+                                IrInstructionId right_def = function->values[right.value].definition;
+                                IrInstruction* left_row = left_def.value < function->instruction_count ? function->instructions + left_def.value : 0;
+                                IrInstruction* right_row = right_def.value < function->instruction_count ? function->instructions + right_def.value : 0;
+                                same_inputs = left_row && right_row &&
+                                              left_row->opcode == IR_OPCODE_LOAD && right_row->opcode == IR_OPCODE_LOAD &&
+                                              left_row->operand_count == 1 && right_row->operand_count == 1 &&
+                                              left_row->operands[0].value == right_row->operands[0].value;
+                            }
+                        }
+                        if (same_inputs)
+                        {
+                            first = prior;
+                            second = candidate;
+                        }
+                    }
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, first && second))
+            {
+                second->operands = first->operands;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0 &&
+                                       module->local_promotion.inserted_parameters == 0 &&
+                                       module->local_promotion.parameter_sweeps == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                u32 matching = 0;
+                for (u32 row = 0; row < function->instruction_count; row += 1)
+                {
+                    IrInstruction* candidate = function->instructions + row;
+                    if (candidate->opcode == IR_OPCODE_BINARY && candidate->operand_count == 2)
+                    {
+                        for (u32 previous = 0; previous < row; previous += 1)
+                        {
+                            IrInstruction* prior = function->instructions + previous;
+                            if (prior->opcode == candidate->opcode && prior->binary_operation == candidate->binary_operation &&
+                                prior->operand_count == candidate->operand_count &&
+                                prior->operands[0].value == candidate->operands[0].value &&
+                                prior->operands[1].value == candidate->operands[1].value)
+                            {
+                                BUSTER_TEST(arguments, prior->operands != candidate->operands);
+                                matching += 1;
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, matching >= 1);
             }
         }
         scratch_end(temporary);

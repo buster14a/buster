@@ -13,6 +13,8 @@
 //                                              into
 //   c_source_map_append, c_source_map_sort,    location checkpoints (see
 //   c_lex_token_location                       CTranslatedSource below)
+//   c_preprocess_token_site,                   record sites and their on-demand
+//   c_preprocess_site_location                 recovery (CSourceSite in c.h)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
 //   c_translate_source                         phase-1/2 translation with
@@ -33,6 +35,10 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   c_token_preceded_by_space,                 source spacing: the `#` white-
+//   c_token_requires_separator                 space test and the lexical-
+//                                              join guard -E and quoting
+//                                              diagnostics print through
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
@@ -949,6 +955,43 @@ CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess,
     return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
 
+BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_RECORD_SITES, 1);
+    BUSTER_CHECK(token.offset < UINT32_MAX);
+    CSourceSite result = {
+        .map_offset_plus_one = token.offset + 1,
+        .file = c_preprocess_token_source(preprocess, token, cursor),
+    };
+#if !BUSTER_OPTIMIZE
+    // The source a region's key names is the source every position in that
+    // region resolves to (TEXT regions answer region->source, STAMP regions a
+    // stamp built with the same source), so the site agrees with the eager
+    // location it replaces.
+    BUSTER_CHECK(result.file == c_preprocess_token_location(preprocess, token).file);
+#endif
+    return result;
+}
+
+CSourceSite c_preprocess_token_site(CPreprocessResult const* preprocess, CToken token)
+{
+    return c_preprocess_token_site_cursor(preprocess, token, 0);
+}
+
+CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, CSourceSite site)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_SITE_RESOLUTIONS, 1);
+    CSourceLocation result = {0};
+    if (site.map_offset_plus_one)
+    {
+        CToken token = {
+            .offset = site.map_offset_plus_one - 1,
+        };
+        result = c_preprocess_token_location(preprocess, token);
+    }
+    return result;
+}
+
 // The amortized variant for consumers whose queries mostly ascend (parsing
 // walks tokens roughly in stream order).
 BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
@@ -960,8 +1003,9 @@ BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessRe
 
 // Which source a token belongs to, without recovering its line and column:
 // what lowering wants, since an IR source range is a source plus the offset
-// the token already carries.
-BUSTER_C_SHARED u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+// the token already carries. Forced inline with ir_source_map_source: every
+// lowered instruction asks, and record sites are a second caller.
+BUSTER_C_SHARED BUSTER_SHARED_INLINE u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;
@@ -1119,26 +1163,6 @@ BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource transl
         result->token_shapes[token_index] = c_token_shape_from_token(token);
     }
     result->token_count = token_index + 1;
-}
-
-BUSTER_C_INTERNAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic_arena, u64* diagnostic_capacity, u64 maximum_diagnostic_count,
-                                           u64 offset, CDiagnosticKind kind, String8 message)
-{
-    BUSTER_VALIDATE(result->diagnostic_count < maximum_diagnostic_count);
-    if (result->diagnostic_count == *diagnostic_capacity)
-    {
-        u64 capacity = *diagnostic_capacity > maximum_diagnostic_count / 2 ? maximum_diagnostic_count : *diagnostic_capacity * 2;
-        CDiagnostic* diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, capacity);
-        memcpy(diagnostics, result->diagnostics, sizeof(*diagnostics) * result->diagnostic_count);
-        result->diagnostics = diagnostics;
-        *diagnostic_capacity = capacity;
-    }
-    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
-        .message = message,
-        .location = c_lex_local_location(result, offset),
-        .kind = kind,
-        .severity = C_DIAGNOSTIC_ERROR,
-    };
 }
 
 // Indexed by CPunctuator, so the id and the spelling cannot drift apart.  The
@@ -1315,12 +1339,28 @@ BUSTER_C_INTERNAL bool c_literal_prefix(String8 source, u64 offset, u64* prefix_
 // same code.  The three line fields are the only state that crosses a
 // compaction window: they describe the line under construction, never the
 // tokenizer, so the window pipeline still starts every window from scratch.
+typedef enum CLexDiagnosticStorage
+{
+    C_LEX_DIAGNOSTIC_STORAGE_NONE,
+    C_LEX_DIAGNOSTIC_STORAGE_SCRATCH,
+    C_LEX_DIAGNOSTIC_STORAGE_DEDICATED,
+    C_LEX_DIAGNOSTIC_STORAGE_RESULT,
+} CLexDiagnosticStorage;
+
 typedef struct CLexState CLexState;
 struct CLexState
 {
     CLexResult* result;
     CTranslatedSource translated;
+    // The result's arena. Diagnostic rows grow in diagnostic_arena, which is
+    // rewound or destroyed once lexing ends and the rows are copied out, so
+    // anything a row points at -- a formatted message -- lives here instead.
+    Arena* arena;
+    // Taken at the first diagnostic (c_lex_diagnostic_storage_begin); null
+    // and zero while the file lexes cleanly.
     Arena* diagnostic_arena;
+    TemporalArena diagnostic_temporary;
+    u64 diagnostic_reserve_size;
     u64 diagnostic_capacity;
     u64 maximum_diagnostic_count;
     // Offset just past the newline that ended the last line, so a file whose
@@ -1333,7 +1373,93 @@ struct CLexState
     // its comment and literal scans in 64-byte strides.  The reference path
     // keeps the byte loops, so the differential gate compares the two.
     u32 simd_scan;
+    CLexDiagnosticStorage diagnostic_storage;
 };
+
+// Where a lexer's diagnostic rows grow, chosen at its first diagnostic so a
+// file that lexes cleanly takes none: a scratch arena when the file's worst
+// case -- one diagnostic per byte, plus the growth copies -- fits it, else a
+// dedicated arena. Should that arena not be available the rows grow in the
+// result arena itself, which costs only the growth copies.
+BUSTER_C_INTERNAL void c_lex_diagnostic_storage_begin(CLexState* state)
+{
+    Arena* conflicts[] = {
+        state->arena,
+    };
+    state->diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    Arena* scratch = state->diagnostic_temporary.arena;
+    if (state->diagnostic_reserve_size <= scratch->reserved_size - scratch->position)
+    {
+        state->diagnostic_arena = scratch;
+        state->diagnostic_storage = C_LEX_DIAGNOSTIC_STORAGE_SCRATCH;
+    }
+    else
+    {
+        scratch_end(state->diagnostic_temporary);
+        u64 reserved_size = BUSTER_MAX(BUSTER_MB(64), state->diagnostic_reserve_size);
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENAS, 1);
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENA_BYTES, reserved_size);
+        state->diagnostic_arena = arena_create((ArenaCreation){
+            .reserved_size = reserved_size,
+        });
+        state->diagnostic_storage = state->diagnostic_arena ? C_LEX_DIAGNOSTIC_STORAGE_DEDICATED : C_LEX_DIAGNOSTIC_STORAGE_RESULT;
+        if (!state->diagnostic_arena)
+        {
+            state->diagnostic_arena = state->arena;
+        }
+    }
+}
+
+// Releases the storage c_lex_diagnostic_storage_begin took, once the rows are
+// copied into the result arena.
+BUSTER_C_INTERNAL void c_lex_diagnostic_storage_end(CLexState* state)
+{
+    if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_SCRATCH)
+    {
+        scratch_end(state->diagnostic_temporary);
+    }
+    else if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_DEDICATED)
+    {
+        arena_destroy(state->diagnostic_arena, 1);
+    }
+}
+
+// The capacity sequence is the one the rows had when 64 of them were reserved
+// before lexing: 64 (or one per byte for a shorter file), then doubling up to
+// one per byte.
+BUSTER_C_INTERNAL void c_diagnostic_push(CLexState* state, u64 offset, CDiagnosticKind kind, String8 message)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
+    CLexResult* result = state->result;
+    BUSTER_VALIDATE(result->diagnostic_count < state->maximum_diagnostic_count);
+    if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_NONE)
+    {
+        c_lex_diagnostic_storage_begin(state);
+    }
+    if (result->diagnostic_count == state->diagnostic_capacity)
+    {
+        u64 capacity = !state->diagnostic_capacity                                          ? BUSTER_MIN(state->maximum_diagnostic_count, UINT64_C(64))
+                       : state->diagnostic_capacity > state->maximum_diagnostic_count / 2 ? state->maximum_diagnostic_count
+                                                                                          : state->diagnostic_capacity * 2;
+        if (!state->diagnostic_capacity)
+        {
+            C_DIAGNOSTIC_RESERVATION_CENSUS(LEX, capacity);
+        }
+        CDiagnostic* diagnostics = arena_allocate(state->diagnostic_arena, CDiagnostic, capacity);
+        if (result->diagnostic_count)
+        {
+            memcpy(diagnostics, result->diagnostics, sizeof(*diagnostics) * result->diagnostic_count);
+        }
+        result->diagnostics = diagnostics;
+        state->diagnostic_capacity = capacity;
+    }
+    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+        .message = message,
+        .location = c_lex_local_location(result, offset),
+        .kind = kind,
+        .severity = C_DIAGNOSTIC_ERROR,
+    };
+}
 
 #if BUSTER_C_LEX_COMPACT
 
@@ -1486,8 +1612,7 @@ BUSTER_C_INTERNAL void c_lex_validate_word_utf8(CLexState* state, u64 offset, u6
         }
         if (!valid)
         {
-            c_diagnostic_push(state->result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count,
-                              offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
+            c_diagnostic_push(state, offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
             break;
         }
         offset += length;
@@ -1581,8 +1706,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         result->metrics.comments += 1;
         if (!terminated)
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, comment_start,
-                              C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
+            c_diagnostic_push(state, comment_start, C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
         }
         return offset;
     }
@@ -1636,8 +1760,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         result->metrics.literal_bytes += offset - start;
         if (!terminated)
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
+            c_diagnostic_push(state, start, literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
                               literal_delimiter == '\'' ? S8("unterminated character literal") : S8("unterminated string literal"));
         }
         return offset;
@@ -1658,8 +1781,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("identifier exceeds 65534 bytes"));
+            c_diagnostic_push(state, start, C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("identifier exceeds 65534 bytes"));
         }
         return offset;
     }
@@ -1687,8 +1809,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
         {
-            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
-                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("preprocessing number exceeds 65534 bytes"));
+            c_diagnostic_push(state, start, C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("preprocessing number exceeds 65534 bytes"));
         }
         return offset;
     }
@@ -1700,8 +1821,8 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         return offset + punctuator_length;
     }
     c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
-    c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
-                      string_format(state->diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
+    c_diagnostic_push(state, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
+                      string_format(state->arena, S8("invalid character byte {u32} in C source"), (u32)character));
     return offset + 1;
 }
 
@@ -2655,30 +2776,16 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
             if (diagnostic_bytes <= (UINT64_MAX - BUSTER_MB(1)) / 2)
             {
-                u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
-                Arena* conflicts[] = {
-                    arena,
-                };
-                TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                Arena* diagnostic_arena = diagnostic_temporary.arena;
-                bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
-                if (!diagnostic_arena_is_scratch)
-                {
-                    scratch_end(diagnostic_temporary);
-                    diagnostic_arena = arena_create((ArenaCreation){
-                        .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
-                    });
-                }
-                if (diagnostic_arena)
+                // Diagnostic storage waits for the first diagnostic; see
+                // c_lex_diagnostic_storage_begin.
                 {
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
-                        .diagnostic_arena = diagnostic_arena,
+                        .arena = arena,
+                        .diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1),
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
-                    state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
-                    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
                     // Source measurement rides the branches the lexer already takes; see
                     // CSourceMetrics.
                     result.metrics.files = 1;
@@ -2713,14 +2820,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                         memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
                     }
                     result.diagnostics = diagnostics;
-                    if (diagnostic_arena_is_scratch)
-                    {
-                        scratch_end(diagnostic_temporary);
-                    }
-                    else
-                    {
-                        arena_destroy(diagnostic_arena, 1);
-                    }
+                    c_lex_diagnostic_storage_end(&state);
                 }
             }
         }
@@ -3004,10 +3104,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
-    // The `l` spellings sit between the int and long long ones and lower the
-    // same way -- the operand's own width decides the operation -- so their
-    // absence only ever surfaces on an LP64 target where a caller reached
-    // for the `unsigned long` form (CPython's _Py_bit_length does).
+    // The `l` spellings take unsigned long, which is target-dependent (LP64
+    // versus LLP64). The shared signature policy below selects their operand
+    // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -3066,6 +3165,21 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
+// three spellings; the suffix determines the parameter width, while the C
+// result type is always int. CTypeKind retains the target's long data model.
+CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -3234,6 +3348,40 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         .length_and_id = length_word | id,
     };
     return id;
+}
+
+// The id `name` was interned under, or 0 when it never was. The probe is
+// c_symbol_intern's without the insertion, so a consumer that holds a
+// spelling from outside the token stream -- lowering's IrField names -- can
+// ask for its id without growing the table. A 0 answer is exact: no token
+// interned into this table spells `name`.
+BUSTER_C_SHARED u32 c_symbol_find(const CSymbolTable* table, String8 name)
+{
+    CSymbolKey key = c_symbol_key(name);
+    u64 length_word = (u64)name.length << 32;
+    u32 mask = table->slot_capacity - 1;
+    u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    u32 result = 0;
+    for (;;)
+    {
+        CSymbolSlot* entry = &table->slots[slot];
+        u64 length_and_id = entry->length_and_id;
+        if (!length_and_id)
+        {
+            break;
+        }
+        if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
+        {
+            u32 id = (u32)length_and_id;
+            if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
+            {
+                result = id;
+                break;
+            }
+        }
+        slot = (slot + 1) & mask;
+    }
+    return result;
 }
 
 BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
@@ -3552,6 +3700,89 @@ BUSTER_C_INTERNAL CSourceLocation c_pp_stamp_location(CPpStampTable const* stamp
 BUSTER_C_INTERNAL bool c_token_preceded_by_space(char8 const* spelling_base, CToken previous, CToken token)
 {
     return previous.kind == C_TOKEN_NEWLINE || previous.offset + c_token_length(spelling_base, previous) != token.offset;
+}
+
+// The converse question, asked by a printer rather than by `#`: would these
+// two spellings, written with nothing between them, lex back as these two
+// tokens? Identifiers, numbers and literal prefixes run into one another, and
+// a punctuator followed by a spelling that extends it (`-` `-`, `<` `:`)
+// maximal-munches into another; every other pair may touch.
+BUSTER_C_INTERNAL bool c_token_literal_has_prefix(String8 spelling)
+{
+    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
+{
+    bool result = (spelling.length == 1 &&
+                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
+                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+{
+    char8 first = current.length ? current.pointer[0] : 0;
+    bool result = false;
+    switch ((CPunctuator)previous.punctuator)
+    {
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
+    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
+    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_EXCLAMATION:
+    case C_PUNCTUATOR_STAR:
+    case C_PUNCTUATOR_CARET: result = first == '='; break;
+    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
+    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
+    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
+    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
+    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
+    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_COLON: result = first == '>'; break;
+    case C_PUNCTUATOR_DOT: result = first == '.'; break;
+    case C_PUNCTUATOR_SHIFT_LEFT:
+    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
+    default: break;
+    }
+    return result;
+}
+
+bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling)
+{
+    bool result = false;
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER ||
+                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
+        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
+        {
+            result = c_token_literal_has_prefix(current_spelling) || c_token_identifier_is_literal_prefix(previous_spelling);
+        }
+    }
+    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 (current.kind == C_TOKEN_STRING_LITERAL && c_token_literal_has_prefix(current_spelling));
+        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
+        {
+            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
+            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
+            result = first == '.' ||
+                     ((first == '+' || first == '-') &&
+                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
+        }
+    }
+    else if (previous.kind == C_TOKEN_PUNCTUATOR)
+    {
+        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
+                  current_spelling.pointer[0] != '.') ||
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+    }
+    return result;
 }
 
 typedef struct CPreprocessTokenNode CPreprocessTokenNode;
@@ -3878,6 +4109,7 @@ BUSTER_C_INTERNAL void c_preprocess_diagnostic_reserve(Arena* arena, CPreprocess
 BUSTER_C_INTERNAL void c_preprocess_diagnostic_push_severity(Arena* arena, CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind,
                                                                CDiagnosticSeverity severity, String8 message)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     c_preprocess_diagnostic_reserve(arena, result);
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
@@ -4402,6 +4634,16 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
+            // A pasted identifier is interned where it is formed, exactly as
+            // the token pass interns every lexed one, so the id -- not the
+            // spelling -- is the name key every later phase reads. Left at 0,
+            // each downstream lookup re-interned the joined spelling and
+            // dropped the answer; interning here is once per paste. The
+            // joined bytes live in the spelling space, which outlives the
+            // table's borrowed name pointer.
+            u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
+                                    ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
+                                    : 0;
             left->token = (CPpToken){
                 .token =
                     {
@@ -4409,6 +4651,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                         .length = c_token_length_field(joined_length),
                         .kind = pasted_shape.kind,
                         .punctuator = pasted_shape.punctuator,
+                        .symbol = pasted_symbol,
                     },
                 .stamp = stamp & C_PP_STAMP_MASK,
                 .foreign = true,
@@ -4747,6 +4990,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     // carries, and what its diagnostics point at.
                     if (!token.foreign && !token.stamp)
                     {
+                        IR_DIAGNOSTIC_CENSUS_RECORD(C_STAMP_LOCATIONS, 1);
                         token.stamp = c_pp_stamp_push(stamps, c_preprocess_recover_location(frame, file, token.token)) & C_PP_STAMP_MASK;
                     }
                     CMacroArgument* arguments = 0;
@@ -5446,6 +5690,9 @@ BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, Str
     case OPERATING_SYSTEM_UEFI:
         result = string_equal(spelling, S8("uefi"));
         break;
+    case OPERATING_SYSTEM_WASI:
+        result = string_equal(spelling, S8("wasip1")) || string_equal(spelling, S8("wasi"));
+        break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     default:
@@ -5577,6 +5824,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             String8 argument = c_token_spelling(base, arguments[0]);
             supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
+                                                  : options->target.cpu_arch == CPU_ARCH_WASM32 ? string_equal(argument, S8("wasm32"))
                                                   : options->target.cpu_arch == CPU_ARCH_WASM64 ? string_equal(argument, S8("wasm64"))
                                                   : options->target.cpu_arch == CPU_ARCH_BPFEL
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
@@ -6272,6 +6520,21 @@ CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeF
                                             CIncludeFileEntry** entry_out)
 {
     return c_include_file_entry(table, identity, spelling, entry_out);
+}
+
+u32 c_test_symbol_intern(CSymbolTable* table, String8 name)
+{
+    return c_symbol_intern(table, name);
+}
+
+u32 c_test_symbol_find(CSymbolTable const* table, String8 name)
+{
+    return c_symbol_find(table, name);
+}
+
+u32 c_test_symbol_count(CSymbolTable const* table)
+{
+    return table->count;
 }
 
 bool c_test_include_file_table_grow(CIncludeFileTable* table)
@@ -7160,6 +7423,9 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
         *map_out = (FileMapRead){0};
     }
     String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
+    // A mapping exists only when bytes do, so a miss owns nothing. A hit
+    // transfers the mapping to `map_out`; a probe without one (feature
+    // queries) releases it here and reports no source bytes.
     FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
     ByteSlice bytes = map.bytes;
     bool result;
@@ -7170,10 +7436,15 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
     else
     {
         *path_out = path;
-        *source_out = BYTE_SLICE_TO_STRING(8, bytes);
         if (map_out)
         {
+            *source_out = BYTE_SLICE_TO_STRING(8, bytes);
             *map_out = map;
+        }
+        else
+        {
+            *source_out = (String8){0};
+            file_map_unmap(map);
         }
         result = true;
     }
@@ -7895,8 +8166,8 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
-           dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU89 || dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
@@ -7915,6 +8186,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_GNU23:
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
+    case C_PREPROCESS_DIALECT_GNU89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -8122,6 +8394,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
     result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
     {
@@ -8135,7 +8408,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .length = 1,
         .kind = C_TOKEN_PREPROCESSING_NUMBER,
     };
-    standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    String8 standard_version = c_preprocess_standard_version(options.dialect);
+    standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
     // The GNU version macros are not a dialect switch.  Both reference
@@ -8259,25 +8533,26 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                        constant_parameters, 1, true, false);
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
-    bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_64_type = layout.long_integer.bit_width == 64 ? S8("long") : S8("long long");
+    String8 unsigned_64_type = layout.unsigned_long_integer.bit_width == 64 ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
     C_DEFINE_TYPE_MACRO("__UINT16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__INT32_TYPE__", S8("int"));
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
                       target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
@@ -8504,10 +8779,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             C_DEFINE_TYPE_MACRO("_M_ARM64", S8("1"));
         }
     }
-    if (!llp64_target)
+    if (layout.pointer.size == 8 && layout.long_integer.size == 8)
     {
         C_DEFINE_TYPE_MACRO("__LP64__", S8("1"));
         C_DEFINE_TYPE_MACRO("_LP64", S8("1"));
+    }
+    else if (layout.pointer.size == 4 && layout.long_integer.size == 4)
+    {
+        C_DEFINE_TYPE_MACRO("__ILP32__", S8("1"));
+        C_DEFINE_TYPE_MACRO("_ILP32", S8("1"));
     }
     if (options.target.os == OPERATING_SYSTEM_ANDROID && options.target.os_version_major)
     {
@@ -8562,6 +8842,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         operating_system_macros[operating_system_macro_count++] = S8("__ELF__");
     }
     break;
+    case OPERATING_SYSTEM_WASI:
+    {
+        operating_system_macros[operating_system_macro_count++] = S8("__wasi__");
+        operating_system_macros[operating_system_macro_count++] = S8("__wasip1__");
+    }
+    break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     {
@@ -8577,13 +8863,22 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
     String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+                               : options.target.cpu_arch == CPU_ARCH_WASM32  ? S8("__wasm32__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
                                : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
-    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    if (options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro,
+                       options.target.cpu_arch == CPU_ARCH_WASM32 ? S8("__wasm32") : S8("__wasm64"), standard_replacement, 1, 0, 0, false,
+                       false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_mutable_globals__"), standard_replacement, 1, 0, 0, false, false);
+    }
+    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_memory64__"), standard_replacement, 1, 0, 0, false, false);
     }
     if (options.target.cpu_arch == CPU_ARCH_BPFEL)
@@ -8616,7 +8911,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         hosted_replacement.offset = C_SPELLING_ZERO;
     }
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
+    if (standard_version.length)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    }
     CTokenStream token_stream = {
         .arena = token_arena,
         .shape_arena = token_shape_arena,
@@ -8753,6 +9052,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 {
                     token_index += 1;
                 }
+                IR_DIAGNOSTIC_CENSUS_RECORD(C_DIRECTIVE_LOCATIONS, 2);
                 u32 physical_directive_line = c_lex_token_location(&source_frame->lex, directive).line;
                 CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
                 u64 line_end = class_masks->word_count ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
@@ -9381,6 +9681,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;
+    if (!options.omit_spelled_bytes)
     {
         // The accumulator and both bases are locals on purpose. c_token_length
         // keeps a call in its oversized arm, so a member accumulator has to be
@@ -9391,6 +9692,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         char8 const* spelling_base = space->base;
         CToken const* stream = result.tokens;
         u64 spelled_bytes = 0;
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_METRICS_TOKEN_VISITS, output_count);
         for (u64 token_index = 0; token_index < output_count; token_index += 1)
         {
             spelled_bytes += c_token_length(spelling_base, stream[token_index]);

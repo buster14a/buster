@@ -734,7 +734,7 @@ typedef enum MachineOpcode
     MACHINE_A64_VA_HOME_WINDOWS,
     // Closed x87 transactions over frame values. No ST register survives a
     // row except the explicit ABI result bridge immediately beside CALL/RET.
-    MACHINE_X64_F80_BINARY, // destination, left, right frames; payload = add/sub/mul/div
+    MACHINE_X64_F80_BINARY, // destination, left, right frames; payload = MachineX64F80BinaryMode
     MACHINE_X64_F80_NEGATE, // destination, source frames
     MACHINE_X64_F80_COMPARE, // general definition, left/right frames; payload = relation
     MACHINE_X64_F80_CONVERT, // destination/source/scratch frames; payload = conversion
@@ -772,6 +772,20 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
+typedef enum MachineX64F80BinaryMode
+{
+    MACHINE_X64_F80_ADD,
+    MACHINE_X64_F80_SUBTRACT,
+    MACHINE_X64_F80_MULTIPLY,
+    MACHINE_X64_F80_DIVIDE,
+    MACHINE_X64_F80_ADD_P24,
+    MACHINE_X64_F80_ADD_P53,
+    MACHINE_X64_F80_ADD_P64,
+    MACHINE_X64_F80_MULTIPLY_P64,
+    MACHINE_X64_F80_SUBTRACT_P64,
+    MACHINE_X64_F80_BINARY_MODE_COUNT,
+} MachineX64F80BinaryMode;
+
 // x86-64 encoder authority registry.  The opcode rows are a contiguous
 // projection of MACHINE_X64_MOV_RI..MACHINE_X64_ATOMIC_RMW16; the authority and
 // neutral-patch records below keep every remaining producer explicit while
@@ -785,7 +799,7 @@ typedef enum MachineOpcode
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 32u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
-#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 7u
+#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 8u
 #define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
 
 typedef enum MachineX64EmitProducerStatus
@@ -1842,6 +1856,7 @@ BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_a
 BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm_all_shapes(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
@@ -2036,6 +2051,16 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
+// The same encoders, writing into the caller's buffer when the function's
+// worst-case byte budget fits `caller_capacity`, and into a budget-sized
+// buffer from `arena` otherwise; `bytes` in the result says which. Either way
+// the encoder is bounded by that same budget, so its bytes and its success or
+// failure do not depend on where it writes. On failure `caller_bytes` may
+// hold partial bytes past anything the caller has committed.
+BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                             u8* caller_bytes, u64 caller_capacity);
+BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                              u8* caller_bytes, u64 caller_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
@@ -2117,6 +2142,9 @@ typedef struct MachineX64MetadataShapeCacheAudit MachineX64MetadataShapeCacheAud
 struct MachineX64MetadataShapeCacheAudit
 {
     u32 prepared_rows;
+    u32 registered_queries;
+    u32 resolved_rows;
+    u32 pending_rows;
     u32 invalid_rows;
     bool valid;
     u8 reserved[3];

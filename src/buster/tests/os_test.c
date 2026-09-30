@@ -493,8 +493,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 
     String8 descriptor_value = {0};
 #if BUSTER_WINDOWS
+    // Handle values are per process, and the child's own runtime (notably the
+    // sanitizer runtime) can hold an unrelated handle with the same value. Name
+    // the event so the child can prove object identity instead of assuming a
+    // valid handle value was inherited.
+    String8 descriptor_name = string_format(arena, S8("Local\\buster-os-spawn-probe-{u32}"), (u32)GetCurrentProcessId());
+    String16 descriptor_name16 = string16_from_string8(arena, descriptor_name, true);
     SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
-    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, 0);
+    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, (LPCWSTR)descriptor_name16.pointer);
     bool unrelated_created = unrelated != 0;
     if (unrelated_created)
     {
@@ -511,8 +517,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
     BUSTER_TEST(arguments, unrelated_created);
     if (unrelated_created)
     {
+#if BUSTER_WINDOWS
+        String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE"), S8("BUSTER_OS_SPAWN_PROBE_NAME")};
+        String8 descriptor_values[] = {S8("descriptor"), descriptor_value, descriptor_name};
+#else
         String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
         String8 descriptor_values[] = {S8("descriptor"), descriptor_value};
+#endif
         ProcessSpawnResult descriptor_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
                                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_keys),
                                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_values), (ProcessSpawnOptions){0});
@@ -1666,15 +1677,22 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         if (helper_escaped) { BUSTER_TEST(arguments, os_file_delete(escaped_sentinel)); }
     }
 
-    // A hot inherited writer keeps poll continuously readable. Deadline
-    // enforcement is independent of readability: the owner kills the group,
-    // proves every member quiescent, and drains the captured pipe to EOF.
+    // A hot inherited writer keeps poll continuously readable. Wait until its
+    // first output is written before starting the deadline, so a slow shell
+    // startup cannot make the output assertion depend on scheduler timing.
+    // The owner kills the group, proves every member quiescent, and drains
+    // the captured pipe to EOF.
     {
         u64 position = arguments->arena->position;
+        String8 ready = buster_test_temporary_path(arguments->arena, S8("buster-hot-writer-ready"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready));
         String8 spawn_arguments[] = {
             S8("/bin/sh"),
             S8("-c"),
-            S8("while :; do printf 0123456789abcdef0123456789abcdef; done"),
+            S8("printf 0123456789abcdef0123456789abcdef || exit 90; printf ready > \"$1\" || exit 90; "
+               "while :; do printf 0123456789abcdef0123456789abcdef; done"),
+            S8("hot-writer-helper"),
+            ready,
         };
         ProcessSpawnOptions options = {
             .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
@@ -1686,13 +1704,18 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
         if (spawn.handle)
         {
-            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 100000);
-            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
-            BUSTER_TEST(arguments, wait_result.timed_out);
-            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length > 0);
-            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
-            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+            OsTestProcessTreeWait tree = os_test_process_tree_wait(arguments->arena, spawn, ready, 3000, 10, 100000);
+            BUSTER_TEST(arguments, tree.ready);
+            if (tree.ready)
+            {
+                BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, tree.waited.timed_out);
+                BUSTER_TEST(arguments, tree.waited.streams[STANDARD_STREAM_OUTPUT].length > 0);
+                BUSTER_TEST(arguments, !tree.waited.process_group_reservation_retained);
+                BUSTER_TEST(arguments, !tree.waited.process_group_ownership_lost);
+            }
         }
+        BUSTER_TEST(arguments, os_file_delete(ready));
         arena_set_position(arguments->arena, position);
     }
 

@@ -528,8 +528,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_class_scalar_bit_width(MachineX64Selector co
     return result;
 }
 
-// The only sixteen-byte scalar float carried here is resolved SysV f80.
-// AArch64 binary128 and Win64 long double remain their own target shapes.
+// Resolved SysV f80 and Android binary128 are both sixteen-byte frame values,
+// but they use distinct x87 and XMM call shapes.
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selector, IrTypeId type_id)
 {
     MachineTypeClass type_class = machine_x64_type_class(selector, type_id);
@@ -539,6 +539,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selec
         result = codegen_canonical_x64_type_is_f80(ir_type_from_id(&selector->program->types, type_id));
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f128(IrProgram* program, Target target, IrTypeId type_id)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    return target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+           machine_x64_abi_convention(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type &&
+           type->layout.resolved && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 &&
+           type->layout.size == 16 && type->layout.alignment == 16;
 }
 
 // Darwin caps bare vector ABI alignment at the CPU's available width.
@@ -823,6 +832,26 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_is_float = {1},
             .part_count = 1,
             .byte_size = 8,
+        };
+        return true;
+    }
+    if (machine_x64_type_is_f128(program, target, type_id))
+    {
+        IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+        if (abi.indirect || abi.memory || abi.part_count != 1 ||
+            abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || abi.parts[0].size != 16)
+        {
+            return false;
+        }
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {16},
+            .part_count = 1,
+            .byte_size = 16,
+            .exact_byte_size = 16,
+            .aggregate = true,
+            .xmm128 = true,
+            .stack_alignment = 16,
         };
         return true;
     }
@@ -2501,8 +2530,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
         machine_x64_define(selector, result_register, row);
         selected = true;
     }
-    else if (machine_x64_type_is_f80(selector, instruction->canonical_type) && instruction->immediate_count == 2 &&
-             !(instruction->immediates[1] & ~UINT64_C(0xffff)))
+    else if (instruction->immediate_count == 2 &&
+             ((machine_x64_type_is_f80(selector, instruction->canonical_type) &&
+               !(instruction->immediates[1] & ~UINT64_C(0xffff))) ||
+              machine_x64_type_is_f128(selector->program, selector->target, instruction->canonical_type)))
     {
         u32 slot = selector->value_stack_slots[instruction->result.value];
         selected = slot != UINT32_MAX;
@@ -2544,6 +2575,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
 // truncations use the existing frame rows, a 128-bit reinterpret is a
 // byte-preserving frame copy, and other aggregate casts continue through the
 // explicit unsupported fallback.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register);
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* selector, IrInstruction* instruction, IrType* source_type,
                                                       IrType* cast_target_type, u32 source_bits, u32 result_register)
 {
@@ -2779,13 +2813,19 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
         u32 source_register = UINT32_MAX;
         if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
         {
-            selected = machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
-                       machine_x64_select_f80_cast(selector, instruction, result_register);
+            selected = (source_integer128 || target_integer128)
+                           ? machine_x64_select_cast_i128_float(selector, instruction, ir_type_from_id(&program->types, source_type_id),
+                                                                ir_type_from_id(&program->types, instruction->canonical_type), result_register)
+                           : machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
+                                 machine_x64_select_f80_cast(selector, instruction, result_register);
         }
         else if (source_integer128 || target_integer128)
         {
-            selected = machine_x64_select_cast_i128(selector, instruction, ir_type_from_id(&program->types, source_type_id),
-                                                    ir_type_from_id(&program->types, instruction->canonical_type), source_bits, result_register);
+            IrType* source_type = ir_type_from_id(&program->types, source_type_id);
+            IrType* target_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            selected = (source_type && target_type && (source_type->kind == IR_TYPE_FLOAT || target_type->kind == IR_TYPE_FLOAT))
+                           ? machine_x64_select_cast_i128_float(selector, instruction, source_type, target_type, result_register)
+                           : machine_x64_select_cast_i128(selector, instruction, source_type, target_type, source_bits, result_register);
         }
         // Float conversions mirror the canonical forms.
         else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
@@ -3480,6 +3520,234 @@ BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_apply_sign(MachineX64Selector* 
     *low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_low, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_high, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, *high, borrow);
+}
+
+// The extra binary modes set x87 precision for one closed frame transaction.
+// In particular the final i128 sum rounds once at the destination precision.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_binary_slot(MachineX64Selector* selector, u32 destination, u32 left, u32 right, u32 mode)
+{
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, left),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, right)},
+        .payload = mode, .opcode = MACHINE_X64_F80_BINARY});
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_convert_slot(MachineX64Selector* selector, u32 destination, u32 source, u32 mode)
+{
+    u32 scratch = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, scratch)},
+        .payload = mode, .opcode = MACHINE_X64_F80_CONVERT});
+}
+
+// FILD consumes a signed eightbyte. Split the unsigned top bit before it and
+// add the exact 2^63 correction under a temporary 64-bit x87 precision mode.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_u64_to_f80_slot(MachineX64Selector* selector, u32 value, u32 destination)
+{
+    u32 sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, value,
+                                                  machine_x64_select_immediate_register(selector, 63));
+    u32 low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, value,
+                                                machine_x64_select_immediate_register(selector, UINT64_C(0x7fffffffffffffff)));
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, integer, 0, low);
+    machine_x64_select_f80_convert_slot(selector, destination, integer, 4);
+    machine_x64_select_f80_u64_bias(selector, bias, sign);
+    machine_x64_select_f80_binary_slot(selector, destination, destination, bias, MACHINE_X64_F80_ADD_P64);
+}
+
+// Compare against 2^63, subtract the exact selected bias, then FISTP under
+// truncation. The correction bit is ORed back into the unsigned eightbyte.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_f80_slot_to_u64(MachineX64Selector* selector, u32 source)
+{
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    u32 remainder = machine_x64_append_slot(selector, 16, 16);
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_frame_store64(selector, bias, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, bias, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403e)));
+    u32 high = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, bias)},
+        .payload = 5, .opcode = MACHINE_X64_F80_COMPARE});
+    u32 mask = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64,
+                                                 machine_x64_select_immediate_register(selector, 0), high);
+    u32 high_bit = machine_x64_select_f80_u64_bias(selector, bias, mask);
+    machine_x64_select_f80_binary_slot(selector, remainder, source, bias, MACHINE_X64_F80_SUBTRACT_P64);
+    machine_x64_select_f80_convert_slot(selector, integer, remainder, 5);
+    u32 low = machine_x64_select_frame_load64(selector, integer, 0);
+    return machine_x64_select_arithmetic_row(selector, MACHINE_X64_OR64, low, high_bit);
+}
+
+// A two-limb magnitude is exact in f80 until the final add. That add uses
+// destination precision (24/53/64 bits) and the caller's rounding mode;
+// changing the x87 control word never escapes the binary machine row.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_to_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* target_type, u32 source_slot, u32 result_register)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+    u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    if (signed_value)
+    {
+        sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, high,
+                                                  machine_x64_select_immediate_register(selector, 63));
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    u32 low_float = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled_high = machine_x64_append_slot(selector, 16, 16);
+    u32 sum = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_u64_to_f80_slot(selector, low, low_float);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, scaled_high, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    if (signed_value)
+    {
+        // Round a negative sum as a negative x87 value. Flipping the sign
+        // after a positive addition would reverse upward/downward rounding.
+        u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, sign,
+                                                         machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+        u32 halves[] = {scaled_high, low_float};
+        for (u32 half = 0; half < BUSTER_ARRAY_LENGTH(halves); half += 1)
+        {
+            u32 exponent = machine_x64_select_frame_load64(selector, halves[half], 8);
+            machine_x64_select_frame_store64(selector, halves[half], 8,
+                machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, exponent, sign_bit));
+        }
+    }
+    u32 mode = target_type->bit_width == 32 ? MACHINE_X64_F80_ADD_P24 :
+               target_type->bit_width == 64 ? MACHINE_X64_F80_ADD_P53 : MACHINE_X64_F80_ADD_P64;
+    machine_x64_select_f80_binary_slot(selector, sum, scaled_high, low_float, mode);
+    if (target_type->bit_width == 80)
+    {
+        u32 destination = selector->value_stack_slots[instruction->result.value];
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, sum)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+    }
+    else
+    {
+        u32 scalar = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_f80_convert_slot(selector, scalar, sum, target_type->bit_width == 32 ? 2u : 3u);
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_STACK_SLOT, scalar)},
+            .opcode = MACHINE_X64_LOAD_FRAME});
+        machine_x64_define(selector, result_register, row);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_float_to_i128(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* source_type, u32 source_slot, u32 source_register, u32 result_slot)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER;
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    u32 magnitude = machine_x64_append_slot(selector, 16, 16);
+    if (source_type->bit_width == 80)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, magnitude), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+        u32 exponent = machine_x64_select_frame_load64(selector, source_slot, 8);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                              machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign,
+                machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                                   machine_x64_select_immediate_register(selector, 15)));
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                          machine_x64_select_immediate_register(selector, UINT64_C(0x7fff)));
+        machine_x64_select_frame_store64(selector, magnitude, 8, absolute);
+    }
+    else
+    {
+        u64 sign_mask = source_type->bit_width == 32 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                              machine_x64_select_immediate_register(selector, sign_mask));
+            u32 shifted = machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                machine_x64_select_immediate_register(selector, source_type->bit_width - 1));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign, shifted);
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                          machine_x64_select_immediate_register(selector,
+                                                              source_type->bit_width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff)));
+        u32 input = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_frame_store64(selector, input, 0, absolute);
+        machine_x64_select_f80_convert_slot(selector, magnitude, input, source_type->bit_width == 32 ? 0u : 1u);
+    }
+    u32 inverse_scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 contribution = machine_x64_append_slot(selector, 16, 16);
+    u32 residual = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, inverse_scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, inverse_scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x3fbf)));
+    machine_x64_select_f80_binary_slot(selector, scaled, magnitude, inverse_scale, MACHINE_X64_F80_MULTIPLY_P64);
+    u32 high = machine_x64_select_f80_slot_to_u64(selector, scaled);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, contribution, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    machine_x64_select_f80_binary_slot(selector, residual, magnitude, contribution, MACHINE_X64_F80_SUBTRACT_P64);
+    u32 low = machine_x64_select_f80_slot_to_u64(selector, residual);
+    if (signed_value)
+    {
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    machine_x64_select_frame_store64(selector, result_slot, 0, low);
+    machine_x64_select_frame_store64(selector, result_slot, 8, high);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register)
+{
+    bool from_integer = source_type && target_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128 &&
+                        target_type->kind == IR_TYPE_FLOAT &&
+                        (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                         instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+    bool to_integer = source_type && target_type && source_type->kind == IR_TYPE_FLOAT &&
+                      target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128 &&
+                      (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                       instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+    bool source_float = source_type && (source_type->bit_width == 32 || source_type->bit_width == 64 ||
+                                        (source_type->bit_width == 80 && machine_x64_type_is_f80(selector,
+                                            selector->function->values[instruction->operands[0].value].canonical_type)));
+    bool target_float = target_type && (target_type->bit_width == 32 || target_type->bit_width == 64 ||
+                                        (target_type->bit_width == 80 && machine_x64_type_is_f80(selector, instruction->canonical_type)));
+    u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 result_slot = selector->value_stack_slots[instruction->result.value];
+    u32 source_register = UINT32_MAX;
+    bool selected = from_integer ? target_float && source_slot != UINT32_MAX &&
+                                   (target_type->bit_width == 80 ? result_slot != UINT32_MAX : result_register != UINT32_MAX)
+                    : to_integer ? source_float && result_slot != UINT32_MAX &&
+                                   (source_type->bit_width == 80 ? source_slot != UINT32_MAX :
+                                    machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+                                 : false;
+    if (selected)
+    {
+        if (from_integer)
+        {
+            machine_x64_select_i128_to_float(selector, instruction, target_type, source_slot, result_register);
+        }
+        else
+        {
+            machine_x64_select_float_to_i128(selector, instruction, source_type, source_slot, source_register, result_slot);
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_divide_edge(MachineX64Selector* selector, u32 source, u32 destination, u32 const* values)
@@ -7645,6 +7913,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, parameter->canonical_type), target);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
                         machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
+                        machine_x64_type_is_f128(program, target, parameter->canonical_type) ||
                         (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
                          parameter_class.size_log2 <= 4);
             bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
@@ -8183,8 +8452,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             // Address producers hold an 8-byte address in their vreg no
             // matter what their declared canonical type is, exactly like
             // the canonical path stores an address in the value's slot.
-            bool float_scalar = (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
-                                (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
+            bool float_scalar =
+                !machine_x64_type_is_f128(program, selector.target, value->canonical_type) &&
+                (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
+                    (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
             bool windows_va_list_register = windows_va_list &&
                                             (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
                                              instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
@@ -8198,7 +8469,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                                          });
                 selector.value_virtual_registers[instruction->result.value] = register_index;
             }
-            else if (machine_x64_type_is_f80(&selector, value->canonical_type))
+            else if (machine_x64_type_is_f80(&selector, value->canonical_type) ||
+                     machine_x64_type_is_f128(program, selector.target, value->canonical_type))
             {
                 selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
             }
@@ -9424,29 +9696,70 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZE
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
 // Expansion/prologue instructions use a small, closed set of physical
-// shapes.  Resolve each shape through the metadata selector once during the
-// serial prewarm lane and publish only the resulting opaque machine token to
+// shapes.  Each shape resolves through the metadata selector once, on a
+// serial thread, and only the resulting opaque machine token is published to
 // workers.  The signature deliberately describes physical shape/value
 // classes, not register numbers or byte templates; dynamic registers,
 // displacements, and immediates are still validated by the metadata transform
 // on every emission.
+//
+// The serial prewarm registers the closed set rather than resolving it.  Its
+// 336 queries each run a generic selector search -- about 45 M instructions
+// in total, more than a one-function compile spends on everything else --
+// while an ordinary compile reaches a few dozen of the 267 distinct shapes.
+// Registration hashes each query and keeps its parameters; the first serial
+// lookup of a registered shape resolves the same query the eager walk would
+// have resolved first, and a shape outside the closed set still misses and
+// fails closed.  machine_x86_64_exact_prewarm_all_shapes resolves every
+// registration, including the duplicate-signature agreement checks, and must
+// run before a gang may emit.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
+#define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
+#define MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY 4u
+#define MACHINE_X64_METADATA_SHAPE_PENDING 0u
+#define MACHINE_X64_METADATA_SHAPE_VALID 1u
+#define MACHINE_X64_METADATA_SHAPE_INVALID 2u
 typedef struct MachineX64MetadataShapeCacheEntry MachineX64MetadataShapeCacheEntry;
 struct MachineX64MetadataShapeCacheEntry
 {
     u64 signature;
     u64 guard;
     BusterX86MetadataMachineExactToken token;
+    // First registration of this signature: the query eager resolution
+    // would have selected with.
+    u16 registration;
+    u8 state;
+    u8 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineX64MetadataShapeCacheEntry) == 24);
+// One registered closed-set query.  Mnemonics are string literals and every
+// feature list names a static machine_x64_*_features array, so a query stays
+// valid until it is resolved.
+typedef struct MachineX64MetadataShapeRegistration MachineX64MetadataShapeRegistration;
+struct MachineX64MetadataShapeRegistration
+{
+    String8 mnemonic;
+    BusterX86MetadataFeatureInput features;
+    BusterX86MetadataPhysicalAttributes attributes;
+    BusterX86MetadataPhysicalOperand operands[MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY];
+    u32 operand_count;
+    u32 entry;
 };
 BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeCacheEntry machine_x64_metadata_shape_cache[MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u16 machine_x64_metadata_shape_cache_slots[MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeRegistration machine_x64_metadata_shape_registrations[MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_registration_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_count;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_resolved_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_invalid_count;
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_ready;
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_complete;
 BUSTER_CT_CHECK((MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u)) == 0);
+BUSTER_CT_CHECK(MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY <= UINT16_MAX);
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void);
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void);
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void);
 
 enum
@@ -11890,7 +12203,18 @@ void machine_x86_64_exact_prewarm(void)
 
     // Every row was staged serially above.  The ready bit is written last;
     // codegen_prewarm() completes before any worker lane can observe globals.
+    // Closed-set shapes the templates did not reach stay registered but
+    // unresolved: a serial compile resolves the few it emits on first use.
     machine_x64_exact_opcode_map_ready = true;
+}
+
+// The gang form of the prewarm: also resolves every registered shape, so a
+// worker lane's bridge lookup is a plain read.  Call it serially before any
+// lane_run that may emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
+void machine_x86_64_exact_prewarm_all_shapes(void)
+{
+    machine_x86_64_exact_prewarm();
+    machine_x64_metadata_shape_cache_resolve_all();
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -12376,17 +12700,17 @@ BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeHashes machine_x64_metadata_shape_has
     return hashes;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
-                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                               BusterX86MetadataFeatureInput features,
-                                                               BusterX86MetadataPhysicalAttributes attributes)
+// Resolves one registered query exactly as the eager walk resolved it: the
+// generic selector, then the serial plan preparation and its machine token.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
+                                                            BusterX86MetadataMachineExactToken* token)
 {
     BusterX86MetadataPhysicalQuery query = {
-        .mnemonic = mnemonic,
-        .operands = operands,
-        .operand_count = operand_count,
-        .features = features,
-        .attributes = attributes,
+        .mnemonic = registration->mnemonic,
+        .operands = registration->operand_count ? registration->operands : 0,
+        .operand_count = registration->operand_count,
+        .features = registration->features,
+        .attributes = registration->attributes,
         .address_size = 64,
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = false,
@@ -12395,66 +12719,155 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         .source_semantics = false,
     };
     BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(query);
-    if (!machine_x64_metadata_shape_mnemonic_id(mnemonic) || selected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS ||
-        selected.form_id == UINT32_MAX || !selected.stable_hash)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
     BusterX86MetadataFormKey key = {.form_id = selected.form_id, .stable_hash = selected.stable_hash};
     BusterX86MetadataExactPlan plan = {0};
-    BusterX86MetadataMachineExactToken token = {0};
-    if (!buster_x86_metadata_exact_plan_prepare(key, &plan) ||
-        !buster_x86_metadata_machine_exact_token_for_plan(plan, features, &token))
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
-    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
-    {
-        MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + entry_index;
-        if (entry->signature != hashes.signature) continue;
-        if (entry->guard != hashes.guard || entry->token.slot_plus_one != token.slot_plus_one ||
-            entry->token.policy_flags != token.policy_flags ||
-            entry->token.integrity != token.integrity)
-        {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-            return false;
-        }
-        return true;
-    }
-    if (machine_x64_metadata_shape_cache_count >= MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count++] = (MachineX64MetadataShapeCacheEntry){
-        .signature = hashes.signature,
-        .guard = hashes.guard,
-        .token = token,
-    };
-    return true;
+    *token = (BusterX86MetadataMachineExactToken){0};
+    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected.form_id != UINT32_MAX && selected.stable_hash &&
+                  buster_x86_metadata_exact_plan_prepare(key, &plan) &&
+                  buster_x86_metadata_machine_exact_token_for_plan(plan, registration->features, token);
+
+    return result;
 }
 
+// Registers one closed-set query.  Nothing is selected here: a new signature
+// gets a pending entry that remembers this first query, and a repeated
+// signature only has its guard checked; its token agreement is checked by
+// machine_x64_metadata_shape_cache_resolve_all.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
+                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                               BusterX86MetadataFeatureInput features,
+                                                               BusterX86MetadataPhysicalAttributes attributes)
+{
+    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
+    u32 entry_index = 0;
+    while (entry_index < machine_x64_metadata_shape_cache_count && machine_x64_metadata_shape_cache[entry_index].signature != hashes.signature)
+    {
+        entry_index += 1;
+    }
+    bool existing = entry_index < machine_x64_metadata_shape_cache_count;
+    bool result = machine_x64_metadata_shape_mnemonic_id(mnemonic) != 0 &&
+                  operand_count <= MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY &&
+                  machine_x64_metadata_shape_registration_count < MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY &&
+                  (existing ? machine_x64_metadata_shape_cache[entry_index].guard == hashes.guard
+                            : machine_x64_metadata_shape_cache_count < MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY);
+    if (result)
+    {
+        u32 registration_index = machine_x64_metadata_shape_registration_count;
+        MachineX64MetadataShapeRegistration* registration = machine_x64_metadata_shape_registrations + registration_index;
+        *registration = (MachineX64MetadataShapeRegistration){
+            .mnemonic = mnemonic,
+            .features = features,
+            .attributes = attributes,
+            .operand_count = operand_count,
+            .entry = entry_index,
+        };
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            registration->operands[operand_index] = operands[operand_index];
+        }
+        machine_x64_metadata_shape_registration_count += 1;
+        if (!existing)
+        {
+            machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count] = (MachineX64MetadataShapeCacheEntry){
+                .signature = hashes.signature,
+                .guard = hashes.guard,
+                .registration = (u16)registration_index,
+                .state = MACHINE_X64_METADATA_SHAPE_PENDING,
+            };
+            machine_x64_metadata_shape_cache_count += 1;
+        }
+    }
+    else
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+    }
+
+    return result;
+}
+
+// A failed resolution refuses every later bridge emission, as a failed eager
+// walk refused all of them.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX64MetadataShapeCacheEntry* entry)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    bool valid = machine_x64_metadata_shape_resolve(machine_x64_metadata_shape_registrations + entry->registration, &entry->token);
+    entry->state = valid ? MACHINE_X64_METADATA_SHAPE_VALID : MACHINE_X64_METADATA_SHAPE_INVALID;
+    machine_x64_metadata_shape_cache_resolved_count += 1;
+    if (!valid)
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        machine_x64_metadata_shape_cache_ready = false;
+    }
+}
+
+// Resolves every registration in registration order -- the order of the
+// eager walk -- and repeats its check that queries sharing a signature select
+// the same token, so no gang can reach a pending entry.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
+{
+    if (!machine_x64_metadata_shape_cache_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        for (u32 registration_index = 0; registration_index < machine_x64_metadata_shape_registration_count; registration_index += 1)
+        {
+            MachineX64MetadataShapeRegistration const* registration = machine_x64_metadata_shape_registrations + registration_index;
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + registration->entry;
+            if (entry->registration == registration_index)
+            {
+                if (entry->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+                {
+                    machine_x64_metadata_shape_cache_resolve_entry(entry);
+                }
+            }
+            else
+            {
+                BusterX86MetadataMachineExactToken token;
+                bool agrees = machine_x64_metadata_shape_resolve(registration, &token) &&
+                              entry->state == MACHINE_X64_METADATA_SHAPE_VALID && entry->token.slot_plus_one == token.slot_plus_one &&
+                              entry->token.policy_flags == token.policy_flags && entry->token.integrity == token.integrity;
+                if (!agrees)
+                {
+                    machine_x64_metadata_shape_cache_invalid_count += 1;
+                    machine_x64_metadata_shape_cache_ready = false;
+                }
+            }
+        }
+        machine_x64_metadata_shape_cache_complete = true;
+    }
+}
+
+// A registered shape still pending is resolved here, on its first lookup;
+// only a serial thread may do that, which BUSTER_CHECK_SERIAL_INITIALIZATION
+// enforces.  Shapes outside the closed set still miss.
 BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metadata_shape_cache_find(
     String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
     BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
 {
     MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
     u32 slot = (u32)hashes.signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
-    for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
+    MachineX64MetadataShapeCacheEntry* found = 0;
+    bool searching = true;
+    for (u32 probe = 0; searching && probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
     {
         u16 entry_plus_one = machine_x64_metadata_shape_cache_slots[slot];
-        if (!entry_plus_one) return 0;
-        MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
-        if (entry->signature == hashes.signature)
+        if (!entry_plus_one)
         {
-            return entry->guard == hashes.guard ? &entry->token : 0;
+            searching = false;
+        }
+        else if (machine_x64_metadata_shape_cache[entry_plus_one - 1u].signature == hashes.signature)
+        {
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
+            found = entry->guard == hashes.guard ? entry : 0;
+            searching = false;
         }
         slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     }
-    return 0;
+    if (found && found->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+    {
+        machine_x64_metadata_shape_cache_resolve_entry(found);
+    }
+
+    return found && found->state == MACHINE_X64_METADATA_SHAPE_VALID ? &found->token : 0;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_publish_slots(void)
@@ -12908,30 +13321,44 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
     (void)machine_x64_metadata_shape_cache_add(S8("CMPXCHG16B"), &cmpxchg16_operand, 1, cx16, attributes);
 }
 
+// Registers the closed set and publishes its slots; resolution waits for
+// the first lookup of each shape or for machine_x86_64_exact_prewarm_all_shapes.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
 {
-    if (machine_x64_metadata_shape_cache_ready) return;
-    machine_x64_metadata_shape_cache_count = 0;
-    machine_x64_metadata_shape_cache_invalid_count = 0;
-    machine_x64_metadata_shape_cache_prepare_zero();
-    machine_x64_metadata_shape_cache_prepare_predicates();
-    machine_x64_metadata_shape_cache_prepare_unary();
-    machine_x64_metadata_shape_cache_prepare_registers();
-    machine_x64_metadata_shape_cache_prepare_immediates();
-    machine_x64_metadata_shape_cache_prepare_memory();
-    machine_x64_metadata_shape_cache_prepare_relative();
-    machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
-    machine_x64_metadata_shape_cache_prepare_x87();
-    machine_x64_metadata_shape_cache_publish_slots();
-    machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    if (!machine_x64_metadata_shape_registration_count)
+    {
+        machine_x64_metadata_shape_cache_count = 0;
+        machine_x64_metadata_shape_cache_resolved_count = 0;
+        machine_x64_metadata_shape_cache_invalid_count = 0;
+        machine_x64_metadata_shape_cache_complete = false;
+        machine_x64_metadata_shape_cache_prepare_zero();
+        machine_x64_metadata_shape_cache_prepare_predicates();
+        machine_x64_metadata_shape_cache_prepare_unary();
+        machine_x64_metadata_shape_cache_prepare_registers();
+        machine_x64_metadata_shape_cache_prepare_immediates();
+        machine_x64_metadata_shape_cache_prepare_memory();
+        machine_x64_metadata_shape_cache_prepare_relative();
+        machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
+        machine_x64_metadata_shape_cache_prepare_x87();
+        machine_x64_metadata_shape_cache_publish_slots();
+        machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    }
 }
 
 #if BUSTER_INCLUDE_TESTS
 MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
 {
-    machine_x86_64_exact_prewarm();
+    machine_x86_64_exact_prewarm_all_shapes();
+    u32 pending_rows = 0;
+    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
+    {
+        pending_rows += machine_x64_metadata_shape_cache[entry_index].state == MACHINE_X64_METADATA_SHAPE_PENDING;
+    }
     return (MachineX64MetadataShapeCacheAudit){
         .prepared_rows = machine_x64_metadata_shape_cache_count,
+        .registered_queries = machine_x64_metadata_shape_registration_count,
+        .resolved_rows = machine_x64_metadata_shape_cache_resolved_count,
+        .pending_rows = pending_rows,
         .invalid_rows = machine_x64_metadata_shape_cache_invalid_count,
         .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
                  machine_x64_metadata_shape_cache_invalid_count == 0,
@@ -13037,10 +13464,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features);
         }
     }
-    // Workers never re-enter the generic selector.  The serial prewarm lane
-    // populated one immutable token per finite physical shape; a stale or
-    // unclassified shape fails closed instead of falling back to handwritten
-    // bytes or a checked query lookup.
+    // Workers never re-enter the generic selector: a gang starts only after
+    // machine_x86_64_exact_prewarm_all_shapes has resolved one immutable token
+    // per finite physical shape, and a serial compile resolves a registered
+    // shape on its first lookup.  A stale or unclassified shape fails closed
+    // instead of falling back to handwritten bytes or a checked query lookup.
     if (!machine_x64_metadata_shape_cache_ready)
     {
         return machine_x64_exact_reject(encoder, counters);
@@ -14877,11 +15305,36 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
     if (instruction->opcode == MACHINE_X64_F80_BINARY)
     {
         String8 names[] = {S8("FADDP"), S8("FSUBP"), S8("FMULP"), S8("FDIVP")};
+        u32 mode = instruction->payload;
+        bool controlled = mode >= MACHINE_X64_F80_ADD_P24;
+        u32 operation = mode == MACHINE_X64_F80_MULTIPLY_P64 ? MACHINE_X64_F80_MULTIPLY :
+                        mode == MACHINE_X64_F80_SUBTRACT_P64 ? MACHINE_X64_F80_SUBTRACT : controlled ? MACHINE_X64_F80_ADD : mode;
+        u32 precision = mode == MACHINE_X64_F80_ADD_P24 ? 0u : mode == MACHINE_X64_F80_ADD_P53 ? 0x200u : 0x300u;
+        if (controlled)
+        {
+            // The six padding bytes in the destination frame hold the saved
+            // and temporary control words until this closed transaction ends.
+            machine_x64_emit_x87_memory(encoder, S8("FNSTCW"), offsets[0] + 10, 16);
+            (void)machine_x64_emit_metadata_register_memory(encoder, S8("MOVZX"), MACHINE_X64_RAX, MACHINE_X64_RBP,
+                                                           offsets[0] + 10, 64, 16, 0);
+            (void)machine_x64_emit_metadata_register_immediate(encoder, S8("AND"), MACHINE_X64_RAX, ~UINT32_C(0x300), 32, 32, 0);
+            if (precision)
+            {
+                (void)machine_x64_emit_metadata_register_immediate(encoder, S8("OR"), MACHINE_X64_RAX, precision, 32, 32, 0);
+            }
+            (void)machine_x64_emit_metadata_memory_register(encoder, S8("MOV"), MACHINE_X64_RBP, offsets[0] + 12,
+                                                           MACHINE_X64_RAX, 16, 16, 0);
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 12, 16);
+        }
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(1), machine_x64_x87_operand(0)};
-        (void)machine_x64_emit_x87(encoder, names[instruction->payload], operands, 1);
+        (void)machine_x64_emit_x87(encoder, names[operation], operands, 1);
         machine_x64_emit_x87_memory(encoder, S8("FSTP"), offsets[0], 80);
+        if (controlled)
+        {
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 10, 16);
+        }
         machine_x64_emit_f80_padding(encoder, offsets[0]);
     }
     else if (instruction->opcode == MACHINE_X64_F80_NEGATE)
@@ -14953,6 +15406,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
 
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_x86_64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                               u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     if (!placement->valid)
     {
@@ -15010,7 +15469,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         return result;
     }
     MachineX64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineX64ExactEmitCounters exact_counters = {0};

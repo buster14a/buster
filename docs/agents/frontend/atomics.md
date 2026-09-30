@@ -206,6 +206,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and volatile objects, byte-offset pointer RMWs, and both frontend SSA paths.
   Do not relax the atomic-place or operand-type validation to accept the GNU
   spelling's surface types.
+- **A narrow atomic compound assignment returns the converted stored value.**
+  The read-modify-write instruction returns the old value, and the frontend
+  computes the expression result from that value without another atomic load.
+  Integer promotions may make the arithmetic wider than the destination, so
+  `c_ir_emit_compound_assignment` converts the computed result back to the
+  unqualified destination type before publishing it. Prefix increment uses
+  that result; postfix increment uses the old value. The type-only expression
+  query also strips atomic access qualification from assignment and increment
+  results, so `_Generic` sees the same value type as runtime lowering. The
+  atomic update remains
+  one sequentially consistent read-modify-write. `c_test_atomic_compound_result`
+  checks byte/short wrapping, expression types, both increment forms, and
+  the stored value across native allocator and frontend modes.
 - **Aggregate C11 exchange and compare-exchange use integer representations
   in canonical IR.** `c_ir_atomic_aggregate_bits_place` preserves the atomic
   qualifier on an integer pointer view of the same promoted object.

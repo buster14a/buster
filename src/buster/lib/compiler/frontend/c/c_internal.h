@@ -12,11 +12,24 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+// Diagnostic rows reserved before any diagnostic exists, by the stage that
+// reserves them (LEX, PREPROCESS, SEMANTIC, EVALUATION, LOWERING), for the
+// allocation diagnostic build's census; normal builds evaluate nothing.
+#define C_DIAGNOSTIC_RESERVATION_CENSUS(stage, rows)                                                 \
+    do                                                                                               \
+    {                                                                                                \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_RESERVATIONS, 1);                                   \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_ROWS_RESERVED, (rows));                             \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_BYTES_RESERVED, (u64)(rows) * sizeof(CDiagnostic)); \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_##stage##_ROWS, (rows));                            \
+    } while (0)
 
 #if BUSTER_SIMD_512 && !defined(__BUSTER__)
 #define BUSTER_C_LEX_COMPACT 1
@@ -146,6 +159,17 @@ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
+// GNU `_Alignof(object)` answers the object's alignment, which its alignment
+// records raise; a record may itself spell `_Alignof(object)`, so each layout
+// engine counts the nested evaluations and refuses past this many rather than
+// chain -- or cycle, for `extern int g; _Alignas(_Alignof(g)) int g;` --
+// through its constant evaluator.
+#define C_ALIGNOF_OBJECT_DEPTH_LIMIT 4
+// Steps through the alignment runs that raise `_Alignof(entity)` at
+// `token_index`: the entity's own, then those of each object declaration of
+// the entity that ends before the operand. `*cursor` starts at zero.
+BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
+                                               u32* count_out);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -194,6 +218,7 @@ BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
                                                    u32* invalid_specifier);
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
+BUSTER_C_EXTERN u32 c_symbol_find(const CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                 CDeclaration* declaration, CTypeId inherited_base);
@@ -260,6 +285,10 @@ BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
 BUSTER_C_EXTERN CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_C_EXTERN bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out);
 BUSTER_C_EXTERN u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
+// The first token of `start .. end` past its last typeof operand group: a
+// type name's own attributes follow that group, while the attributes inside
+// it already shaped the operand's type.
+BUSTER_C_EXTERN u32 c_parse_type_name_attribute_start(CPreprocessResult preprocess, u32 start, u32 end);
 // The decimal or hexadecimal value of an attribute's integer argument, as it
 // is spelled: `aligned(16)`, `constructor(101)`. False when the spelling is
 // not one, which every caller reads as "the attribute named no argument".
@@ -279,9 +308,16 @@ BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* a
 BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                     String8 name, u32 token_index);
+BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_result_reserve_types(CParseResult* result, u32 additional);
+BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) do { if (lookup) { (lookup)->lowering_search_type_count += 1; } } while (0)
+#else
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
+#endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
-                                             CParseResult checkpoint, u32 mutation_mark);
+                                             CParseResult const* checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
 BUSTER_C_EXTERN bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end);
 BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess,
@@ -290,6 +326,15 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
+BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
+// CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing
+// builds and out of the canonical-construction census: parse-only runs
+// construct no IR, and tests pin that their construction counters stay still.
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) do { if (index) { (index)->field += (amount); } } while (0)
+#else
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) ((void)0)
+#endif
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
@@ -315,10 +360,103 @@ BUSTER_C_EXTERN bool c_vector_type_layout(Target target, u64 element_size, u32 l
 // `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
 // (see c_atomic_promoted_layout in c_parse.c).
 BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u32* alignment);
+
+// How a record's bit-fields claim storage. C leaves bit-field allocation to
+// the implementation and each platform ABI fixes it, so the rule is a fact of
+// the target, like plain char's signedness, that c_record_layout_rule derives
+// from it alone.
+//
+// ITANIUM    The System V generic rule, which the x86-64 psABI, Darwin, Wasm
+//            and bpf follow: a bit-field takes the next bit at which it does
+//            not straddle an aligned storage unit of its declared type, and
+//            an unnamed bit-field does not raise the record's alignment.
+// AAPCS64    The same placement, but every bit-field's container -- named,
+//            unnamed or zero-width -- raises the record's alignment (AAPCS64
+//            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
+// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+//            bit-field occupies a storage unit of its declared type's size,
+//            and the next one shares it only while its declared type has the
+//            same size and its bits still fit. A zero-width bit-field matters
+//            only after a non-zero one, and a union's bit-fields do not raise
+//            the union's alignment.
+typedef enum CRecordLayoutRule
+{
+    C_RECORD_LAYOUT_ITANIUM,
+    C_RECORD_LAYOUT_AAPCS64,
+    C_RECORD_LAYOUT_MICROSOFT,
+    C_RECORD_LAYOUT_COUNT,
+} CRecordLayoutRule;
+
+// Record member placement, the one authority both layout engines -- the
+// sizeof/offsetof folding in c_parse.c and the IrType layout in c_gen.c --
+// place members through, so a folded size and the object it sizes cannot
+// follow different rules. The target's CRecordLayoutRule selects the rule;
+// see c_record_layout_place in c_parse.c. Each engine still evaluates the
+// member's own facts (width, alignment specifiers, packing) and hands them in.
+typedef struct CRecordLayoutMember CRecordLayoutMember;
+struct CRecordLayoutMember
+{
+    // The declared type's size in bytes; zero for a flexible array member.
+    u64 size;
+    // The declared type's own alignment.
+    u32 natural_alignment;
+    // The alignment after packing, #pragma pack and alignment specifiers.
+    u32 alignment;
+    // The largest explicit aligned(N)/_Alignas(N) written on the member.
+    u32 alignment_request;
+    u32 bit_width;
+    bool is_bit_field;
+    bool is_named;
+    // Packed by its own attribute, its record's or #pragma pack(1).
+    bool is_packed;
+    u8 reserved[5];
+};
+
+typedef struct CRecordLayoutCursor CRecordLayoutCursor;
+struct CRecordLayoutCursor
+{
+    // The next free bit. Under the Microsoft rule it is always the end of the
+    // last whole storage unit or ordinary member.
+    u64 bit_position;
+    // Microsoft: the open allocation unit's size and the bits it has left.
+    u64 unit_bits;
+    u64 unit_remaining_bits;
+    // The record's alignment so far.
+    u32 alignment;
+    // The #pragma pack ceiling around the definition, zero when none.
+    u32 pack_alignment;
+    u8 policy;
+    bool is_union;
+    // Microsoft: the previous member was a non-zero-width bit-field, whose
+    // unit a following bit-field may share.
+    bool unit_open;
+    // Set when a bit-field's natural storage unit may not cover its bits or
+    // may overhang the record, so the IR layout has to fit a unit for it.
+    bool needs_unit_fitting;
+    u8 reserved[4];
+};
+
+typedef struct CRecordLayoutPlacement CRecordLayoutPlacement;
+struct CRecordLayoutPlacement
+{
+    // The member's first bit, from the start of the record.
+    u64 bit_position;
+    // A bit-field's storage unit, a declared-type-sized access, in bytes from
+    // the start of the record; an ordinary member's own offset.
+    u64 unit_offset;
+};
+
+BUSTER_C_EXTERN CRecordLayoutRule c_record_layout_rule(Target target);
+BUSTER_C_EXTERN CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment);
+BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member);
+// The record's size, once `alignment` -- the cursor's, raised by any aligned
+// attribute on the definition -- is final.
+BUSTER_C_EXTERN u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
+BUSTER_C_EXTERN CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,
                                                                      IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
@@ -416,6 +554,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
 
 struct CSymbolTable
 {
@@ -535,19 +674,68 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
     return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
 }
 
+// The C frontend only exposes the canonical x87 spelling on a target whose
+// selected ABI actually carries it.  The target layout is the frontend's
+// source of truth for the spelling; the shared ABI classifier is the source of
+// truth for how a value with that spelling crosses a function boundary.
+// x86_64 Android shares the ELF System V convention, but target_data_layout
+// gives it sixteen-byte IEEE binary128 long double, so the exact
+// representation checks below keep it off this x87 path.  Lowering and the
+// parser's lowering-constraint mirror ask this same predicate.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
+// The supported C long-double ABIs carry IEEE binary128 directly in one
+// sixteen-byte vector-file part: AAPCS64 in a Q register and Android System V
+// x86-64 in an XMM register. Keep this gate as narrow as the exact target data
+// layout so ordinary System V x87 long double remains on its separate path.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    bool direct_register_abi =
+        (target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_AAPCS64) ||
+        (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    return direct_register_abi && layout.endianness == TARGET_ENDIAN_LITTLE &&
+           layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];
 
+// Can a token without an interned id still be spelled like an identifier?
+// Only identifiers and unclassified hand-built rows can: a punctuator,
+// number, literal, newline or pragma marker never spells a word that starts
+// with a letter or underscore and holds no quote, which is every
+// well-known spelling. Callers ask about arbitrary tokens, so this is what
+// keeps punctuation from paying a spelling compare.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_may_spell_word(CToken token)
+{
+    return token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_INVALID;
+}
+
 // Is this identifier token spelled `well_known`?  Interned tokens — every
-// token the preprocessor produced — settle on the integer compare. Symbol 0
-// marks a token that never passed the intern pass (pasted, synthesized, or
-// test-built) and falls back to the spelling, so a missed path costs speed
-// and never correctness. Both sides read the one spelling table, so the id
-// and the fallback spelling cannot drift apart.
+// identifier the preprocessor produced, pasted ones included — settle on the
+// integer compare. Symbol 0 marks a non-identifier or a token that never
+// passed the intern pass (synthesized or test-built); only the latter falls
+// back to the spelling, so a missed path costs speed and never correctness.
+// Both sides read the one spelling table, so the id and the fallback
+// spelling cannot drift apart.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_well_known(char8 const* spelling_base, CToken token, CSymbolWellKnown well_known)
 {
     return token.symbol ? token.symbol == (u32)well_known
-                        : string_equal(c_token_spelling(spelling_base, token), c_symbol_well_known_spellings[well_known]);
+                        : c_token_may_spell_word(token) &&
+                              string_equal(c_token_spelling(spelling_base, token), c_symbol_well_known_spellings[well_known]);
 }
 
 // Is this identifier token spelled as any member of `set`, a union of
@@ -566,7 +754,7 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
     {
         String8 spelling = c_token_spelling(spelling_base, token);
         result = false;
-        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
+        for (u64 remaining = c_token_may_spell_word(token) ? set : 0; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
         }
@@ -681,6 +869,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT,
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
+    C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -729,8 +918,13 @@ struct CParseExpressionTypeTask
 struct CTypeParseFrame
 {
     CParseResult* result;
-    CParseResult checkpoint;
-    CPreprocessResult preprocess;
+    // The token stream of the root query that pushed this frame, shared by
+    // every frame of one machine run: the root outlives the run, which pops
+    // its frames before returning or failing, so no frame holds a copy. A
+    // frame that saves a rollback snapshot keeps it in the machine's
+    // frame_checkpoints row of the same slot, not in the frame, because few
+    // frames ever take one and every push copies the whole row.
+    CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
     CType qualifiers;
@@ -853,6 +1047,11 @@ struct CTypeParseMachine
     u32 expression_query_start;
     u32 expression_query_end;
     CTypeParseFrame* frames;
+    // One rollback snapshot per frame slot, written only by the frame kinds
+    // that can abandon a partial parse (aggregate segments and typeof/_Atomic
+    // operands) and read back only by that frame; see
+    // c_type_parse_frame_checkpoint.
+    CParseResult* frame_checkpoints;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
     CTypeId* incomplete_array_chain;
@@ -882,6 +1081,11 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool enum_constant_members_active;
+    // How many GNU `_Alignof(object)` evaluations of an object's alignment
+    // records enclose this one, and whether one of them hit
+    // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
+    u8 alignof_object_depth;
+    bool alignof_object_refused;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

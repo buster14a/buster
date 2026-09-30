@@ -18,6 +18,12 @@ captured stderr diagnostics separately; the retirement census reads its
 reporting a failed compiler invocation. A `-v -E` invocation also prints the
 requested statistics on stdout; use plain `-E` when piping preprocessed C.
 
+With several inputs, only a native link copies each unit's in-memory object
+out of its translation-unit arena into the result arena for `link_objects`.
+Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
+`-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
+nothing per unit and leave `CompilerDriverResult.object` unset.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -192,6 +198,18 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+## Plain-char signedness
+
+`-fsigned-char` and `-funsigned-char` override the target's implementation-
+defined plain-`char` signedness; the last option wins. With neither option,
+the target ABI default remains in effect. This policy is carried through
+`TargetDataLayout`, so the C frontend uses it consistently for plain-`char`
+typing and promotions, casts, character constants, `__CHAR_UNSIGNED__`, and
+the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
+and `unsigned char` keep their specified behavior. The options apply to C
+frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
+pipelines reject them because their toolchains do not use Buster's C frontend.
+
 ## C input phase selection
 
 A `.c` input and any path under `-x c` begin as raw C source and run the full
@@ -279,6 +297,12 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
+Direct WebAssembly output accepts one C source for `wasm64-unknown-freestanding`
+or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview 1
+command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
+header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
+output rejects `-emit-llvm`, native link inputs, and `-S`.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
@@ -327,8 +351,12 @@ The object writer already carries that requirement into the section metadata
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
-`lib`/`usr/lib` roots, multiarch first — and rejects a file whose ELF machine
+`lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
+cross-libc root `/usr/<triple>/lib` — and rejects a file whose ELF machine
 disagrees with the target, so a cross link never reads the host's own libc.
+A cross link that finds no target libc cannot tell a missing symbol from a
+libc import and keeps every strong undefined reference as an import (GitHub
+#1729).
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
@@ -384,6 +412,83 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   and Buster linked it and let the loader pick. **Do not use `sys_errlist` as a
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
+
+A hosted executable also exports each of its own definitions that a requested
+library leaves undefined, as GNU ld does: `compiler_driver_elf_dynamic_symbols`
+records every library's undefined names as `referenced_symbols`, and the
+index marks them, so a library that calls back into the program or reads its
+data binds without `-rdynamic`. Only the requested libraries are consulted, not
+`libc.so.6`, whose undefined names are loader internals.
+
+## Shared objects and position-independent executables
+
+On x86-64 Linux, `-shared` links a shared object and `-pie` a
+position-independent executable (`NativeImageKind`, carried to the linker in
+`NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
+order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
+inputs of that invocation with the position-independent code model, and
+`-fPIE`/`-fpie` select that same model on every target (the last of the four
+positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
+target a link that asks for either image is refused as an unsupported option,
+while a compile-only invocation ignores the link option, as GCC does.
+
+`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
+ET_DYN at base zero. Its orientation comment is the contract; in short:
+
+- Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
+  a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
+  in a shared object, for an exported definition, because an executable may
+  copy-relocate the library's data and the library must then follow the copy.
+  Direct calls bind to the library's own definitions (ld's
+  `-Bsymbolic-functions` answer). A rel32 to preemptible data or to imported
+  data, 32-bit absolute addresses, and address relocations in code are refused
+  with a hint to compile with `-fPIC`; copy relocations are not produced.
+- A shared object exports every defined default-visibility symbol, leaves
+  undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
+  executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
+  `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the
+  fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
+  `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
+- Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
+  executable. In a shared object general-dynamic keeps its `__tls_get_addr`
+  call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
+  `DF_STATIC_TLS`, and local-exec is refused.
+- Local-dynamic TLS, which this compiler never emits but GCC and Clang do for a
+  file-local `__thread` under `-fPIC -O1` and above (`R_X86_64_TLSLD` then
+  `DTPOFF32` per variable, issue 1711), is read from foreign objects. An
+  executable -- fixed-address or PIE -- relaxes the `lea`/`call
+  __tls_get_addr` pair (direct, or through the GOT under `-fno-plt`) to
+  `mov rax, fs:0` behind data16 padding and resolves `DTPOFF32` in code to the
+  thread-pointer offset, as ld does. A shared object keeps the call and gives
+  the image one `DTPMOD64` pair with a zero offset, and `DTPOFF32` is the
+  variable's offset in the module's block. `DTPOFF32`/`DTPOFF64` in DWARF
+  sections resolve to that block offset in every image.
+
+`compiler_driver_test_position_independent_images` exercises the whole path:
+a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
+PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
+library must follow), calls and data in both directions, the lifecycle order
+of initializers and handlers, a randomized PIE base, a CPython extension when
+`python3` and its headers exist, and the `-fPIC` refusal.
+`compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
+local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
+runs them, the shared object under both a Buster PIE and the host toolchain.
+AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+## Object output (`-c`)
+
+`-c` writes the object through `object_write_borrowing`. The ELF64 writer
+plans the whole file with checked arithmetic, then stores each byte once,
+except that each section payload of at least 4 KiB is named in place and the
+file is published from the image's ranges and those payloads in order
+(`object_artifact_slices`, `file_publish_slices`), byte-identical to
+`object_write`'s image. It refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds the object writer's limits (...)`,
+and leaves an existing output file untouched. `-v` prints the writer's exact
+work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
+`-c`. See [object emission](../object-emission.md).
 
 ## External ELF debug information
 
@@ -442,3 +547,44 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+## Response files
+
+`compiler_driver_parse_arguments` expands `@path` arguments before it reads
+any option, so `ide cc` and embedding callers share one behavior. An argument
+whose first byte is `@` is replaced, in place, by the arguments held in the
+file `path` names; a relative path resolves against the current directory.
+Expansion applies after `--` as well, as in GCC and Clang. An argument that
+contains `@` elsewhere (`a@b.c`, `-Wl,@x`) is not a response file. With no
+argument beginning with `@`, the argument slice is used unchanged and neither
+bound below applies.
+
+The file's text follows GCC's `expandargv` and Clang's GNU tokenizer:
+
+- space, tab, newline, carriage return, vertical tab and form feed separate
+  arguments; there is no comment syntax;
+- single and double quotes group bytes, including whitespace, and are
+  removed, so `a"b c"d` is one argument and `""` or `''` is an empty one;
+- a backslash takes the next byte literally inside or outside either quote,
+  so `\"`, `\'`, `\\`, `\ ` and a backslash-newline pair each yield that
+  byte. Write Windows paths with `/` or doubled backslashes.
+
+Where those compilers accept malformed text in different ways, this driver
+refuses it with a `driver.argument` error naming the file: a quote still open
+at the end of the file, a trailing backslash, a NUL byte, and a bare `@`.
+Nesting is not supported: an expanded argument that itself begins with `@`,
+quoted or escaped, is refused rather than expanded, so one file never
+includes another. Name an input that begins with `@` as `./@name`.
+
+`COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT` (4 MiB) bounds the bytes read from
+all response files of one invocation together, and
+`COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
+expanded command line; exceeding either is a `driver.argument` error. The
+reader requests one byte past the remaining budget, so a pipe or device is
+bounded too. A file that cannot be opened or read (missing, a directory) is a
+`driver.file-read` error, `could not read response file <path>`, which
+`ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
+are NUL-terminated copies in the invocation arena.
+`compiler_driver_test_response_file_arguments` covers the grammar and bounds;
+`compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
+writes the same objects through `@file` as on the command line.

@@ -799,6 +799,21 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             OPERATING_SYSTEM_FREESTANDING,
         },
         {
+            S8("wasm32-wasip1"),
+            CPU_ARCH_WASM32,
+            OPERATING_SYSTEM_WASI,
+        },
+        {
+            S8("wasm32-unknown-wasip1"),
+            CPU_ARCH_WASM32,
+            OPERATING_SYSTEM_WASI,
+        },
+        {
+            S8("wasm32-wasi"),
+            CPU_ARCH_WASM32,
+            OPERATING_SYSTEM_WASI,
+        },
+        {
             S8("wasm64-unknown-freestanding"),
             CPU_ARCH_WASM64,
             OPERATING_SYSTEM_FREESTANDING,
@@ -862,8 +877,27 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_X86_64));
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_AARCH64));
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_A64_APPLE_M4, CPU_ARCH_AARCH64));
+    BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_BASELINE, CPU_ARCH_WASM32));
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_BASELINE, CPU_ARCH_WASM64));
+    BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_NATIVE, CPU_ARCH_WASM32));
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_NATIVE, CPU_ARCH_WASM64));
+    Target wasi_target = {
+        .cpu_arch = CPU_ARCH_WASM32,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_WASI,
+    };
+    TargetDataLayout wasi_layout = target_data_layout(wasi_target);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(wasi_layout));
+    BUSTER_TEST(arguments, wasi_layout.pointer.size == 4 && wasi_layout.pointer.alignment == 4 && wasi_layout.pointer.bit_width == 32);
+    BUSTER_TEST(arguments, wasi_layout.long_integer.size == 4 && wasi_layout.long_integer.bit_width == 32);
+    BUSTER_TEST(arguments, wasi_layout.long_long_integer.size == 8 && wasi_layout.long_double_type.size == 16 &&
+                               wasi_layout.long_double_type.bit_width == 128);
+    BUSTER_TEST(arguments, wasi_layout.va_list.size == 4 && wasi_layout.va_list.alignment == 4);
+    BUSTER_TEST(arguments, !wasi_layout.has_128_bit_integer);
+    BUSTER_TEST(arguments, target_vector_register_size(wasi_target) == 0);
+    BUSTER_STRING_TEST(arguments, cpu_arch_to_string_os(CPU_ARCH_WASM32), S8("wasm32"));
+    BUSTER_STRING_TEST(arguments, operating_system_to_string_os(OPERATING_SYSTEM_WASI), S8("wasip1"));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(wasi_target));
     Target wasm64_target = {
         .cpu_arch = CPU_ARCH_WASM64,
         .cpu_model = CPU_MODEL_BASELINE,
@@ -3493,6 +3527,40 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                              linux_arm_layout.long_double_type.bit_width == 128);
     BUSTER_TEST(arguments, !linux_arm_layout.plain_char_is_signed);
     BUSTER_TEST(arguments, target_data_layout_is_valid(linux_arm_layout));
+    Target plain_char_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    bool plain_char_default_signed[] = {true, true, true, true, false, false, true, true, true, true, true};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(plain_char_targets); target_index += 1)
+    {
+        Target target = plain_char_targets[target_index];
+        TargetDataLayout target_layout = target_data_layout(target);
+        Target signed_target = target;
+        signed_target.plain_char_policy = TARGET_PLAIN_CHAR_POLICY_SIGNED;
+        TargetDataLayout signed_layout = target_data_layout(signed_target);
+        Target unsigned_target = target;
+        unsigned_target.plain_char_policy = TARGET_PLAIN_CHAR_POLICY_UNSIGNED;
+        TargetDataLayout unsigned_layout = target_data_layout(unsigned_target);
+        BUSTER_TEST(arguments, target_layout.plain_char_is_signed == plain_char_default_signed[target_index]);
+        BUSTER_TEST(arguments, signed_layout.plain_char_is_signed);
+        BUSTER_TEST(arguments, !unsigned_layout.plain_char_is_signed);
+        BUSTER_TEST(arguments, target_layout.plain_char.size == signed_layout.plain_char.size &&
+                                 target_layout.plain_char.size == unsigned_layout.plain_char.size &&
+                                 target_layout.plain_char.alignment == signed_layout.plain_char.alignment &&
+                                 target_layout.plain_char.alignment == unsigned_layout.plain_char.alignment &&
+                                 target_layout.plain_char.bit_width == signed_layout.plain_char.bit_width &&
+                                 target_layout.plain_char.bit_width == unsigned_layout.plain_char.bit_width);
+    }
     TargetDataLayout android_arm_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_AARCH64,
         .cpu_model = CPU_MODEL_BASELINE,

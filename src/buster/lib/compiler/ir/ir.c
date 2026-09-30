@@ -17,11 +17,14 @@
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
-// half-built function into codegen.
+// half-built function into codegen. Its module-scope and per-function halves
+// (ir_validate_canonical_scope, ir_validate_canonical_function) let local
+// promotion attribute a defect to the function that already had it.
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
 #include <buster/lib/simd.h>
@@ -67,6 +70,48 @@ String8 ir_construction_counter_name(IrConstructionCounter counter)
 #define IR_CONSTRUCTION_NAME(id, name) case IR_CONSTRUCTION_##id: result = S8(#name); break;
         IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_NAME)
 #undef IR_CONSTRUCTION_NAME
+        default: break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrDiagnosticCensus ir_diagnostic_census_totals;
+
+void ir_diagnostic_census_record(IrDiagnosticCensusCounter counter, u64 amount)
+{
+    if ((u32)counter < IR_DIAGNOSTIC_CENSUS_COUNT)
+    {
+        u64* value = ir_diagnostic_census_totals.values + counter;
+        if (amount > UINT64_MAX - *value)
+        {
+            *value = UINT64_MAX;
+            ir_diagnostic_census_totals.overflowed = true;
+        }
+        else
+        {
+            *value += amount;
+        }
+    }
+    else
+    {
+        ir_diagnostic_census_totals.overflowed = true;
+    }
+    return;
+}
+
+IrDiagnosticCensus ir_diagnostic_census(void)
+{
+    return ir_diagnostic_census_totals;
+}
+
+String8 ir_diagnostic_census_counter_name(IrDiagnosticCensusCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define IR_DIAGNOSTIC_CENSUS_NAME(id, name) case IR_DIAGNOSTIC_CENSUS_##id: result = S8(#name); break;
+        IR_DIAGNOSTIC_CENSUS_COUNTERS(IR_DIAGNOSTIC_CENSUS_NAME)
+#undef IR_DIAGNOSTIC_CENSUS_NAME
         default: break;
     }
     return result;
@@ -388,6 +433,7 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
             }
         }
         cursor = ir_source_search_offsets(offsets, low, high, local);
+        IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_CHECKPOINT_SEARCHES, 1);
         if (checkpoint_cursor)
         {
             *checkpoint_cursor = cursor;
@@ -420,9 +466,12 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
 // that a full position runs after it — the difference between the two is paid
 // once per lowered instruction, so the short answer has its own entry point,
 // and the key it reads carries the source beside the start it matched on.
-u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+// Forced inline: lowering's per-instruction range path depends on it, and a
+// second caller (record sites) was enough for Clang to outline it there.
+BUSTER_SHARED_INLINE u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
     u32 result;
+    IR_DIAGNOSTIC_CENSUS_RECORD(SOURCE_QUERIES, 1);
     if (!map || !map->keys)
     {
         result = 0;
@@ -438,6 +487,7 @@ u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* 
 
 IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_QUERIES, 1);
     if (!map || !map->keys)
     {
         return (IrSourcePosition){0};
@@ -450,6 +500,7 @@ IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSo
     }
     if (offset == cursor->memo_offset)
     {
+        IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_MEMO_HITS, 1);
         return cursor->memo_position;
     }
     u32 index = ir_source_map_region(map, offset, cursor);
@@ -463,8 +514,10 @@ IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 off
 {
     IrSourcePosition result = {0};
     bool done = false;
+    IR_DIAGNOSTIC_CENSUS_RECORD(ORIGINAL_QUERIES, 1);
     for (u32 step = 0; map && map->keys && step < map->count && !done; step += 1)
     {
+        IR_DIAGNOSTIC_CENSUS_RECORD(ORIGINAL_STEPS, 1);
         u32 index = ir_source_map_find(map, offset);
         IrSourceRegion const* region = map->regions + index;
         if (!region->origin_plus_one)
@@ -490,6 +543,7 @@ IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 off
 IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor)
 {
     IrSourcePosition result;
+    IR_DIAGNOSTIC_CENSUS_RECORD(TEXT_POSITION_QUERIES, 1);
     if (!text.pointer || offset > text.length)
     {
         result = (IrSourcePosition){.source = source};
@@ -515,6 +569,7 @@ IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, I
             line = cursor->memo_position.line;
             line_start = cursor->memo_offset + 1 - cursor->memo_position.column;
         }
+        IR_DIAGNOSTIC_CENSUS_RECORD(TEXT_BYTES_SCANNED, offset - scanned);
         for (; scanned < offset; scanned += 1)
         {
             if (text.pointer[scanned] == '\n')
@@ -3205,6 +3260,9 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             }
             u32 first = (u32)(task.offset / 8);
             u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, (u64)1) - 1) / 8);
+            bool xmm128_value = type->layout.size == 16 &&
+                                (type->kind == IR_TYPE_VECTOR ||
+                                 (type->kind == IR_TYPE_FLOAT && type->bit_width == 128));
             for (u32 part = first; part <= last; part += 1)
             {
                 if (part >= 2)
@@ -3212,8 +3270,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                     valid = false;
                     break;
                 }
-                IrAbiClass part_class = type->kind == IR_TYPE_VECTOR && type->layout.size == 16 && part != first
-                                            ? IR_ABI_CLASS_FLOAT_UP : abi_class;
+                IrAbiClass part_class = xmm128_value && part != first ? IR_ABI_CLASS_FLOAT_UP : abi_class;
                 classes[part] = ir_system_v_abi_class_merge(classes[part], part_class);
             }
         }
@@ -3474,12 +3531,13 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         }
                         return value;
                     }
-                    if (convention == IR_ABI_CONVENTION_AAPCS64 && type->bit_width == 128 && size == 16)
+                    if ((convention == IR_ABI_CONVENTION_AAPCS64 ||
+                         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64) &&
+                        type->bit_width == 128 && size == 16)
                     {
-                        // Base AAPCS64 carries IEEE binary128 directly in one
-                        // Q register for arguments and results. Keep the whole
-                        // sixteen-byte image in one vector-file ABI part so
-                        // caller, callee and compiler-rt declarations agree.
+                        // AAPCS64 and System V x86-64 carry IEEE binary128 in
+                        // one Q/XMM register. Keep the whole sixteen-byte image
+                        // in one vector-file ABI part so callers and callees agree.
                         value.part_count = 1;
                         value.parts[0] = (IrAbiPart){
                             .abi_class = IR_ABI_CLASS_VECTOR,
@@ -3721,11 +3779,15 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
                 {
                     IrType* element_type = ir_type_from_id(&program->types, element);
+                    // A binary128 member takes a whole Q register, the same
+                    // sixteen-byte vector-file part a scalar binary128 uses.
+                    bool vector_part = element_type->kind == IR_TYPE_VECTOR ||
+                                       (element_type->kind == IR_TYPE_FLOAT && element_type->bit_width == 128);
                     value.part_count = count;
                     for (u32 part = 0; part < count; part += 1)
                     {
                         value.parts[part] = (IrAbiPart){
-                            .abi_class = element_type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
+                            .abi_class = vector_part ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
                             .value_offset = part * (u32)element_type->layout.size,
                             .size = (u32)element_type->layout.size,
                         };
@@ -4645,6 +4707,60 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_ok(void)
     };
 }
 
+// Every relocation writes pointer_size bytes, so two of them overlap exactly
+// when their offsets differ by less than that width, and in offset order any
+// overlapping pair has an overlapping neighbour between them. A table whose
+// offsets arrive in that order is checked in ir_validate_global with one
+// comparison per row; a designated initializer can list entries in any order,
+// and such a table comes here once to have a copy of its offsets sorted.
+// Callers pass only offsets that fit the global, so no end below wraps, and
+// largest_offset bounds the radix passes to the key bytes actually in use.
+BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgram* program, IrGlobal* global, u64 pointer_size,
+                                                                        u64 largest_offset)
+{
+    IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_SORTS, 1);
+    u32 count = global->relocation_count;
+    TemporalArena temporary = scratch_begin(&program->arena, 1);
+    u64* source = arena_allocate(temporary.arena, u64, count);
+    u64* destination = arena_allocate(temporary.arena, u64, count);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        source[index] = global->relocations[index].offset;
+    }
+    enum { IR_RELOCATION_RADIX_BITS = 8, IR_RELOCATION_RADIX_BUCKETS = 1 << IR_RELOCATION_RADIX_BITS };
+    for (u32 shift = 0; shift < 64 && (largest_offset >> shift) != 0; shift += IR_RELOCATION_RADIX_BITS)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_SORT_ROWS, count);
+        u32 offsets[IR_RELOCATION_RADIX_BUCKETS] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            offsets[(source[index] >> shift) & (IR_RELOCATION_RADIX_BUCKETS - 1)] += 1;
+        }
+        u32 offset = 0;
+        for (u32 bucket = 0; bucket < IR_RELOCATION_RADIX_BUCKETS; bucket += 1)
+        {
+            u32 population = offsets[bucket];
+            offsets[bucket] = offset;
+            offset += population;
+        }
+        for (u32 index = 0; index < count; index += 1)
+        {
+            destination[offsets[(source[index] >> shift) & (IR_RELOCATION_RADIX_BUCKETS - 1)]++] = source[index];
+        }
+        u64* swap = source;
+        source = destination;
+        destination = swap;
+    }
+    bool overlap_free = true;
+    for (u32 index = 1; index < count; index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
+        overlap_free &= source[index] >= source[index - 1] + pointer_size;
+    }
+    scratch_end(temporary);
+    return overlap_free;
+}
+
 // One global's alignment, initializer, and relocation table. Nothing here names
 // a function, a block or an instruction, so the caller keeps the invalid ids the
 // module-level result already carries and only the error kind travels back.
@@ -4716,6 +4832,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
         else
         {
             u64 pointer_size = program->data_layout.pointer.size;
+            // Rows up to here start at or past the previous row's end, so the
+            // previous end is the furthest any of them reaches.
+            bool ordered = true;
+            u64 ordered_end = 0;
+            u64 largest_offset = 0;
             for (u32 relocation_index = 0; relocation_index < global->relocation_count && error == IR_VALIDATION_NONE; relocation_index += 1)
             {
                 IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATIONS, 1);
@@ -4724,17 +4845,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                 bool offset_valid = pointer_size != 0 && relocation->offset <= type->layout.size && pointer_size <= type->layout.size - relocation->offset;
                 bool bytes_valid = global->bytes.pointer && global->bytes.length == type->layout.size && relocation->offset <= global->bytes.length &&
                                    pointer_size <= global->bytes.length - relocation->offset;
-                bool overlap_free = true;
-                for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
-                    IrGlobalRelocation* previous = global->relocations + previous_index;
-                    bool previous_end_valid = previous->offset <= UINT64_MAX - pointer_size;
-                    bool relocation_end_valid = relocation->offset <= UINT64_MAX - pointer_size;
-                    overlap_free &= previous_end_valid && relocation_end_valid &&
-                                    (previous->offset >= relocation->offset + pointer_size || relocation->offset >= previous->offset + pointer_size);
-                }
-                if (!relocation_symbol || !offset_valid || !bytes_valid || !overlap_free)
+                if (!relocation_symbol || !offset_valid || !bytes_valid)
                 {
                     error = IR_VALIDATION_OPERATION;
                 }
@@ -4747,6 +4858,21 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                         error = IR_VALIDATION_OPERATION;
                     }
                 }
+                if (error == IR_VALIDATION_NONE)
+                {
+                    if (relocation_index != 0 && ordered)
+                    {
+                        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
+                        ordered = relocation->offset >= ordered_end;
+                    }
+                    ordered_end = relocation->offset + pointer_size;
+                    largest_offset = BUSTER_MAX(largest_offset, relocation->offset);
+                }
+            }
+            if (error == IR_VALIDATION_NONE && !ordered &&
+                !ir_validate_unordered_relocations_overlap_free(program, global, pointer_size, largest_offset))
+            {
+                error = IR_VALIDATION_OPERATION;
             }
         }
     }
@@ -5734,7 +5860,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+// The module-scope half of ir_validate_canonical_module: the argument guard,
+// the ownership proof for every lowered function, and the globals, aliases and
+// initializers. A failure here is not a verdict on one function's rows.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
@@ -5763,29 +5892,44 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
             IR_CONSTRUCTION_RECORD(VALIDATION_INITIALIZERS, 1);
             result.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
         }
-        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+    }
+    return result;
+}
+
+// The function-scope half: one lowered function's signature, values, blocks
+// and rows. It walks instruction chains without a cycle guard, so it runs only
+// after ir_validate_canonical_scope has proven ownership for the module.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result;
+    IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
+    IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+    if (!signature || signature->kind != IR_TYPE_FUNCTION ||
+        (signature->parameter_count && !signature->parameter_types) ||
+        !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+    {
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
+    else
+    {
+        result = ir_validate_function_values(program, function);
+        if (result.error == IR_VALIDATION_NONE)
         {
-            IrFunction* function = module->functions + function_index;
-            if (function->state != IR_FUNCTION_LOWERED)
-            {
-                continue;
-            }
-            IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
-            IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION ||
-                (signature->parameter_count && !signature->parameter_types) ||
-                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
-            {
-                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
-            }
-            else
-            {
-                result = ir_validate_function_values(program, function);
-                if (result.error == IR_VALIDATION_NONE)
-                {
-                    result = ir_validate_function_blocks(program, function, signature);
-                }
-            }
+            result = ir_validate_function_blocks(program, function, signature);
+        }
+    }
+    return result;
+}
+
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+{
+    IrValidationResult result = ir_validate_canonical_scope(program, module);
+    for (u32 function_index = 0; result.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            result = ir_validate_canonical_function(program, function);
         }
     }
     return result;

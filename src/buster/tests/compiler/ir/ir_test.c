@@ -389,6 +389,182 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* 
     return result;
 }
 
+// The definition the validator must agree with: no two relocations of one
+// global share a byte. Only the test compares every pair.
+BUSTER_GLOBAL_LOCAL bool ir_test_relocations_pairwise_overlap_free(IrGlobalRelocation* relocations, u32 count, u64 width)
+{
+    bool result = true;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        for (u32 previous = 0; previous < index; previous += 1)
+        {
+            result &= relocations[previous].offset >= relocations[index].offset + width ||
+                      relocations[index].offset >= relocations[previous].offset + width;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_test_relocation_random(u64* state)
+{
+    *state = *state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+    return *state >> 33;
+}
+
+// Ordered, reversed, shuffled, duplicated, misaligned and out-of-range tables
+// against the pairwise definition. The table spans 2^20 bytes so unordered
+// offsets need three radix passes. The counting build also pins the work: one
+// comparison per row for an ordered table and one bounded sort otherwise.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_global_relocation_overlap(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum { IR_TEST_RELOCATION_SLOTS = 1 << 17, IR_TEST_RELOCATION_CAPACITY = 4096, IR_TEST_RELOCATION_TRIALS = 768 };
+    u32 width = 8;
+    u64 table_size = (u64)IR_TEST_RELOCATION_SLOTS * width;
+    IrProgram program = ir_program_initialize(arena, 1, 2, 1, 0);
+    program.arena = arena;
+    program.data_layout.pointer.size = width;
+    IrTypeId pointer = ir_program_add_type(&program, (IrType){
+                                                         .kind = IR_TYPE_POINTER,
+                                                         .layout = {.size = 8, .alignment = 8, .resolved = true},
+                                                     });
+    IrTypeId table_type = ir_program_add_type(&program, (IrType){
+                                                            .kind = IR_TYPE_ARRAY,
+                                                            .element_type = pointer,
+                                                            .element_count = IR_TEST_RELOCATION_SLOTS,
+                                                            .layout = {.size = table_size, .alignment = 8, .resolved = true},
+                                                        });
+    IrSymbolId symbol = ir_program_add_symbol(&program, (IrSymbol){
+                                                          .type = table_type,
+                                                          .kind = IR_SYMBOL_DATA,
+                                                          .linkage = IR_LINKAGE_INTERNAL,
+                                                          .is_definition = true,
+                                                      });
+    u8* bytes = arena_allocate(arena, u8, table_size);
+    IrGlobalRelocation* relocations = arena_allocate(arena, IrGlobalRelocation, IR_TEST_RELOCATION_CAPACITY);
+    IrGlobal* global = ir_module_add_global(arena, program.modules, (IrGlobal){
+                                                                      .symbol = symbol,
+                                                                      .type = table_type,
+                                                                      .bytes = (ByteSlice){.pointer = bytes, .length = table_size},
+                                                                      .relocations = relocations,
+                                                                      .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+                                                                  });
+    if (BUSTER_REQUIRE(arguments, global != 0 && bytes && relocations && symbol.value != IR_ID_UNDERLYING_INVALID &&
+                                  table_type.value != IR_ID_UNDERLYING_INVALID))
+    {
+        memset(bytes, 0, table_size);
+        for (u32 index = 0; index < IR_TEST_RELOCATION_CAPACITY; index += 1)
+        {
+            relocations[index] = (IrGlobalRelocation){.symbol = symbol};
+        }
+        u64 state = 0x1310;
+        u32 invalid_count = 0;
+        for (u32 trial = 0; trial < IR_TEST_RELOCATION_TRIALS; trial += 1)
+        {
+            u32 count = trial % 41;
+            u32 shape = (trial / 41) % 6;
+            u64 slot = ir_test_relocation_random(&state) % 64;
+            // Ascending distinct slots with random gaps; each shape then
+            // reverses, shuffles, duplicates, or draws free byte offsets.
+            for (u32 index = 0; index < count; index += 1)
+            {
+                slot += 1 + ir_test_relocation_random(&state) % 3;
+                u64 offset = slot * width;
+                if (shape == 4)
+                {
+                    offset = ir_test_relocation_random(&state) % (table_size - width + 1);
+                }
+                else if (shape == 5 && index % 5 == 4)
+                {
+                    offset -= 3;
+                }
+                relocations[index].offset = offset;
+            }
+            for (u32 index = 0; shape == 1 && index < count / 2; index += 1)
+            {
+                IrGlobalRelocation swap = relocations[index];
+                relocations[index] = relocations[count - 1 - index];
+                relocations[count - 1 - index] = swap;
+            }
+            for (u32 index = count; (shape == 2 || shape == 3 || shape == 4) && index > 1; index -= 1)
+            {
+                u32 other = (u32)(ir_test_relocation_random(&state) % index);
+                IrGlobalRelocation swap = relocations[index - 1];
+                relocations[index - 1] = relocations[other];
+                relocations[other] = swap;
+            }
+            if (shape == 3 && count > 1)
+            {
+                u32 destination = (u32)(ir_test_relocation_random(&state) % count);
+                u32 source = (u32)(ir_test_relocation_random(&state) % count);
+                relocations[destination].offset = relocations[source].offset;
+            }
+            global->relocation_count = count;
+            bool expected = ir_test_relocations_pairwise_overlap_free(relocations, count, width);
+            invalid_count += !expected;
+            IrValidationError error = ir_validate_canonical_module(&program, program.modules).error;
+            BUSTER_TEST(arguments, error == (expected ? IR_VALIDATION_NONE : IR_VALIDATION_OPERATION));
+        }
+        // The mix must exercise both verdicts, not just one of them.
+        BUSTER_TEST(arguments, invalid_count != 0 && invalid_count != IR_TEST_RELOCATION_TRIALS);
+
+        u64 edge_offsets[][3] = {
+            {0, 8, 16}, {16, 8, 0}, {8, 0, 16}, {0, 7, 16}, {16, 0, 9}, {0, 0, 8},
+            {table_size - 8, 0, 8}, {table_size - 7, 0, 8}, {8, 0, table_size - 7},
+        };
+        bool edge_valid[] = {true, true, true, false, false, false, true, false, false};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(edge_offsets) == BUSTER_ARRAY_LENGTH(edge_valid));
+        for (u32 edge = 0; edge < BUSTER_ARRAY_LENGTH(edge_offsets); edge += 1)
+        {
+            for (u32 index = 0; index < 3; index += 1)
+            {
+                relocations[index].offset = edge_offsets[edge][index];
+            }
+            global->relocation_count = 3;
+            IrValidationError error = ir_validate_canonical_module(&program, program.modules).error;
+            BUSTER_TEST(arguments, error == (edge_valid[edge] ? IR_VALIDATION_NONE : IR_VALIDATION_OPERATION));
+        }
+        // Without a pointer width no relocation fits, in either order.
+        relocations[0].offset = 8;
+        relocations[1].offset = 0;
+        global->relocation_count = 2;
+        program.data_layout.pointer.size = 0;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_OPERATION);
+        program.data_layout.pointer.size = width;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_NONE);
+
+#if BUSTER_BENCH_ALLOCATIONS
+        // 4096 rows at 8-byte strides: the largest offset, 32760, has two key
+        // bytes, so the reversed table takes two radix passes over its rows.
+        u32 rows = IR_TEST_RELOCATION_CAPACITY;
+        for (u32 reversed = 0; reversed < 2; reversed += 1)
+        {
+            for (u32 index = 0; index < rows; index += 1)
+            {
+                relocations[index].offset = (reversed ? rows - 1 - index : index) * width;
+            }
+            global->relocation_count = rows;
+            IrConstructionCounters before = ir_construction_counters();
+            IrValidationError error = ir_validate_canonical_module(&program, program.modules).error;
+            IrConstructionCounters after = ir_construction_counters();
+            BUSTER_TEST(arguments, error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_RELOCATION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+            IR_RELOCATION_EXPECT(VALIDATION_GLOBAL_RELOCATIONS, rows);
+            // Ordered: rows - 1 neighbour checks. Reversed: the first check
+            // fails, then the sorted copy has rows - 1 neighbour checks.
+            IR_RELOCATION_EXPECT(VALIDATION_GLOBAL_RELOCATION_PAIRS, reversed ? rows : rows - 1);
+            IR_RELOCATION_EXPECT(VALIDATION_GLOBAL_RELOCATION_SORTS, reversed);
+            IR_RELOCATION_EXPECT(VALIDATION_GLOBAL_RELOCATION_SORT_ROWS, reversed ? 2 * rows : 0);
+#undef IR_RELOCATION_EXPECT
+        }
+#endif
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -563,6 +739,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+    UnitTestResult relocation_overlap = ir_test_global_relocation_overlap(arguments);
+    result.test_count += relocation_overlap.test_count;
+    result.succeeded_test_count += relocation_overlap.succeeded_test_count;
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},

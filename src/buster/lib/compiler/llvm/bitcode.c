@@ -1,10 +1,24 @@
-#include <buster/lib/compiler/llvm/bitcode.h>
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
+#include <buster/lib/hash.h>
+
+#include <buster/lib/string.h>
 
 // Direct canonical-IR serialization: llvm_bc_build_types preserves storage
-// layout, llvm_bc_plan_function assigns SSA ids, and llvm_bc_emit_module writes
-// the records. LLVM's bitstream is LSB-first. The writer intentionally emits
+// layout, llvm_bc_collect_instruction_constants builds the constant pool and
+// records each constant instruction's pool value id, llvm_bc_plan_function
+// assigns SSA ids from those records, and llvm_bc_emit_module writes the
+// records. LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
+//
+// Collection-time lookups stay O(1) expected as the module grows:
+// llvm_bc_add_constant deduplicates through the constant_slots hash index,
+// llvm_bc_name_available checks link names through the name_slots hash index,
+// and llvm_bc_find_integer_count reads the integer_count_functions table. These
+// indexes only locate rows; pool and entity order, and therefore value IDs,
+// remain insertion order.
+// Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
+// normal builds omit that private boundary entirely.
 
 enum
 {
@@ -32,6 +46,7 @@ enum
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
     LLVM_BC_MODULE_DATALAYOUT = 3,
+    LLVM_BC_MODULE_SECTIONNAME = 5,
     LLVM_BC_MODULE_GLOBALVAR = 7,
     LLVM_BC_MODULE_FUNCTION = 8,
     LLVM_BC_MODULE_SOURCE_FILENAME = 16,
@@ -137,6 +152,14 @@ enum
 };
 
 #define LLVM_BC_INVALID_ID UINT32_MAX
+// Tags a function index in a name-index slot; untagged indices are globals.
+#define LLVM_BC_NAME_FUNCTION (UINT32_C(1) << 31)
+// Initial slot count of the open-addressed constant and name indexes. Both
+// stay power-of-two sized and at most half full.
+#define LLVM_BC_INDEX_MIN_CAPACITY 64
+// Scalar ctlz/cttz/ctpop declarations, one per operation and width 1..64.
+#define LLVM_BC_INTEGER_COUNT_KIND_COUNT 3
+#define LLVM_BC_INTEGER_COUNT_MAX_WIDTH 64
 
 typedef struct LlvmBcBuffer LlvmBcBuffer;
 struct LlvmBcBuffer
@@ -181,6 +204,16 @@ struct LlvmBcConstant
     u32 type_id;
     u32 code;
     u32 operand_count;
+    u32 hash;
+};
+
+// One open-addressed link-name slot. entity is a global index, or a function
+// index tagged with LLVM_BC_NAME_FUNCTION; LLVM_BC_INVALID_ID marks it empty.
+typedef struct LlvmBcNameSlot LlvmBcNameSlot;
+struct LlvmBcNameSlot
+{
+    u32 hash;
+    u32 entity;
 };
 
 typedef struct LlvmBcAbiValue LlvmBcAbiValue;
@@ -246,13 +279,15 @@ struct LlvmBcFunction
     u32 calling_convention;
     u32* value_ids;
     u32* value_type_ids;
+    // Per instruction: the constant-pool value id collection found for a
+    // constant instruction's own value, which value numbering reads instead
+    // of searching the pool again. LLVM_BC_INVALID_ID elsewhere.
+    u32* constant_value_ids;
     u32* emitted_counts;
     u32 first_local_value_id;
     u32 final_value_id;
     bool declaration;
     bool synthetic;
-    IrUnaryOperation intrinsic_operation;
-    u32 intrinsic_width;
 };
 
 typedef struct LlvmBcString LlvmBcString;
@@ -300,6 +335,12 @@ struct LlvmBcContext
     LlvmBcConstant* constants;
     u32 constant_count;
     u32 constant_capacity;
+    u32* constant_slots;
+    u32 constant_slot_capacity;
+
+    LlvmBcNameSlot* name_slots;
+    u32 name_slot_count;
+    u32 name_slot_capacity;
 
     LlvmBcGlobal* globals;
     u32 global_count;
@@ -317,6 +358,7 @@ struct LlvmBcContext
     u8* symbol_seen;
     u32 module_value_count;
     u32 va_intrinsic_ids[LLVM_BC_VA_INTRINSIC_COUNT];
+    u32 integer_count_functions[LLVM_BC_INTEGER_COUNT_KIND_COUNT][LLVM_BC_INTEGER_COUNT_MAX_WIDTH];
     bool constants_locked;
 };
 
@@ -1394,9 +1436,10 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function
     return llvm_bc_alignment(alignment);
 }
 
-static u32 llvm_bc_linkage(IrSymbol* symbol)
+// LLVM accepts only external or extern_weak linkage on a declaration.
+static u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
 {
-    return symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
+    return !declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
 }
 
 static u32 llvm_bc_calling_convention(IrCallingConvention convention)
@@ -1415,29 +1458,75 @@ static u32 llvm_bc_calling_convention(IrCallingConvention convention)
     return UINT32_MAX;
 }
 
-static bool llvm_bc_name_available(LlvmBcContext* context, String8 name, IrSymbol* symbol)
+static u32 llvm_bc_name_hash(String8 name)
+{
+    return (u32)buster_hash_64((u8*)name.pointer, name.length);
+}
+
+static u32 llvm_bc_free_name_slot(LlvmBcNameSlot const* slots, u32 mask, u32 hash)
+{
+    u32 slot = hash & mask;
+    while (slots[slot].entity != LLVM_BC_INVALID_ID)
+    {
+        slot = (slot + 1) & mask;
+    }
+    return slot;
+}
+
+// Every collected global and function with a name is registered here, right
+// after it is appended, so llvm_bc_name_available sees the same rows the old
+// full scan did.
+static void llvm_bc_register_name(LlvmBcContext* context, String8 name, u32 entity)
 {
     if (name.length)
     {
-        for (u32 index = 0; index < context->global_count; index += 1)
+        if ((u64)(context->name_slot_count + 1) * 2 > context->name_slot_capacity)
         {
-            LlvmBcGlobal* global = context->globals + index;
-            if (llvm_bc_string_equal(global->name, name) && global->symbol != symbol)
+            u32 capacity = context->name_slot_capacity ? context->name_slot_capacity * 2 : LLVM_BC_INDEX_MIN_CAPACITY;
+            LlvmBcNameSlot* slots = arena_allocate(context->arena, LlvmBcNameSlot, capacity);
+            memset(slots, 0xff, (size_t)capacity * sizeof(*slots));
+            for (u32 slot = 0; slot < context->name_slot_capacity; slot += 1)
             {
-                return false;
+                LlvmBcNameSlot entry = context->name_slots[slot];
+                if (entry.entity != LLVM_BC_INVALID_ID)
+                {
+                    slots[llvm_bc_free_name_slot(slots, capacity - 1, entry.hash)] = entry;
+                }
             }
+            context->name_slots = slots;
+            context->name_slot_capacity = capacity;
         }
-        for (u32 index = 0; index < context->function_count; index += 1)
+        u32 hash = llvm_bc_name_hash(name);
+        context->name_slots[llvm_bc_free_name_slot(context->name_slots, context->name_slot_capacity - 1, hash)] =
+            (LlvmBcNameSlot){.hash = hash, .entity = entity};
+        context->name_slot_count += 1;
+    }
+}
+
+static bool llvm_bc_name_available(LlvmBcContext* context, String8 name, IrSymbol* symbol)
+{
+    bool result = true;
+    if (name.length && context->name_slot_capacity)
+    {
+        u32 hash = llvm_bc_name_hash(name);
+        u32 mask = context->name_slot_capacity - 1;
+        // Synthetic string globals register without a check, so one name can
+        // occupy several slots; walk the chain until a conflict or its end.
+        for (u32 slot = hash & mask; result && context->name_slots[slot].entity != LLVM_BC_INVALID_ID; slot = (slot + 1) & mask)
         {
-            LlvmBcFunction* function = context->functions + index;
-            if (llvm_bc_string_equal(function->name, name) && function->symbol != symbol)
+            LlvmBcNameSlot entry = context->name_slots[slot];
+            if (entry.hash == hash)
             {
-                return false;
+                u32 index = entry.entity & ~LLVM_BC_NAME_FUNCTION;
+                bool function = (entry.entity & LLVM_BC_NAME_FUNCTION) != 0;
+                String8 other_name = function ? context->functions[index].name : context->globals[index].name;
+                IrSymbol* other_symbol = function ? context->functions[index].symbol : context->globals[index].symbol;
+                result = !llvm_bc_string_equal(other_name, name) || other_symbol == symbol;
             }
         }
     }
 
-    return true;
+    return result;
 }
 
 static bool llvm_bc_add_global_entity(LlvmBcContext* context, IrGlobal* global, IrSymbol* symbol, bool declaration)
@@ -1484,6 +1573,7 @@ static bool llvm_bc_add_global_entity(LlvmBcContext* context, IrGlobal* global, 
                              .read_only = global ? global->is_read_only : false,
                              .is_thread_local = (global && global->is_thread_local) || symbol->is_thread_local};
     context->symbol_seen[symbol->id.value] = 1;
+    llvm_bc_register_name(context, name, context->global_count);
     context->global_count += 1;
     return true;
 }
@@ -1543,6 +1633,7 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
                                .calling_convention = calling_convention,
                                .declaration = declaration};
     context->symbol_seen[symbol->id.value] = 1;
+    llvm_bc_register_name(context, name, context->function_count | LLVM_BC_NAME_FUNCTION);
     context->function_count += 1;
     return true;
 }
@@ -1566,6 +1657,7 @@ static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
         u32 index = context->function_count++;
         context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
                                                      .type_id = type_id, .declaration = true, .synthetic = true};
+        llvm_bc_register_name(context, name, index | LLVM_BC_NAME_FUNCTION);
         if (save)
         {
             context->stack_save_function_index = index;
@@ -1585,17 +1677,22 @@ static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
            operation == IR_UNARY_INTEGER_POPULATION_COUNT;
 }
 
+// integer_count_functions holds one declaration per operation/width, as a
+// function index plus one; zero means none has been declared yet.
+BUSTER_CT_CHECK(IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS + 1 &&
+                IR_UNARY_INTEGER_POPULATION_COUNT == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS + LLVM_BC_INTEGER_COUNT_KIND_COUNT - 1);
+static u32* llvm_bc_integer_count_slot(LlvmBcContext* context, IrUnaryOperation operation, u32 width)
+{
+    return &context->integer_count_functions[operation - IR_UNARY_INTEGER_COUNT_LEADING_ZEROS][width - 1];
+}
+
 static LlvmBcFunction* llvm_bc_find_integer_count(LlvmBcContext* context, IrUnaryOperation operation, u32 width)
 {
     LlvmBcFunction* result = 0;
-    for (u32 index = 0; index < context->function_count; index += 1)
+    if (llvm_bc_is_integer_count(operation) && width && width <= LLVM_BC_INTEGER_COUNT_MAX_WIDTH)
     {
-        LlvmBcFunction* function = context->functions + index;
-        if (function->synthetic && function->intrinsic_operation == operation && function->intrinsic_width == width)
-        {
-            result = function;
-            break;
-        }
+        u32 function = *llvm_bc_integer_count_slot(context, operation, width);
+        result = function ? context->functions + (function - 1) : 0;
     }
     return result;
 }
@@ -1628,14 +1725,58 @@ static bool llvm_bc_add_integer_count(LlvmBcContext* context, IrFunction* functi
             u32 function_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, operand_count);
             llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
                                 sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
-            context->functions[context->function_count++] = (LlvmBcFunction){
+            context->functions[context->function_count] = (LlvmBcFunction){
                 .name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
                 .type_id = function_type, .declaration = true, .synthetic = true,
-                .intrinsic_operation = instruction->unary_operation, .intrinsic_width = width,
             };
+            llvm_bc_register_name(context, name, context->function_count | LLVM_BC_NAME_FUNCTION);
+            *llvm_bc_integer_count_slot(context, instruction->unary_operation, width) = context->function_count + 1;
+            context->function_count += 1;
         }
     }
     return !llvm_bc_failed(context);
+}
+
+// Marks every symbol a lowered instruction or a global initializer names.
+static void llvm_bc_mark_referenced_symbols(LlvmBcContext* context, u8* referenced)
+{
+    u32 symbol_count = context->program->symbols.count;
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrSymbolId symbol = function->instructions[instruction_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            if (global->initializer_symbol.value < symbol_count)
+            {
+                referenced[global->initializer_symbol.value] = 1;
+            }
+            for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
+            {
+                IrSymbolId symbol = global->relocations[relocation_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+    }
 }
 
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
@@ -1643,11 +1784,14 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     u32 symbol_count = context->program->symbols.count;
     context->symbol_value_ids = arena_allocate(context->arena, u32, symbol_count ? symbol_count : 1);
     context->symbol_seen = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    u8* referenced = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
     for (u32 index = 0; index < symbol_count; index += 1)
     {
         context->symbol_value_ids[index] = LLVM_BC_INVALID_ID;
         context->symbol_seen[index] = 0;
+        referenced[index] = 0;
     }
+    llvm_bc_mark_referenced_symbols(context, referenced);
 
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
@@ -1657,6 +1801,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             IrGlobal* global = module->globals + global_index;
             IrSymbol* symbol = llvm_bc_ir_symbol(context, global->symbol);
             bool declaration = !symbol || !symbol->is_definition || global->initializer_kind == IR_GLOBAL_INITIALIZER_NONE;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_global_entity(context, global, symbol, declaration))
             {
                 return false;
@@ -1677,6 +1825,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             }
             IrSymbol* symbol = llvm_bc_ir_symbol(context, function->symbol);
             bool declaration = function->state == IR_FUNCTION_DECLARATION || !symbol || !symbol->is_definition;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_function_entity(context, function, symbol, declaration))
             {
                 return false;
@@ -1755,6 +1907,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                                          .alignment = 1,
                                          .synthetic = true,
                                          .read_only = true};
+                llvm_bc_register_name(context, name, context->global_count);
                 context->global_count += 1;
                 context->string_count += 1;
             }
@@ -1820,6 +1973,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                                                                             .canonical_type = IR_TYPE_ID_INVALID,
                                                                             .declaration = true, .synthetic = true};
             context->va_intrinsic_ids[index] = context->function_count;
+            llvm_bc_register_name(context, names[index], context->function_count | LLVM_BC_NAME_FUNCTION);
             context->function_count += 1;
         }
     }
@@ -1900,26 +2054,67 @@ static u64 llvm_bc_encode_integer_bits(u64 bits, u32 width)
     return (magnitude << 1) | 1;
 }
 
-static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u64 const* operands, u32 operand_count)
+#if BUSTER_INCLUDE_TESTS
+u64 llvm_bitcode_test_integer_operand(u64 bits, u32 width)
 {
+    return llvm_bc_encode_integer_bits(bits, width);
+}
+#endif
+
+static u32 llvm_bc_constant_hash(u32 type_id, u32 code, u64 const* operands, u32 operand_count)
+{
+    u64 hash = buster_hash_64((u8*)operands, (u64)operand_count * sizeof(*operands));
+    hash ^= (((u64)type_id << 32) | code) * UINT64_C(0x9E3779B97F4A7C15);
+    return (u32)(hash ^ (hash >> 32));
+}
+
+static u32 llvm_bc_free_constant_slot(u32 const* slots, u32 mask, u32 hash)
+{
+    u32 slot = hash & mask;
+    while (slots[slot] != LLVM_BC_INVALID_ID)
+    {
+        slot = (slot + 1) & mask;
+    }
+    return slot;
+}
+
+static void llvm_bc_grow_constant_index(LlvmBcContext* context)
+{
+    u32 capacity = context->constant_slot_capacity ? context->constant_slot_capacity * 2 : LLVM_BC_INDEX_MIN_CAPACITY;
+    u32* slots = arena_allocate(context->arena, u32, capacity);
+    memset(slots, 0xff, (size_t)capacity * sizeof(*slots));
     for (u32 index = 0; index < context->constant_count; index += 1)
     {
-        LlvmBcConstant* constant = context->constants + index;
-        if (constant->type_id != type_id || constant->code != code || constant->operand_count != operand_count)
+        slots[llvm_bc_free_constant_slot(slots, capacity - 1, context->constants[index].hash)] = index;
+    }
+    context->constant_slots = slots;
+    context->constant_slot_capacity = capacity;
+}
+
+// Pooled constants are unique by (type, code, operands); constant_slots maps
+// that key to the pool index so a lookup costs one short probe chain.
+static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u64 const* operands, u32 operand_count)
+{
+    context->stats.constant_searches += 1;
+    context->stats.locked_constant_searches += context->constants_locked;
+    u32 result = LLVM_BC_INVALID_ID;
+    u32 hash = llvm_bc_constant_hash(type_id, code, operands, operand_count);
+    if (context->constant_slot_capacity)
+    {
+        u32 mask = context->constant_slot_capacity - 1;
+        for (u32 slot = hash & mask; context->constant_slots[slot] != LLVM_BC_INVALID_ID; slot = (slot + 1) & mask)
         {
-            continue;
-        }
-        bool equal = true;
-        for (u32 operand = 0; operand < operand_count; operand += 1)
-        {
-            equal &= constant->operands[operand] == operands[operand];
-        }
-        if (equal)
-        {
-            return context->module_value_count + index;
+            u32 index = context->constant_slots[slot];
+            LlvmBcConstant* constant = context->constants + index;
+            if (constant->hash == hash && constant->type_id == type_id && constant->code == code && constant->operand_count == operand_count &&
+                (!operand_count || memcmp(constant->operands, operands, (size_t)operand_count * sizeof(*operands)) == 0))
+            {
+                result = context->module_value_count + index;
+                break;
+            }
         }
     }
-    if (context->constants_locked)
+    if (result == LLVM_BC_INVALID_ID && context->constants_locked)
     {
         String8 message = code == LLVM_BC_CST_NULL           ? llvm_bc_s8("LLVM null constant discovered after value numbering")
                           : code == LLVM_BC_CST_UNDEF        ? llvm_bc_s8("LLVM undefined constant discovered after value numbering")
@@ -1930,18 +2125,27 @@ static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u
                           : code == LLVM_BC_CST_STRING       ? llvm_bc_s8("LLVM string constant discovered after value numbering")
                                                              : llvm_bc_s8("LLVM constant expression discovered after value numbering");
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, message, 0, 0, 0, IR_SYMBOL_ID_INVALID);
-        return LLVM_BC_INVALID_ID;
     }
-    llvm_bc_vec_reserve(context->arena, (void**)&context->constants, &context->constant_capacity, context->constant_count + 1,
-                        sizeof(*context->constants), BUSTER_ALIGN_OF(LlvmBcConstant));
-    LlvmBcConstant* constant = context->constants + context->constant_count;
-    *constant = (LlvmBcConstant){.type_id = type_id, .code = code, .operand_count = operand_count};
-    if (operand_count)
+    else if (result == LLVM_BC_INVALID_ID)
     {
-        constant->operands = arena_allocate(context->arena, u64, operand_count);
-        memcpy(constant->operands, operands, (size_t)operand_count * sizeof(*operands));
+        if ((u64)(context->constant_count + 1) * 2 > context->constant_slot_capacity)
+        {
+            llvm_bc_grow_constant_index(context);
+        }
+        llvm_bc_vec_reserve(context->arena, (void**)&context->constants, &context->constant_capacity, context->constant_count + 1,
+                            sizeof(*context->constants), BUSTER_ALIGN_OF(LlvmBcConstant));
+        LlvmBcConstant* constant = context->constants + context->constant_count;
+        *constant = (LlvmBcConstant){.type_id = type_id, .code = code, .operand_count = operand_count, .hash = hash};
+        if (operand_count)
+        {
+            constant->operands = arena_allocate(context->arena, u64, operand_count);
+            memcpy(constant->operands, operands, (size_t)operand_count * sizeof(*operands));
+        }
+        context->constant_slots[llvm_bc_free_constant_slot(context->constant_slots, context->constant_slot_capacity - 1, hash)] =
+            context->constant_count;
+        result = context->module_value_count + context->constant_count++;
     }
-    return context->module_value_count + context->constant_count++;
+    return result;
 }
 
 static u32 llvm_bc_null_constant(LlvmBcContext* context, u32 type_id)
@@ -2349,6 +2553,26 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
     return true;
 }
 
+typedef enum LlvmBcBitFieldAggregateMode
+{
+    LLVM_BC_BIT_FIELD_AGGREGATE_COUNT,
+    LLVM_BC_BIT_FIELD_AGGREGATE_CONSTANTS,
+    LLVM_BC_BIT_FIELD_AGGREGATE_EMIT,
+} LlvmBcBitFieldAggregateMode;
+
+BUSTER_GLOBAL_LOCAL bool llvm_bc_struct_has_bit_field(IrType* type)
+{
+    bool result = false;
+    for (u32 index = 0; type && type->kind == IR_TYPE_STRUCT && index < type->field_count; index += 1)
+    {
+        result |= type->fields[index].is_bit_field;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
+                                                    IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode);
+
 static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
 {
     llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
@@ -2360,10 +2584,17 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
         {
             continue;
         }
+        // The pool value id each search below returns is final: the pool only
+        // grows and module_value_count is fixed before collection. Record the
+        // one that is the instruction's own value, exactly as value numbering
+        // would look it up, so numbering does not search the pool again.
+        u32* constant_value_ids = arena_allocate(context->arena, u32, function->instruction_count ? function->instruction_count : 1);
+        function_record->constant_value_ids = constant_value_ids;
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = function->instructions + instruction_index;
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+            constant_value_ids[instruction_index] = LLVM_BC_INVALID_ID;
             switch (instruction->opcode)
             {
             case IR_OPCODE_CALL:
@@ -2371,25 +2602,32 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                 break;
             case IR_OPCODE_CONSTANT_INTEGER:
             case IR_OPCODE_ENUM:
+            {
                 if (!instruction->immediate_count)
                 {
                     llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("integer constant has no value"), function, 0, instruction,
                                  IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                llvm_bc_scalar_integer_constant(context, type, instruction->immediates[0], instruction->immediate_is_negative);
+                u32 value = llvm_bc_scalar_integer_constant(context, type, instruction->immediates[0], instruction->immediate_is_negative);
+                constant_value_ids[instruction_index] = instruction->immediate_count == 1 ? value : LLVM_BC_INVALID_ID;
                 break;
+            }
             case IR_OPCODE_CONSTANT_FLOAT:
+            {
                 if (!instruction->immediate_count)
                 {
                     llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("floating constant has no value"), function, 0, instruction,
                                  IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                llvm_bc_float_constant(context, type, instruction->immediates[0]);
+                u32 value = llvm_bc_float_constant(context, type, instruction->immediates[0]);
+                constant_value_ids[instruction_index] = instruction->immediate_count == 1 ? value : LLVM_BC_INVALID_ID;
                 break;
+            }
             case IR_OPCODE_UNDEFINED:
-                llvm_bc_undef_constant(context, llvm_bc_value_type_id(context, function, instruction->result));
+                constant_value_ids[instruction_index] =
+                    llvm_bc_undef_constant(context, llvm_bc_value_type_id(context, function, instruction->result));
                 break;
             case IR_OPCODE_LOCAL:
                 llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
@@ -2400,7 +2638,7 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                     IrType* iterable = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
                     if (iterable && (iterable->kind == IR_TYPE_ARRAY || iterable->kind == IR_TYPE_VECTOR))
                     {
-                        llvm_bc_scalar_integer_constant(context, type, iterable->element_count, false);
+                        constant_value_ids[instruction_index] = llvm_bc_scalar_integer_constant(context, type, iterable->element_count, false);
                     }
                 }
                 break;
@@ -2422,12 +2660,22 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                 break;
             case IR_OPCODE_ARRAY:
             case IR_OPCODE_AGGREGATE:
-                llvm_bc_undef_constant(context, context->ir_type_ids[type->id.value]);
+            {
+                // type is the table entry for canonical_type, so this is the
+                // undefined value an empty aggregate numbers to.
+                u32 undefined = llvm_bc_undef_constant(context, context->ir_type_ids[type->id.value]);
+                constant_value_ids[instruction_index] = instruction->operand_count ? LLVM_BC_INVALID_ID : undefined;
+                if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_struct_has_bit_field(type))
+                {
+                    llvm_bc_bit_field_aggregate(context, 0, function, 0, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_CONSTANTS);
+                    break;
+                }
                 for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
                 {
                     llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, operand);
                 }
                 break;
+            }
             case IR_OPCODE_INDEX:
                 llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, 0);
                 break;
@@ -2532,42 +2780,6 @@ static u32 llvm_bc_function_value_type_id(LlvmBcContext* context, LlvmBcFunction
     return record->value_type_ids[value.value];
 }
 
-static u32 llvm_bc_instruction_constant(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
-{
-    IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-    switch (instruction->opcode)
-    {
-    case IR_OPCODE_CONSTANT_INTEGER:
-    case IR_OPCODE_ENUM:
-        return instruction->immediate_count == 1
-                   ? llvm_bc_scalar_integer_constant(context, type, instruction->immediates[0], instruction->immediate_is_negative)
-                   : LLVM_BC_INVALID_ID;
-    case IR_OPCODE_CONSTANT_FLOAT:
-        return instruction->immediate_count == 1 ? llvm_bc_float_constant(context, type, instruction->immediates[0]) : LLVM_BC_INVALID_ID;
-    case IR_OPCODE_UNDEFINED:
-        return llvm_bc_undef_constant(context, llvm_bc_value_type_id(context, function, instruction->result));
-    case IR_OPCODE_LENGTH:
-        if (instruction->operand_count == 1)
-        {
-            IrType* iterable = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
-            if (iterable && (iterable->kind == IR_TYPE_ARRAY || iterable->kind == IR_TYPE_VECTOR))
-            {
-                return llvm_bc_scalar_integer_constant(context, type, iterable->element_count, false);
-            }
-        }
-        break;
-    case IR_OPCODE_ARRAY:
-    case IR_OPCODE_AGGREGATE:
-        if (!instruction->operand_count)
-        {
-            return llvm_bc_undef_constant(context, context->ir_type_ids[instruction->canonical_type.value]);
-        }
-        break;
-    default:
-        break;
-    }
-    return LLVM_BC_INVALID_ID;
-}
 
 static bool llvm_bc_cast_is_alias(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
 {
@@ -2689,15 +2901,9 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
                          IR_SYMBOL_ID_INVALID);
             return LLVM_BC_INVALID_ID;
         }
-        for (u32 field_index = 0; field_index < aggregate->field_count; field_index += 1)
+        if (llvm_bc_struct_has_bit_field(aggregate))
         {
-            if (aggregate->fields[field_index].is_bit_field)
-            {
-                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
-                             llvm_bc_s8("LLVM aggregate values currently require a non-bit-field struct"), function, block, instruction,
-                             IR_SYMBOL_ID_INVALID);
-                return LLVM_BC_INVALID_ID;
-            }
+            return llvm_bc_bit_field_aggregate(context, 0, function, block, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_COUNT);
         }
         return instruction->operand_count;
     }
@@ -2849,7 +3055,9 @@ static bool llvm_bc_assign_alias(LlvmBcContext* context, LlvmBcFunction* record,
     case IR_OPCODE_UNDEFINED:
     case IR_OPCODE_LENGTH:
     case IR_OPCODE_ENUM:
-        value = llvm_bc_instruction_constant(context, function, instruction);
+    case IR_OPCODE_ARRAY:
+    case IR_OPCODE_AGGREGATE:
+        value = record->constant_value_ids[ir_instruction_self_id(function, instruction).value];
         break;
     case IR_OPCODE_GLOBAL:
     case IR_OPCODE_FUNCTION:
@@ -2864,10 +3072,6 @@ static bool llvm_bc_assign_alias(LlvmBcContext* context, LlvmBcFunction* record,
         }
         break;
     }
-    case IR_OPCODE_ARRAY:
-    case IR_OPCODE_AGGREGATE:
-        value = llvm_bc_instruction_constant(context, function, instruction);
-        break;
     case IR_OPCODE_CAST:
         if (llvm_bc_cast_is_alias(context, function, instruction) && instruction->operand_count == 1)
         {
@@ -3538,6 +3742,174 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_load(LlvmBcContext* context, u32 pointer, u3
     return result;
 }
 
+// A struct with bit-fields is an opaque byte array in LLVM, which insertvalue
+// cannot address by member. Its value is built in a zeroed temporary: members
+// are stored at their byte offsets, and each bit-field byte is ORed in from the
+// masked, shifted value in i64, matching the little-endian allocation layout.
+// COUNT sizes the value plan, CONSTANTS registers every constant before value
+// numbering, and EMIT writes the records; all three walk the same shape.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
+                                                    IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode)
+{
+    IrType* aggregate = llvm_bc_ir_type(context, instruction->canonical_type);
+    u32 array_type = context->ir_type_ids[aggregate->id.value];
+    bool constants = mode != LLVM_BC_BIT_FIELD_AGGREGATE_COUNT;
+    bool emit = mode == LLVM_BC_BIT_FIELD_AGGREGATE_EMIT;
+    u32 alignment = llvm_bc_alignment(aggregate->layout.alignment ? aggregate->layout.alignment : 1);
+    bool valid = alignment != UINT32_MAX && instruction->operand_count == instruction->immediate_count;
+    u32 count = 2;
+    u32 temporary = 0;
+    if (valid && constants)
+    {
+        u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
+        u32 zero = llvm_bc_null_constant(context, array_type);
+        if (emit)
+        {
+            u64 operands[4] = {array_type, context->i32_type_id, size, (UINT64_C(1) << 6) | alignment};
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, operands, 4);
+            temporary = *current_value_id;
+            *current_value_id += 1;
+            llvm_bc_abi_store(context, temporary, zero, array_type, aggregate->layout.alignment, *current_value_id);
+        }
+    }
+    for (u32 index = 0; valid && index < instruction->operand_count; index += 1)
+    {
+        u64 field_index = instruction->immediates[index];
+        IrField* field = field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
+        IrValueId operand = instruction->operands[index];
+        IrType* operand_type = operand.value < function->value_count ? llvm_bc_ir_type(context, function->values[operand.value].canonical_type) : 0;
+        valid = field && operand_type;
+        if (valid && !field->is_bit_field)
+        {
+            count += 1;
+            if (emit)
+            {
+                u32 value = llvm_bc_function_value_id(context, record, operand);
+                u32 value_type = llvm_bc_function_value_type_id(context, record, operand);
+                u32 offset = llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, field->offset);
+                u64 operands[8];
+                u32 operand_count = 0;
+                operands[operand_count++] = 0;
+                operands[operand_count++] = context->i8_type_id;
+                llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, temporary, context->pointer_type_id);
+                llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, offset, context->i64_type_id);
+                llvm_bc_record(&context->stream, LLVM_BC_FUNC_GEP, operands, operand_count);
+                u32 address = *current_value_id;
+                *current_value_id += 1;
+                llvm_bc_abi_store(context, address, value, value_type, 1, *current_value_id);
+            }
+            else if (constants)
+            {
+                llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, field->offset);
+            }
+        }
+        else if (valid && field->bit_width)
+        {
+            u32 width = llvm_bc_integer_width(operand_type);
+            valid = (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_BOOLEAN || operand_type->kind == IR_TYPE_ENUM) &&
+                    width && width <= 64 && field->bit_width <= width;
+            u32 masked = LLVM_BC_INVALID_ID;
+            if (valid)
+            {
+                u64 mask = field->bit_width < 64 ? (UINT64_C(1) << field->bit_width) - 1 : UINT64_MAX;
+                count += (u32)(width < 64) + (u32)(field->bit_width < 64);
+                u32 mask_value = constants ? llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, mask) : 0;
+                if (emit)
+                {
+                    masked = llvm_bc_function_value_id(context, record, operand);
+                    u64 operands[8];
+                    u32 operand_count = 0;
+                    if (width < 64)
+                    {
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, masked,
+                                                    llvm_bc_function_value_type_id(context, record, operand));
+                        operands[operand_count++] = context->i64_type_id;
+                        operands[operand_count++] = LLVM_BC_CAST_ZEXT;
+                        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CAST, operands, operand_count);
+                        masked = *current_value_id;
+                        *current_value_id += 1;
+                    }
+                    if (field->bit_width < 64)
+                    {
+                        operand_count = 0;
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, masked, context->i64_type_id);
+                        llvm_bc_push_relative(operands, &operand_count, *current_value_id, mask_value);
+                        operands[operand_count++] = LLVM_BC_BINOP_AND;
+                        llvm_bc_record(&context->stream, LLVM_BC_FUNC_BINOP, operands, operand_count);
+                        masked = *current_value_id;
+                        *current_value_id += 1;
+                    }
+                }
+            }
+            u32 end = (field->bit_offset + field->bit_width + 7) / 8;
+            valid = valid && field->offset <= aggregate->layout.size && end <= aggregate->layout.size - field->offset;
+            for (u32 byte = field->bit_offset / 8; valid && byte < end; byte += 1)
+            {
+                u32 bit = byte * 8;
+                bool shifted = bit != field->bit_offset;
+                count += 4 + shifted;
+                if (constants)
+                {
+                    u32 offset = llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, field->offset + byte);
+                    u32 shift = llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64,
+                                                                     bit > field->bit_offset ? bit - field->bit_offset : field->bit_offset - bit);
+                    if (emit)
+                    {
+                        u64 operands[8];
+                        u32 operand_count = 0;
+                        operands[operand_count++] = 0;
+                        operands[operand_count++] = context->i8_type_id;
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, temporary, context->pointer_type_id);
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, offset, context->i64_type_id);
+                        llvm_bc_record(&context->stream, LLVM_BC_FUNC_GEP, operands, operand_count);
+                        u32 address = *current_value_id;
+                        *current_value_id += 1;
+                        u32 previous = llvm_bc_abi_load(context, address, context->i8_type_id, 1, current_value_id);
+                        u32 piece = masked;
+                        if (shifted)
+                        {
+                            operand_count = 0;
+                            llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, piece, context->i64_type_id);
+                            llvm_bc_push_relative(operands, &operand_count, *current_value_id, shift);
+                            operands[operand_count++] = bit > field->bit_offset ? LLVM_BC_BINOP_LSHR : LLVM_BC_BINOP_SHL;
+                            llvm_bc_record(&context->stream, LLVM_BC_FUNC_BINOP, operands, operand_count);
+                            piece = *current_value_id;
+                            *current_value_id += 1;
+                        }
+                        operand_count = 0;
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, piece, context->i64_type_id);
+                        operands[operand_count++] = context->i8_type_id;
+                        operands[operand_count++] = LLVM_BC_CAST_TRUNC;
+                        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CAST, operands, operand_count);
+                        piece = *current_value_id;
+                        *current_value_id += 1;
+                        operand_count = 0;
+                        llvm_bc_push_value_and_type(operands, &operand_count, *current_value_id, previous, context->i8_type_id);
+                        llvm_bc_push_relative(operands, &operand_count, *current_value_id, piece);
+                        operands[operand_count++] = LLVM_BC_BINOP_OR;
+                        llvm_bc_record(&context->stream, LLVM_BC_FUNC_BINOP, operands, operand_count);
+                        u32 combined = *current_value_id;
+                        *current_value_id += 1;
+                        llvm_bc_abi_store(context, address, combined, context->i8_type_id, 1, *current_value_id);
+                    }
+                }
+            }
+        }
+    }
+    if (valid && emit)
+    {
+        llvm_bc_abi_load(context, temporary, array_type, aggregate->layout.alignment, current_value_id);
+        valid = !llvm_bc_failed(context);
+    }
+    if (!valid)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
+                     llvm_bc_s8("LLVM bit-field aggregate operand does not match its member layout"), function, block, instruction,
+                     IR_SYMBOL_ID_INVALID);
+    }
+    return valid ? count : LLVM_BC_INVALID_ID;
+}
+
 BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_convert(LlvmBcContext* context, LlvmBcAbiValue abi, u32 value, u32 source_type,
                                             u32 destination_type, u32* current_value_id)
 {
@@ -3945,7 +4317,15 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         break;
     case IR_OPCODE_ARRAY:
     case IR_OPCODE_AGGREGATE:
-        if (!llvm_bc_emit_aggregate_instruction(context, record, block, instruction, current_value_id))
+        if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_struct_has_bit_field(llvm_bc_ir_type(context, instruction->canonical_type)))
+        {
+            if (llvm_bc_bit_field_aggregate(context, record, function, block, instruction, current_value_id, LLVM_BC_BIT_FIELD_AGGREGATE_EMIT) ==
+                LLVM_BC_INVALID_ID)
+            {
+                return false;
+            }
+        }
+        else if (!llvm_bc_emit_aggregate_instruction(context, record, block, instruction, current_value_id))
         {
             return false;
         }
@@ -4271,8 +4651,47 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
     }
 }
 
+// The one-based MODULE_CODE_SECTIONNAME index of a definition's requested
+// section (issue 1276), appending the name when it is new; zero, the
+// record's "no section", for a declaration or a definition that names none.
+static u32 llvm_bc_section_id(String8* names, u32* name_count, IrSymbol* symbol, bool declaration)
+{
+    u32 result = 0;
+    String8 name = symbol && !declaration ? symbol->section_name : (String8){0};
+    for (u32 index = 0; index < *name_count && name.length && !result; index += 1)
+    {
+        result = string_equal(names[index], name) ? index + 1 : 0;
+    }
+    if (name.length && !result)
+    {
+        names[*name_count] = name;
+        *name_count += 1;
+        result = *name_count;
+    }
+
+    return result;
+}
+
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
+    // Every section name is recorded ahead of the entities that refer to it,
+    // which is the order a reader resolves them in.
+    String8* section_names = arena_allocate(context->arena, String8, context->global_count + context->function_count + 1);
+    u32* section_ids = arena_allocate(context->arena, u32, context->global_count + context->function_count + 1);
+    u32 section_name_count = 0;
+    for (u32 index = 0; index < context->global_count; index += 1)
+    {
+        section_ids[index] = llvm_bc_section_id(section_names, &section_name_count, context->globals[index].symbol, context->globals[index].declaration);
+    }
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        section_ids[context->global_count + index] =
+            llvm_bc_section_id(section_names, &section_name_count, context->functions[index].symbol, context->functions[index].declaration);
+    }
+    for (u32 index = 0; index < section_name_count; index += 1)
+    {
+        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, section_names[index]);
+    }
     for (u32 index = 0; index < context->global_count; index += 1)
     {
         LlvmBcGlobal* global = context->globals + index;
@@ -4298,9 +4717,9 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             global->storage_type_id,
             2 | (global->read_only ? 1 : 0), // explicit storage type, optionally constant
             initializer,
-            llvm_bc_linkage(global->symbol),
+            llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
-            0, // section id
+            section_ids[index],
             0, // visibility
             global->is_thread_local ? 1 : 0,
         };
@@ -4313,10 +4732,10 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->type_id,
             function->calling_convention,
             function->declaration,
-            llvm_bc_linkage(function->symbol),
+            llvm_bc_linkage(function->symbol, function->declaration),
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
-            0, // section id
+            section_ids[context->global_count + index],
             0, // visibility
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);

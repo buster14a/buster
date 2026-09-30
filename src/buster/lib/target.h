@@ -12,6 +12,9 @@ typedef enum CpuArch
 {
     CPU_ARCH_X86_64,
     CPU_ARCH_AARCH64,
+    // Core WebAssembly with 32-bit linear-memory addresses.  WASI Preview 1
+    // uses this architecture and the ILP32 C data model.
+    CPU_ARCH_WASM32,
     // WebAssembly with the Memory64 proposal.  This is intentionally a
     // distinct architecture rather than a feature of wasm32: pointers,
     // linear-memory addresses, and the C data model are all 64-bit.
@@ -29,6 +32,9 @@ typedef enum OperatingSystem
     OPERATING_SYSTEM_UEFI,
     OPERATING_SYSTEM_ANDROID,
     OPERATING_SYSTEM_IOS,
+    // WASI Preview 1.  `wasip1` is the canonical target spelling; the parser
+    // also accepts the legacy `wasi` spelling for toolchain compatibility.
+    OPERATING_SYSTEM_WASI,
     OPERATING_SYSTEM_FREESTANDING,
     OPERATING_SYSTEM_COUNT,
 } OperatingSystem;
@@ -453,6 +459,13 @@ typedef enum TargetStringComponents
     TARGET_STRING_COMPONENT_COUNT,
 } TargetStringComponent;
 
+typedef enum TargetPlainCharPolicy
+{
+    TARGET_PLAIN_CHAR_POLICY_TARGET_DEFAULT,
+    TARGET_PLAIN_CHAR_POLICY_SIGNED,
+    TARGET_PLAIN_CHAR_POLICY_UNSIGNED,
+} TargetPlainCharPolicy;
+
 typedef struct Target Target;
 struct Target
 {
@@ -464,6 +477,9 @@ struct Target
     u8 os_version_patch;
     u16 os_version_major;
     TargetCpuFeatures cpu_features;
+    // Command-line plain-char overrides; target default keeps the ABI's
+    // implementation-defined signedness.
+    TargetPlainCharPolicy plain_char_policy;
 };
 
 typedef struct TargetStringSplit TargetStringSplit;

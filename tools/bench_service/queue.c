@@ -24,9 +24,9 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "contract=docs/native-retirement-performance-contract.md\n"
     "contract-sha256=67fff9a8b53764792046ba1c1ec104a24cc6e525c4322a6206b218b188a431b0\n"
     "support-declaration=docs/native-retirement-support-v1.tsv\n"
-    "support-declaration-sha256=932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82\n"
+    "support-declaration-sha256=a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932\n"
     "binding-validator=tools/native_retirement_performance_binding.py\n"
-    "binding-validator-sha256=2d3c97e5f31b6af5dc5cdfe7a956b7ea7910fd61a5c71ebab7be29e725ec4d95\n"
+    "binding-validator-sha256=a089ba98da5cd851725e91abb08375449fbed5ccf32afa6a347439c152a476b5\n"
     "binding-schema=tools/native_retirement_performance_schema.py\n"
     "binding-schema-sha256=e19a5cf1114997ddf4a71cf47f8da4125777b49441d1a48d012bab7f2bb8e6a3\n"
     "statistics=tools/throughput/retirement_stats.h\n"
@@ -756,8 +756,14 @@ BqError bq_open(BqQueue* queue, char const* existing_private_directory)
         queue->directory_fd = open(existing_private_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     }
     struct stat info;
-    if (queue->directory_fd >= 0 && fstat(queue->directory_fd, &info) == 0 && S_ISDIR(info.st_mode) &&
-        info.st_uid == geteuid() && (info.st_mode & 077) == 0)
+    /* The fixed systemd broker can look up worker records through this one
+     * directory. Other queues retain the fully private mode. */
+    bool broker_queue = path_valid && !strcmp(existing_private_directory, "/var/lib/buster-bench/queue");
+    bool directory_valid = queue->directory_fd >= 0 && fstat(queue->directory_fd, &info) == 0 &&
+                           S_ISDIR(info.st_mode) && info.st_uid == geteuid();
+    if (directory_valid && (broker_queue ?
+        ((info.st_mode & 07777) == 0710 && info.st_gid == getegid()) :
+        ((info.st_mode & 077) == 0)))
     {
         queue->lock_fd = openat(queue->directory_fd, "writer.lock", O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (queue->lock_fd >= 0 && bq_private_regular(queue->lock_fd))

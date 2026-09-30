@@ -133,7 +133,11 @@ the #1022 A/B launch.
   measurement is always on and costs 0.19% of stage-1 instructions (measured
   on Clang 22/Linux x86-64), because every source unit falls out of a branch
   the lexer already takes rather than a second pass over the bytes, and the
-  output side is one linear sum over the finished token stream. The
+  output side is one linear sum over the finished token stream. That sum
+  feeds only the spelling-bytes figure, so the `cc` command skips it when it
+  prints neither this table nor `-fsource-metrics`
+  (`CompilerDriverInvocation.omit_spelled_bytes`); API callers get it by
+  default. The
   bootstrap's table does not match the self-hosted stages' and is not meant
   to: the bootstrap finds its host compiler's resource headers and the
   self-hosted stages fall back to the builtin ones, which is why the file
@@ -331,9 +335,12 @@ the #1022 A/B launch.
   Its admitted path is the one-pair `validate-buster-v1`
   smoke recipe; it is not the former stage-1 diagnostic, an A/A
   qualification, or a performance verdict.
+  Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
+  manual approval step: a per-attempt `authorize` job and the `submit` job
+  condition skip every other requester and re-run.
   Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
-  ruleset, protected environment, host authorization, installed identities,
-  clean queue, and administrator reviewer with self-review prevention are
+  ruleset, main-only environment without a required reviewer, workflow gate,
+  host authorization, installed identities, and clean queue are
   verified as described in
   [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
   `native-retirement-performance-v1` remains blocked. Use the local trusted

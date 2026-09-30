@@ -1,7 +1,7 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, six
-# independent native mode lanes, four Unix differential lanes and three mobile
+# Build/test policy remains in build.c. Two shards per desktop lane, five
+# independent native mode lanes, three Unix differential lanes and two mobile
 # lanes retain full coverage. See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -65,6 +65,8 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 tools/ci_artifact_upload_test.py
+          python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
         shell: bash
         run: |
@@ -90,6 +92,17 @@ jobs:
           set -euo pipefail
           python3 tools/new_audit.py --self-test
           python3 tools/new_audit.py --check
+      - name: Compile the build driver with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang; this keeps the POSIX
+          # driver clean under GCC's -Wall -Werror as well. Compile at -O2:
+          # Ubuntu's GCC enables _FORTIFY_SOURCE only when optimizing, and
+          # -Wunused-result is only reported during code generation.
+          gcc --version
+          gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -98,7 +111,9 @@ jobs:
           GOSUMDB: sum.golang.org
         run: |
           set -euo pipefail
-          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
+          # The pinned actionlint predates GitHub's queue: max field. The
+          # preceding policy test confines that field to the reviewed workflow.
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
         shell: bash
@@ -107,7 +122,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce with the lint command in `.github/workflows/ci.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -129,12 +144,16 @@ jobs:
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
     if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
-    name: ${{ matrix.name }} ${{ matrix.shard }}
+    # The first attempt of a draft pull-request run defers scarce macOS
+    # runners: the lane reports itself as a named Linux no-op. Merge groups,
+    # main, tags, ready pull requests and "Re-run all jobs" run it in full.
+    # See docs/ci-runner-queue.md#draft-pull-request-deferral.
+    name: ${{ matrix.name }} ${{ matrix.shard }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
-        lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
+        lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
         shard: [release, checks]
         include:
           - name: Linux x86-64
@@ -151,13 +170,6 @@ jobs:
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
-          - name: macOS x86-64
-            lane: macos-x86_64
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
-            zig_target: x86_64-macos
           - name: macOS AArch64
             lane: macos-aarch64
             runner: macos-26
@@ -185,10 +197,30 @@ jobs:
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      # A macOS lane on a non-macOS runner is deferred; skipping checkout skips
+      # every later step. The step fails unless deferral was authorized, and
+      # CI complete accepts the no-op only for a first-attempt draft run.
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }} ${{ matrix.shard }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -275,10 +307,18 @@ jobs:
           run_suite tools/matrix_shard_test.py matrix-shard.log
           run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
           run_suite tools/native_producer_profile_test.py native-producer-profile.log
+          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
+          run_suite tools/ci_llvm_test.py llvm-installer-test.log
           run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
           run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
           run_suite tools/ci_native_observation_test.py native-observation-test.log
+          run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
+          run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
+          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
+          if [[ '${{ matrix.os }}' == macos ]]; then
+            run_suite tools/ci_runner_resources_test.py runner-resources-test.log
+          fi
           printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
             "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -406,9 +446,25 @@ jobs:
             --proof-matched-key "$ZIG_CACHE_PROOF_MATCHED_KEY" \
             --summary "$GITHUB_STEP_SUMMARY"
 
+      # Native lanes prefer the newest stable upstream LLVM over the hosted
+      # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
+      - name: Install latest stable LLVM
+        id: llvm
+        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.arch }}-${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/buster-ci/llvm.log"
+
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -432,7 +488,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
@@ -443,32 +499,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          # The result step independently re-probes the exact compiler
-          # executables recorded by the driver. Preserve this step's selected
-          # Visual Studio/LLVM search path and target architecture for it.
-          $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
-          foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          # Export the shell's PATH and target for the result step's re-probe.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -GithubEnv $env:GITHUB_ENV `
+            -Require cl, clang, gcc, zig -ClangArch $env:CLANG_ARCH
           New-Item -ItemType Directory -Force -Path 'build' | Out-Null
           $Driver = Join-Path (Get-Location) 'build\build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
@@ -518,62 +552,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$BUSTER_CI_PYTHON" - <<'PYTHON'
-          import os
-          import shutil
-          import stat
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "buster-ci"
-          source = root.with_name("buster-ci-unsanitized")
-          if source.is_symlink() or source.is_file():
-              source.unlink()
-          elif source.is_dir():
-              shutil.rmtree(source, ignore_errors=True)
-          if root.is_symlink() or root.is_file():
-              root.unlink()
-          elif root.is_dir():
-              root.rename(source)
-          root.mkdir(parents=True, exist_ok=True)
-
-          skipped = []
-          if source.is_dir():
-              for directory, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
-                  current = Path(directory)
-                  relative = current.relative_to(source)
-                  retained_directories = []
-                  for name in dirnames:
-                      entry = current / name
-                      try:
-                          mode = entry.lstat().st_mode
-                      except OSError as error:
-                          skipped.append(f"{relative / name}: {error}")
-                          continue
-                      if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
-                          retained_directories.append(name)
-                          (root / relative / name).mkdir(parents=True, exist_ok=True)
-                      else:
-                          skipped.append(f"{relative / name}: non-directory or symbolic link")
-                  dirnames[:] = retained_directories
-                  for name in filenames:
-                      entry = current / name
-                      destination = root / relative / name
-                      try:
-                          mode = entry.lstat().st_mode
-                          if not stat.S_ISREG(mode):
-                              skipped.append(f"{relative / name}: non-regular file")
-                              continue
-                          destination.parent.mkdir(parents=True, exist_ok=True)
-                          with entry.open("rb") as input_file, destination.open("wb") as output_file:
-                              shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
-                      except OSError as error:
-                          destination.unlink(missing_ok=True)
-                          skipped.append(f"{relative / name}: {error}")
-
-          report = root / "artifact-sanitization.txt"
-          report.write_text("\n".join(skipped) + ("\n" if skipped else ""), encoding="utf-8")
-          shutil.rmtree(source, ignore_errors=True)
-          PYTHON
+          "$BUSTER_CI_PYTHON" tools/ci_sanitize_logs.py --root "$RUNNER_TEMP/buster-ci"
 
       - name: Retain desktop logs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -588,15 +567,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The mode matrix is independent from the combination matrix on all six
+  # The mode matrix is independent from the combination matrix on all five
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    # Draft pull-request deferral of macOS runners; see the desktop job.
+    name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -612,11 +592,6 @@ jobs:
             platform: unix
             os: linux
             arch: aarch64
-          - name: macOS x86-64 native
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
           - name: macOS AArch64 native
             runner: macos-26
             platform: unix
@@ -639,8 +614,25 @@ jobs:
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
     steps:
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -667,14 +659,28 @@ jobs:
             --debug-info OFF \
             --differential-workers '${{ matrix.platform == 'unix' && '4' || '0' }}'
 
+      # Native lanes prefer the newest stable upstream LLVM over the hosted
+      # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
+      - name: Install latest stable LLVM
+        id: llvm
+        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.arch }}-${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/buster-ci/llvm.log"
+
       # A failed mode suite must not hide the independent differential result.
       # No continue-on-error: either failure still fails this Unix native lane.
       - name: Execution-mode matrix
         id: modes
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
@@ -691,35 +697,18 @@ jobs:
 
       - name: Execution-mode matrix (Windows)
         id: modes_windows
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          foreach ($Compiler in @('cl', 'clang')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang -ClangArch $env:CLANG_ARCH
           & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py toolchain `
             --root $env:BUSTER_CI_OBSERVATION_ROOT --compiler clang --cmake cmake --ninja ninja
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -755,10 +744,8 @@ jobs:
           VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'MSVC toolchain missing' }
-          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          # cl.exe only: no installed LLVM and no clang probe in this step.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
           $Root = Join-Path $env:RUNNER_TEMP 'buster-ci'
           $Sources = Join-Path $Root 'msvc source with spaces'
@@ -824,10 +811,8 @@ jobs:
 
       - name: Native configuration differential matrix
         id: differential
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
@@ -868,7 +853,7 @@ jobs:
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
           BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
-        run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
+        run: python_command=$BUSTER_CI_PYTHON; test -n "$python_command" || python_command=python3; "$python_command" tools/ci_native_observation.py package --root "$BUSTER_CI_OBSERVATION_ROOT" --python "$python_command" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
@@ -910,7 +895,8 @@ jobs:
 
   mobile:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: ${{ matrix.name }}
+    # Draft pull-request deferral of macOS runners; see the desktop job.
+    name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
@@ -920,24 +906,37 @@ jobs:
             runner: ubuntu-26.04
             os: android
             arch: x86_64
-          - name: iOS x86-64
-            runner: macos-26-intel
-            os: ios
-            arch: x86_64
           - name: iOS AArch64
             runner: macos-26
             os: ios
             arch: aarch64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
       - name: Install coreutils
-        if: ${{ matrix.os == 'ios' }}
+        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         run: brew install --quiet coreutils
 
@@ -1033,10 +1032,10 @@ jobs:
 
       - name: Test (iOS simulator)
         id: ios
-        if: ${{ matrix.os == 'ios' }}
+        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+          BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
           set -euo pipefail
@@ -1172,12 +1171,11 @@ jobs:
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
 
-          reference_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            reference_materialized=false
-          fi
+          reference_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1258,12 +1256,11 @@ jobs:
               exit 1
             fi
           done
-          expected_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            expected_materialized=false
-          fi
+          expected_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
@@ -1355,6 +1352,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
     needs: [lint, test, native, mobile, uefi, analyzer]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
@@ -1388,8 +1386,8 @@ jobs:
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
         run: |
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All twelve desktop shards | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
-            printf '| All six native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All ten desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"

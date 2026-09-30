@@ -162,7 +162,9 @@
   path order, so the home analysis observes every reload before every spill at
   that point, conservatively lengthening rather than shortening a range. Dense
   home IDs keep the CFG bit planes proportional to actually spilled values, not
-  all virtual registers. Branches, joins, loops, indirect edges, and
+  all virtual registers; selector slots likewise close over a dense index of
+  only the touched, non-fixed slots the color scan can share, because a fixed
+  slot's range is never read. Branches, joins, loops, indirect edges, and
   inline-assembly landings retain the conservative per-home lifetime guard until
   their path-specific repairs have the same proof. Both object classes are
   assigned by one linear scan in start order with a free-color stack; no
@@ -248,18 +250,25 @@
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
   constants and computed results clear private padding. Two-limb edge copies
   carry f80 joins; ABI transport includes single-f80 wrappers and complex
-  results. See [wide float boundaries](frontend/wide-floats-assembly.md) for
-  unsupported i128 casts. Unsigned-64 conversion now composes signed casts
+  results. The i128↔f32/f64/f80 selector converts two frame limbs through
+  closed x87 transactions. Controlled binary modes restore the complete
+  control word after an exact 64-bit scaled product or a final add rounded
+  to destination precision; the destination's f80 padding holds the control
+  words during that row. Unsigned-64 conversion composes signed casts
   with scalar masks and exact zero/2^63 f80 corrections, without new opcodes
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
-  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
-  independent parts; an orphan SSEUP becomes SSE. Canonical classification
-  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
-  with explicit XMM definition/use operands for whole-register argument
-  transfers and the existing XMM0 result bridges. Variadic prologues save
-  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  sixteen-byte VECTOR ABI part. Android IEEE binary128 scalar values and
+  one-member wrappers use the same XMM contract. Union merging can split that
+  pair into two independent parts; an orphan SSEUP becomes SSE. Canonical
+  classification publishes no FLOAT_UP parts. MIR keeps these values in frame
+  slots, with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. `machine_x64_type_is_f128`
+  admits only Android's exact sixteen-byte scalar layout; constants write both
+  limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
+  copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
+  each VECTOR read consumes one FP cursor slot.
   The shared direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
@@ -489,12 +498,14 @@
   through scalar MIR: CLZ normalization, exponent rebiasing, sign and payload
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
-  preserving subnormals even with flush-to-zero enabled. No libcall or direct
-  emitter is used. `compiler_driver_test_aarch64_float_to_f128` retains the
-  original created-NaN fixture and tests independent binary128 byte cases.
+  preserving subnormals even with flush-to-zero enabled. No libcall is used;
+  the canonical `none` emitter builds the same image with the same rows.
+  `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
+  fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
-  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
+  Binary128 arithmetic and rounding conversions are frontend runtime calls;
+  see the wide-float frontend guide.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
@@ -741,7 +752,8 @@
   links here. An instruction shape the relaxation does not recognize fails the
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
+  sequence too (`link_elf_relax_local_dynamic`).
 
 ## Wide integer conversion rounding
 
