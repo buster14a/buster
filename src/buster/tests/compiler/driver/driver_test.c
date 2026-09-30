@@ -6413,12 +6413,73 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL String8 compiler_driver_test_i128_count_r
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aggregate_comma(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 source = S8("/* Identity casts for aggregate comma results must copy the complete value,\n"
+                        " * including partial eightbytes and the tail of an indirect ABI argument. */\n"
+                        "struct Small { unsigned char a, b, c; };\n"
+                        "struct Big { long long a, b, c; };\n"
+                        "union BigUnion { long long words[3]; unsigned char bytes[24]; };\n"
+                        "union OddUnion { unsigned char bytes[13]; };\n"
+                        "static volatile int effects;\n"
+                        "static int side(void) { effects += 1; return 0; }\n"
+                        "\n"
+                        "static struct Small small_result(void)\n"
+                        "{\n"
+                        "    return (side(), (struct Small){3, 5, 7});\n"
+                        "}\n"
+                        "\n"
+                        "static struct Big big_result(struct Big value)\n"
+                        "{\n"
+                        "    return (side(), value);\n"
+                        "}\n"
+                        "\n"
+                        "static long long big_sum(struct Big value)\n"
+                        "{\n"
+                        "    struct Big copy = (side(), value);\n"
+                        "    return copy.a + copy.b + copy.c;\n"
+                        "}\n"
+                        "\n"
+                        "static long long union_tail(union BigUnion value)\n"
+                        "{\n"
+                        "    union BigUnion copy = (side(), value);\n"
+                        "    return copy.words[2];\n"
+                        "}\n"
+                        "\n"
+                        "static union BigUnion union_result(union BigUnion value)\n"
+                        "{\n"
+                        "    return (side(), value);\n"
+                        "}\n"
+                        "\n"
+                        "static int odd_tail(union OddUnion value)\n"
+                        "{\n"
+                        "    union OddUnion copy = (side(), value);\n"
+                        "    return copy.bytes[0] + copy.bytes[7] + copy.bytes[12];\n"
+                        "}\n"
+                        "\n"
+                        "int main(void)\n"
+                        "{\n"
+                        "    struct Small small = small_result();\n"
+                        "    struct Big original = {11, 23, 47};\n"
+                        "    struct Big big = big_result(original);\n"
+                        "    union BigUnion original_union = {.words = {13, 29, 61}};\n"
+                        "    union BigUnion large_union = union_result(original_union);\n"
+                        "    union OddUnion odd_union = {.bytes = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}};\n"
+                        "    long long sum = big_sum((side(), original));\n"
+                        "    long long literal_sum = big_sum((side(), (struct Big){2, 3, 5}));\n"
+                        "    long long tail = union_tail((side(), large_union));\n"
+                        "    int odd = odd_tail((side(), odd_union));\n"
+                        "    return small.a != 3 || small.b != 5 || small.c != 7 ||\n"
+                        "           big.a != 11 || big.b != 23 || big.c != 47 ||\n"
+                        "           sum != 81 || literal_sum != 10 || tail != 61 || odd != 22 || effects != 11;\n"
+                        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-aggregate-comma-source"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
     String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
                         S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
-    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    for (u32 target = 0; written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -6430,7 +6491,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aggregate_comma(UnitTest
                 // the backend, masking both rejection and incomplete copies.
                 String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                                      S8("-fno-canonical-fast"), S8("-fverify-codegen"), S8("-o"), output,
-                                     S8("tests/basic_c_aggregate_comma.c")};
+                                     input};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object,
@@ -6445,7 +6506,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aggregate_comma(UnitTest
                 {
                     String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-aggregate-comma-run"), S8(".exe"));
                     String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-canonical-fast"), S8("-fverify-codegen"),
-                                                S8("-o"), executable, S8("tests/basic_c_aggregate_comma.c")};
+                                                S8("-o"), executable, input};
                     CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
                     BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
