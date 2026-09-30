@@ -13,7 +13,7 @@ x86-64 and on AArch64.**
 | Runner | Architecture |
 |---|---|
 | `ubuntu-26.04` / `ubuntu-26.04-arm` | x86-64 / AArch64 |
-| `macos-26-intel` / `macos-26` | x86-64 / AArch64 |
+| `macos-26` | AArch64 |
 | `windows-2025` / `windows-11-arm` | x86-64 / AArch64 |
 
 These are the newest label of each pair. `ubuntu-26.04` and `ubuntu-26.04-arm`
@@ -56,15 +56,15 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains all six desktop runner labels, with two internal
+The `test` matrix retains five desktop runner labels, with two internal
 combination jobs per platform: `<platform> release` and `<platform> checks`.
 Six independent `native` lanes run the execution-mode suite. The four Unix
 lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
-independently. Mobile retains its three independent suite-level shards; lint,
+independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 25-job inventory, including all twelve
-desktop partitions and all six native jobs. The old six names alone do not
+which checks all groups and the exact 21-job inventory, including all ten
+desktop partitions and all five native jobs. The old six names alone do not
 prove coverage. See [combination sharding](ci-combination-shards.md) for native
 ownership, fail-closed completion, reproduction and mandatory performance
 qualification; [Windows CI coverage](windows-ci-coverage.md) records the
@@ -73,11 +73,11 @@ documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
-| Combination matrix | `release` and `checks` on each of six desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
-| Execution-mode matrix | all six independent desktop native lanes | `test_mode_matrix --config Release` |
+| Combination matrix | `release` and `checks` on each of five desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
+| Execution-mode matrix | all five independent desktop native lanes | `test_mode_matrix --config Release` |
 | Native differential matrix | the four Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
-| iOS shards | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
+| iOS shard | `macos-26` | `ios/test_ci.sh --all` |
 
 The native build driver still owns the complete compiler/configuration matrix,
 including sanitized Debug/Release, fuzz policy, static analysis and supported
@@ -87,7 +87,7 @@ compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
-The first attempt of a draft pull-request run defers the eight macOS-runner
+The first attempt of a draft pull-request run defers the four macOS-runner
 jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
 always run them, and `CI complete` rejects a deferral anywhere else (see
 [draft pull-request deferral](ci-runner-queue.md#draft-pull-request-deferral)).
@@ -103,11 +103,17 @@ superseded. Lifecycle PR updates separately cancel obsolete fake-tool runs.
 The seven-day log artifacts, summaries, cache boundaries, reproduction commands,
 and timing methodology are documented in [the workflow audit](ci-workflow-audit.md).
 
-Both architectures of all three desktop platforms run the execution-mode
-matrix. Matching native legs therefore execute rather than falling back to the
-disassembly oracle: ELF and Mach-O on the four Unix runners and PE/COFF on the
-two Windows runners. Foreign-format or foreign-architecture legs that cannot
+Linux and Windows run both desktop architectures; macOS runs AArch64.
+Matching native legs execute rather than falling back to the disassembly
+oracle: ELF on the two Linux runners, AArch64 Mach-O on macOS, and PE/COFF on
+the two Windows runners. Foreign-format or foreign-architecture legs that cannot
 execute on the current host remain explicitly oracle-checked.
+
+Apple x86-64 is no longer scheduled by routine or default manual CI. Source
+compatibility remains best-effort, and passing Linux/x86-64 or macOS/AArch64
+does not validate Intel Apple execution or universal release artifacts. The
+[Apple CI policy](apple-ci-policy.md) records the removed lanes and retirement
+census boundary.
 
 ## Supplementary bootstrap scheduling and tested revision
 
@@ -237,16 +243,16 @@ alone does not establish compilation: the GCC Debug build and the full macOS
 matrices must also pass.
 
 The self-host fan-out runs only where the fixed point exists —
-the x86-64 Linux and Windows runners and both macOS runners — so the two
-AArch64 desktop rows build and test without it.
+the x86-64 Linux and Windows runners and macOS AArch64 — so the Linux and
+Windows AArch64 rows build and test without it.
 
 ## What does not run here
 
 - **Wine and `qemu-user`.** The images carry neither. Each native runner executes
   the matching operating-system format and architecture directly; unsupported
   foreign formats or architectures remain oracle-checked rather than silently
-  emulated. Across all six native runners, the matching x86-64 and AArch64 ELF,
-  Mach-O and PE/COFF legs have a real host execution avenue.
+  emulated. Across the five native runners, both ELF and PE/COFF architectures and
+  AArch64 Mach-O have a real host execution avenue. Intel Mach-O does not.
 - **The performance series.** Hosted virtual machines expose no performance
   counters, and their wall times are too noisy to trend. `STEP_INSTRUCTIONS`
   needs hardware under your control. CI elapsed time and total job seconds
@@ -294,8 +300,8 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all twelve desktop combination jobs, six
-native jobs, three mobile jobs, workflow lint, UEFI and the analyzer. Its
+The aggregate `CI complete` requires all ten desktop combination jobs, five
+native jobs, two mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success. It selects each logical job's
 latest attempt from the exact run and source head, then requires a unique
@@ -436,10 +442,11 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts historical six-, eleven-, fifteen-, seventeen- and twenty-three-job
-workflows plus the current twenty-five-job layout; all applicable suites must
-succeed on a complete first attempt. All six native jobs must report mode
-success, the four Unix native jobs must additionally report differential
+accepts historical six-, eleven-, fifteen-, seventeen-, nineteen-, twenty-three-
+and twenty-five-job workflows plus the current twenty-one-job layout; all applicable suites must
+succeed on a complete first attempt. All five current native jobs must report mode
+success; historical layouts retain their original inventories. The three
+current Unix native jobs must additionally report differential
 success, and the UEFI and analyzer gates must report their key coverage steps.
 Their execution intervals and runner seconds are included. Workflow hashes and
 runner labels define separate cohorts. Reports include queue delay, elapsed

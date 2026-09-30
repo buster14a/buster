@@ -107,7 +107,9 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Documentation only | Check commands against their implementation, local links, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. |
 
 Preserve Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and supported
-platform coverage. Test fixtures use repository-relative paths; concurrent tests
+platform coverage. Routine Apple CI validates AArch64 only; Apple x86-64
+source/target compatibility is best-effort, with no Intel or universal release
+validation promise. See [Apple CI policy](docs/apple-ci-policy.md). Test fixtures use repository-relative paths; concurrent tests
 honor `BUSTER_TEST_JOBS`. Report the actual revision, commands, results, and
 unavailable gates; never call an unrun check green. Follow the existing
 [rebase validation workflow](docs/agents/workflow.md) when rebasing a code change.
