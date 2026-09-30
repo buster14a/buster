@@ -41,6 +41,13 @@ transcript, #615 and adapter-series readers; a halved sample is refused.
 That fixture binds placeholder executable digests, so it cannot back a
 complete binding; the first test covers the full validate() path.
 
+WorkerUnitResultTests (only when the preparation runner of `bench_service
+self-test` has exported its composed job-82 result beside COMPOSE_BINARY)
+reads the worker-unit producer's own output (#881 PR 3): the #511 binding the
+C writer derived (structurally valid, bound to the result root's documents,
+mutations refused), the execution context over the bundle's raw digest, the
+producer authority and context chain, the result manifest and bundle index.
+
 Spec directives written here (one per line): source, store, scratch,
 adapter PATH SHA256, authority, binding PATH SHA256, sealed, timeout NS,
 identity JOB ATTEMPT BOOT BOUND COMPLETED, digests PLAN ROWS RESULT_PLAN
@@ -863,6 +870,210 @@ class ThroughputFixtureTests(unittest.TestCase):
                 evidence, descriptor, plan, record, rows, rules["sampling"], db,
                 composed["raw_measurements_sha256"], trusted, 2, binding.NATIVE_TIMED_TARGET)
             self.assertEqual(checked["invocations"], 1220)
+
+
+# The composed job-82 result the preparation runner exports beside itself
+# (retirement_worker_unit_tests.h, bq_prep_worker_unit_export): `result/`
+# (the result root), `authority/` (the producer authority and context chain)
+# and `census/` (the installed census the binding's support files name).
+WORKER_UNIT_RESULT = "retirement-worker-unit-result"
+WORKER_UNIT_BINDING = "retirement-binding.json"
+WORKER_UNIT_MANIFEST = "native-retirement-performance-v1.manifest"
+WORKER_UNIT_BUNDLE = "native-retirement-performance-v1.bundle"
+WORKER_UNIT_CHAIN_HEADER = "BQ-RETIREMENT-CONTEXT-CHAIN-V2"
+WORKER_UNIT_PENDING = {"bytes": 1, "sha256": "0" * 64}
+# The preparation fixture's installed census files under the binding's
+# `census/` support paths (retirement_binding_context_fixture.py).
+WORKER_UNIT_CENSUS_ROLES = ("support_declaration", "manifest", "inputs", "rows", "performance_rows",
+                            "validator_report")
+
+
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _keyed(text):
+    return dict(line.split("=", 1) for line in text.split("\n") if "=" in line)
+
+
+class WorkerUnitResultTests(unittest.TestCase):
+    """The worker-unit producer's composed result (#881 PR 3).
+
+    The preparation runner (`bench_service self-test`) drives job 82 through
+    the real coordinator path to MEASURED and exports its result root beside
+    itself; `build/bench-service-tools/` is also COMPOSE_BINARY's directory.
+    These checks read that output with the validator's own readers: the #511
+    binding the C writer derived from the pinned context (structurally valid,
+    its pre-campaign documents and admission receipt bound, its two late
+    phases pending), the execution context over the result bundle's raw
+    digest, the producer authority and its context chain, the result manifest
+    and BQ-BUNDLE-V1 index. Mutated bindings are refused by the validator.
+    Absent that output (CI runs this file without the preparation runner),
+    the class is skipped.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.export = Path(COMPOSE_BINARY).parent / WORKER_UNIT_RESULT
+        if not (cls.export / "result" / WORKER_UNIT_BINDING).is_file():
+            raise unittest.SkipTest(f"run `bench_service self-test` first: {cls.export} is missing")
+        cls.result = cls.export / "result"
+        cls.authorities = sorted((cls.export / "authority").glob("authority-*.txt"))
+        cls.chains = sorted((cls.export / "authority").glob("context-chain-*.txt"))
+
+    def record(self):
+        return json.loads((self.result / WORKER_UNIT_BINDING).read_bytes())
+
+    def file_descriptor(self, name):
+        return _descriptor((self.result / name).read_bytes(), name)
+
+    def validate(self, record, name="binding.json"):
+        with tempfile.TemporaryDirectory(prefix="retirement-worker-unit-binding-") as directory:
+            path = Path(directory) / name
+            path.write_bytes(_python_canonical(record))
+            return binding.validate(path)
+
+    def test_binding_is_structurally_valid_and_bound(self):
+        data = (self.result / WORKER_UNIT_BINDING).read_bytes()
+        record = json.loads(data)
+        # The C writer's bytes are the validator's canonical JSON.
+        self.assertEqual(data, _python_canonical(record))
+        checked = binding.validate(self.result / WORKER_UNIT_BINDING)
+        self.assertEqual(checked["proof"], "structural-only")
+        self.assertGreater(checked["required_rows"], 0)
+        workflow = record["workflow"]
+        # Lane D's pre-sample plan, post-A/A binding, oracle and result-input
+        # plan, and the admission receipt, all as the result root holds them.
+        for descriptor, name in ((workflow["phases"]["pre_sample_plan"], "retirement-pre-sample-plan.json"),
+                                 (workflow["phases"]["post_aa_binding"], "retirement-post-aa-binding.json"),
+                                 (workflow["records"]["oracle"], "retirement-oracle.json"),
+                                 (workflow["records"]["result_input_plan"], "retirement-result-input-plan.json"),
+                                 (record["execution"]["host"]["aa_admission_receipt"],
+                                  "retirement-aa-admission.json")):
+            self.assertEqual(descriptor, self.file_descriptor(name))
+        # The sealed result binds this record's digest, so the late phases
+        # are lane F's to fill.
+        for phase in ("sealed_result", "independent_replay"):
+            self.assertEqual({key: workflow["phases"][phase][key] for key in ("bytes", "sha256")},
+                             WORKER_UNIT_PENDING)
+        # The support files are the installed census's bytes.
+        files = record["support"]["files"]
+        for role in WORKER_UNIT_CENSUS_ROLES:
+            artifact = files[binding.SUPPORT_FILE_ROLES.index(role)]
+            self.assertTrue(artifact["path"].startswith("census/"))
+            binding._check_evidence(self.export, artifact, f"support.files.{role}")
+        # The subjects are the sealed result's pinned binaries.
+        sealed = json.loads((self.result / "retirement-sealed-result.json").read_bytes())
+        self.assertEqual(sealed["post_aa_binding_sha256"], workflow["phases"]["post_aa_binding"]["sha256"])
+
+    def test_mutated_binding_is_refused(self):
+        record = self.record()
+        self.validate(record)
+        mutations = {
+            "decision": lambda value: value.__setitem__("decision_id", "other-decision"),
+            "support-root": lambda value: value["support"].__setitem__("root_sha256", "f" * 64),
+            "closure-manifest": lambda value: value["requested_work"]["closure"].__setitem__(
+                "manifest_sha256", "e" * 64),
+            "same-subjects": lambda value: value["subjects"]["candidate"].__setitem__(
+                "source_commit", value["subjects"]["baseline"]["source_commit"]),
+            "sampling-family": lambda value: value["rules"]["sampling"].__setitem__(
+                "cell_members_per_scope", value["rules"]["sampling"]["cell_members_per_scope"] + 1),
+        }
+        for name, mutate in mutations.items():
+            mutated = copy.deepcopy(record)
+            mutate(mutated)
+            with self.subTest(mutation=name), self.assertRaises(ValueError):
+                self.validate(mutated)
+
+    def test_context_is_the_validators_over_the_result_raw_digest(self):
+        record = self.record()
+        bundle = json.loads((self.result / "retirement-result-bundle.json").read_bytes())
+        raw = bundle["raw_measurements_sha256"]
+        context = binding._canonical_json_digest(binding._execution_context(record, raw))
+        receipt = json.loads((self.result / "retirement-execution-receipt.json").read_bytes())
+        self.assertEqual(receipt["context_sha256"], context)
+        chain = _keyed(self.chains[0].read_text(encoding="ascii"))
+        self.assertEqual(chain["context"], context)
+        # Lane D's A/B stage raw digest is the composer's.
+        self.assertEqual(chain["stage-1"].split(" ")[3], raw)
+        # A different binding derives a different context.
+        record["measurement"]["harness_source_commit"] = "9" * 40
+        self.assertNotEqual(binding._canonical_json_digest(binding._execution_context(record, raw)), context)
+
+    def test_authority_and_context_chain(self):
+        self.assertEqual((len(self.authorities), len(self.chains)), (1, 1))
+        text = self.authorities[0].read_text(encoding="ascii")
+        lines = text.split("\n")
+        receipt = json.loads((self.result / "retirement-execution-receipt.json").read_bytes())
+        self.assertEqual(lines[0], AUTHORITY_HEADER)
+        self.assertEqual((lines[1], lines[2]), (receipt["job_id"], str(receipt["attempt"])))
+        # The plan is lane D's execution-plan document; the receipt is the
+        # composer's, byte for byte.
+        self.assertEqual(lines[3], receipt["execution_plan_sha256"])
+        self.assertEqual(lines[3], _sha256_file(self.result / "retirement-execution-plan.json"))
+        self.assertEqual(lines[4], receipt["context_sha256"])
+        self.assertEqual(lines[5], _sha256_file(self.result / "retirement-execution-receipt.json"))
+        # Line 6 is the store identity; line 7 the retained manifest.
+        manifest = (self.result / RETAINED_MANIFEST).read_bytes()
+        self.assertEqual(lines[7], hashlib.sha256(manifest).hexdigest())
+        listed = manifest.decode("ascii").split("\n")
+        self.assertEqual(listed[0], RETAINED_HEADER)
+        for line in listed[1:-1]:
+            _kind, digest, size, path = line.split(" ")
+            self.assertEqual(self.file_descriptor(path), {"path": path, "bytes": int(size), "sha256": digest})
+        self.assertIn("unit-campaign-post-sample.txt", manifest.decode("ascii"))
+        chain_text = self.chains[0].read_text(encoding="ascii")
+        self.assertEqual(chain_text.split("\n")[0], WORKER_UNIT_CHAIN_HEADER)
+        chain = _keyed(chain_text)
+        self.assertEqual((chain["job"], chain["attempt"]), (lines[1], lines[2]))
+        self.assertEqual(chain["plan"], lines[3])
+        self.assertEqual(chain["binding"], _sha256_file(self.result / WORKER_UNIT_BINDING))
+        self.assertEqual(chain["bound-at"], str(receipt["bound_at_ns"]))
+        # The READY digest the coordinator kept is the one the chain carries.
+        ready = _keyed((self.result / "worker-phase-5").read_text(encoding="ascii"))
+        self.assertEqual(chain["ready"], ready["digest-sha256"])
+        # The unit record retains the pre- and post-sample contexts.
+        unit = _keyed((self.result / "unit-campaign-post-sample.txt").read_text(encoding="ascii"))
+        self.assertEqual((unit["pre-sample"], unit["post-sample"]), (chain["pre-sample"], chain["post-sample"]))
+        self.assertEqual(unit["execution-plan"], chain["plan"])
+
+    def test_result_manifest_and_bundle(self):
+        manifest = _keyed((self.result / WORKER_UNIT_MANIFEST).read_text(encoding="ascii"))
+        self.assertEqual((manifest["recipe"], manifest["status"], manifest["stage"]),
+                         ("native-retirement-performance-v1", "succeeded", "retirement"))
+        self.assertEqual(manifest["authority-sha256"], _sha256_file(self.authorities[0]))
+        self.assertEqual(manifest["receipt-sha256"], _sha256_file(self.result / "retirement-execution-receipt.json"))
+        self.assertEqual(manifest["sealed-result"], "retirement-sealed-result.json")
+        self.assertEqual(manifest["sealed-result-sha256"],
+                         _sha256_file(self.result / "retirement-sealed-result.json"))
+        self.assertEqual(manifest["binding"], WORKER_UNIT_BINDING)
+        self.assertEqual(manifest["binding-sha256"], _sha256_file(self.result / WORKER_UNIT_BINDING))
+        self.assertEqual(manifest["bundle-sha256"], _sha256_file(self.result / WORKER_UNIT_BUNDLE))
+        chain = _keyed(self.chains[0].read_text(encoding="ascii"))
+        self.assertEqual(manifest["ready-sha256"], chain["ready"])
+        lines = (self.result / WORKER_UNIT_BUNDLE).read_text(encoding="ascii").split("\n")
+        self.assertEqual(lines[0], "BQ-BUNDLE-V1")
+        entries = [line.split(" ", 2) for line in lines[3:] if line]
+        names = sorted(path.name for path in self.result.iterdir()
+                       if path.name not in (WORKER_UNIT_MANIFEST, WORKER_UNIT_BUNDLE))
+        self.assertEqual([entry[2] for entry in entries], names)
+        self.assertEqual(lines[1], f"entries={len(entries)}")
+        total = 0
+        for digest, size, name in entries:
+            self.assertEqual(self.file_descriptor(name), {"path": name, "bytes": int(size), "sha256": digest})
+            total += int(size)
+        self.assertEqual(lines[2], f"bytes={total}")
+
+    def test_result_streams_through_the_validator_readers(self):
+        bundle = json.loads((self.result / "retirement-result-bundle.json").read_bytes())
+        series = binding._adapter_series_manifest(self.result, bundle["adapter_input"])
+        self.assertTrue(series["shards"])
+        receipt = json.loads((self.result / "retirement-execution-receipt.json").read_bytes())
+        records = binding._execution_trace_records(self.result, receipt["shards"], receipt["invocations"])
+        try:
+            self.assertEqual(sum(1 for _ in records), receipt["invocations"])
+        finally:
+            records.close()
 
 
 if __name__ == "__main__":

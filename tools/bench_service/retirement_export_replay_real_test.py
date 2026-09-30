@@ -10,12 +10,22 @@ The tests reorder, drop, truncate, forge or substitute those bytes and require
 the production readers (native_retirement_performance_binding.py,
 native_retirement_result_input.py) and this lane's publication path to reject
 them. The last tests carry real output through the CLI's offline test
-publication, separate retrieval and unpack format. With the real binding
-validator the chain stops there, because no composer-produced binding record
-exists yet (retirement_export_replay.COMPOSER_BINDING_PATH); with a validator
-test double the CLI's authenticated_attempt_join accepts the genuine receipt
-and refuses a wrong attempt or a forged receipt. Nothing here is a full
-service bundle, a performance result or #512 evidence.
+publication, separate retrieval and unpack format, with the join record at
+the composer's fixed binding path (retirement_export_replay.COMPOSER_BINDING_PATH).
+With the real binding validator the chain stops there, because that minimal
+join record is no complete binding; with a validator test double the CLI's
+authenticated_attempt_join accepts the genuine receipt and refuses a wrong
+attempt or a forged receipt.
+
+WorkerUnitResultJoinTests read the worker-unit producer's composed job-82
+result (#881 PR 3), which the preparation runner of `bench_service self-test`
+exports to build/bench-service-tools/retirement-worker-unit-result (skipped
+when absent): its binding sits at COMPOSER_BINDING_PATH with the sealed-result
+phase pending, which the validator's evidence check refuses until lane F's
+final binding names the composed sealed result; over that final binding the
+join accepts the producer authority's receipt digest for job 82 and refuses
+another job or attempt, another trust root and a tampered receipt. Nothing here is a full service bundle, a performance
+result or #512 evidence.
 """
 import copy
 import hashlib
@@ -359,7 +369,7 @@ class RealThroughputOutputTests(unittest.TestCase):
         sealed = {"result_bundle": _descriptor(root, "result-bundle.json")}
         (root / "sealed-result.json").write_bytes(_canonical_line(sealed))
         record = {"workflow": {"phases": {"sealed_result": _descriptor(root, "sealed-result.json")}}}
-        (root / "binding.json").write_bytes(_canonical_line(record))
+        (root / replay.COMPOSER_BINDING_PATH).write_bytes(_canonical_line(record))
         return root
 
     def test_forged_self_consistent_bundle_needs_the_external_authority(self):
@@ -368,21 +378,21 @@ class RealThroughputOutputTests(unittest.TestCase):
         value = json.loads(genuine)
         self.assertEqual((value["job_id"], value["attempt"]), ("job-1", 2))
         root = self.evidence_chain(genuine)
-        joined = replay.authenticated_attempt_join(root, root / "binding.json", 1, 2, authority)
+        joined = replay.authenticated_attempt_join(root, root / replay.COMPOSER_BINDING_PATH, 1, 2, authority)
         self.assertEqual(joined["invocations"], value["invocations"])
         # The service labels the job; a bare numeric job ID is not its label.
         self.assertEqual(replay.SERVICE_JOB_LABEL.format(1), value["job_id"])
         for job, attempt in ((2, 2), (1, 3)):
             with self.subTest(job=job, attempt=attempt), \
                     self.assertRaisesRegex(ValueError, "does not identify the exported job"):
-                replay.authenticated_attempt_join(root, root / "binding.json", job, attempt, authority)
+                replay.authenticated_attempt_join(root, root / replay.COMPOSER_BINDING_PATH, job, attempt, authority)
         # A forged attempt with every in-bundle descriptor recomputed.
         forged = _canonical_line(dict(value, attempt=3))
         root = self.evidence_chain(forged)
         self.assertEqual(json.loads((root / "result-bundle.json").read_bytes())["execution_receipt"]["sha256"],
                          hashlib.sha256(forged).hexdigest())
         with self.assertRaisesRegex(ValueError, "independently trusted digest"):
-            replay.authenticated_attempt_join(root, root / "binding.json", 1, 3, authority)
+            replay.authenticated_attempt_join(root, root / replay.COMPOSER_BINDING_PATH, 1, 3, authority)
 
     def test_forged_self_consistent_export_never_publishes(self):
         names = [UNTIMED_RECORDS, UNTIMED_SHARD, RECEIPT]
@@ -399,7 +409,7 @@ class RealThroughputOutputTests(unittest.TestCase):
         publication.mkdir(mode=0o700)
         command = [sys.executable, str(Path(replay.__file__).resolve()), str(forged), "--publish-only",
                    "--test-publication", str(publication), "--bench-service", str(self.work / "unused"),
-                   "--repository-root", str(REPOSITORY), "--binding", "binding.json", "--job", "1",
+                   "--repository-root", str(REPOSITORY), "--binding", replay.COMPOSER_BINDING_PATH, "--job", "1",
                    "--attempt", "2", "--full-result-sha256", "a" * 64,
                    "--export-receipt-sha256", authority,
                    "--trusted-execution-receipt-sha256", hashlib.sha256(
@@ -438,7 +448,7 @@ class RealThroughputOutputTests(unittest.TestCase):
         publication = self.work / f"{name}-publication"
         publication.mkdir(mode=0o700)
         identities = ["--bench-service", str(unpacker), "--repository-root", str(REPOSITORY),
-                      "--binding", "binding.json", "--job", "1", "--attempt", str(attempt),
+                      "--binding", replay.COMPOSER_BINDING_PATH, "--job", "1", "--attempt", str(attempt),
                       "--full-result-sha256", "a" * 64, "--export-receipt-sha256", export_sha,
                       "--trusted-execution-receipt-sha256",
                       hashlib.sha256((self.root / RECEIPT).read_bytes()).hexdigest()]
@@ -466,9 +476,8 @@ class RealThroughputOutputTests(unittest.TestCase):
         return second
 
     def test_real_output_stops_at_the_production_binding_validator(self):
-        """No composer-produced binding exists yet (COMPOSER_BINDING_PATH), so
-        the real validator must refuse the record and no replay may be
-        reported."""
+        """The join record at COMPOSER_BINDING_PATH is no complete binding, so
+        the real validator must refuse it and no replay may be reported."""
         second = self.run_chain((self.root / RECEIPT).read_bytes())
         self.assertEqual(second.returncode, 1)
         self.assertRegex(second.stderr, r"retirement export replay failed: Command .*"
@@ -499,6 +508,83 @@ class RealThroughputOutputTests(unittest.TestCase):
         forged_run = self.run_chain(forged, attempt=3, validator=validator, name="forged")
         self.assertEqual(forged_run.returncode, 1)
         self.assertIn("execution_receipt bytes do not match the independently trusted digest", forged_run.stderr)
+
+
+# The worker-unit producer's composed result, exported by the preparation
+# runner (retirement_worker_unit_tests.h, bq_prep_worker_unit_export).
+WORKER_UNIT_RESULT = REPOSITORY / "build" / "bench-service-tools" / "retirement-worker-unit-result"
+
+
+class WorkerUnitResultJoinTests(unittest.TestCase):
+    """authenticated_attempt_join over the worker unit's own result root."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not (WORKER_UNIT_RESULT / "result" / replay.COMPOSER_BINDING_PATH).is_file():
+            raise unittest.SkipTest(f"run `bench_service self-test` first: {WORKER_UNIT_RESULT} is missing")
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="retirement-worker-unit-join-",
+                                                     dir=WORKER_UNIT_RESULT.parent)
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.result = self.work / "result"
+        shutil.copytree(WORKER_UNIT_RESULT / "result", self.result)
+        for path in self.result.iterdir():
+            path.chmod(0o600)
+        authority = sorted((WORKER_UNIT_RESULT / "authority").glob("authority-*.txt"))
+        self.assertEqual(len(authority), 1)
+        lines = authority[0].read_text(encoding="ascii").split("\n")
+        # BQ-RETIREMENT-AUTHORITY-V3: job label, attempt, plan, context, receipt.
+        self.label, self.attempt, self.trusted = lines[1], int(lines[2]), lines[5]
+        self.job = int(self.label[len("job-"):])
+        self.assertEqual(replay.SERVICE_JOB_LABEL.format(self.job), self.label)
+
+    def final_binding(self):
+        """Lane F's final binding: the composed record with its sealed-result
+        phase naming the composed sealed result."""
+        record = json.loads((self.result / replay.COMPOSER_BINDING_PATH).read_bytes())
+        sealed = (self.result / "retirement-sealed-result.json").read_bytes()
+        record["workflow"]["phases"]["sealed_result"] = {
+            "path": "retirement-sealed-result.json", "bytes": len(sealed),
+            "sha256": hashlib.sha256(sealed).hexdigest()}
+        path = self.work / "final-binding.json"
+        path.write_bytes(_canonical_line(record))
+        return path
+
+    def test_composed_binding_is_at_the_fixed_path(self):
+        self.assertEqual(str(replay.composer_binding_path(replay.COMPOSER_BINDING_PATH)),
+                         replay.COMPOSER_BINDING_PATH)
+        record = json.loads((self.result / replay.COMPOSER_BINDING_PATH).read_bytes())
+        self.assertEqual(record["decision_id"], binding.DECISION_ID)
+        # The pending sealed-result phase names the composed sealed result's
+        # path but no digest of it: the validator's evidence check refuses
+        # it, so only lane F's final binding can pass the replay.
+        pending = record["workflow"]["phases"]["sealed_result"]
+        self.assertEqual(pending["path"], "retirement-sealed-result.json")
+        with self.assertRaises(ValueError):
+            binding._check_evidence(self.result, pending, "workflow.phases.sealed_result")
+        binding._check_evidence(self.result, json.loads(self.final_binding().read_bytes())["workflow"]["phases"][
+            "sealed_result"], "workflow.phases.sealed_result")
+
+    def test_join_accepts_the_producer_authority_receipt(self):
+        path = self.final_binding()
+        joined = replay.authenticated_attempt_join(self.result, path, self.job, self.attempt, self.trusted)
+        self.assertEqual((joined["job_id"], joined["attempt"]), (self.label, self.attempt))
+        for job, attempt in ((self.job + 1, self.attempt), (self.job, self.attempt + 1)):
+            with self.subTest(job=job, attempt=attempt), \
+                    self.assertRaisesRegex(ValueError, "does not identify the exported job"):
+                replay.authenticated_attempt_join(self.result, path, job, attempt, self.trusted)
+        with self.assertRaisesRegex(ValueError, "independently trusted digest"):
+            replay.authenticated_attempt_join(self.result, path, self.job, self.attempt, "f" * 64)
+
+    def test_tampered_receipt_is_refused(self):
+        path = self.final_binding()
+        receipt = self.result / "retirement-execution-receipt.json"
+        value = json.loads(receipt.read_bytes())
+        receipt.write_bytes(_canonical_line(dict(value, attempt=value["attempt"] + 1)))
+        with self.assertRaises(ValueError):
+            replay.authenticated_attempt_join(self.result, path, self.job, self.attempt, self.trusted)
 
 
 if __name__ == "__main__":

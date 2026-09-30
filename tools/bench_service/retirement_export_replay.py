@@ -12,7 +12,7 @@ production binding validator and ``authenticated_attempt_join``.
 ``copy_ledger``/``capacity_ledger`` give the receipt-derived six-copy ledger;
 ``a1_export_ledger`` maps the A1 campaign model (metrics shards, untimed
 records) onto the export limits, printed by the ``a1-capacity`` subcommand.
-``composer_binding_path`` is the marked hook for E's result composer.
+``composer_binding_path`` holds the binding to E's fixed result location.
 """
 
 import argparse
@@ -65,10 +65,13 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 # labels the execution receipt's job as "job-<numeric job id>"; the export
 # receipt carries the numeric id.
 SERVICE_JOB_LABEL = "job-{}"
-# HOOK(#1023, E composer): the reviewed composer fixes where the binding
-# record lives inside the finalized service result. Until it lands, the
-# operator names it with --binding; once set, --binding must equal it.
-COMPOSER_BINDING_PATH = None
+# The reviewed composer fixes where the binding record lives inside the
+# finalized service result: the worker-unit producer writes it at the result
+# root (BQ_RETIREMENT_WORKER_BINDING_PATH, retirement_worker_compose.c, #881
+# PR 3), and --binding must equal it. That record carries the sealed-result
+# and independent-replay phases as pending descriptors (the sealed result
+# binds the record's digest); the lane F binding replay names fill them.
+COMPOSER_BINDING_PATH = "retirement-binding.json"
 
 
 def fail(message):
@@ -462,11 +465,11 @@ def relative_binding_path(text):
 
 
 def composer_binding_path(text):
-    """HOOK(#1023, E composer): the binding record's place in the result.
+    """The binding record's place in the result (#1023, E composer).
 
-    The composer, not the operator, owns this location. While
-    COMPOSER_BINDING_PATH is unset the operator-supplied canonical path is
-    used; once the composer contract sets it, any other path is refused.
+    The composer, not the operator, owns this location: any path other than
+    COMPOSER_BINDING_PATH is refused (were it unset, the operator-supplied
+    canonical path would be used).
     """
     relative = relative_binding_path(text)
     if COMPOSER_BINDING_PATH is not None and text != COMPOSER_BINDING_PATH:

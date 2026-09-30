@@ -1,4 +1,4 @@
-/* Retirement producer of the service worker-unit (#881, PRs 1 and 2 of 4).
+/* Retirement producer of the service worker-unit (#881, PRs 1 to 3 of 4).
  *
  * Ownership: orchestration of the in-unit retirement steps for
  * bq_worker_unit (worker_linux.c). It cannot run in the recipe executable,
@@ -32,19 +32,19 @@
  * build (which sends PREPARING), project, oracle, gate and ready, sends
  * RETIREMENT_READY carrying the record's digest (BQPHASE2), then runs the
  * in-unit campaign through lane D's READY (bq_retirement_worker_campaign_run
- * in retirement_worker_campaign.c: SETTLING, MEASURING, A/A, admission, A/B),
- * and releases everything in reverse on every path, sweeping any surviving
- * descendant (bq_retirement_check_sweep). bq_retirement_worker_unit_wait
- * waits for the producer under the execution deadline plus the stop budget
- * without reaping it; bq_retirement_worker_unit_run then disarms the
- * forwarder, reaps, and consumes a SIGTERM held in that teardown window.
+ * in retirement_worker_campaign.c: SETTLING, MEASURING, A/A, admission, A/B)
+ * and composition, the receipt authority, MEASURED and the result's manifest
+ * (bq_retirement_worker_compose in retirement_worker_compose.c), and releases
+ * everything in reverse on every path, sweeping any surviving descendant
+ * (bq_retirement_check_sweep). bq_retirement_worker_unit_wait waits for the
+ * producer under the execution deadline plus the stop budget without reaping
+ * it; bq_retirement_worker_unit_run then disarms the forwarder, reaps, and
+ * consumes a SIGTERM held in that teardown window.
  *
- * PR 2 stops after READY: composition, the authority and MEASURED are not
- * wired yet (PR 3), so a READY producer exits with BQ_UNSUPPORTED
- * (BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED) and sends no MEASURED message; the
- * job fails closed. Production A/A admission has no authority and stays
- * compiled out, so production cannot reach A/B either. Nothing here is a
- * timing fact.
+ * The producer exits 0 only after MEASURED was acknowledged and the manifest
+ * written. Production A/A admission has no authority and stays compiled out,
+ * so production cannot reach A/B, and the compiled profile is blocked, so it
+ * cannot even start. Nothing here is a timing fact.
  */
 #include <poll.h>
 #include <pwd.h>
@@ -55,9 +55,10 @@
 
 /* The operator-installed read-only tree (bq_worker_run's canonical root). */
 #define BQ_RETIREMENT_WORKER_UNIT_INSTALLED_ROOT "/opt/buster-bench/installed"
-/* The producer's result once lane D's campaign is READY: composition, the
- * authority and MEASURED (#881 PR 3) are not wired yet. */
-#define BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED BQ_UNSUPPORTED
+/* The reviewed #619 adapter (`bench_throughput retirement-replay`), the
+ * service-installed throughput tool the smoke recipe also runs; the
+ * profile's adapter-sha256= pins its bytes. */
+#define BQ_RETIREMENT_WORKER_UNIT_ADAPTER "/usr/local/libexec/buster-bench-throughput"
 /* A candidate UID asking the producer to resolve buster-bench-candidate, as
  * bq_retirement_unit_build does. */
 #define BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP ((uid_t)-1)
@@ -77,21 +78,24 @@ typedef struct BqRetirementWorkerUnitSeams
     char const* broker;
     char const* broker_workspaces;
     uid_t candidate_uid;
+    /* The composer's adapter executable (absolute). */
+    char const* adapter;
     /* Test seam of the gate (bq_retirement_unit_gate_pinned): an observation
      * of the pinned row plan instead of running it. NULL in production. */
     BqRetirementRowObserved const* supplied;
 } BqRetirementWorkerUnitSeams;
 
-/* Every digest pin a retirement job needs through READY: the ready record's
- * inputs, the reviewed campaign budget and the untimed-command contract
- * (retirement_worker_campaign.c); PR 4 adds the adapter pin. */
+/* Every digest pin a retirement job needs through MEASURED: the ready
+ * record's inputs, the reviewed campaign budget and the untimed-command
+ * contract (retirement_worker_campaign.c), and the composer's adapter and the
+ * #511 binding context (retirement_worker_compose.c). */
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "contract-sha256=", "support-declaration-sha256=", "inventory-sha256=", "toolchain-manifest-sha256=",
     "build-driver-sha256=", "reference-template-sha256=", "reference-inventory-sha256=",
     "validator-source-applicability-sha256=", "census-inputs-sha256=", "census-rows-sha256=",
     "census-manifest-sha256=", "validator-report-sha256=", "validator-applicability-sha256=",
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
-    "campaign-budget-sha256=", "untimed-commands-sha256="};
+    "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256="};
 
 /* The only admitting status line; the compiled profile says status=blocked. */
 #define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "status=admitted"
@@ -133,7 +137,7 @@ BUSTER_GLOBAL_LOCAL BqRetirementWorkerUnitSeams bq_retirement_worker_unit_instal
         .installed_root = BQ_RETIREMENT_WORKER_UNIT_INSTALLED_ROOT, .driver = BQ_RETIREMENT_BUILD_DRIVER,
         .toolchain_root = BQ_RETIREMENT_TOOLCHAIN_ROOT, .broker = BQ_RETIREMENT_UNIT_BROKER,
         .broker_workspaces = BQ_RETIREMENT_STAGE_WORKSPACE_ROOT,
-        .candidate_uid = BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP};
+        .candidate_uid = BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP, .adapter = BQ_RETIREMENT_WORKER_UNIT_ADAPTER};
     return seams;
 }
 
@@ -168,11 +172,12 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_worker_unit_cancel(int signal_number)
 }
 
 /* Design steps 1 to 10 in the producer, then the in-unit campaign through
- * READY with the result root as lane E's store root. Each step checks the
- * cancellation descriptor and the deadline itself; the stop reason is also
- * rechecked between steps. Everything is released in reverse on every path.
- * The build sends PREPARING, the written record's digest goes out in
- * RETIREMENT_READY, and the campaign sends SETTLING and MEASURING. */
+ * READY and composition with the result root as lane E's store root. Each
+ * step checks the cancellation descriptor and the deadline itself; the stop
+ * reason is also rechecked between steps. Everything is released in reverse
+ * on every path. The build sends PREPARING, the written record's digest goes
+ * out in RETIREMENT_READY, the campaign sends SETTLING and MEASURING, and
+ * the composition sends MEASURED with the authority digest. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
     u64 attempt_token, char const* workspace_root, char const* result_root, int phase_descriptor, int cancellation_fd,
     char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns, char ready_sha256[SHA256_HEX_CAPACITY])
@@ -238,9 +243,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
     BqRetirementCampaignUnitStore unit = {store, workspaces, installed, root, seams->profile, seams->census_profile,
                                           seams->driver, seams->toolchain_root, seams->broker, seams->broker_workspaces};
     if (result == BQ_OK)
-        result = bq_retirement_worker_campaign_run(&unit, &phases, cancellation_fd, deadline_ns, results, &prepared.job,
-                                                   &projection, &gate, preparation_sha256, ready_sha256);
-    if (result == BQ_OK) result = BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED;
+        result = bq_retirement_worker_campaign_run(&unit, &phases, cancellation_fd, deadline_ns, results, result_root,
+                                                   seams->adapter, &prepared.job, &projection, &gate, preparation_sha256,
+                                                   ready_sha256);
     if (!bq_retirement_unit_gate_release(&gate) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_oracle_release(&oracle) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_projection_release(&projection) && result == BQ_OK) result = BQ_IO;
@@ -291,8 +296,7 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSe
                                                             phase_descriptor, self_pipe[0], preparation_sha256,
                                                             deadline_ns, ready_sha256) : BQ_IO;
     if (ready_sha256[0])
-        fprintf(stderr, "retirement worker-unit: ready record %s; campaign result %d%s\n", ready_sha256, (int)result,
-                result == BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED ? " (READY; composition is not wired yet)" : "");
+        fprintf(stderr, "retirement worker-unit: ready record %s; campaign result %d\n", ready_sha256, (int)result);
     close(phase_descriptor);
     for (u32 side = 0; side < 2; side += 1)
         if (self_pipe[side] >= 0) close(self_pipe[side]);
@@ -335,9 +339,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_unit_wait(pid_t producer, u64 boun
  * the lease and the keeper; the producer is the phase channel's only writer,
  * so the parent's copy is closed at once and the coordinator sees EOF when
  * the producer exits. A SIGTERM to the unit process is forwarded. The
- * producer's exit status is its BqError; exit 0 cannot be a success before
- * MEASURED is wired (BQ_WORKER_FAILED), and a producer killed by a signal or
- * at the bound never proved its descendants absent (BQ_CLEANUP_FAILED). */
+ * producer's exit status is its BqError (0 after MEASURED and the
+ * manifest), and a producer killed by a signal or at the bound never proved
+ * its descendants absent (BQ_CLEANUP_FAILED). */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
     u64 attempt_token, char const* workspace_root, char const* result_root, int lease_descriptor,
     int* phase_descriptor, char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns)
@@ -389,7 +393,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnit
     int code = reaped == producer && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     if (result == BQ_OK)
         result = !exited || reaped != producer || WIFSIGNALED(status) ? BQ_CLEANUP_FAILED :
-                 code > BQ_OK && code <= BQ_EXPORT_TIMEOUT ? (BqError)code : BQ_WORKER_FAILED;
+                 code >= BQ_OK && code <= BQ_EXPORT_TIMEOUT ? (BqError)code : BQ_WORKER_FAILED;
     /* A SIGTERM held since the forwarder was disarmed would be delivered
      * under the restored disposition and end the unit before it stops its
      * keeper and releases the lease: consume it and report the cancellation

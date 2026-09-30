@@ -2185,6 +2185,8 @@ BUSTER_GLOBAL_LOCAL u32 bq_worker_test_cancel_during_finish;
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
                                                        BqWorkerFinalization* finalization);
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_seamed(BqJob const* job,
+                                                                     BqRetirementWorkerUnitSeams const* seams);
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
                                                        BqWorkerFinalization* finalization);
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
@@ -2254,7 +2256,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_before_terminal(BqQueue* queue, BqJob* job
     if (error == BQ_OK && finalization->config && finalization->config->production_path)
         error = bq_worker_result_validate(finalization->config, job, finalization);
     if (error == BQ_OK && finalization->config && finalization->config->production_path && job && finalization->result_bound)
-        error = job->result_bound ? bq_worker_result_binding_validate(job) :
+        error = job->result_bound ? bq_worker_result_binding_validate_seamed(job, finalization->retirement) :
                 bq_result_bind(queue, job, string_from_pointer(finalization->result_root), finalization->result_digest,
                                finalization->bundle_digest, finalization->full_digest);
     /* Result validation and binding may hash and sync the whole bundle. Keep
@@ -2931,12 +2933,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_sync_tree(int result_directory)
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
+/* A bound result's manifest, bundle and full digests are still the ones the
+ * queue recorded. The service recipe is admitted; the retirement recipe only
+ * when the seams' profile is complete (bq_retirement_profile_complete, #881
+ * PR 3), which the compiled blocked profile never is, so every production
+ * caller (the non-pinned entries) still refuses it. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_pinned(BqJob const* job, int result_directory,
+                                                                     BqRetirementWorkerUnitSeams const* seams)
 {
     char path[BQ_PATH_CAP + 1] = {0};
     BqRecipeFiles recipe;
     BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
-    BqError error = job && job->result_bound && bq_recipe_service(selected) && bq_recipe_files(selected, &recipe) &&
+    bool admitted = bq_recipe_service(selected) || (selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && seams &&
+                                                    bq_retirement_profile_complete(seams->profile));
+    BqError error = job && job->result_bound && admitted && bq_recipe_files(selected, &recipe) &&
                     bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
                     path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     struct stat directory_info = {0};
@@ -3025,17 +3035,31 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* jo
     return error;
 }
 
-BqError bq_worker_result_binding_validate(BqJob const* job)
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
+{
+    BqError error = bq_worker_result_binding_validate_pinned(job, result_directory, NULL);
+    return error;
+}
+
+/* The bound result under its trusted root, with the given seams. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_seamed(BqJob const* job,
+                                                                     BqRetirementWorkerUnitSeams const* seams)
 {
     int directory = job && job->result_bound ?
         bq_worker_open_trusted_directory(string_from_pointer(job->result_root), true, false) : -1;
-    BqError error = bq_worker_result_binding_validate_at(job, directory);
+    BqError error = bq_worker_result_binding_validate_pinned(job, directory, seams);
     if (directory >= 0 && close(directory) != 0 && error == BQ_OK) error = BQ_IO;
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
-                                                       BqWorkerFinalization* finalization)
+BqError bq_worker_result_binding_validate(BqJob const* job)
+{
+    BqError error = bq_worker_result_binding_validate_seamed(job, NULL);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate_smoke(BqWorkerConfig const* config, BqJob const* job,
+                                                             BqWorkerFinalization* finalization)
 {
     char bytes[BQ_WORKER_RESULT_CAP + 1];
     char job_line[64], token_line[64], workspace_line[BQ_PATH_CAP + 32], result_line[BQ_PATH_CAP + 32];
@@ -3169,6 +3193,96 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
             finalization->result_bound = true;
         }
     }
+    return error;
+}
+
+/* The bound digests of a validated result: the manifest's, the bundle's and
+ * the full result's (BQ-RESULT-FULL-V1), recorded on first validation and
+ * required equal afterwards. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_bind_digests(BqWorkerFinalization* finalization, char const* bytes,
+                                                           u32 used, char const bundle_digest[SHA256_HEX_CAPACITY],
+                                                           char const recursive_digest[SHA256_HEX_CAPACITY])
+{
+    char result_digest[SHA256_HEX_CAPACITY], full_digest[SHA256_HEX_CAPACITY];
+    Sha256 full;
+    sha256_init(&full);
+    sha256_add(&full, "BQ-RESULT-FULL-V1", 18);
+    sha256_add(&full, bytes, used);
+    sha256_add(&full, recursive_digest, 64);
+    sha256_finish_hex(&full, (char8*)full_digest);
+    bq_digest(bytes, used, (char8*)result_digest);
+    BqError error = BQ_OK;
+    if (finalization->result_bound)
+        error = !memcmp(finalization->result_digest, result_digest, SHA256_HEX_CAPACITY) &&
+                !memcmp(finalization->bundle_digest, bundle_digest, SHA256_HEX_CAPACITY) &&
+                !memcmp(finalization->full_digest, full_digest, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    else
+    {
+        memcpy(finalization->result_digest, result_digest, sizeof(finalization->result_digest));
+        memcpy(finalization->bundle_digest, bundle_digest, sizeof(finalization->bundle_digest));
+        memcpy(finalization->full_digest, full_digest, sizeof(finalization->full_digest));
+        finalization->result_bound = true;
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_control_read(int parent, char const* name, char* body, u32 capacity,
+                                                       u32* length);
+
+/* #881 PR 3: the retirement producer's manifest
+ * (bq_retirement_worker_manifest_format) must be exactly the one the
+ * coordinator formats from its own job, attempt, roots, the ready and
+ * authority digests the channel carried, the digests of the execution
+ * receipt, the sealed result and the binding it rehashes in the result root,
+ * and the manifest's bundle digest, whose index must then validate against
+ * the whole tree (bq_worker_bundle_validate_recipe). */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate_retirement(BqWorkerConfig const* config, BqJob const* job,
+                                                                  BqWorkerFinalization* finalization)
+{
+    char bytes[BQ_WORKER_RESULT_CAP + 1], expected[BQ_WORKER_RESULT_CAP];
+    char workspace_text[BQ_PATH_CAP + 1], bundle_digest[SHA256_HEX_CAPACITY] = {0};
+    char recursive_digest[SHA256_HEX_CAPACITY] = {0}, receipt[SHA256_HEX_CAPACITY] = {0};
+    char sealed[SHA256_HEX_CAPACITY] = {0}, binding[SHA256_HEX_CAPACITY] = {0};
+    BqError error = bq_worker_result_sync_tree(finalization->result_directory);
+    u32 used = 0;
+    if (error == BQ_OK &&
+        !(bq_worker_text(config->workspace_root, workspace_text, sizeof(workspace_text)) &&
+          bq_worker_result_control_read(finalization->result_directory, finalization->recipe.manifest, bytes,
+                                        BQ_WORKER_RESULT_CAP, &used) &&
+          !memchr(bytes, 0, used)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK) bytes[used] = 0;
+    u64 size = 0;
+    int length = error == BQ_OK &&
+                 bq_worker_result_digest_line(bytes, "bundle-sha256=", bundle_digest) &&
+                 bq_worker_bundle_file_digest(finalization->result_directory, TP_RETIREMENT_EXECUTION_RECEIPT_PATH,
+                                              &size, receipt) &&
+                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_SEALED_PATH, &size,
+                                              sealed) &&
+                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_BINDING_PATH, &size,
+                                              binding) ?
+                 bq_retirement_worker_manifest_format(expected, sizeof(expected), job->id, job->token,
+                     string_from_pointer(workspace_text), finalization->result_root,
+                     finalization->retirement_ready_sha256, finalization->retirement_authority_sha256, receipt, sealed,
+                     binding, bundle_digest) : -1;
+    if (error == BQ_OK && !(length > 0 && (u32)length == used && !memcmp(expected, bytes, used)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK)
+        error = bq_worker_bundle_validate_recipe(finalization->result_directory, &finalization->recipe, bundle_digest,
+                                                 recursive_digest);
+    if (error == BQ_OK) error = bq_worker_result_bind_digests(finalization, bytes, used, bundle_digest, recursive_digest);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
+                                                       BqWorkerFinalization* finalization)
+{
+    bool admitted = job && config && finalization && finalization->result_directory >= 0 &&
+                    bq_worker_finalization_recipe(job, finalization);
+    bool retirement = admitted && bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    BqError error = !admitted ? BQ_CONFIGURATION_MISMATCH :
+                    retirement ? bq_worker_result_validate_retirement(config, job, finalization) :
+                    bq_worker_result_validate_smoke(config, job, finalization);
     return error;
 }
 
@@ -3941,9 +4055,10 @@ BUSTER_GLOBAL_LOCAL void bq_worker_retirement_reload(BqQueue* queue, BqJob const
 
 /* #881 PR 4: a retirement job succeeds only if the coordinator's replay of
  * its attempt workspace reproduces the ready record whose digest the
- * RETIREMENT_READY packet carried (bq_retirement_coordinator_replay), and the
- * authority the MEASURED packet named is still copied, journalled and bound
- * to the coordinator's facts (bq_retirement_coordinator_authority_complete).
+ * RETIREMENT_READY packet carried, the authority the MEASURED packet named is
+ * still copied, journalled and bound to the coordinator's facts, and (#881
+ * PR 3) that authority's plan and final context are the ones the coordinator
+ * derives itself from the replay (bq_retirement_coordinator_finalize).
  * Missing digests are reloaded from the durable records first; a missing
  * digest or seam fails. A cancellation or the execution deadline (backend
  * clock) before or after the replay stops it. Other recipes pass unchanged. */
@@ -3958,14 +4073,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_finalize(BqQueue* queue, BqJob 
     BqError error = !retirement ? BQ_OK : !bound ? BQ_WORKER_MISMATCH :
                     bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
                     bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT :
-                    bq_retirement_coordinator_replay(finalization->retirement, finalization->config->workspace_root,
-                        job->id, job->token, finalization->retirement_preparation_sha256,
-                        finalization->retirement_ready_sha256);
-    if (retirement && error == BQ_OK)
-        error = bq_retirement_coordinator_authority_complete(finalization->result_directory,
-            finalization->config->workspace_root, queue->directory_fd, job->id, job->token,
-            finalization->retirement->profile, finalization->retirement_preparation_sha256,
-            finalization->retirement_ready_sha256, finalization->retirement_authority_sha256);
+                    bq_retirement_coordinator_finalize(finalization->retirement, finalization->config->workspace_root,
+                        finalization->result_directory, queue->directory_fd, job->id, job->token,
+                        finalization->retirement_preparation_sha256, finalization->retirement_ready_sha256,
+                        finalization->retirement_authority_sha256);
     if (retirement && error == BQ_OK)
         error = bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
                 bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT : BQ_OK;
@@ -4032,7 +4143,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
         if (error == BQ_OK && job->phase < BQ_CLEANING) error = bq_real_advance(queue, job, BQ_CLEANING, outcome);
         if (production && job && job->result_bound)
         {
-            evidence = bq_worker_result_binding_validate(job);
+            evidence = bq_worker_result_binding_validate_seamed(job, finalization ? finalization->retirement : NULL);
         }
         else if (production && finalization && finalization->result_directory >= 0)
         {

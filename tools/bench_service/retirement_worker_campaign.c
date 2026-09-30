@@ -1,7 +1,8 @@
-/* In-unit #881-D campaign of the retirement producer (#881, PR 2 of 4).
+/* In-unit #881-D campaign of the retirement producer (#881, PRs 2 and 3).
  *
  * Ownership: the worker-unit producer's SETTLING and MEASURING stages, from
- * lane B's ready record to lane D's READY. retirement_worker_unit.c calls
+ * lane B's ready record to lane D's READY, then composition to MEASURED
+ * (retirement_worker_compose.c). retirement_worker_unit.c calls
  * bq_retirement_worker_campaign_run after the ready record; everything here
  * is service code compiled only into the service translation unit (main.c
  * includes this file after retirement_campaign_service.h and before
@@ -24,16 +25,21 @@
  *              lane E's store plan (bq_retirement_worker_store_plan), attach,
  *              documents, A/A, admission, post-A/A document, freeze, A/B and
  *              READY on the post-sample record stream
- * It stops there: composition, the authority and MEASURED are PR 3, so a
- * READY campaign still fails closed (BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED in
- * retirement_worker_unit.c). Production A/A admission has no authority
- * (#426, #1021) and stays compiled out; the preparation fixture compiles the
- * driver's fixture admission and supplies the receipt stand-in
- * (bq_retirement_worker_campaign_fixture_receipt).
+ *   MEASURED   (#881 PR 3) bq_retirement_worker_compose
+ *              (retirement_worker_compose.c): the binding, composition, the
+ *              receipt authority and context chain, MEASURED carrying the
+ *              authority digest, then the result manifest and bundle
+ * The retirement-worker entries of the result root are reserved before
+ * timing (BQ_RETIREMENT_WORKER_RESULT_ENTRIES: the control files, the phase
+ * receipts, the binding and its admission receipt). Production A/A
+ * admission has no authority (#426, #1021) and stays compiled out; the
+ * preparation fixture compiles the driver's fixture admission and supplies
+ * the receipt stand-in (bq_retirement_worker_campaign_fixture_receipt).
  *
  * Entry point: bq_retirement_worker_campaign_run. Release in reverse on
- * every path: bq_retirement_worker_campaign_release (store abort, campaign
- * poison, ready record, held binaries, plans, streams, arena); orphans a
+ * every path: bq_retirement_worker_campaign_release (store abort unless
+ * composed, campaign poison, ready record, held binaries, plans, streams,
+ * arena); orphans a
  * killed launch left reparented to the producer's subreaper are killed and
  * reaped first (bq_retirement_check_sweep), and a failure is retained as
  * retirement-campaign/campaign-failure.txt in the attempt
@@ -105,12 +111,17 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_directories[BQ_RETIRE
 /* Staged streams of one attempt: never more than the store holds. */
 #define BQ_RETIREMENT_WORKER_STREAMS_MAX TP_RETIREMENT_STORE_FILES
 /* The result root's worker-written entries (the control files: manifest,
- * bundle and outcome; and the coordinator's five BQPHASE2 worker-phase-N
- * receipts) are inventoried beside the store's files, so the store plan
- * reserves them as external entries, each at the bundle's per-file cap: the
- * store then keeps its files plus those entries within the bundle's entry
- * cap. */
-#define BQ_RETIREMENT_WORKER_RESULT_ENTRIES (BQ_WORKER_BUNDLE_CONTROL_ENTRIES + BQ_WORKER_RETIREMENT_PHASE_RECEIPTS)
+ * bundle and outcome; the coordinator's five BQPHASE2 worker-phase-N
+ * receipts; and the producer's #511 binding document and A/A admission
+ * receipt, retirement_worker_compose.c) are inventoried beside the store's
+ * files, so the store plan reserves them as external entries, each at the
+ * bundle's per-file cap: the store then keeps its files plus those entries
+ * within the bundle's entry cap. D's five documents are the plan's prior
+ * entries and the authority and its context chain live in the attempt
+ * workspace, outside the result root. */
+#define BQ_RETIREMENT_WORKER_BINDING_ENTRIES 2u
+#define BQ_RETIREMENT_WORKER_RESULT_ENTRIES \
+    (BQ_WORKER_BUNDLE_CONTROL_ENTRIES + BQ_WORKER_RETIREMENT_PHASE_RECEIPTS + BQ_RETIREMENT_WORKER_BINDING_ENTRIES)
 #define BQ_RETIREMENT_WORKER_CONTROL_BYTES ((u64)BQ_RETIREMENT_WORKER_RESULT_ENTRIES * BQ_WORKER_BUNDLE_FILE_CAP)
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_FILES <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
@@ -361,7 +372,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_untimed_command(BqRetirementRowTem
  * reproduce the gate's artifact; an object group runs its contract template
  * over its members, each expected to reproduce the gate's artifact and
  * diagnostic, with the reviewed budget's metrics bound. Response files are
- * written into the work directory. */
+ * written into the work directory, except with BQ_RETIREMENT_WORKER_DERIVE_ONLY
+ * (the coordinator's derivation of the execution plan, which launches
+ * nothing). */
+#define BQ_RETIREMENT_WORKER_DERIVE_ONLY (-1)
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_untimed_build(Arena* arena, int work, BqRetirementRowPlan const* plan,
     BqRetirementCorrectness const* gate, BqRetirementDocumentPartition const* partition,
     BqRetirementWorkerUntimedContract const* contract, TpRetirementCampaignBudget const* budget,
@@ -369,8 +383,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_untimed_build(Arena* arena, int wo
 {
     u32 groups = partition ? partition->count : 0, rows = partition ? partition->row_count : 0;
     *untimed = (BqRetirementWorkerUntimed){0};
-    bool ok = arena && work >= 3 && plan && gate && contract && budget && groups && groups <= TP_RETIREMENT_MAX_CELLS &&
-              contract->group_count == partition->object_groups;
+    bool ok = arena && (work >= 3 || work == BQ_RETIREMENT_WORKER_DERIVE_ONLY) && plan && gate && contract && budget &&
+              groups && groups <= TP_RETIREMENT_MAX_CELLS && contract->group_count == partition->object_groups;
     if (ok)
     {
         untimed->batches = bq_retirement_worker_allocate(arena, 4u * groups, sizeof(*untimed->batches));
@@ -434,7 +448,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_untimed_build(Arena* arena, int wo
                 *batch = (TpRetirementBatchContract){entry->target, entry->allocator, entry->metrics, inputs, members,
                                                      0, bound};
                 ok = ok && tp_retirement_batch_contract_valid(batch) && tp_retirement_batch_input_list_leaf(batch, leaf) &&
-                     bq_retirement_worker_input_list(work, batch);
+                     (work == BQ_RETIREMENT_WORKER_DERIVE_ONLY || bq_retirement_worker_input_list(work, batch));
                 BqRetirementRowContext context = {.metrics = entry->metrics, .inputs = leaf, .side = variant,
                                                   .label = 1};
                 ok = ok && bq_retirement_worker_untimed_command(plan->templates + entry->template_index, &context, "",
@@ -836,9 +850,21 @@ typedef struct BqRetirementWorkerCampaign
     TpRetirementCampaignStorePlan store_plan;
     TpRetirementFamilyCounts family;
     uint64_t document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
+    /* The A/A admission receipt the admission step verified (fixture only:
+     * production admission is compiled out), which the binding names. */
+    char aa_receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX];
+    u32 aa_receipt_bytes;
     int attempt, directory, directories[BQ_RETIREMENT_WORKER_DIRECTORIES];
-    bool begun;
+    /* composed: the authority is issued over the store, which is then
+     * closed rather than aborted. */
+    bool begun, composed;
 } BqRetirementWorkerCampaign;
+
+/* Composition, the authority and MEASURED (retirement_worker_compose.c). */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_compose(BqRetirementWorkerCampaign* campaign,
+    BqRetirementCampaignUnitStore const* unit, BqJob const* job, BqRetirementUnitGate const* unit_gate, int result_root,
+    char const* result_path, char const* adapter, char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const ready_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns);
 
 /* The attempt's new, private campaign directory and its sub-directories. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_directories_open(BqRetirementWorkerCampaign* campaign, int workspaces,
@@ -1242,6 +1268,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWor
 #endif
     if (result == BQ_OK && !bq_retirement_unit_campaign_admit(driver, &admission))
         result = driver->failure.reason ? BQ_RECIPE_MISMATCH : BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED;
+    /* The admitted receipt's bytes, which the binding names. */
+    if (result == BQ_OK && admission.receipt && admission.receipt_bytes <= sizeof(campaign->aa_receipt))
+    {
+        memcpy(campaign->aa_receipt, admission.receipt, admission.receipt_bytes);
+        campaign->aa_receipt_bytes = admission.receipt_bytes;
+    }
     if (result == BQ_OK &&
         !(bq_retirement_unit_campaign_post_aa_document(driver, sources) &&
           bq_retirement_worker_documents_sized(campaign, BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA,
@@ -1313,7 +1345,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_release(BqRetirementWorke
     bool ok = true;
     if (campaign->store.root >= 0)
     {
-        tp_retirement_store_abort(&campaign->store, NULL);
+        if (!campaign->composed) tp_retirement_store_abort(&campaign->store, NULL);
         tp_retirement_store_close(&campaign->store);
     }
     tp_retirement_campaign_poison(&campaign->campaign);
@@ -1340,14 +1372,16 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_release(BqRetirementWorke
     return ok;
 }
 
-/* After the ready record: SETTLING, MEASURING and the campaign through
- * READY. Returns BQ_OK only for a READY campaign, whose post-sample record
- * and streams are published in the result store; any other result retains
- * the failure. Everything is released before it returns. */
+/* After the ready record: SETTLING, MEASURING, the campaign through READY,
+ * then composition, the authority, MEASURED and the result's manifest
+ * (bq_retirement_worker_compose). Returns BQ_OK only once the manifest is
+ * written; any other result retains the failure. Everything is released
+ * before it returns. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_run(BqRetirementCampaignUnitStore const* unit,
-    BqPhaseChannel* phases, int cancellation_fd, u64 deadline_ns, int result_root, BqJob const* job,
-    BqRetirementProjection const* projection, BqRetirementUnitGate const* unit_gate,
-    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY])
+    BqPhaseChannel* phases, int cancellation_fd, u64 deadline_ns, int result_root, char const* result_path,
+    char const* adapter, BqJob const* job, BqRetirementProjection const* projection,
+    BqRetirementUnitGate const* unit_gate, char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const ready_sha256[SHA256_HEX_CAPACITY])
 {
     BqRetirementWorkerCampaign* campaign = calloc(1, sizeof(*campaign));
     BqError result = campaign && unit && phases && job && projection && unit_gate && result_root >= 0 ? BQ_OK : BQ_IO;
@@ -1372,6 +1406,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_run(BqRetirementCampai
         result = bq_retirement_worker_campaign_bind(campaign, unit, phases, cancellation_fd, deadline_ns, job,
                                                     unit_gate, ready_sha256, result_root, &sources);
     if (result == BQ_OK) result = bq_retirement_worker_campaign_stages(campaign, &sources);
+    if (result == BQ_OK)
+        result = bq_retirement_worker_compose(campaign, unit, job, unit_gate, result_root, result_path, adapter,
+                                              preparation_sha256, ready_sha256, deadline_ns);
     BqRetirementUnitCampaignFailure failure = campaign ? bq_retirement_unit_campaign_failure(&campaign->driver) :
                                                          (BqRetirementUnitCampaignFailure){0};
     if (result != BQ_OK && failure.reason) result = bq_retirement_worker_campaign_error(&failure, result);

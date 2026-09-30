@@ -137,7 +137,7 @@ class ExportReplayTest(unittest.TestCase):
         arguments = mock.Mock(
             download=self.archive, destination=self.root / "fresh",
             test_publication=self.destination, bench_service=self.root / "trusted-utility",
-            repository_root=self.root, binding="record.json", job=self.job,
+            repository_root=self.root, binding=replay.COMPOSER_BINDING_PATH, job=self.job,
             attempt=self.attempt, full_result_sha256=self.full_digest,
             export_receipt_sha256=self.receipt_sha256,
             trusted_execution_receipt_sha256="b" * 64,
@@ -155,7 +155,7 @@ class ExportReplayTest(unittest.TestCase):
             download=self.archive, destination=self.root / "fresh",
             test_publication=self.destination, retrieval=None,
             bench_service=self.root / "trusted-utility", repository_root=self.root,
-            binding="record.json", job=self.job, attempt=self.attempt,
+            binding=replay.COMPOSER_BINDING_PATH, job=self.job, attempt=self.attempt,
             full_result_sha256=self.full_digest,
             export_receipt_sha256=self.receipt_sha256,
             trusted_execution_receipt_sha256="b" * 64,
@@ -209,7 +209,7 @@ class ExportReplayTest(unittest.TestCase):
     def test_publisher_and_consumer_are_separate_cli_processes(self):
         command = [sys.executable, str(Path(replay.__file__).resolve())]
         identities = ["--bench-service", str(self.root / "reviewed-service"),
-                      "--repository-root", str(self.root), "--binding", "record.json",
+                      "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                       "--job", str(self.job), "--attempt", str(self.attempt),
                       "--full-result-sha256", self.full_digest,
                       "--export-receipt-sha256", self.receipt_sha256,
@@ -265,7 +265,7 @@ class ExportReplayTest(unittest.TestCase):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
                    str(self.archive), "--publish-only", "--test-publication",
                    str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
-                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                    "--job", str(self.job), "--attempt", str(self.attempt),
                    "--full-result-sha256", self.full_digest,
                    "--trusted-execution-receipt-sha256", "b" * 64]
@@ -445,22 +445,28 @@ class ExportReplayTest(unittest.TestCase):
         self.assertFalse(ledger["per_file_fits"])
         self.assertFalse(ledger["fits"])
 
-    def test_composer_hook_fixes_the_binding_location(self):
-        self.assertIsNone(replay.COMPOSER_BINDING_PATH)
-        self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
-        with mock.patch.object(replay, "COMPOSER_BINDING_PATH", "retirement/binding.json"):
-            self.assertEqual(str(replay.composer_binding_path("retirement/binding.json")),
-                             "retirement/binding.json")
-            with self.assertRaisesRegex(ValueError, "composer"):
-                replay.composer_binding_path("other/binding.json")
-            with self.assertRaises(ValueError):
-                replay.composer_binding_path("../binding.json")
+    def test_composer_fixes_the_binding_location(self):
+        # The worker-unit producer's BQ_RETIREMENT_WORKER_BINDING_PATH.
+        root = Path(replay.__file__).resolve().parents[2]
+        source = (root / "tools/bench_service/retirement_worker_compose.c").read_text(encoding="utf-8")
+        match = re.search(r'^#define BQ_RETIREMENT_WORKER_BINDING_PATH "([^"]+)"$', source, re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertEqual(replay.COMPOSER_BINDING_PATH, match.group(1))
+        self.assertEqual(str(replay.composer_binding_path(replay.COMPOSER_BINDING_PATH)),
+                         replay.COMPOSER_BINDING_PATH)
+        for other in ("any/record.json", "other/" + replay.COMPOSER_BINDING_PATH):
+            with self.subTest(other=other), self.assertRaisesRegex(ValueError, "composer"):
+                replay.composer_binding_path(other)
+        with self.assertRaises(ValueError):
+            replay.composer_binding_path("../binding.json")
+        with mock.patch.object(replay, "COMPOSER_BINDING_PATH", None):
+            self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
 
     def test_publish_only_capacity_output_does_not_claim_replay(self):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
                    str(self.archive), "--publish-only", "--test-publication",
                    str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
-                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                    "--job", str(self.job), "--attempt", str(self.attempt),
                    "--full-result-sha256", self.full_digest,
                    "--trusted-execution-receipt-sha256", "b" * 64,

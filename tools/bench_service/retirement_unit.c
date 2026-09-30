@@ -35,6 +35,11 @@
  *                                   only for a gate whose seal verifies
  *   bq_retirement_unit_replay       coordinator side: re-derive and compare
  *                                   every digest the record binds
+ *   bq_retirement_unit_replay_kept  the same, keeping the replayed objects
+ *                                   and a re-issued gate (BqRetirementUnitReplayed,
+ *                                   bq_retirement_unit_replayed_release) for
+ *                                   the coordinator's derivation of the
+ *                                   authority's plan and contexts (#881 PR 3)
  *
  * Map: bq_retirement_unit_store_closed checks the sealed export's exact
  * contents; bq_retirement_unit_prepare_pinned is the profile seam that the
@@ -1768,11 +1773,46 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_replay_authority(BqRetirementUnitPre
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore store, int workspaces, int installed,
+/* What a successful replay re-derived, kept for the coordinator's
+ * derivation of the authority's plan and pre-sample context (#881 PR 3,
+ * retirement_coordinator.c): the prepared attempt, the imported builds, the
+ * projection, the row plan re-imported from its pin and the gate re-admitted
+ * over the persisted row evidence. The gate and projection borrow from the
+ * others, so they are released together (bq_retirement_unit_replayed_release). */
+typedef struct BqRetirementUnitReplayed
+{
+    BqRetirementUnitPrepared prepared;
+    BqRetirementUnitBuilt built;
+    BqRetirementProjection projection;
+    BqRetirementRowPlan plan;
+    BqRetirementUnitGate gate;
+    bool kept;
+} BqRetirementUnitReplayed;
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_replayed_release(BqRetirementUnitReplayed* replayed)
+{
+    bool ok = true;
+    if (replayed && replayed->kept)
+    {
+        bq_retirement_unit_gate_release(&replayed->gate);
+        if (replayed->plan.owned && !bq_retirement_row_plan_release(&replayed->plan)) ok = false;
+        if (!bq_retirement_projection_release(&replayed->projection)) ok = false;
+        if (!bq_retirement_unit_built_release(&replayed->built)) ok = false;
+        if (!bq_retirement_unit_release(&replayed->prepared)) ok = false;
+    }
+    if (replayed) replayed->kept = false;
+    return ok;
+}
+
+/* bq_retirement_unit_replay_pinned; with `kept`, a successful replay moves
+ * its re-derived objects there instead of releasing them. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_kept(BqRetirementStore store, int workspaces, int installed,
     u64 job_id, u64 attempt_token, String8 workspace_root, String8 profile, String8 census_profile,
     char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
-    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY])
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementUnitReplayed* kept)
 {
+    if (kept) kept->kept = false;
     BqRetirementUnitPrepared prepared = {.policy = {.clang = -1, .inventory = -1}};
     BqRetirementUnitBuilt built = {.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}}};
     BqRetirementProjection projection = {0};
@@ -1890,6 +1930,27 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
     if (result == BQ_OK)
         result = bq_retirement_unit_ready_format(&facts, expected, capacity, &expected_length) &&
                  expected_length == length && !memcmp(expected, text, length) ? BQ_OK : BQ_CORRUPT;
+    /* A kept replay hands over what it re-derived; the locals are left in
+     * their released state. */
+    if (result == BQ_OK && kept)
+    {
+        /* The frozen batch groups the correctness gate points into move with
+         * it (as bq_retirement_unit_gate_pinned keeps them), and the seal the
+         * replay just verified against the re-derived facts marks it issued
+         * for the derivation's command builder, which requires that marker. */
+        gate.joined = joined;
+        joined = (BqRetirementRowJoined){0};
+        memcpy(gate.evidence_sha256, check_evidence, SHA256_HEX_CAPACITY);
+        memcpy(gate.row_evidence_sha256, row_evidence, SHA256_HEX_CAPACITY);
+        memcpy(gate.seal_sha256, gate_seal, SHA256_HEX_CAPACITY);
+        gate.issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED;
+        *kept = (BqRetirementUnitReplayed){prepared, built, projection, plan, gate, true};
+        prepared = (BqRetirementUnitPrepared){.policy = {.clang = -1, .inventory = -1}};
+        built = (BqRetirementUnitBuilt){.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}}};
+        projection = (BqRetirementProjection){0};
+        plan = (BqRetirementRowPlan){0};
+        gate = (BqRetirementUnitGate){0};
+    }
     bq_retirement_unit_gate_release(&gate);
     bq_retirement_row_joined_release(&joined);
     bq_retirement_row_observed_release(&observed);
@@ -1910,6 +1971,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
     if (!bq_retirement_projection_release(&projection) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_built_release(&built) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_release(&prepared) && result == BQ_OK) result = BQ_IO;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore store, int workspaces, int installed,
+    u64 job_id, u64 attempt_token, String8 workspace_root, String8 profile, String8 census_profile,
+    char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY])
+{
+    BqError result = bq_retirement_unit_replay_kept(store, workspaces, installed, job_id, attempt_token, workspace_root,
+        profile, census_profile, driver, toolchain_root, broker, broker_workspaces, preparation_sha256, ready_sha256,
+        NULL);
     return result;
 }
 

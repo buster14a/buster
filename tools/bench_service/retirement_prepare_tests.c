@@ -1,6 +1,12 @@
 /* Dedicated #1018 fixture. Compile against tools/throughput/shared.c; this
  * intentionally does not change the shared service test registration owned by
  * the #923 integrator. It uses the real descriptor-backed materializer.
+ *
+ * Entry point: main. With no argument it runs every fixture
+ * (bq_prep_test_suite); `worker-unit` runs only the worker-unit fixtures;
+ * `retirement-replay --input I --output O` is the worker-unit composition's
+ * adapter stand-in (bq_prep_worker_unit_adapter), which the composer executes
+ * from this binary by its pinned digest (#881 PR 3).
  */
 #define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 /* The worker-unit campaign fixture (retirement_worker_unit_tests.h) admits
@@ -3276,7 +3282,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 #include "retirement_unit_campaign_tests.h"
 #include "retirement_worker_unit_tests.h"
 
-int main(void)
+/* Every fixture of this runner (the default mode). */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_suite(void)
 {
     bq_test_worker_budget_crosscheck();
     bq_check_test_runner();
@@ -3475,7 +3482,29 @@ int main(void)
         bq_prep_test_cleanup(installed);
     }
     bq_prep_test_large_manifest();
-    printf("RETIREMENT_PREP_TEST assertions=%u failures=%u\n", bq_retirement_tests, bq_retirement_failures);
-    int result = bq_retirement_failures ? 1 : 0;
+}
+
+/* Modes: no argument runs every fixture; `worker-unit` runs only the
+ * worker-unit fixtures (bq_prep_test_worker_store_plan and
+ * bq_prep_test_worker_unit); `retirement-replay --input I --output O` is the
+ * worker-unit fixture's composer adapter (bq_prep_worker_unit_adapter), which
+ * the composer executes from this binary. */
+int main(int argc, char** argv)
+{
+    bool adapter = argc == 6 && !strcmp(argv[1], "retirement-replay") && !strcmp(argv[2], "--input") &&
+                   !strcmp(argv[4], "--output");
+    int result = 0;
+    if (adapter) result = bq_prep_worker_unit_adapter(argv[3], argv[5]);
+    else
+    {
+        if (argc == 2 && !strcmp(argv[1], "worker-unit"))
+        {
+            bq_prep_test_worker_store_plan();
+            bq_prep_test_worker_unit();
+        }
+        else bq_prep_test_suite();
+        printf("RETIREMENT_PREP_TEST assertions=%u failures=%u\n", bq_retirement_tests, bq_retirement_failures);
+        result = bq_retirement_failures ? 1 : 0;
+    }
     return result;
 }
