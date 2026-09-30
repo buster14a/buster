@@ -357,9 +357,9 @@ def lag_one_correlation(values: list[float]) -> float | None:
     right = values[1:]
     left_mean = statistics.fmean(left)
     right_mean = statistics.fmean(right)
-    numerator = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
-    left_norm = sum((a - left_mean) ** 2 for a in left)
-    right_norm = sum((b - right_mean) ** 2 for b in right)
+    numerator = math.fsum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
+    left_norm = math.fsum((a - left_mean) ** 2 for a in left)
+    right_norm = math.fsum((b - right_mean) ** 2 for b in right)
     denominator = math.sqrt(left_norm * right_norm)
     return numerator / denominator if denominator else None
 
@@ -369,10 +369,10 @@ def relative_drift_per_pair(values: list[float]) -> float | None:
         return None
     x_mean = (len(values) - 1) * 0.5
     y_mean = statistics.fmean(values)
-    denominator = sum((index - x_mean) ** 2 for index in range(len(values)))
+    denominator = math.fsum((index - x_mean) ** 2 for index in range(len(values)))
     if denominator == 0.0 or y_mean == 0.0:
         return None
-    slope = sum((index - x_mean) * (value - y_mean) for index, value in enumerate(values)) / denominator
+    slope = math.fsum((index - x_mean) * (value - y_mean) for index, value in enumerate(values)) / denominator
     return slope / y_mean
 
 
