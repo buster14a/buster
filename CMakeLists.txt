@@ -767,7 +767,7 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
         set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
     elseif (C_COMPILER_GNU_FAMILY)
         set(BUSTER_LINUX_ASAN_RUNTIME_NAMES)
-        if (C_COMPILER_CLANG_FAMILY)
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG)
             if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
                 set(BUSTER_LINUX_ASAN_ARCH x86_64)
             elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
@@ -777,11 +777,12 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
             if (BUSTER_LINUX_ASAN_ARCH)
                 list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES
                     "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so"
-                    "libclang_rt.asan.so"
                 )
             endif()
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libclang_rt.asan.so")
+        elseif (C_COMPILER_GNU)
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
         endif()
-        list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
 
         foreach(runtime_name IN LISTS BUSTER_LINUX_ASAN_RUNTIME_NAMES)
             execute_process(
@@ -790,14 +791,36 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 RESULT_VARIABLE BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT
             )
+            get_filename_component(BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME
+                "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" NAME)
             if (BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT EQUAL 0
                 AND IS_ABSOLUTE "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}"
+                AND BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME STREQUAL "${runtime_name}"
                 AND EXISTS "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}")
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" REALPATH)
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}" DIRECTORY)
                 break()
             endif()
         endforeach()
+
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND NOT BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+            set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME "libclang_rt.asan.so")
+            if (BUSTER_LINUX_ASAN_ARCH)
+                set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME
+                    "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so (or libclang_rt.asan.so)")
+            endif()
+            string(REGEX MATCH "^[0-9]+" BUSTER_LINUX_ASAN_CLANG_MAJOR
+                "${CMAKE_C_COMPILER_VERSION}")
+            set(BUSTER_LINUX_ASAN_PACKAGE_HINT
+                "Install the matching compiler-rt development package")
+            if (BUSTER_LINUX_ASAN_CLANG_MAJOR)
+                string(APPEND BUSTER_LINUX_ASAN_PACKAGE_HINT
+                    " (Debian/Ubuntu: libclang-rt-${BUSTER_LINUX_ASAN_CLANG_MAJOR}-dev)")
+            endif()
+            message(FATAL_ERROR
+                "Could not find Clang's Linux AddressSanitizer runtime ${BUSTER_LINUX_ASAN_EXPECTED_RUNTIME} for ${CMAKE_C_COMPILER}. "
+                "${BUSTER_LINUX_ASAN_PACKAGE_HINT}.")
+        endif()
     endif()
 
     if (BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
@@ -1081,6 +1104,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
     src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+    src/buster/tests/compiler/frontend/c/record_layout_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
@@ -1139,6 +1163,8 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
     src/buster/tests/compiler/frontend/c/macro_conditional_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_corpus.generated.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h

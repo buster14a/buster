@@ -114,8 +114,9 @@ unavailable gates; never call an unrun check green. Follow the existing
 
 Native-retirement generated source identities and the aggregate binding are
 integration-owned. Ordinary feature PRs must not refresh or commit them;
-the read-only gate reconstructs them ephemerally and the serialized trusted
-writer publishes the exact integrated tree. Read
+the read-only gate reconstructs them ephemerally, ordinary PRs land through
+the native queue, and an automatic catch-up publishes the pair afterwards.
+Trust transitions still go through the trusted writer first. Read
 [native-retirement rebinding](docs/native-retirement-rebinding.md) before
 changing its policy, authority code, schema, consumers, or workflows.
 
@@ -132,6 +133,16 @@ not just a proxy or generated-program runtime.
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
 index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
+
+## Project license reporting
+
+When scanning, researching, auditing, or comparing projects, include each
+project's license in the report and any resulting GitHub issue or PR. Verify
+it from license files or authoritative repository metadata at the inspected
+revision, and cite the source; include the SPDX identifier when available.
+Distinguish dual/multiple licenses and relevant component-specific licenses
+rather than presenting one license as covering everything. Explicitly mark
+missing, ambiguous, or unverified licenses; do not guess from public access.
 
 ## Forge, issues, and pull requests
 
@@ -152,6 +163,25 @@ Historical issue references may use Forgejo numbers. Resolve those through
 [docs/issue-migration-map.md](docs/issue-migration-map.md) or
 [docs/forgejo-issue-archive.md](docs/forgejo-issue-archive.md); a current GitHub
 URL already identifies its issue and must not be remapped.
+
+**Branch naming.** Read the task or issue before choosing a new branch name.
+When you control the name, use `<agent>/<issue-number>-<short-description>`,
+or `<agent>/<short-description>` when no issue exists; never invent an issue
+number. Use `claude/` for Claude and the established prefix for other agents.
+Use lowercase kebab-case for the description and name the actual change,
+not the activity of working on it. Examples (illustrative issue numbers):
+`claude/123-fix-msvc-preflight`, `claude/456-reduce-merge-queue-concurrency`,
+and `claude/document-native-abi`. Do not choose random adjective/person/animal
+names, generic `fix-issues` or `implement-changes` names, or unnecessary dates
+and identifiers.
+
+Preserve any prefix or session suffix required by the execution platform.
+If the platform has already assigned the working branch, keep it when renaming
+is unsupported or would break session/push restrictions; do not bypass those
+restrictions for cosmetic naming. Do not rename an existing PR branch or
+another session's branch merely to satisfy this convention. If a new name is
+already taken, choose a meaningful task-specific qualifier; never reset or
+reuse another session's branch.
 
 Write issue/PR bodies using structured arguments or a body file. Do not interpolate
 Markdown into shell commands. Use `--force-with-lease`, never bare `--force`,
