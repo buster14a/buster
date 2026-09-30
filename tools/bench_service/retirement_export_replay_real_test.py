@@ -683,8 +683,13 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
         archive = self.writer_bundle(name)
         with mock.patch.object(lane_f, "adapter_replay", return_value=("6" * 64, "7" * 64, "clang -O2")):
             lane_f.bind(self.result, self.work / name, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
-                        PUBLICATION_ID, "retirement-v1", f"run-{self.job}", REPOSITORY)
+                        PUBLICATION_ID, "retirement-v1", f"run-{self.job}", REPOSITORY, *self.harness())
         return self.work / name
+
+    def harness(self):
+        """The record's harness identity, trusted here as the operator's."""
+        measurement = json.loads((self.result / replay.COMPOSER_BINDING_PATH).read_bytes())["measurement"]
+        return measurement["harness_source_commit"], measurement["harness_source_tree"]
 
     def test_writer_bundle_is_deterministic_and_extracts(self):
         first, second = self.writer_bundle("first"), self.writer_bundle("second")
@@ -711,9 +716,12 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
                                                           "commit", "--quiet", "-m", "clean checkout"]):
             (checkout / "file").write_text("clean\n")
             subprocess.run(["git", "-C", str(checkout)] + arguments, check=True, capture_output=True)
+        with self.assertRaisesRegex(ValueError, "differ from the trusted harness identity"):
+            lane_f.bind(self.result, self.work / "untrusted", archive, published, PUBLICATION_ID, "retirement-v1",
+                        "run-f", checkout, "0" * 40, self.harness()[1])
         with self.assertRaisesRegex(ValueError, "does not match the bound source identity"):
             lane_f.bind(self.result, self.work / "pinned", archive, published, PUBLICATION_ID, "retirement-v1",
-                        "run-f", checkout)
+                        "run-f", checkout, *self.harness())
         self.assertFalse((self.work / "pinned").exists())
         compile_adapter = binding._compile_trusted_retirement_adapter
 
@@ -723,7 +731,7 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
         with mock.patch.object(binding, "_compile_trusted_retirement_adapter", working_tree_adapter), \
                 self.assertRaisesRegex(ValueError, "adapter replay differs from the sealed adapter result"):
             lane_f.bind(self.result, self.work / "relaxed", archive, published, PUBLICATION_ID, "retirement-v1",
-                        "run-f", REPOSITORY)
+                        "run-f", REPOSITORY, *self.harness())
         self.assertFalse((self.work / "relaxed").exists())
 
     def test_real_validator_refuses_the_writer_output_for_missing_context_evidence(self):
@@ -735,20 +743,24 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
         directory = self.writer_lane_f("lane-f")
         validator, validator_sha256 = lane_f.profile_validator_pin(REPOSITORY)
         self.assertEqual(validator.resolve(), Path(binding.__file__).resolve())
+        closure_sha256 = lane_f.validator_closure(REPOSITORY, validator, validator_sha256)[2]
         verdicts = []
         for name in ("clean-1", "clean-2"):
             verdict = lane_f.replay_lane_f(self.result, directory, self.work / name, REPOSITORY, self.trusted,
-                                           validator, validator_sha256, self.work / f"{name}.verdict.json")
+                                           validator, validator_sha256, closure_sha256,
+                                           self.work / f"{name}.verdict.json")
             verdicts.append((self.work / f"{name}.verdict.json").read_bytes())
             self.assertEqual(verdict["verdict"], "refused")
-            self.assertEqual(verdict["validator"], {"path": "tools/native_retirement_performance_binding.py",
-                                                    "sha256": validator_sha256})
+            self.assertEqual((verdict["validator"]["path"], verdict["validator"]["sha256"],
+                              verdict["validator"]["closure_sha256"]),
+                             ("tools/native_retirement_performance_binding.py", validator_sha256, closure_sha256))
+            self.assertEqual(verdict["evidence_layout"]["entries"], 0)
             self.assertEqual(verdict["refusal"],
                              "ValueError: support.files[0] is missing or is a symbolic link: census/support.tsv")
         self.assertEqual(verdicts[0], verdicts[1])
         with self.assertRaisesRegex(ValueError, "pinned SHA-256"):
             lane_f.replay_lane_f(self.result, directory, self.work / "clean-3", REPOSITORY, self.trusted,
-                                 validator, "f" * 64, self.work / "clean-3.verdict.json")
+                                 validator, "f" * 64, closure_sha256, self.work / "clean-3.verdict.json")
 
     def test_cli_replays_the_worker_unit_result_through_lane_f(self):
         """The export CLI with the writer's directory and the real validator:

@@ -538,171 +538,6 @@ class ExportReplayTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "collides"):
             replay.lane_f_import(lane_f, result)
 
-    def lane_f_result(self):
-        """An unpacked composed result: the pending record, a sealed result
-        whose seal enumerates its closure, and the result bundle."""
-        result = self.root / "composed"
-        result.mkdir(mode=0o700)
-
-        def put(path, data):
-            (result / path).write_bytes(data)
-            return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-
-        closure = {"workflow.adapter_input": put("retirement-series.manifest.json", b'{"series":1}\n'),
-                   "workflow.adapter_result": put("retirement-statistics.json", b'{"members":[]}\n'),
-                   "workflow.untimed_batches": put("retirement-untimed-batches.jsonl", b'{"batch":0}\n'),
-                   "contract.source": put("contract.md", b"contract\n")}
-        closure["workflow.result_bundle"] = put("retirement-result-bundle.json", lane_f.canonical({
-            "adapter_input": closure["workflow.adapter_input"], "raw_measurements_sha256": "1" * 64,
-            "family_sha256": "2" * 64, "member_invocations_sha256": "3" * 64, "member_count": 4,
-            "code_bytes_summary": {"rows": 1},
-            "untimed_batches": dict(closure["workflow.untimed_batches"], records=1)}))
-        files = [dict(artifact, name=name) for name, artifact in sorted(closure.items())]
-        put("retirement-sealed-result.json", lane_f.canonical({
-            "result_bundle": closure["workflow.result_bundle"],
-            "seal": {"files": files, "root_sha256": replay.binding._canonical_files_digest(files)}}))
-        pending = dict(replay.PENDING_DESCRIPTOR)
-        composed = {"execution": {"service": {"id": "service-f"}},
-                    "measurement": {"harness_source_commit": "4" * 40, "harness_source_tree": "5" * 40},
-                    "workflow": {"phases": {
-                        "sealed_result": dict(pending, path="retirement-sealed-result.json"),
-                        "independent_replay": dict(pending, path="retirement-independent-replay.json")}}}
-        put(replay.COMPOSER_BINDING_PATH, lane_f.canonical(composed))
-        return result
-
-    @staticmethod
-    def lane_f_main(arguments):
-        with contextlib.redirect_stdout(io.StringIO()):
-            return lane_f.main(arguments)
-
-    def lane_f_bind(self, result, name, **changes):
-        """Publish (here: copy) lane F's archive and bind from the copy; the
-        adapter replay is exercised on the worker unit's real result."""
-        archive = self.root / f"{name}.tar"
-        self.assertEqual(self.lane_f_main(["bundle", str(result), str(archive), "--publication-id", "pub-f"]), 0)
-        published = hashlib.sha256(archive.read_bytes()).hexdigest()
-        arguments = {"downloaded": archive, "published_sha256": published, "publication_id": "pub-f",
-                     "release": "retirement-v1", "run_id": "run-f", "repository_root": self.root}
-        arguments.update(changes)
-        with mock.patch.object(lane_f, "adapter_replay", return_value=("6" * 64, "7" * 64, "clang -O2")):
-            return lane_f.bind(result, self.root / name, **arguments)
-
-    def test_lane_f_writer_round_trips_through_the_checker(self):
-        result = self.lane_f_result()
-        written = self.lane_f_bind(result, "lane-f")
-        directory = self.root / "lane-f"
-        self.assertFalse((self.root / "lane-f.pending").exists())
-        self.assertEqual(sorted(path.name for path in directory.iterdir()), sorted([
-            replay.FINAL_BINDING_NAME, lane_f.BUNDLE_NAME, lane_f.PUBLICATION_NAME, lane_f.REPLAY_BUNDLE_NAME,
-            "retirement-independent-replay.json"]))
-        destination = self.root / "destination"
-        shutil.copytree(result, destination)
-        final = replay.final_binding_check(destination, replay.lane_f_import(directory, destination))
-        self.assertEqual(final["workflow"]["phases"]["independent_replay"], written["independent_replay"])
-        # The records have exactly the validator's fields and bindings.
-        binding = replay.binding
-        phase = binding._workflow_phase(destination, written["independent_replay"],
-                                        binding.PHASE_SCHEMA["independent_replay"], "independent_replay")
-        self.assertEqual(phase["sealed_result_sha256"], final["workflow"]["phases"]["sealed_result"]["sha256"])
-        bundle = binding._read_json_evidence(destination, phase["replay_bundle"], "replay bundle")
-        self.assertEqual(bundle["publication_receipt"], phase["publication_receipt"])
-        self.assertEqual(bundle["downloaded_bundle"], written["downloaded_bundle"])
-        publication = binding._read_json_evidence(destination, phase["publication_receipt"], "publication")
-        self.assertEqual(publication["service_id"], "service-f")
-        self.assertEqual(publication["sealed_result_sha256"], bundle["sealed_result_sha256"])
-        # The downloaded archive passes the validator's own extractor.
-        state = lane_f.composed_state(result)
-        with tempfile.TemporaryDirectory(dir=self.root) as scratch:
-            extracted = binding._extract_downloaded_bundle(destination, bundle["downloaded_bundle"], "pub-f",
-                                                           state["closure"], scratch)
-            self.assertEqual((extracted / "retirement-statistics.json").read_bytes(), b'{"members":[]}\n')
-
-    def test_lane_f_writer_is_deterministic(self):
-        result = self.lane_f_result()
-        self.lane_f_bind(result, "first")
-        self.lane_f_bind(result, "second")
-        for path in (self.root / "first").iterdir():
-            with self.subTest(file=path.name):
-                self.assertEqual(path.read_bytes(), (self.root / "second" / path.name).read_bytes())
-        self.assertEqual((self.root / "first.tar").read_bytes(), (self.root / "second.tar").read_bytes())
-
-    def test_lane_f_writer_fails_closed(self):
-        result = self.lane_f_result()
-        # The publisher's digest is the authority, never the downloaded file.
-        with self.assertRaisesRegex(ValueError, "publisher's digest"):
-            self.lane_f_bind(result, "wrong-digest", published_sha256="8" * 64)
-        self.assertTrue((self.root / "wrong-digest.pending").is_dir())
-        self.assertFalse((self.root / "wrong-digest").exists())
-        # A download that differs from the archive the unpacked result derives.
-        archive = self.root / "other-publication.tar"
-        self.assertEqual(self.lane_f_main(["bundle", str(result), str(archive), "--publication-id", "other-f"]), 0)
-        with self.assertRaisesRegex(ValueError, "derived from the unpacked export"):
-            self.lane_f_bind(result, "forged", downloaded=archive,
-                             published_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
-        self.assertFalse((self.root / "forged").exists())
-        # A sealed file of the export tampered with after the publication:
-        # neither the archive nor lane F's directory is derived from it.
-        archive = self.root / "before-tampering.tar"
-        self.assertEqual(self.lane_f_main(["bundle", str(result), str(archive), "--publication-id", "pub-f"]), 0)
-        target = result / "retirement-statistics.json"
-        original = target.read_bytes()
-        target.write_bytes(b'{"members":[2]}\n')
-        self.assertEqual(self.lane_f_main(["bundle", str(result), str(self.root / "tampered.tar"),
-                                           "--publication-id", "pub-f"]), 1)
-        with self.assertRaisesRegex(ValueError, "does not match evidence"), \
-                mock.patch.object(lane_f, "adapter_replay") as adapter:
-            lane_f.bind(result, self.root / "tampered", archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
-                        "pub-f", "retirement-v1", "run-f", self.root)
-        adapter.assert_not_called()
-        self.assertFalse((self.root / "tampered").exists())
-        target.write_bytes(original)
-        # A missing or already filled phase.
-        record_path = result / replay.COMPOSER_BINDING_PATH
-        record = json.loads(record_path.read_bytes())
-        for phase, value in (("independent_replay", None),
-                             ("sealed_result", {"path": "retirement-sealed-result.json", "bytes": 1,
-                                                "sha256": "9" * 64})):
-            changed = json.loads(json.dumps(record))
-            if value is None:
-                del changed["workflow"]["phases"][phase]
-            else:
-                changed["workflow"]["phases"][phase] = value
-            record_path.write_bytes(lane_f.canonical(changed))
-            with self.subTest(phase=phase), self.assertRaisesRegex(ValueError, "pending descriptor"):
-                lane_f.composed_state(result)
-        record_path.write_bytes(lane_f.canonical(record))
-        # An existing lane F directory is never replaced.
-        (self.root / "exists").mkdir()
-        with self.assertRaisesRegex(ValueError, "already exists"):
-            self.lane_f_bind(result, "exists")
-
-    def test_lane_f_replay_pins_the_validator_before_running(self):
-        result = self.lane_f_result()
-        self.lane_f_bind(result, "lane-f")
-        repository = Path(replay.__file__).resolve().parents[2]
-        validator = Path(replay.binding.__file__).resolve()
-        clean = self.root / "clean"
-        verdict = self.root / "verdict.json"
-        with mock.patch.object(lane_f.subprocess, "run") as run:
-            with self.assertRaisesRegex(ValueError, "pinned SHA-256"):
-                lane_f.replay_lane_f(result, self.root / "lane-f", clean, repository, "a" * 64, validator,
-                                     "b" * 64, verdict)
-            with self.assertRaisesRegex(ValueError, "pinned checkout"):
-                lane_f.replay_lane_f(result, self.root / "lane-f", clean, self.root, "a" * 64, validator,
-                                     hashlib.sha256(validator.read_bytes()).hexdigest(), verdict)
-            run.assert_not_called()
-        self.assertFalse(clean.exists())
-        self.assertFalse(verdict.exists())
-        # Without lane F's final binding nothing is validated either.
-        (self.root / "lane-f" / replay.FINAL_BINDING_NAME).chmod(0o600)
-        (self.root / "lane-f" / replay.FINAL_BINDING_NAME).unlink()
-        with mock.patch.object(lane_f.subprocess, "run") as run, \
-                self.assertRaisesRegex(ValueError, "lacks the final binding"):
-            lane_f.replay_lane_f(result, self.root / "lane-f", clean, repository, "a" * 64, validator,
-                                 hashlib.sha256(validator.read_bytes()).hexdigest(), verdict)
-        run.assert_not_called()
-        self.assertFalse(verdict.exists())
-
     def test_publish_only_capacity_output_does_not_claim_replay(self):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
                    str(self.archive), "--publish-only", "--test-publication",
@@ -717,6 +552,378 @@ class ExportReplayTest(unittest.TestCase):
         self.assertEqual(output["transferred_bytes"], replay.RECEIPT_BYTES + len(self.bytes))
         self.assertEqual(output["receipt_derived_capacity"], replay.capacity_ledger(self.receipt))
         self.assertNotIn("replay", output)
+
+
+HARNESS = ("4" * 40, "5" * 40)
+REPOSITORY = Path(replay.__file__).resolve().parents[2]
+
+
+def stub_validator_run(*_arguments, **_keywords):
+    """Stands in for the validator subprocess only where a test checks what
+    lane F lays out before it; the pin and closure tests run the real one."""
+    return subprocess.CompletedProcess([], 1, "", "Traceback\nValueError: stub validator refusal\n")
+
+
+class LaneFWriterTest(unittest.TestCase):
+    """retirement_lane_f.py over a small composed result. The real adapter
+    replay and the real validator's acceptance run in
+    retirement_compose_test.py and the worker-unit tests."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="retirement-lane-f-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.result = self.lane_f_result()
+
+    def lane_f_result(self):
+        """An unpacked composed result: the pending record, a sealed result
+        whose seal enumerates its closure, the result bundle and one
+        binding-named file published flat (retirement-evidence-*)."""
+        result = self.root / "composed"
+        result.mkdir(mode=0o700)
+
+        def put(path, data, stored=None):
+            (result / (stored or path)).write_bytes(data)
+            return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+        closure = {"workflow.adapter_input": put("retirement-series.manifest.json", b'{"series":1}\n'),
+                   "workflow.adapter_result": put("retirement-statistics.json", b'{"members":[]}\n'),
+                   "workflow.untimed_batches": put("retirement-untimed-batches.jsonl", b'{"batch":0}\n'),
+                   "contract.source": put("docs/contract.md", b"contract\n", "retirement-evidence-docs--contract.md")}
+        closure["workflow.result_bundle"] = put("retirement-result-bundle.json", lane_f.canonical({
+            "adapter_input": closure["workflow.adapter_input"], "raw_measurements_sha256": "1" * 64,
+            "family_sha256": "2" * 64, "member_invocations_sha256": "3" * 64, "member_count": 4,
+            "code_bytes_summary": {"rows": 1},
+            "untimed_batches": dict(closure["workflow.untimed_batches"], records=1)}))
+        files = [dict(artifact, name=name) for name, artifact in sorted(closure.items())]
+        put("retirement-sealed-result.json", lane_f.canonical({
+            "result_bundle": closure["workflow.result_bundle"],
+            "seal": {"files": files, "root_sha256": replay.binding._canonical_files_digest(files)}}))
+        pending = dict(replay.PENDING_DESCRIPTOR)
+        self.composed = {
+            "contract": {"source": closure["contract.source"]},
+            "execution": {"service": {"id": "service-f"}},
+            "measurement": {"harness_source_commit": HARNESS[0], "harness_source_tree": HARNESS[1]},
+            "workflow": {"phases": {
+                "sealed_result": dict(pending, path="retirement-sealed-result.json"),
+                "independent_replay": dict(pending, path="retirement-independent-replay.json")}}}
+        put(replay.COMPOSER_BINDING_PATH, lane_f.canonical(self.composed))
+        return result
+
+    def lane_f_main(self, arguments):
+        with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            status = lane_f.main(arguments)
+        return status, output.getvalue()
+
+    def publish(self, name, publication_id="pub-f"):
+        archive = self.root / f"{name}.tar"
+        status, output = self.lane_f_main(["bundle", str(self.result), str(archive),
+                                           "--publication-id", publication_id])
+        self.assertEqual(status, 0)
+        self.assertFalse(archive.with_name(archive.name + ".partial").exists())
+        self.assertEqual(json.loads(output)["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+        return archive
+
+    def bind(self, name, **changes):
+        """Publish (here: copy) lane F's archive and bind from the copy; the
+        adapter replay is exercised on real composer output elsewhere."""
+        archive = changes.pop("archive", None) or self.publish(name)
+        arguments = {"downloaded": archive, "published_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                     "publication_id": "pub-f", "release": "retirement-v1", "run_id": "run-f",
+                     "repository_root": self.root, "harness_commit": HARNESS[0], "harness_tree": HARNESS[1]}
+        arguments.update(changes)
+        with mock.patch.object(lane_f, "adapter_replay", return_value=("6" * 64, "7" * 64, "clang -O2")):
+            return lane_f.bind(self.result, self.root / name, **arguments)
+
+    def test_writer_round_trips_through_the_checker(self):
+        written = self.bind("lane-f")
+        directory = self.root / "lane-f"
+        self.assertFalse((self.root / "lane-f.pending").exists())
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), sorted([
+            replay.FINAL_BINDING_NAME, lane_f.BUNDLE_NAME, lane_f.PUBLICATION_NAME, lane_f.REPLAY_BUNDLE_NAME,
+            "retirement-independent-replay.json"]))
+        destination = self.root / "destination"
+        shutil.copytree(self.result, destination)
+        final = replay.final_binding_check(destination, replay.lane_f_import(directory, destination))
+        self.assertEqual(final["workflow"]["phases"]["independent_replay"], written["independent_replay"])
+        # The records have exactly the validator's fields and bindings.
+        binding = replay.binding
+        phase = binding._workflow_phase(destination, written["independent_replay"],
+                                        binding.PHASE_SCHEMA["independent_replay"], "independent_replay")
+        self.assertEqual(phase["sealed_result_sha256"], final["workflow"]["phases"]["sealed_result"]["sha256"])
+        bundle = binding._read_json_evidence(destination, phase["replay_bundle"], "replay bundle")
+        self.assertEqual(bundle["publication_receipt"], phase["publication_receipt"])
+        self.assertEqual(bundle["downloaded_bundle"], written["downloaded_bundle"])
+        publication = binding._read_json_evidence(destination, phase["publication_receipt"], "publication")
+        self.assertEqual(publication["service_id"], "service-f")
+        self.assertEqual(publication["sealed_result_sha256"], bundle["sealed_result_sha256"])
+        # The downloaded archive passes the validator's own extractor, with
+        # the flat evidence file under the path the seal names.
+        state = lane_f.composed_state(self.result)
+        self.assertEqual(state["sources"], {"docs/contract.md": "retirement-evidence-docs--contract.md"})
+        with tempfile.TemporaryDirectory(dir=self.root) as scratch:
+            extracted = binding._extract_downloaded_bundle(destination, bundle["downloaded_bundle"], "pub-f",
+                                                           state["closure"], scratch)
+            self.assertEqual((extracted / "retirement-statistics.json").read_bytes(), b'{"members":[]}\n')
+            self.assertEqual((extracted / "docs" / "contract.md").read_bytes(), b"contract\n")
+        # The validator's ".." member guard (_extract_downloaded_bundle_stream)
+        # is unreachable through bind: the download must equal the archive
+        # re-derived from sealed paths that relative_binding_path and
+        # _artifact already accept, so no test drives it from here.
+
+    def test_writer_is_deterministic(self):
+        self.bind("first")
+        self.bind("second")
+        for path in (self.root / "first").iterdir():
+            with self.subTest(file=path.name):
+                self.assertEqual(path.read_bytes(), (self.root / "second" / path.name).read_bytes())
+        self.assertEqual((self.root / "first.tar").read_bytes(), (self.root / "second.tar").read_bytes())
+
+    def test_bundle_never_replaces_its_output(self):
+        archive = self.publish("once")
+        before = archive.read_bytes()
+        status, _output = self.lane_f_main(["bundle", str(self.result), str(archive), "--publication-id", "pub-f"])
+        self.assertEqual(status, 1)
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertFalse(archive.with_name(archive.name + ".partial").exists())
+        with mock.patch.object(lane_f, "BUNDLE_OVERHEAD_CAP", 0):
+            status, _output = self.lane_f_main(["bundle", str(self.result), str(self.root / "capped.tar"),
+                                                "--publication-id", "pub-f"])
+        self.assertEqual(status, 1)
+        self.assertEqual(sorted(path.name for path in self.root.glob("capped.tar*")), [])
+
+    def test_writer_fails_closed(self):
+        # The publisher's digest is the authority, never the downloaded file.
+        with self.assertRaisesRegex(ValueError, "publisher's digest"):
+            self.bind("wrong-digest", published_sha256="8" * 64)
+        self.assertTrue((self.root / "wrong-digest.pending").is_dir())
+        self.assertFalse((self.root / "wrong-digest").exists())
+        # A leftover pending attempt is kept and named.
+        with self.assertRaisesRegex(ValueError, "previous pending attempt exists .*inspect or remove it"):
+            self.bind("wrong-digest", archive=self.root / "wrong-digest.tar")
+        self.assertTrue((self.root / "wrong-digest.pending" / lane_f.BUNDLE_NAME).is_file())
+        # A download that differs from the archive the unpacked result derives.
+        other = self.publish("other-publication", "other-f")
+        with self.assertRaisesRegex(ValueError, "derived from the unpacked export"):
+            self.bind("forged", archive=other)
+        self.assertFalse((self.root / "forged").exists())
+        # The harness identity comes from the operator and must be the record's.
+        with mock.patch.object(lane_f, "adapter_replay") as adapter, \
+                self.assertRaisesRegex(ValueError, "differ from the trusted harness identity"):
+            archive = self.publish("harness")
+            lane_f.bind(self.result, self.root / "harness", archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        "pub-f", "retirement-v1", "run-f", self.root, "9" * 40, HARNESS[1])
+        adapter.assert_not_called()
+        self.assertFalse((self.root / "harness.pending").exists())
+        # A sealed file of the export tampered with after the publication:
+        # neither the archive nor lane F's directory is derived from it.
+        archive = self.publish("before-tampering")
+        target = self.result / "retirement-statistics.json"
+        original = target.read_bytes()
+        target.write_bytes(b'{"members":[2]}\n')
+        status, _output = self.lane_f_main(["bundle", str(self.result), str(self.root / "tampered.tar"),
+                                            "--publication-id", "pub-f"])
+        self.assertEqual(status, 1)
+        with self.assertRaisesRegex(ValueError, "does not match evidence"):
+            self.bind("tampered", archive=archive)
+        self.assertFalse((self.root / "tampered").exists())
+        target.write_bytes(original)
+        # A missing or already filled phase.
+        record_path = self.result / replay.COMPOSER_BINDING_PATH
+        for phase, value in (("independent_replay", None),
+                             ("sealed_result", {"path": "retirement-sealed-result.json", "bytes": 1,
+                                                "sha256": "9" * 64})):
+            changed = json.loads(json.dumps(self.composed))
+            if value is None:
+                del changed["workflow"]["phases"][phase]
+            else:
+                changed["workflow"]["phases"][phase] = value
+            record_path.write_bytes(lane_f.canonical(changed))
+            with self.subTest(phase=phase), self.assertRaisesRegex(ValueError, "pending descriptor"):
+                lane_f.composed_state(self.result)
+        record_path.write_bytes(lane_f.canonical(self.composed))
+        # An existing lane F directory is never replaced.
+        (self.root / "exists").mkdir()
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.bind("exists")
+
+    def test_lane_f_directory_appearing_during_the_bind_is_never_replaced(self):
+        check = replay.final_binding_check
+
+        def appear(result, path):
+            (self.root / "raced").mkdir()
+            return check(result, path)
+
+        with mock.patch.object(lane_f.replay, "final_binding_check", appear), \
+                self.assertRaisesRegex(ValueError, "appeared during the bind"):
+            self.bind("raced")
+        self.assertEqual(list((self.root / "raced").iterdir()), [])
+        self.assertTrue((self.root / "raced.pending" / replay.FINAL_BINDING_NAME).is_file())
+        # The rename itself never replaces even an empty directory, which
+        # os.rename would.
+        (self.root / "empty").mkdir()
+        with self.assertRaisesRegex(ValueError, "not replaced"):
+            lane_f.rename_noreplace(self.root / "raced.pending", self.root / "empty")
+        self.assertTrue((self.root / "raced.pending").is_dir())
+        lane_f.rename_noreplace(self.root / "raced.pending", self.root / "renamed")
+        self.assertTrue((self.root / "renamed" / replay.FINAL_BINDING_NAME).is_file())
+
+    def test_evidence_layout_maps_flat_files_to_binding_paths(self):
+        entries, digest = lane_f.evidence_layout(self.result, self.composed)
+        self.assertEqual(entries, [dict(self.composed["contract"]["source"],
+                                        evidence="retirement-evidence-docs--contract.md")])
+        self.assertEqual(digest, hashlib.sha256(lane_f.canonical(entries)).hexdigest())
+        # A flat evidence entry the binding does not name.
+        (self.result / "retirement-evidence-extra").write_bytes(b"x\n")
+        with self.assertRaisesRegex(ValueError, "retirement-evidence-extra is not named"):
+            lane_f.evidence_layout(self.result, self.composed)
+        (self.result / "retirement-evidence-extra").unlink()
+        # Two binding paths with one flat name.
+        self.assertIsNone(lane_f.evidence_name("already-flat.md"))
+        colliding = json.loads(json.dumps(self.composed))
+        source = self.composed["contract"]["source"]
+        colliding["support"] = {"first": dict(source, path="docs/x--y.md"), "second": dict(source, path="docs--x/y.md")}
+        self.assertEqual(lane_f.evidence_name("docs/x--y.md"), lane_f.evidence_name("docs--x/y.md"))
+        (self.result / "retirement-evidence-docs--x--y.md").write_bytes(b"contract\n")
+        with self.assertRaisesRegex(ValueError, "named by both"):
+            lane_f.evidence_layout(self.result, colliding)
+        (self.result / "retirement-evidence-docs--x--y.md").unlink()
+        # One path with different bytes, and a path present both ways.
+        conflict = json.loads(json.dumps(self.composed))
+        conflict["other"] = dict(self.composed["contract"]["source"], sha256="0" * 64)
+        with self.assertRaisesRegex(ValueError, "twice with different bytes"):
+            lane_f.evidence_layout(self.result, conflict)
+        (self.result / "docs").mkdir()
+        (self.result / "docs" / "contract.md").write_bytes(b"contract\n")
+        with self.assertRaisesRegex(ValueError, "both at its path and as"):
+            lane_f.evidence_layout(self.result, self.composed)
+
+    # -- replay: the pinned validator closure ------------------------------------
+
+    def fake_repository(self):
+        """A copy of the validator's closure and the profile, as a pinned
+        checkout the tests may plant files in."""
+        repository = self.root / "repository"
+        for relative in lane_f.VALIDATOR_MODULES + lane_f.VALIDATOR_DATA + (lane_f.PROFILE_PATH,):
+            target = repository / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPOSITORY / relative, target)
+        return repository
+
+    def pins(self, repository):
+        validator, validator_sha256 = lane_f.profile_validator_pin(repository)
+        return validator, validator_sha256, lane_f.validator_closure(repository, validator, validator_sha256)[2]
+
+    def replay(self, repository, pins, name="clean", run=None):
+        validator, validator_sha256, closure_sha256 = pins
+        arguments = (self.result, self.root / "lane-f", self.root / name, repository, "a" * 64, validator,
+                     validator_sha256, closure_sha256, self.root / f"{name}.verdict.json")
+        if run is None:
+            return lane_f.replay_lane_f(*arguments)
+        with mock.patch.object(lane_f.subprocess, "run", side_effect=run) as runner:
+            verdict = lane_f.replay_lane_f(*arguments)
+        return verdict, runner
+
+    def test_validator_closure_is_the_reviewed_module_list(self):
+        validator, validator_sha256 = lane_f.profile_validator_pin(REPOSITORY)
+        entry, closure, _digest = lane_f.validator_closure(REPOSITORY, validator, validator_sha256)
+        self.assertEqual(entry, "tools/native_retirement_performance_binding.py")
+        self.assertEqual(sorted(path for path, _data in closure),
+                         sorted(lane_f.VALIDATOR_MODULES + lane_f.VALIDATOR_DATA))
+        # A new local import is refused until the reviewed list names it.
+        repository = self.fake_repository()
+        entry_path = repository / entry
+        entry_path.write_bytes(entry_path.read_bytes() + b"\nimport native_retirement_extra  # noqa\n")
+        (repository / "tools" / "native_retirement_extra.py").write_text("VALUE = 1\n")
+        with self.assertRaisesRegex(ValueError, r"undeclared \['tools/native_retirement_extra.py'\]"):
+            lane_f.validator_closure(repository, entry_path, hashlib.sha256(entry_path.read_bytes()).hexdigest())
+
+    def test_replay_refuses_a_wrong_pin_before_anything_runs(self):
+        self.bind("lane-f")
+        repository = self.fake_repository()
+        validator, validator_sha256, closure_sha256 = self.pins(repository)
+        cases = {"pinned SHA-256": (validator, "b" * 64, closure_sha256),
+                 "closure differs from its pinned digest": (validator, validator_sha256, "c" * 64),
+                 "not a file of the pinned checkout": (REPOSITORY / "tools" / validator.name, validator_sha256,
+                                                       closure_sha256)}
+        for message, pins in cases.items():
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.replay(repository, pins, run=stub_validator_run)
+        # An edited sibling module changes the closure digest.
+        sibling = repository / "tools" / "native_retirement_result_input.py"
+        sibling.write_bytes(sibling.read_bytes() + b"\n# edited\n")
+        with self.assertRaisesRegex(ValueError, "closure differs from its pinned digest"):
+            self.replay(repository, (validator, validator_sha256, closure_sha256), run=stub_validator_run)
+        self.assertFalse((self.root / "clean").exists())
+        self.assertFalse((self.root / "clean.verdict.json").exists())
+
+    def test_replay_ignores_a_planted_bytecode_cache(self):
+        """A __pycache__ entry planted beside the checkout's schema module is
+        loaded by a plain run of the validator; the pinned closure runs from
+        a private copy with no cache and an empty bytecode prefix."""
+        import importlib.util
+        import marshal
+        self.bind("lane-f")
+        repository = self.fake_repository()
+        pins = self.pins(repository)
+        marker = self.root / "planted-code-ran"
+        schema = repository / "tools" / "native_retirement_performance_schema.py"
+        planted = compile(f"open({str(marker)!r}, 'w').close()\n" + schema.read_text(), str(schema), "exec")
+        info = schema.stat()
+        cache = Path(importlib.util.cache_from_source(str(schema)))
+        cache.parent.mkdir()
+        cache.write_bytes(importlib.util.MAGIC_NUMBER + (0).to_bytes(4, "little") +
+                          (int(info.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little") +
+                          (info.st_size & 0xFFFFFFFF).to_bytes(4, "little") + marshal.dumps(planted))
+        subprocess.run([sys.executable, str(pins[0]), "--help"], check=True, capture_output=True,
+                       env={"PATH": os.environ.get("PATH", "")})
+        self.assertTrue(marker.exists(), "the planted cache is not effective, so this test proves nothing")
+        marker.unlink()
+        verdict = self.replay(repository, pins)
+        self.assertFalse(marker.exists())
+        self.assertEqual(verdict["verdict"], "refused")
+        self.assertEqual(verdict["validator"]["closure_sha256"], pins[2])
+        self.assertTrue(verdict["refusal"].startswith("ValueError: "), verdict["refusal"])
+        self.assertNotIn(str(self.root), verdict["refusal"])
+        self.assertEqual(list((self.root / "clean").rglob("__pycache__")), [])
+
+    def test_replay_records_lane_f_refusals_and_lays_out_evidence(self):
+        self.bind("lane-f")
+        pins = self.pins(self.fake_repository())
+        repository = self.root / "repository"
+        verdict, runner = self.replay(repository, pins, "laid-out", run=stub_validator_run)
+        runner.assert_called_once()
+        command = runner.call_args.args[0]
+        self.assertEqual(command[1:3], ["-I", "-B"])
+        self.assertEqual(verdict["refusal"], "ValueError: stub validator refusal")
+        self.assertEqual(verdict["evidence_layout"]["entries"], 1)
+        evidence = self.root / "laid-out" / "result"
+        self.assertEqual((evidence / "docs" / "contract.md").read_bytes(), b"contract\n")
+        self.assertFalse((evidence / "retirement-evidence-docs--contract.md").exists())
+        # A link or special file in the result, an unmapped flat entry and a
+        # lane F directory without its final binding are each recorded.
+        refusals = {}
+        os.symlink("retirement-statistics.json", self.result / "link.json")
+        refusals["link"] = self.replay(repository, pins, "link", run=stub_validator_run)
+        (self.result / "link.json").unlink()
+        os.mkfifo(self.result / "fifo")
+        refusals["fifo"] = self.replay(repository, pins, "fifo", run=stub_validator_run)
+        (self.result / "fifo").unlink()
+        (self.result / "retirement-evidence-extra").write_bytes(b"x\n")
+        refusals["unmapped"] = self.replay(repository, pins, "unmapped", run=stub_validator_run)
+        (self.result / "retirement-evidence-extra").unlink()
+        (self.root / "lane-f" / replay.FINAL_BINDING_NAME).chmod(0o600)
+        (self.root / "lane-f" / replay.FINAL_BINDING_NAME).unlink()
+        refusals["final"] = self.replay(repository, pins, "final", run=stub_validator_run)
+        expected = {"link": "lane F: unpacked result holds a link or a special file",
+                    "fifo": "lane F: unpacked result holds a link or a special file",
+                    "unmapped": "lane F: evidence entry retirement-evidence-extra is not named by the binding",
+                    "final": "lane F: lane F directory lacks the final binding"}
+        for name, (verdict, runner) in refusals.items():
+            with self.subTest(case=name):
+                runner.assert_not_called()
+                self.assertEqual((verdict["verdict"], verdict["refusal"]), ("refused", expected[name]))
+                self.assertTrue((self.root / f"{name}.verdict.json").is_file())
 
 
 if __name__ == "__main__":

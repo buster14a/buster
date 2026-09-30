@@ -20,37 +20,51 @@ never from a value a candidate produced as its own expectation:
   publisher's digest, requires both to equal the archive re-derived from the
   unpacked result, extracts the downloaded copy with the validator's own
   reader, rebuilds the reviewed #619 adapter from the pinned checkout at the
-  record's harness commit, reruns it over the downloaded adapter input and
-  requires the sealed adapter result byte for byte. Only then does it write
-  the publication receipt, the replay bundle, the
+  harness commit and tree the operator supplies (which must equal the
+  record's), reruns it over the downloaded adapter input and requires the
+  sealed adapter result byte for byte. Only then does it write the
+  publication receipt, the replay bundle, the
   ``buster-native-retirement-independent-replay-v1`` phase record and
   ``retirement-final-binding.json`` (``replay.FINAL_BINDING_NAME``) into a
   ``.pending`` directory, check the final binding with
-  ``replay.final_binding_check`` and rename it to the lane F directory.
-- ``replay`` pins the production validator by path and SHA-256 (by default
-  the profile's ``binding-validator`` pin, ``profile_validator_pin``) before
-  it runs, copies the result into a new clean directory, imports lane F's
-  directory there (``replay.lane_f_import``), checks the final binding and
-  runs the real validator. It writes a verdict record naming the validator's
-  identity, the final binding, the phase record and the validator's output or
-  refusal, and succeeds only for a complete independent replay.
+  ``replay.final_binding_check`` and rename it, never replacing anything, to
+  the lane F directory (``rename_noreplace``).
+- ``replay`` pins the production validator's closure before anything runs:
+  the entry file by SHA-256 (by default the profile's ``binding-validator``
+  pin, ``profile_validator_pin``) and every local module it imports plus the
+  data files it reads beside itself by one closure digest
+  (``validator_closure``). It installs those verified bytes into a private
+  directory (``install_validator``) and runs them isolated (``python -I -B``,
+  an empty private bytecode prefix, a minimal environment). It copies the
+  result into a new clean directory, imports lane F's directory there
+  (``replay.lane_f_import``), checks the final binding, lays out the flat
+  ``retirement-evidence-*`` files at the paths the binding names
+  (``evidence_layout``) and runs the validator. The verdict record names the
+  validator closure, the layout, the final binding, the phase record and the
+  validator's output or refusal; it succeeds only for a complete independent
+  replay.
 
 The phase record's keys are fixed by the validator (``_workflow_phase``), so
 the validator identity and verdict live in the separate verdict record.
 Nothing here publishes durably (#510) or admits the recipe.
 
-Map: ``composed_state`` (composed record, sealed closure), ``write_bundle``
-and ``bundle_digest`` (the deterministic archive), ``adapter_replay``,
-``bind``, ``copy_result``, ``profile_validator_pin``, ``replay_lane_f``,
-``main``.
+Map: ``evidence_name`` and ``evidence_layout`` (flat evidence names),
+``composed_state`` (composed record, sealed closure), ``write_bundle`` and
+``bundle_digest`` (the deterministic archive), ``adapter_replay``,
+``rename_noreplace``, ``bind``, ``copy_result``, ``profile_validator_pin``,
+``validator_closure``, ``install_validator``, ``replay_lane_f``, ``main``.
 """
 
 import argparse
+import ast
+import ctypes
+import errno
 import hashlib
 import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import sys
@@ -82,9 +96,43 @@ BUNDLE_OVERHEAD_CAP = 64 * 1024 * 1024
 REPLAY_TIMEOUT = 86400
 PROOF = "independent-evidence-and-receipts-checked"
 PROOF_FLAGS = ("rows_recomputed", "support_checked", "execution_checked", "bundle_checked", "git_checked")
-EVIDENCE_ROOT_TOKEN = "EVIDENCE_ROOT"
 # The integration-owned profile pins the validator's path and SHA-256.
 PROFILE_PATH = "tools/bench_service/profiles/native-retirement-performance-v1.blocked"
+# The producer publishes every evidence file the binding context names as one
+# flat result-root entry (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, #1998): this
+# prefix, then the named path with each "/" written "--", in [A-Za-z0-9._-]
+# and at most BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP bytes.
+EVIDENCE_PREFIX = "retirement-evidence-"
+EVIDENCE_SEPARATOR = "--"
+EVIDENCE_PATH_CAP = 128
+EVIDENCE_NAME = re.compile(r"[A-Za-z0-9._-]+\Z")
+# The validator's reviewed closure: the entry file, every repository-local
+# module it imports (transitively, including the #508 validator it runs as a
+# subprocess) and the data files those modules read beside themselves
+# (_approved_support_counts, native_retirement_contract's dependency
+# authority). validator_closure derives the module list from the verified
+# bytes and refuses one that differs from VALIDATOR_MODULES.
+VALIDATOR_MODULES = (
+    "tools/native_retirement_contract.py",
+    "tools/native_retirement_dependency_binding.py",
+    "tools/native_retirement_materializer.py",
+    "tools/native_retirement_performance_binding.py",
+    "tools/native_retirement_performance_schema.py",
+    "tools/native_retirement_reference.py",
+    "tools/native_retirement_result_input.py",
+)
+VALIDATOR_DATA = (
+    "docs/native-retirement-dependencies-v1.json",
+    "docs/native-retirement-repository-sources-v1.json",
+    "docs/native-retirement-support-v1.tsv",
+    "tools/native_retirement_dependency_binding.generated.h",
+)
+VALIDATOR_FILE_CAP = 16 * 1024 * 1024
+# Linux renameat2 and Darwin renamex_np flags for a rename that never
+# replaces its target.
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+RENAME_EXCL = 4
 
 fail = replay.fail
 
@@ -138,9 +186,69 @@ def phase_is_pending(phase):
     return {key: phase.get(key) for key in replay.PENDING_DESCRIPTOR} == replay.PENDING_DESCRIPTOR
 
 
+def evidence_name(path):
+    """The flat result-root name of the evidence the binding names at PATH,
+    or None when PATH is already flat or cannot be written as one."""
+    name = EVIDENCE_PREFIX + path.replace("/", EVIDENCE_SEPARATOR)
+    valid = "/" in path and len(name) <= EVIDENCE_PATH_CAP and EVIDENCE_NAME.fullmatch(name) is not None
+    return name if valid else None
+
+
+def record_descriptors(record):
+    """Every {path, bytes, sha256} descriptor in RECORD, found with an
+    explicit worklist; a path named twice with other bytes is refused."""
+    found = {}
+    pending = [record]
+    while pending:
+        value = pending.pop()
+        if type(value) is dict:
+            if type(value.get("path")) is str and type(value.get("bytes")) is int and \
+                    type(value.get("sha256")) is str:
+                descriptor = (value["bytes"], value["sha256"])
+                if found.setdefault(value["path"], descriptor) != descriptor:
+                    fail(f"the binding names {value['path']} twice with different bytes")
+            pending.extend(value.values())
+        elif type(value) is list:
+            pending.extend(value)
+    return found
+
+
+def evidence_layout(result, record):
+    """Where each binding-named evidence file is in the flat RESULT.
+
+    A descriptor whose path is present in the result is read there; one
+    that is absent and has a flat ``evidence_name`` present is read from it
+    and laid out at its path for the validator; one with neither is left for
+    the validator to refuse. Returns the sorted layout entries and their
+    digest. A path present both ways, two paths with one flat name, or a flat
+    evidence entry that no descriptor names is refused."""
+    root = Path(result)
+    names = set(os.listdir(root))
+    claimed = {}
+    entries = []
+    for path, (size, sha256) in sorted(record_descriptors(record).items()):
+        replay.relative_binding_path(path)
+        flat = evidence_name(path)
+        direct = os.path.lexists(root.joinpath(*PurePosixPath(path).parts))
+        if flat is not None and flat in names:
+            if direct:
+                fail(f"evidence {path} is in the result both at its path and as {flat}")
+            if flat in claimed:
+                fail(f"evidence {flat} is named by both {claimed[flat]} and {path}")
+            claimed[flat] = path
+            entries.append({"evidence": flat, "path": path, "bytes": size, "sha256": sha256})
+        elif direct and path.startswith(EVIDENCE_PREFIX):
+            claimed[path] = path
+    unmapped = sorted(name for name in names if name.startswith(EVIDENCE_PREFIX) and name not in claimed)
+    if unmapped:
+        fail(f"evidence entry {unmapped[0]} is not named by the binding")
+    return entries, hashlib.sha256(canonical(entries)).hexdigest()
+
+
 def composed_state(result):
     """The composed record, its sealed result and the sealed closure, each
-    descriptor checked against the unpacked bytes."""
+    descriptor checked against the unpacked bytes (read through the flat
+    evidence layout)."""
     root = Path(result)
     composed = parse_json(read_bounded(root, replay.COMPOSER_BINDING_PATH))
     phases = composed["workflow"]["phases"]
@@ -152,6 +260,8 @@ def composed_state(result):
     replay.relative_binding_path(sealed_path)
     if "/" in replay.relative_binding_path(replay_path).as_posix():
         fail("the independent-replay phase must name a file of lane F's flat directory")
+    layout, _layout_sha256 = evidence_layout(root, composed)
+    sources = {entry["path"]: entry["evidence"] for entry in layout}
     sealed_bytes = read_bounded(root, sealed_path)
     sealed_descriptor = descriptor_of(sealed_path, sealed_bytes)
     sealed = parse_json(sealed_bytes)
@@ -167,7 +277,8 @@ def composed_state(result):
                                      f"seal.files[{index}]")
         if artifact["bytes"] > replay.FILE_CAP:
             fail("a sealed closure file exceeds the per-file cap")
-        binding._check_evidence(root, artifact, f"seal.files[{index}]")
+        binding._check_evidence(root, dict(artifact, path=sources.get(artifact["path"], artifact["path"])),
+                                f"seal.files[{index}]")
         if entry["name"] in by_name:
             fail("sealed closure names one identity twice")
         by_name[entry["name"]] = artifact
@@ -180,7 +291,8 @@ def composed_state(result):
     result_bundle_descriptor = by_name["workflow.result_bundle"]
     if sealed["result_bundle"] != result_bundle_descriptor:
         fail("sealed result's result bundle is not its sealed closure's")
-    result_bundle = parse_json(read_bounded(root, result_bundle_descriptor["path"]))
+    result_bundle = parse_json(read_bounded(root, sources.get(result_bundle_descriptor["path"],
+                                                              result_bundle_descriptor["path"])))
     untimed = result_bundle["untimed_batches"]
     if (untimed is None) != ("workflow.untimed_batches" not in by_name) or \
             (untimed is not None and {key: untimed.get(key) for key in ("path", "bytes", "sha256")}
@@ -192,7 +304,7 @@ def composed_state(result):
     if len({item["path"] for item in closure}) != len(closure):
         fail("sealed closure names one path twice")
     return {"composed": composed, "sealed": sealed_descriptor, "replay_path": replay_path,
-            "closure": sorted(closure, key=lambda item: item["path"].encode()),
+            "closure": sorted(closure, key=lambda item: item["path"].encode()), "sources": sources,
             "result_bundle": result_bundle_descriptor, "result_bundle_value": result_bundle,
             "adapter_input": by_name["workflow.adapter_input"],
             "adapter_result": by_name["workflow.adapter_result"],
@@ -240,20 +352,19 @@ def _tar_info(name, size):
     return info
 
 
-def write_bundle(result, closure, publication_id, sink):
-    """Stream the independent-replay archive for ``closure`` into ``sink``.
-
-    Its first member is the bundle manifest the validator requires; every
-    member is re-hashed while it is archived and must match its descriptor.
-    """
-    files = [{key: item[key] for key in ("path", "bytes", "sha256")} for item in closure]
+def write_bundle(result, state, publication_id, sink):
+    """Stream the independent-replay archive for the sealed closure of STATE
+    into ``sink``. Its first member is the bundle manifest the validator
+    requires; members carry the paths the seal names and are read through
+    the evidence layout; each is re-hashed while archived."""
+    files = [{key: item[key] for key in ("path", "bytes", "sha256")} for item in state["closure"]]
     manifest = canonical({
         "schema": BUNDLE_MANIFEST_SCHEMA, "version": 1, "publication_id": publication_id, "files": files,
         "root_sha256": binding._canonical_files_digest([{"name": item["path"], **item} for item in files])})
     with tarfile.open(fileobj=sink, mode="w|", format=tarfile.PAX_FORMAT) as archive:
         archive.addfile(_tar_info(BUNDLE_MANIFEST_NAME, len(manifest)), io.BytesIO(manifest))
         for item in files:
-            descriptor = open_regular(result, item["path"])
+            descriptor = open_regular(result, state["sources"].get(item["path"], item["path"]))
             try:
                 if os.fstat(descriptor).st_size != item["bytes"]:
                     fail(f"{item['path']} changed size before it was archived")
@@ -266,9 +377,15 @@ def write_bundle(result, closure, publication_id, sink):
                 fail(f"{item['path']} changed while it was archived")
 
 
-def bundle_digest(result, closure, publication_id):
+def bundle_cap(state):
+    return sum(item["bytes"] for item in state["closure"]) + BUNDLE_OVERHEAD_CAP
+
+
+def bundle_digest(result, state, publication_id):
     sink = HashSink()
-    write_bundle(result, closure, publication_id, sink)
+    write_bundle(result, state, publication_id, sink)
+    if sink.length > bundle_cap(state):
+        fail("the independent-replay archive exceeds the validator's closure bound")
     return sink.length, sink.digest.hexdigest()
 
 
@@ -318,13 +435,39 @@ def copy_bounded(source, target, cap):
     return copied, digest.hexdigest()
 
 
+def write_bundle_file(result, state, publication_id, output):
+    """Write the archive to OUTPUT through ``OUTPUT.partial``: the output is
+    published by a hard link that never replaces a file, and a failed or
+    oversized write leaves no partial file."""
+    output = Path(output)
+    partial = output.with_name(output.name + ".partial")
+    descriptor = create_exclusive(partial)
+    try:
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                sink = HashSink(stream)
+                write_bundle(result, state, publication_id, sink)
+            if sink.length > bundle_cap(state):
+                fail("the independent-replay archive exceeds the validator's closure bound")
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.link(partial, output, follow_symlinks=False)
+    finally:
+        os.unlink(partial)
+    return {"bundle": str(output), "bytes": sink.length, "sha256": sink.digest.hexdigest()}
+
+
 def adapter_replay(evidence, downloaded, publication_id, state, repository_root):
     """Rerun the reviewed #619 adapter over the downloaded archive's input.
 
     The archive is extracted with the validator's reader against the sealed
     closure; the adapter is rebuilt from the pinned checkout at the record's
-    harness commit and tree. Returns the adapter identity for the replay
-    bundle: (source digest, toolchain digest, build command).
+    harness commit and tree (``bind`` has already required them to equal the
+    operator's) and runs with a minimal environment in a private directory.
+    Returns the adapter identity for the replay bundle: (source digest,
+    toolchain digest, build command).
     """
     measurement = state["composed"]["measurement"]
     with tempfile.TemporaryDirectory(prefix="retirement-lane-f-") as scratch:
@@ -336,11 +479,13 @@ def adapter_replay(evidence, downloaded, publication_id, state, repository_root)
             binding._compile_trusted_retirement_adapter(adapter, repository_root,
                                                         measurement["harness_source_commit"],
                                                         measurement["harness_source_tree"])
-        output = Path(scratch) / "statistics-replay.json"
+        work = Path(scratch) / "work"
+        work.mkdir(mode=0o700)
+        output = work / "statistics-replay.json"
         adapter_input = extracted.joinpath(*PurePosixPath(state["adapter_input"]["path"]).parts)
         process = subprocess.run([str(executable), "retirement-replay", "--input", str(adapter_input),
-                                  "--output", str(output)], check=False, capture_output=True,
-                                 cwd=repository_root, timeout=REPLAY_TIMEOUT)
+                                  "--output", str(output)], check=False, capture_output=True, cwd=work,
+                                 env={"PATH": os.environ.get("PATH", ""), "LANG": "C"}, timeout=REPLAY_TIMEOUT)
         if process.returncode != 0 or not output.is_file():
             fail("lane F's #619 adapter replay failed")
         sealed_output = extracted.joinpath(*PurePosixPath(state["adapter_result"]["path"]).parts)
@@ -349,24 +494,61 @@ def adapter_replay(evidence, downloaded, publication_id, state, repository_root)
     return source_digest, toolchain_digest, build_command
 
 
-def bind(result, lane_f, downloaded, published_sha256, publication_id, release, run_id, repository_root):
-    """Write lane F's directory for the unpacked RESULT (see the module doc)."""
+def rename_noreplace(source, target):
+    """Rename SOURCE to TARGET atomically, refusing when TARGET exists (even
+    an empty directory, which os.rename would silently replace)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes, target_bytes = os.fsencode(source), os.fsencode(target)
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        libc.renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        status = libc.renameat2(AT_FDCWD, source_bytes, AT_FDCWD, target_bytes, RENAME_NOREPLACE)
+    elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        libc.renamex_np.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        status = libc.renamex_np(source_bytes, target_bytes, RENAME_EXCL)
+    else:
+        fail("no atomic no-replace rename is available here; the pending directory is kept")
+    if status != 0:
+        code = ctypes.get_errno()
+        if code in (errno.EEXIST, errno.ENOTEMPTY):
+            fail(f"{target} appeared during the bind; it is not replaced and the pending directory is kept")
+        raise OSError(code, os.strerror(code), str(target))
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def bind(result, lane_f, downloaded, published_sha256, publication_id, release, run_id, repository_root,
+         harness_commit, harness_tree):
+    """Write lane F's directory for the unpacked RESULT (see the module doc).
+
+    HARNESS_COMMIT and HARNESS_TREE come from a trusted source, never from
+    the result; the record's measurement must name exactly them before the
+    adapter is compiled."""
     replay.digest_argument(published_sha256, "published bundle")
     for value, name in ((publication_id, "publication ID"), (release, "release"), (run_id, "run ID")):
         binding._token(value, name)
+    binding._commit(harness_commit, "harness commit")
+    binding._commit(harness_tree, "harness tree")
     lane_f = Path(lane_f)
     pending = lane_f.with_name(lane_f.name + ".pending")
     if os.path.lexists(lane_f):
         fail("lane F directory already exists")
+    if os.path.lexists(pending):
+        fail(f"a previous pending attempt exists at {pending}; inspect or remove it")
     state = composed_state(result)
+    measurement = state["composed"]["measurement"]
+    if (measurement["harness_source_commit"], measurement["harness_source_tree"]) != (harness_commit, harness_tree):
+        fail("the record's harness commit and tree differ from the trusted harness identity")
     names = (BUNDLE_NAME, PUBLICATION_NAME, REPLAY_BUNDLE_NAME, state["replay_path"], replay.FINAL_BINDING_NAME)
     present = set(os.listdir(result))
     if len(set(names)) != len(names) or present.intersection(names):
         fail("a lane F file collides with the service result or another lane F file")
-    derived_bytes, derived_sha256 = bundle_digest(result, state["closure"], publication_id)
-    closure_bytes = sum(item["bytes"] for item in state["closure"])
-    if derived_bytes > closure_bytes + BUNDLE_OVERHEAD_CAP:
-        fail("the independent-replay archive exceeds the validator's closure bound")
+    derived_bytes, derived_sha256 = bundle_digest(result, state, publication_id)
     # A failed attempt keeps its pending directory as evidence; it is never
     # promoted or replaced.
     os.mkdir(pending, 0o700)
@@ -415,19 +597,11 @@ def bind(result, lane_f, downloaded, published_sha256, publication_id, release, 
     final["workflow"]["phases"]["independent_replay"] = descriptor_of(state["replay_path"], independent)
     create_exclusive(pending / replay.FINAL_BINDING_NAME, canonical(final))
     replay.final_binding_check(result, pending / replay.FINAL_BINDING_NAME)
-    directory = os.open(pending, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    fsync_directory(pending)
     if os.path.lexists(lane_f):
-        fail("lane F directory appeared during the bind")
-    os.rename(pending, lane_f)
-    parent = os.open(lane_f.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
+        fail("lane F directory appeared during the bind; the pending directory is kept")
+    rename_noreplace(pending, lane_f)
+    fsync_directory(lane_f.parent)
     return {"lane_f": str(lane_f), "final_binding": descriptor_of(replay.FINAL_BINDING_NAME, canonical(final)),
             "independent_replay": final["workflow"]["phases"]["independent_replay"],
             "downloaded_bundle": archive}
@@ -459,6 +633,18 @@ def copy_result(source, destination):
                 fail("unpacked result holds a link or a special file")
 
 
+def lay_out_evidence(evidence, entries):
+    """Move each flat evidence file of the clean copy to the path the binding
+    names, creating private parent directories."""
+    root = Path(evidence)
+    for entry in entries:
+        target = root.joinpath(*PurePosixPath(entry["path"]).parts)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.path.lexists(target):
+            fail(f"evidence {entry['path']} already exists in the clean replay")
+        os.rename(root / entry["evidence"], target)
+
+
 def profile_validator_pin(repository_root):
     """The validator path and digest the pinned checkout's profile declares."""
     fields = {}
@@ -474,53 +660,151 @@ def profile_validator_pin(repository_root):
     return Path(repository_root) / fields["binding-validator"], fields["binding-validator-sha256"]
 
 
-def replay_lane_f(result, lane_f, clean, repository_root, trusted_sha256, validator, validator_sha256,
-                  verdict_path):
-    """Run the pinned production validator over RESULT and lane F's directory
-    in the new CLEAN directory; write and return the verdict record."""
-    replay.digest_argument(trusted_sha256, "service execution receipt")
-    replay.digest_argument(validator_sha256, "validator")
+def local_imports(data, directory, repository):
+    """The repository-local modules one module's source names: every
+    ``import``/``from`` target and every ``NAME.py`` string constant (the
+    validator's file-location fallbacks and subprocess scripts) that is a
+    file beside it."""
+    names = set()
+    for node in ast.walk(ast.parse(data)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Constant) and type(node.value) is str and \
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.py", node.value):
+            names.add(node.value[:-3])
+    found = []
+    for name in sorted(names):
+        relative = f"{directory}/{name}.py"
+        if (Path(repository) / relative).is_file():
+            found.append(relative)
+    return found
+
+
+def validator_closure(repository_root, validator, validator_sha256):
+    """The validator's closure from the pinned checkout: [(path, bytes)] for
+    the entry (which must hash to VALIDATOR_SHA256), every local module it
+    imports transitively (which must be exactly VALIDATOR_MODULES) and
+    VALIDATOR_DATA, plus the closure digest. Every byte returned is the byte
+    hashed; nothing is read again."""
     repository = Path(repository_root).resolve()
-    validator = Path(validator).resolve()
     try:
-        validator_name = validator.relative_to(repository).as_posix()
+        entry = Path(validator).resolve().relative_to(repository).as_posix()
     except ValueError:
         fail("validator is not a file of the pinned checkout")
-    validator_bytes = read_bounded(repository, validator_name)
-    if hashlib.sha256(validator_bytes).hexdigest() != validator_sha256:
+    files = {entry: read_bounded(repository, entry, VALIDATOR_FILE_CAP)}
+    if hashlib.sha256(files[entry]).hexdigest() != validator_sha256:
         fail("validator differs from its pinned SHA-256")
-    evidence = Path(clean) / "result"
+    pending = [entry]
+    while pending:
+        module = pending.pop()
+        for relative in local_imports(files[module], PurePosixPath(module).parent.as_posix(), repository):
+            if relative not in files:
+                files[relative] = read_bounded(repository, relative, VALIDATOR_FILE_CAP)
+                pending.append(relative)
+    undeclared = sorted(set(files) - set(VALIDATOR_MODULES))
+    missing = sorted(set(VALIDATOR_MODULES) - set(files))
+    if undeclared or missing:
+        fail(f"validator closure differs from the reviewed module list: undeclared {undeclared}, missing {missing}")
+    for relative in VALIDATOR_DATA:
+        files[relative] = read_bounded(repository, relative, VALIDATOR_FILE_CAP)
+    closure = sorted(files.items())
+    digest = binding._canonical_files_digest([dict(descriptor_of(path, data), name=path) for path, data in closure])
+    return entry, closure, digest
+
+
+def install_validator(closure, directory):
+    """Write the verified closure bytes into the new private DIRECTORY at
+    their repository paths; it holds no bytecode cache."""
+    root = Path(directory)
+    root.mkdir(mode=0o700)
+    for path, data in closure:
+        target = root.joinpath(*PurePosixPath(path).parts)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        create_exclusive(target, data)
+
+
+def normalise(text, replacements):
+    """Replace machine-specific paths in TEXT with fixed tokens."""
+    for path, token in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        text = text.replace(path, token)
+    return text
+
+
+def replay_lane_f(result, lane_f, clean, repository_root, trusted_sha256, validator, validator_sha256,
+                  closure_sha256, verdict_path):
+    """Run the pinned validator closure over RESULT and lane F's directory in
+    the new CLEAN directory; write and return the verdict record.
+
+    A wrong pin refuses before anything is created. A refusal by lane F's own
+    import, final-binding check or evidence layout is recorded in the
+    verdict like the validator's."""
+    replay.digest_argument(trusted_sha256, "service execution receipt")
+    replay.digest_argument(validator_sha256, "validator")
+    replay.digest_argument(closure_sha256, "validator closure")
+    repository = Path(repository_root).resolve()
+    entry, closure, digest = validator_closure(repository, validator, validator_sha256)
+    if digest != closure_sha256:
+        fail("validator closure differs from its pinned digest")
+    clean = Path(clean)
     os.mkdir(clean, 0o700)
-    copy_result(result, evidence)
-    final_path = replay.lane_f_import(lane_f, evidence)
-    final = replay.final_binding_check(evidence, final_path)
-    process = subprocess.run(
-        [sys.executable, str(validator), str(final_path), "--evidence-root", str(evidence),
-         "--repository-root", str(repository), "--trusted-execution-receipt-sha256", trusted_sha256],
-        check=False, capture_output=True, text=True, cwd=evidence, timeout=REPLAY_TIMEOUT,
-        env={"PATH": os.environ.get("PATH", ""), "LANG": "C"})
+    clean = clean.resolve()
+    evidence = clean / "result"
+    installed = clean / "validator"
+    prefix = clean / "bytecode"
+    install_validator(closure, installed)
+    prefix.mkdir(mode=0o700)
+    replacements = [(str(evidence), "EVIDENCE_ROOT"), (str(installed), "VALIDATOR_ROOT"),
+                    (str(clean), "CLEAN_ROOT"), (str(repository), "REPOSITORY_ROOT"),
+                    (str(Path(lane_f).resolve()), "LANE_F_ROOT"), (str(Path(result).resolve()), "RESULT_ROOT"),
+                    (tempfile.gettempdir(), "TMPDIR")]
     output = None
     refusal = None
-    if process.returncode == 0:
-        try:
-            output = json.loads(process.stdout)
-        except json.JSONDecodeError:
-            refusal = "validator output is not one JSON result"
-    else:
-        lines = process.stderr.strip().splitlines() or ["validator exited without a diagnostic"]
-        refusal = lines[-1].replace(str(evidence), EVIDENCE_ROOT_TOKEN)
+    final_descriptor = None
+    independent = None
+    layout = None
+    try:
+        copy_result(result, evidence)
+        final_path = replay.lane_f_import(lane_f, evidence)
+        final_data = final_path.read_bytes()
+        final_descriptor = descriptor_of(replay.FINAL_BINDING_NAME, final_data)
+        final = replay.final_binding_check(evidence, final_path)
+        independent = final["workflow"]["phases"]["independent_replay"]
+        entries, layout_sha256 = evidence_layout(evidence, final)
+        lay_out_evidence(evidence, entries)
+        layout = {"entries": len(entries), "sha256": layout_sha256}
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
+        refusal = f"lane F: {error}"
+    if refusal is None:
+        process = subprocess.run(
+            [sys.executable, "-I", "-B", "-X", f"pycache_prefix={prefix}", str(installed / entry), str(final_path),
+             "--evidence-root", str(evidence), "--repository-root", str(repository),
+             "--trusted-execution-receipt-sha256", trusted_sha256],
+            check=False, capture_output=True, text=True, cwd=evidence, timeout=REPLAY_TIMEOUT,
+            env={"PATH": os.environ.get("PATH", ""), "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1",
+                 "PYTHONPYCACHEPREFIX": str(prefix)})
+        if process.returncode == 0:
+            try:
+                output = json.loads(process.stdout)
+            except json.JSONDecodeError:
+                refusal = "validator output is not one JSON result"
+        else:
+            lines = process.stderr.strip().splitlines() or ["validator exited without a diagnostic"]
+            refusal = lines[-1]
     accepted = output is not None and output.get("proof") == PROOF and \
         all(output.get(key) is True for key in PROOF_FLAGS)
     if output is not None and not accepted:
         refusal = "validator did not establish a complete independent replay"
     verdict = {
         "schema": VERDICT_SCHEMA, "version": 1,
-        "validator": {"path": validator_name, "sha256": validator_sha256},
-        "final_binding": descriptor_of(replay.FINAL_BINDING_NAME, final_path.read_bytes()),
-        "independent_replay": final["workflow"]["phases"]["independent_replay"],
+        "validator": {"path": entry, "sha256": validator_sha256, "closure_sha256": digest,
+                      "closure": [descriptor_of(path, data) for path, data in closure]},
+        "evidence_layout": layout, "final_binding": final_descriptor, "independent_replay": independent,
         "trusted_execution_receipt_sha256": trusted_sha256,
         "verdict": "accepted" if accepted else "refused",
-        "validator_result": output, "refusal": refusal,
+        "validator_result": output,
+        "refusal": normalise(refusal, replacements) if refusal is not None else None,
     }
     create_exclusive(verdict_path, canonical(verdict))
     return verdict
@@ -531,7 +815,7 @@ def main(arguments=None):
     commands = parser.add_subparsers(dest="command", required=True)
     make = commands.add_parser("bundle", help="write the independent-replay archive to publish")
     make.add_argument("result", type=Path, help="unpacked service result (bench_service unpack-export)")
-    make.add_argument("output", type=Path, help="new archive file")
+    make.add_argument("output", type=Path, help="new archive file (written through OUTPUT.partial)")
     make.add_argument("--publication-id", required=True)
     write = commands.add_parser("bind", help="write lane F's directory from the downloaded publication")
     write.add_argument("result", type=Path)
@@ -544,8 +828,14 @@ def main(arguments=None):
     write.add_argument("--release", required=True)
     write.add_argument("--run-id", required=True)
     write.add_argument("--repository-root", required=True, type=Path,
-                       help="pinned checkout at the record's harness commit")
-    check = commands.add_parser("replay", help="run the pinned validator in a clean directory")
+                       help="clean pinned checkout at the harness commit")
+    write.add_argument("--harness-commit", required=True,
+                       help="the reviewed harness source commit from a trusted source, never the result; "
+                            "the record's measurement.harness_source_commit must equal it")
+    write.add_argument("--harness-tree", required=True,
+                       help="the reviewed harness source tree from a trusted source; "
+                            "the record's measurement.harness_source_tree must equal it")
+    check = commands.add_parser("replay", help="run the pinned validator closure in a clean directory")
     check.add_argument("result", type=Path)
     check.add_argument("lane_f", type=Path)
     check.add_argument("clean", type=Path, help="new private clean replay directory")
@@ -554,42 +844,51 @@ def main(arguments=None):
                        help="the production binding validator (default: the profile's binding-validator)")
     check.add_argument("--validator-sha256",
                        help="the validator's pinned digest (default: the profile's binding-validator-sha256)")
+    check.add_argument("--validator-closure-sha256", required=True,
+                       help="the reviewed digest of the validator's closure (see validator-closure)")
     check.add_argument("--trusted-execution-receipt-sha256", required=True,
                        help="from the service control authority, never the bundle")
     check.add_argument("--verdict", required=True, type=Path, help="new verdict record")
+    show = commands.add_parser("validator-closure", help="print the validator closure of a reviewed checkout")
+    show.add_argument("--repository-root", required=True, type=Path)
+    show.add_argument("--validator", type=Path)
+    show.add_argument("--validator-sha256")
     args = parser.parse_args(arguments)
     status = 1
     try:
         if args.command == "bundle":
             binding._token(args.publication_id, "publication ID")
             state = composed_state(args.result)
-            descriptor = create_exclusive(args.output)
-            try:
-                with os.fdopen(descriptor, "wb", closefd=False) as stream:
-                    sink = HashSink(stream)
-                    write_bundle(args.result, state["closure"], args.publication_id, sink)
-                os.fchmod(descriptor, 0o400)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            print(json.dumps({"bundle": str(args.output), "bytes": sink.length,
-                              "sha256": sink.digest.hexdigest()}, sort_keys=True))
+            print(json.dumps(write_bundle_file(args.result, state, args.publication_id, args.output),
+                             sort_keys=True))
             status = 0
         elif args.command == "bind":
             print(json.dumps(bind(args.result, args.lane_f, args.downloaded_bundle, args.published_bundle_sha256,
-                                  args.publication_id, args.release, args.run_id, args.repository_root),
-                             sort_keys=True))
+                                  args.publication_id, args.release, args.run_id, args.repository_root,
+                                  args.harness_commit, args.harness_tree), sort_keys=True))
             status = 0
         else:
-            validator, validator_sha256 = profile_validator_pin(args.repository_root)
-            verdict = replay_lane_f(args.result, args.lane_f, args.clean, args.repository_root,
-                                    args.trusted_execution_receipt_sha256, args.validator or validator,
-                                    args.validator_sha256 or validator_sha256, args.verdict)
-            print(json.dumps(verdict, sort_keys=True))
-            if verdict["verdict"] != "accepted":
-                print(f"lane F replay refused: {verdict['refusal']}", file=sys.stderr)
-            status = 0 if verdict["verdict"] == "accepted" else 1
-    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired, tarfile.TarError) as error:
+            validator, validator_sha256 = args.validator, args.validator_sha256
+            if validator is None or validator_sha256 is None:
+                profile_validator, profile_sha256 = profile_validator_pin(args.repository_root)
+                validator = validator or profile_validator
+                validator_sha256 = validator_sha256 or profile_sha256
+            if args.command == "validator-closure":
+                entry, closure, digest = validator_closure(args.repository_root, validator, validator_sha256)
+                print(json.dumps({"validator": entry, "closure_sha256": digest,
+                                  "closure": [descriptor_of(path, data) for path, data in closure]},
+                                 sort_keys=True))
+                status = 0
+            else:
+                verdict = replay_lane_f(args.result, args.lane_f, args.clean, args.repository_root,
+                                        args.trusted_execution_receipt_sha256, validator, validator_sha256,
+                                        args.validator_closure_sha256, args.verdict)
+                print(json.dumps(verdict, sort_keys=True))
+                if verdict["verdict"] != "accepted":
+                    print(f"lane F replay refused: {verdict['refusal']}", file=sys.stderr)
+                status = 0 if verdict["verdict"] == "accepted" else 1
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, SyntaxError, subprocess.TimeoutExpired,
+            tarfile.TarError) as error:
         print(f"lane F failed: {error}", file=sys.stderr)
     return status
 
