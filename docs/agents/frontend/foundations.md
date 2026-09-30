@@ -278,6 +278,8 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   each pointer level retains its own volatile/atomic access qualification.
   `c_test_constant_scalar_truth` checks constant initializers, unevaluated
   predicate bits/effects, diagnostics and native execution (#1225).
+  Its static const initializer cases use the existing GNU folding extension;
+  ISO integer-constant-expression admission keeps its separate checks.
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
