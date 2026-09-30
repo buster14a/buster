@@ -77,6 +77,43 @@ The helper retains `main-push-maintenance.json`:
 Manual `workflow_dispatch` refreshes are not commit-supersession sentinels and
 continue to run the ordinary snapshot tool directly.
 
+## Native-retirement catch-up and automation controller
+
+`Native retirement catch-up` and `Native retirement automation` also run on
+every `push` to `main`, and they run only trusted code at `github.workflow_sha`.
+Their controller commands `catch-up` and `plan` stop with the stale-main
+`AutomationMoved` (exit code 75, `integration.STALE_MAIN_EXIT`) when `main` has
+already advanced. Examples are `main moved before automation authorization`
+and the equivalent read-policy and catch-up-opening checks. They stop before
+any claim, catch-up commit or PR is written.
+
+`native_retirement_controller.superseded_push` reuses this helper's successor
+proof (`wait_successor`). A push run finishes green as `superseded` only if all
+of these hold:
+
+- The event is `push`, and the command is `catch-up` or `plan`.
+- Live `main` differs from the run's `GITHUB_WORKFLOW_SHA`.
+- A later push run of the same workflow file exists, with a higher run number
+  and a `head_sha` equal to live `main`.
+
+The job summary records the event/current SHAs and that successor. Every other
+outcome stays red:
+
+- A stale-main exit while `main` still equals the run's SHA.
+- No exact successor run within the bounded wait.
+- Any API or inventory error.
+- A non-push event.
+- PR movement (exit code 76).
+- A disabled or invalid policy, or any other policy violation.
+- The automation workflow's `dispatch` step, which follows a persisted claim.
+
+Both workflows keep a single shared concurrency group, so an intermediate
+pending successor run may be cancelled by a newer one. As above, an existing
+exact-SHA push run of the same workflow is the proof, whatever its status.
+
+Regressions: `SupersededPushTests` in
+`tools/native_retirement_controller_test.py`.
+
 ## Validation
 
 The focused regression is:

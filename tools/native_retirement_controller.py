@@ -17,8 +17,10 @@ must never enable it.
 
 Map: ledger codec; writer/outcome reconciliation; catch-up detection
 (snapshot_stale, is_catch_up_pr, catch_up_admissible); candidate selection;
-two-phase plan -> immutable artifact upload -> dispatch; catch_up opener. An
-uncertain POST is never retried.
+two-phase plan -> immutable artifact upload -> dispatch; catch_up opener;
+superseded_push, which turns a main-push stale-main exit green only after an
+exact successor run exists (docs/main-push-maintenance.md). An uncertain POST
+is never retried.
 """
 from __future__ import annotations
 
@@ -49,6 +51,10 @@ CATCH_UP_BODY = (
     "native-retirement writer replaces it with generated state reconstructed for "
     "main and enables auto-merge. Do not edit or push to this branch.\n"
 )
+# Main-push commands whose stale-main exit is a no-op once a successor run of
+# the same workflow file exists (#2003). dispatch follows a claim and stays red.
+SUPERSEDABLE = {"catch-up": Path(CATCH_UP_PATH).name,
+                "plan": Path(automation.CONTROLLER_PATH).name}
 
 
 def ledger_body(record: dict) -> str:
@@ -479,6 +485,47 @@ def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
     return result
 
 
+def superseded_push(api, command: str, environment, seconds: float | None = None) -> dict:
+    """Prove that a newer main push, with its own run of this workflow, replaced this one.
+
+    Reuses the main-push maintenance successor contract (#1788, #2003): only a
+    push run whose main moved and whose exact live-main successor run exists
+    becomes a no-op. Everything else, including lookup errors, stays blocking.
+    """
+    import main_push_maintenance as maintenance
+    if environment.get("GITHUB_EVENT_NAME") != "push" or command not in SUPERSEDABLE:
+        raise automation.AutomationError("only a main-push run can be superseded")
+    base = automation.hex_value(environment.get("GITHUB_WORKFLOW_SHA"), 40, "run main")
+    number = automation.positive(int(environment.get("GITHUB_RUN_NUMBER", "")), "run number")
+    live = automation.hex_value(api.request("git/ref/heads/main")["object"]["sha"], 40, "live main")
+    if live == base:
+        raise automation.AutomationError("main did not advance; not a superseded run")
+    if seconds is None:
+        seconds = maintenance.SUCCESSOR_WAIT_SECONDS
+    try:
+        successor = maintenance.wait_successor(api, SUPERSEDABLE[command], number, live, seconds)
+    except maintenance.MaintenanceError as error:
+        raise automation.AutomationError(str(error)) from error
+    return {"status": "superseded", "event_main": base, "current_main": live,
+            "successor": successor}
+
+
+def _superseded_status(api, command: str, error: automation.AutomationMoved) -> int:
+    result = 1
+    print("retirement controller blocked: " + str(error), file=sys.stderr)
+    if error.exit_code == integration.STALE_MAIN_EXIT and command in SUPERSEDABLE:
+        try:
+            report = superseded_push(api, command, os.environ)
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write("## Retirement controller superseded\n\n```json\n" +
+                              json.dumps(report, indent=2) + "\n```\n")
+            print(json.dumps(report, indent=2))
+            result = 0
+        except (KeyError, ValueError, OSError, integration.IntegrationError) as failure:
+            print("retirement controller not superseded: " + str(failure), file=sys.stderr)
+    return result
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("plan", "dispatch", "catch-up"))
@@ -511,6 +558,8 @@ def main(argv=None) -> int:
             report = dispatch(api, automation.decode(args.request.read_bytes()))
         print(json.dumps(report, indent=2))
         result = 0
+    except automation.AutomationMoved as error:
+        result = _superseded_status(api, args.command, error)
     except (KeyError, ValueError, OSError, integration.IntegrationError) as error:
         print("retirement controller blocked: " + str(error), file=sys.stderr)
     return result
