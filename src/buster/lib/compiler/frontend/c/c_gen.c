@@ -40730,7 +40730,8 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
         return false;
     }
     u32 close = c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if (close <= expression_start + 1 || close + 1 >= expression_end)
+    if (close <= expression_start + 1 || close + 1 >= expression_end ||
+        c_ir_unary_expression_end(builder, close + 1, expression_end) != expression_end)
     {
         return false;
     }
@@ -45363,32 +45364,45 @@ BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CI
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConstantValue* value, u64 index)
+BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConstantValue* value, CIrConstantValue index)
 {
+    bool valid = true;
     if (value->kind != C_IR_CONSTANT_UNKNOWN)
     {
         IrType* type = ir_type_from_id(&builder->program->types, value->type);
-        if (!type || (value->kind != C_IR_CONSTANT_LVALUE && value->kind != C_IR_CONSTANT_POINTER) ||
-            (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_POINTER))
+        IrType* index_type = ir_type_from_id(&builder->program->types, index.type);
+        valid = type && (value->kind == C_IR_CONSTANT_LVALUE || value->kind == C_IR_CONSTANT_POINTER) &&
+                (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_POINTER) && c_ir_constant_type_is_integer(index_type);
+        if (valid)
         {
-            return false;
+            // The masked low limb of signed int -1 is UINT32_MAX, not its
+            // element count. Preserve the index's type before scaling, and
+            // refuse unsigned/wide counts that cannot fit the signed addend.
+            s64 count = c_ir_integer_signed_value(index.integer, index_type);
+            valid = (index_type->is_signed || index.integer <= INT64_MAX) &&
+                    (index_type->bit_width <= 64 || index.integer_high == (index_type->is_signed && count < 0 ? UINT64_MAX : 0));
+            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+            valid = valid && element && element->layout.resolved && element->layout.size <= INT64_MAX;
+            if (valid)
+            {
+                s64 scale = (s64)BUSTER_MAX((u64)1, element->layout.size);
+                valid = count <= INT64_MAX / scale && count >= INT64_MIN / scale;
+                if (valid)
+                {
+                    s64 offset = count * (s64)element->layout.size;
+                    valid = !((offset > 0 && value->addend > INT64_MAX - offset) ||
+                              (offset < 0 && value->addend < INT64_MIN - offset));
+                    if (valid)
+                    {
+                        value->type = type->element_type;
+                        value->addend += offset;
+                        value->kind = C_IR_CONSTANT_LVALUE;
+                    }
+                }
+            }
         }
-        IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-        if (!element || !element->layout.resolved || element->layout.size > INT64_MAX || index > (u64)INT64_MAX / BUSTER_MAX((u64)1, element->layout.size))
-        {
-            return false;
-        }
-        s64 offset = (s64)(index * element->layout.size);
-        if (value->addend > INT64_MAX - offset)
-        {
-            return false;
-        }
-        value->type = type->element_type;
-        value->addend += offset;
-        value->kind = C_IR_CONSTANT_LVALUE;
     }
-
-    return true;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value)
@@ -48146,7 +48160,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             builder->queries->value_count = value_start + value_count;
             builder->queries->operator_count = operator_start + operator_count;
             if (!value_count || close >= end || !c_ir_query_constant(builder, index + 1, close, &index_value) ||
-                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value.integer))
+                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value))
             {
                 return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
             }
@@ -48937,8 +48951,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         // `(&_kwtuple.ob_base.ob_base)`, `(PyObject *)&_Py_ID(data)` -- and
         // the shapes below read bare tokens, so the wrappers come off first:
         // parens enclosing the whole range, then a leading group that names
-        // a type.  A cast between pointer types moves no bits, which is all
-        // a symbol-address initializer stores.
+        // a type whose operand covers the whole remaining range. A leading
+        // cast in `(char *)&object + 1` governs the addition's scale: leave
+        // that expression intact for the general constant evaluator.
         for (bool stripped = true; stripped && end > start + 1;)
         {
             stripped = false;
@@ -48955,7 +48970,8 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                 // literal, not a cast: `(int *){0}` keeps its type.
                 else if (group_close + 1 < end && group_close > start + 1 &&
                          !c_token_is_punctuator(&preprocess.tokens[group_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
-                         c_ir_type_name(builder, start + 1, group_close).value != IR_ID_UNDERLYING_INVALID)
+                         c_ir_type_name(builder, start + 1, group_close).value != IR_ID_UNDERLYING_INVALID &&
+                         c_ir_unary_expression_end(builder, group_close + 1, end) == end)
                 {
                     start = group_close + 1;
                     stripped = true;
