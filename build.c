@@ -36568,6 +36568,11 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
         os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
         os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
         os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
+        // ASan gives every inlined callee's locals a distinct frame slot, so
+        // inlining the single-call bq_test_* cases into bq_test_run_all grew
+        // its frame past the default 8 MiB main-thread stack (#1980).
+        // Out-of-line cases release their frames between tests.
+        if (service) os_argument_builder_append(&builder, S8("-fno-inline-functions"));
     }
 #if BUSTER_WINDOWS
     os_argument_builder_append(&builder, S8("-Wno-microsoft-enum-forward-reference"));
