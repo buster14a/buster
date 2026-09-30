@@ -4644,13 +4644,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u16 width, AssemblyRegister fir
            (width == 8 && ((first.index >= 4 && !first.high_byte) || (second.index >= 4 && !second.high_byte)));
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_extension_rex_needed(u16 width, AssemblyRegister destination, AssemblyRegister source,
-                                                            u16 source_width)
-{
-    return assembly_x86_rex_needed(width, destination, source) ||
-           (source_width == 8 && source.index >= 4 && !source.high_byte);
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_displacement_size(AssemblyMemory memory, u32* result)
 {
     if (memory.rip_relative || !memory.has_base)
@@ -4740,35 +4733,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_immediate_fits(s64 value, u16 width, bool 
     return value >= signed_minimum && (signed_only ? value <= (s64)(unsigned_maximum >> 1) : value < 0 || (u64)value <= unsigned_maximum);
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_count_immediate_valid(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_EXPRESSION && !operand.expression.has_symbol &&
-           assembly_x86_immediate_fits(operand.expression.addend, 8, false);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_bit_atomic(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_BSF && opcode <= ASSEMBLY_OPCODE_X86_TZCNT;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_target_has_bit_atomic_feature(Target target, TargetCpuFeature feature)
 {
     return target_cpu_feature_has(target, feature);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_is_gpr(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_REGISTER && operand.reg.class == ASSEMBLY_REGISTER_GPR;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_conflicts_high_byte(u16 width, AssemblyRegister first, AssemblyRegister second)
-{
-    return assembly_x86_rex_needed(width, first, second) && (first.high_byte || second.high_byte);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_rex_conflicts_high_byte(u16 width, AssemblyRegister reg, AssemblyMemory memory)
-{
-    return assembly_x86_memory_rex_needed(width, reg, memory) && reg.high_byte;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_set_width(AssemblyOperand* operand, u16 width)
