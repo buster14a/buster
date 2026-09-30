@@ -565,7 +565,9 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_pair_close(BqPrepOraclePair* pair)
 }
 
 /* Worker-unit B steps are compiled into the service but no production path
- * reaches them yet: bq_worker_unit and the rest of the worker name none. */
+ * reaches them yet: the worker names none, and bq_worker_unit reaches them
+ * only through retirement_worker_unit.c's producer behind the complete-profile
+ * admission (retirement_worker_unit_tests.h). */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle_unreached(void)
 {
     char const* sources[] = {"tools/bench_service/worker_linux.c", "tools/bench_service/main.c",

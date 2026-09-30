@@ -206,8 +206,9 @@ defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`. The service translation
 unit (`main.c`) now defines it together with its only caller,
 `bq_retirement_unit_oracle` in `retirement_unit.c`, so the service accepts
 the live producer's pending token and nothing else. No production path calls
-the unit oracle yet: `bq_worker_unit` and the recipe gates reject the job
-first. The correctness test translation unit keeps the fixture issuer, and
+the unit oracle yet: `bq_worker_unit` reaches it only through its forked
+producer (`retirement_worker_unit.c`), which it admits only with a complete
+profile, and the compiled profile is blocked. The correctness test translation unit keeps the fixture issuer, and
 `retirement_reference_producer_tests.c` links the producer privately;
 `bench_service self-test` (and `--sanitize`) builds and runs both, and the
 unit-oracle fixture exercises forged, foreign and stale tokens in the service
