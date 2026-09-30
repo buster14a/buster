@@ -890,9 +890,11 @@ record and digest) and requires every object group's `metrics_bytes_max` to
 equal header + inputs * per-input from it.
 
 **Writing the record.** `retirement_budget_tool.h` holds the production
-writer and checker. `tp_retirement_budget_evaluate` works over bytes, and
-`tp_retirement_budget_cli` over files, with output to a stream. The service
-binary runs them as `retirement-records budget-encode|budget-preflight`,
+writer and checker, `tp_retirement_budget_evaluate`, which works over bytes.
+`tp_retirement_budget_cli`, over files and streams, is only the self-test's
+seam: it has neither the exclusive `OUTPUT` nor preflight's stale-counts
+check. The service binary runs the checker as
+`retirement-records budget-encode|budget-preflight`,
 beside the other authority generators
 ([RETIREMENT_PREPARATION.md](../bench_service/RETIREMENT_PREPARATION.md#generating-the-campaign-authorities-881)).
 That entry publishes the record to a new `OUTPUT` file exclusively and

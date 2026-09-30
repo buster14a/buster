@@ -1,6 +1,7 @@
 /* Production writer and checker of the reviewed A1 campaign budget (#881,
  * review item M4): `retirement-records budget-encode|budget-preflight` in the
- * service binary (retirement_records.c forwards to tp_retirement_budget_cli).
+ * service binary, which calls tp_retirement_budget_evaluate (and adds the
+ * exclusive OUTPUT and preflight's stale-counts check, retirement_records.c).
  * It is not part of throughput.c: that file's include closure is the trusted
  * #619 adapter the binding validator compiles and pins.
  *
@@ -21,8 +22,11 @@
  *                                      `retirement-records budget-counts`
  *   tp_retirement_budget_review        every rule, with a diagnostic
  *   tp_retirement_budget_evaluate      encode or preflight over bytes
- *   tp_retirement_budget_cli           the same over files; each writes its
- *                                      output only after every rule passed
+ *   tp_retirement_budget_cli           the throughput self-test's seam: the
+ *                                      same over files and streams, without
+ *                                      the service's exclusive OUTPUT or its
+ *                                      stale-counts check; not a production
+ *                                      entry
  *
  * Map: TpRetirementBudgetText (whole-file reads), TpRetirementBudgetOwnedCounts,
  * tp_retirement_budget_fixed_ns, tp_retirement_budget_report.
@@ -77,7 +81,7 @@ static inline int tp_retirement_budget_read(char const* path, size_t cap, TpReti
     if (file && fclose(file) != 0) ok = 0;
 #else
     int file = path ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
-    struct stat info;
+    struct stat info = {0};
     int ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
         (uint64_t)info.st_size <= cap;
     text->bytes = ok ? (char*)malloc((size_t)info.st_size + 1) : NULL;
@@ -579,12 +583,14 @@ static inline int tp_retirement_budget_evaluate(int encode, char const* record, 
     return ok;
 }
 
-/* `encode INPUT COUNTS`: the canonical record on output, only when every
- * rule holds against the frozen counts. `preflight BUDGET COUNTS`: strict
- * decode of an existing record, the same rules and the derivation's terms.
- * 0 on success, 2 with one diagnostic line and nothing on output otherwise.
- * (The service's retirement-records wraps tp_retirement_budget_evaluate with
- * an exclusive output file and its counts check.) */
+/* Test seam only (retirement_budget_tool_test.h): `encode INPUT COUNTS`
+ * writes the canonical record on output, only when every rule holds against
+ * the frozen counts; `preflight BUDGET COUNTS` strictly decodes an existing
+ * record and prints the derivation's terms. 0 on success, 2 with one
+ * diagnostic line and nothing on output otherwise. The production entry is
+ * the service's retirement-records, which calls tp_retirement_budget_evaluate
+ * itself: it publishes to an exclusive OUTPUT and its preflight regenerates
+ * the counts from the census and refuses stale ones, which this seam cannot. */
 static inline int tp_retirement_budget_cli(int argc, char** argv, FILE* output, FILE* diagnostics)
 {
     char diagnostic[TP_RETIREMENT_BUDGET_DIAGNOSTIC] = "usage: encode REVIEWED_INPUT COUNTS | preflight BUDGET COUNTS";

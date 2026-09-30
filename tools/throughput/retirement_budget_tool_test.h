@@ -144,7 +144,8 @@ static void test_retirement_budget_tool(char const* root)
     CHECK(tp_retirement_budget_counts_encode(&counts.counts, counts.population_sha256, counts.declaration_sha256,
                                              encoded, sizeof(encoded)) == strlen(test_budget_counts) &&
           !memcmp(encoded, test_budget_counts, strlen(test_budget_counts)));
-    CHECK(!tp_retirement_budget_counts_encode(&counts.counts, "short", counts.declaration_sha256, NULL, 0));
+    char short_digest[65] = "short";
+    CHECK(!tp_retirement_budget_counts_encode(&counts.counts, short_digest, counts.declaration_sha256, NULL, 0));
     tp_retirement_budget_counts_release(&counts);
     static char const* const bad_counts[] = {
         "schema=" TP_RETIREMENT_BUDGET_COUNTS_SCHEMA "\n" TEST_BUDGET_DIGESTS

@@ -1834,11 +1834,16 @@ service retirement-records untimed-commands INSTALLED PROFILE DECLARATION row-pl
 Run them in that order.
 
 - **Output.** The last argument, `OUTPUT`, is the file each generator
-  creates. The generator writes a new temporary sibling (`O_CREAT | O_EXCL`,
-  mode `0444`, fsynced) and links it to `OUTPUT` with `linkat`, which never
-  replaces an existing name. It then removes the temporary file and fsyncs
-  the directory. An existing `OUTPUT` is refused and left untouched. `-`
-  writes to stdout instead, which the tests use.
+  creates. The generator writes an unnamed `O_TMPFILE` in `OUTPUT`'s
+  directory, or a new `.<leaf>.tmp-<pid>` sibling (`O_CREAT | O_EXCL`) on a
+  filesystem without it, with mode `0444`, fsynced. It then links that file
+  to `OUTPUT` with `linkat`, which never replaces an existing name. An
+  existing `OUTPUT` is refused and left untouched. `-` writes to stdout
+  instead, which the tests use.
+- **Failures around the link.** Before the link, a failure leaves nothing
+  behind. After it, the record is complete and durable under its name. A
+  later failure to remove a named temporary or to fsync the directory is
+  then only a `warning:` line, and the command succeeds.
 - **Preflight.** `budget-preflight` regenerates the counts from the census,
   the declaration and the profile's pair count, and requires the `counts`
   file to be exactly those counts. Stale counts, from another census,
@@ -1987,7 +1992,11 @@ and that nothing is written:
 - the CLI seam, including `budget-encode` and `budget-preflight`, with
   stale counts and a pair count other than the profile's;
 - the exclusive `OUTPUT`: created read-only, never replaced, and no
-  temporary file left behind.
+  temporary file left behind, through both the `O_TMPFILE` and the
+  named-temporary paths;
+- a simulated failure after the link, which succeeds with its warning;
+- each `campaign-pairs=` guard: missing, odd, 58, 256, `060` and a
+  repeated line.
 
 ## Production context generators (#881)
 

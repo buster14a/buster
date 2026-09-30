@@ -3,8 +3,9 @@
  * untimed-command contract (BQ-RETIREMENT-UNTIMED-COMMANDS-V1, pinned by
  * untimed-commands-sha256=) and the frozen counts the campaign budget is
  * preflighted against (tp-retirement-budget-counts-v1), and the entry to lane
- * D's budget writer (budget-encode, budget-preflight: tp_retirement_budget_cli
- * in ../throughput/retirement_budget_tool.h).
+ * D's budget checker (budget-encode, budget-preflight:
+ * tp_retirement_budget_evaluate in ../throughput/retirement_budget_tool.h,
+ * with the exclusive OUTPUT and, for preflight, the stale-counts check).
  *
  * Ownership: turning the pinned census, one reviewed declaration and the
  * host facts into those records. Nothing here admits anything or chooses a
@@ -815,15 +816,29 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_pairs(String8 profile, u32* pairs
     return ok;
 }
 
-/* Writes bytes to path exclusively: a new temporary sibling
- * (O_CREAT | O_EXCL, mode 0444, fsynced) linked to path with linkat, which
- * never replaces an existing name, then the temporary unlinked and the
- * directory fsynced. "-" is output. Nothing is left behind on failure. */
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+/* Fixture seam: 1 forces the named-temporary path, 2 fails the steps after
+ * the link (the temporary's removal and the directory fsync). */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_records_test_publish;
+#define BQ_RETIREMENT_RECORDS_TEST_PUBLISH(bit) ((bq_retirement_records_test_publish & (bit)) != 0)
+#else
+#define BQ_RETIREMENT_RECORDS_TEST_PUBLISH(bit) false
+#endif
+
+/* Writes bytes to path exclusively, never replacing an existing name: an
+ * unnamed O_TMPFILE in path's directory where the filesystem has it (else a
+ * new `.<leaf>.tmp-<pid>` sibling, O_CREAT | O_EXCL), mode 0444, written and
+ * fsynced, then linked to path with linkat. "-" is output. Before the link
+ * nothing is left behind on failure and the result is false. Once the link
+ * succeeds the record is complete and durable under its name, so a failure
+ * of the remaining steps (removing the named temporary, fsyncing the
+ * directory entry) is only a warning on diagnostics and the result is true. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_records_publish(char const* path, char const* bytes, u64 length, FILE* output,
-    char* diagnostic)
+    FILE* diagnostics, char* diagnostic)
 {
     bool stream = !strcmp(path, "-");
-    char directory[BQ_RETIREMENT_RECORDS_PATH_CAP], temporary[BQ_RETIREMENT_RECORDS_PATH_CAP];
+    char directory[BQ_RETIREMENT_RECORDS_PATH_CAP], temporary[BQ_RETIREMENT_RECORDS_PATH_CAP] = {0};
+    char descriptor[64] = {0};
     char const* slash = strrchr(path, '/');
     char const* leaf = slash ? slash + 1 : path;
     size_t prefix = slash ? (size_t)(slash - path) : 0;
@@ -834,24 +849,39 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_publish(char const* path, char co
         memcpy(directory, slash ? path : ".", slash ? prefix : 1u);
         directory[slash ? prefix : 1u] = 0;
         if (slash && !prefix) snprintf(directory, sizeof(directory), "/");
-        snprintf(temporary, sizeof(temporary), ".%s.tmp-%ld", leaf, (long)getpid());
     }
     int parent = ok && !stream ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    int file = parent >= 0 ? openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0444) : -1;
-    bool created = file >= 0;
+    int file = -1;
+#if defined(O_TMPFILE)
+    if (parent >= 0 && !BQ_RETIREMENT_RECORDS_TEST_PUBLISH(1u))
+        file = openat(parent, ".", O_WRONLY | O_TMPFILE | O_CLOEXEC, 0444);
+    if (file >= 0) snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", file);
+#endif
+    bool named = parent >= 0 && file < 0;
+    if (named)
+    {
+        snprintf(temporary, sizeof(temporary), ".%s.tmp-%ld", leaf, (long)getpid());
+        file = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0444);
+    }
+    bool created = file >= 0, linked = false;
     if (stream) ok = fwrite(bytes, 1, (size_t)length, output) == length && fflush(output) == 0;
     else
     {
         ok = created && length <= UINT32_MAX && bq_write_all(file, (u8 const*)bytes, (u32)length) && fsync(file) == 0;
-        if (file >= 0 && close(file) != 0) ok = false;
-        ok = ok && linkat(parent, temporary, parent, leaf, 0) == 0;
-        if (created && unlinkat(parent, temporary, 0) != 0) ok = false;
-        ok = ok && fsync(parent) == 0;
+        linked = ok && (named ? linkat(parent, temporary, parent, leaf, 0) :
+                        linkat(AT_FDCWD, descriptor, parent, leaf, AT_SYMLINK_FOLLOW)) == 0;
+        if (file >= 0 && close(file) != 0 && !linked) ok = false;
+        ok = ok && linked;
+        bool removed = !named || !created || (!BQ_RETIREMENT_RECORDS_TEST_PUBLISH(2u) && unlinkat(parent, temporary, 0) == 0);
+        bool synced = !linked || (!BQ_RETIREMENT_RECORDS_TEST_PUBLISH(2u) && fsync(parent) == 0);
+        if (linked && !(removed && synced))
+            fprintf(diagnostics, "retirement-records: warning: %s is complete, but %s\n", path,
+                    removed ? "fsyncing its directory failed" : "its temporary sibling could not be removed");
     }
     if (parent >= 0) close(parent);
     if (!ok)
         bq_retirement_records_say(diagnostic, "cannot write %s (it must not exist yet; its directory must be "
-                                  "writable)", path);
+                                  "writable); nothing was written", path);
     return ok;
 }
 
@@ -951,7 +981,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_generate(int argc, char** argv
           tp_retirement_budget_report(output, digest, &derived) && fflush(output) == 0))
         result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && !preflight &&
-        !bq_retirement_records_publish(argv[argc - 1], text.bytes, text.length, output, diagnostic))
+        !bq_retirement_records_publish(argv[argc - 1], text.bytes, text.length, output, diagnostics, diagnostic))
         result = BQ_IO;
     if (result != BQ_OK) fprintf(diagnostics, "retirement-records: %s\n", diagnostic);
     free(text.bytes);
@@ -984,7 +1014,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_encode(char** argv, FILE* outp
     if (result == BQ_OK && !tp_retirement_budget_evaluate(1, (char const*)input, input_length, (char const*)counts,
                                                           counts_length, canonical, &size, digest, &derived, diagnostic))
         result = BQ_RECIPE_MISMATCH;
-    if (result == BQ_OK && !bq_retirement_records_publish(argv[3], canonical, size, output, diagnostic)) result = BQ_IO;
+    if (result == BQ_OK && !bq_retirement_records_publish(argv[3], canonical, size, output, diagnostics, diagnostic))
+        result = BQ_IO;
     if (result != BQ_OK) fprintf(diagnostics, "retirement-budget: %s\n", diagnostic);
     free(input);
     free(counts);

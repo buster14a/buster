@@ -120,11 +120,15 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_records_generate(BqRetirementRecordsCensus cons
     return ok;
 }
 
-/* The CLI seam end to end: files in, the record on a temporary stream. */
+/* The last CLI run's diagnostic lines. */
+BUSTER_GLOBAL_LOCAL char bq_prep_records_cli_diagnostic[1024];
+
+/* The CLI seam end to end: files in, the record on a temporary stream, the
+ * diagnostics in bq_prep_records_cli_diagnostic. */
 BUSTER_GLOBAL_LOCAL BqError bq_prep_records_cli(char** argv, int argc, char** output, u32* length)
 {
     FILE* stream = tmpfile();
-    FILE* sink = fopen("/dev/null", "w");
+    FILE* sink = tmpfile();
     BqError result = stream && sink ? bq_retirement_records_run(argc, argv, S8("self-test"), stream, sink) : BQ_IO;
     long size = stream && fseek(stream, 0, SEEK_END) == 0 ? ftell(stream) : -1;
     *output = size >= 0 ? malloc((size_t)size + 1u) : NULL;
@@ -134,6 +138,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_records_cli(char** argv, int argc, char** ou
         (*output)[size] = 0;
         *length = (u32)size;
     }
+    size_t said = sink && fseek(sink, 0, SEEK_SET) == 0 ?
+                  fread(bq_prep_records_cli_diagnostic, 1, sizeof(bq_prep_records_cli_diagnostic) - 1u, sink) : 0;
+    bq_prep_records_cli_diagnostic[said] = 0;
     if (stream) fclose(stream);
     if (sink) fclose(sink);
     return result;
@@ -145,6 +152,20 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_records_file(char const* directory, char const*
     int written = snprintf(path, 256, "%s/%s", directory, name);
     bool ok = written > 0 && written < 256 && (unlink(path) == 0 || errno == ENOENT) &&
               bq_prep_test_write_bytes(path, bytes, (u32)length);
+    return ok;
+}
+
+/* profile with its campaign-pairs= line replaced by `line` (which may hold
+ * several lines, or be empty), written as `name` in directory. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_records_pairs_profile(char const* profile, char const* directory, char const* name,
+    char const* line, char path[256])
+{
+    char edited[4096];
+    char const* at = strstr(profile, BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY);
+    char const* end = at ? strchr(at, '\n') : NULL;
+    int length = end ? snprintf(edited, sizeof(edited), "%.*s%s%s", (int)(at - profile), profile, line, end + 1) : -1;
+    bool ok = length > 0 && (size_t)length < sizeof(edited) &&
+              bq_prep_records_file(directory, name, edited, (u64)length, path);
     return ok;
 }
 
@@ -353,15 +374,42 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
     BQ_PREP_CHECK(files && bq_prep_records_cli(other_pairs, 6, &output, &output_length) == BQ_RECIPE_MISMATCH &&
                   output_length == 0);
     free(output);
-    char unpinned_path[256] = {0}, unpinned[4096];
-    char const* pairs_line = strstr(fixture->profile, BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY);
-    char const* pairs_end = pairs_line ? strchr(pairs_line, '\n') : NULL;
-    int unpinned_length = pairs_end ? snprintf(unpinned, sizeof(unpinned), "%.*s%s", (int)(pairs_line - fixture->profile),
-                                               fixture->profile, pairs_end + 1) : -1;
-    char* no_pairs[] = {"budget-counts", fixture->installed, unpinned_path, declaration_path, "60", "-"};
-    BQ_PREP_CHECK(files && unpinned_length > 0 && (size_t)unpinned_length < sizeof(unpinned) &&
-                  bq_prep_records_file(directory, "records-unpinned", unpinned, (u64)unpinned_length, unpinned_path) &&
-                  bq_prep_records_cli(no_pairs, 6, &output, &output_length) == BQ_RECIPE_MISMATCH && output_length == 0);
+    BQ_PREP_CHECK(strstr(bq_prep_records_cli_diagnostic, "campaign-pairs="));
+    /* Each guard of campaign-pairs= (bq_retirement_unit_campaign_pins'
+     * rules): missing, odd, below 60, above 254, non-canonical, repeated;
+     * PAIRS names the same value, so only the guard can refuse. */
+    char unpinned_path[256] = {0};
+    static struct
+    {
+        char const* line;
+        char const* pairs;
+    } const pair_cases[] = {
+        {"", "60"},
+        {BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "61\n", "61"},
+        {BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "58\n", "58"},
+        {BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "256\n", "256"},
+        {BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "060\n", "60"},
+        {BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "60\n" BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "60\n", "60"},
+    };
+    for (u32 index = 0; files && index < BUSTER_ARRAY_LENGTH(pair_cases); index += 1)
+    {
+        char* pair_argv[] = {"budget-counts", fixture->installed, unpinned_path, declaration_path,
+                             (char*)pair_cases[index].pairs, "-"};
+        BQ_PREP_CHECK(bq_prep_records_pairs_profile(fixture->profile, directory, "records-unpinned",
+                                                    pair_cases[index].line, unpinned_path) &&
+                      bq_prep_records_cli(pair_argv, 6, &output, &output_length) == BQ_RECIPE_MISMATCH &&
+                      output_length == 0 &&
+                      strstr(bq_prep_records_cli_diagnostic, "campaign-pairs= is missing, not an even count in 60..254"));
+        free(output);
+        if (index + 1u < BUSTER_ARRAY_LENGTH(pair_cases)) BQ_PREP_CHECK(unlink(unpinned_path) == 0);
+    }
+    /* The control: the same edit with a valid, matching count passes. */
+    char valid_path[256] = {0};
+    char* valid_argv[] = {"budget-counts", fixture->installed, valid_path, declaration_path, "62", "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_pairs_profile(fixture->profile, directory, "records-valid-pairs",
+                                                         BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY "62\n", valid_path) &&
+                  bq_prep_records_cli(valid_argv, 6, &output, &output_length) == BQ_OK &&
+                  strstr(output, "\npairs=62\n") && unlink(valid_path) == 0);
     free(output);
     /* An OUTPUT file is written exclusively: created read-only with exactly
      * the record, never replaced (a second run refuses and leaves it), and
@@ -390,6 +438,37 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
         temporaries += strstr(entry->d_name, ".tmp-") != NULL;
     BQ_PREP_CHECK(entries && temporaries == 0);
     if (entries) closedir(entries);
+    /* The named-temporary path (a filesystem without O_TMPFILE) publishes
+     * the same way and removes its temporary; a failure after the link (the
+     * temporary's removal, the directory fsync) keeps the complete record,
+     * succeeds and warns. */
+    char fallback[300], after[300];
+    snprintf(fallback, sizeof(fallback), "%s/row-plan-named", directory);
+    snprintf(after, sizeof(after), "%s/row-plan-after", directory);
+    char* fallback_argv[] = {"row-plan", fixture->installed, profile_path, declaration_path, budget_path,
+                             (char*)cpu_model, cpu_text, fallback};
+    char* after_argv[] = {"row-plan", fixture->installed, profile_path, declaration_path, budget_path, (char*)cpu_model,
+                          cpu_text, after};
+    bq_retirement_records_test_publish = 1u;
+    BQ_PREP_CHECK(files && bq_prep_records_cli(fallback_argv, 8, &output, &output_length) == BQ_OK &&
+                  !bq_prep_records_cli_diagnostic[0]);
+    free(output);
+    written = listing >= 0 ? bq_prep_worker_unit_slurp(listing, "row-plan-named", &published_length) : NULL;
+    BQ_PREP_CHECK(written && published_length == generated.length && !memcmp(written, generated.bytes, published_length));
+    free(written);
+    bq_retirement_records_test_publish = 3u;
+    BQ_PREP_CHECK(files && bq_prep_records_cli(after_argv, 8, &output, &output_length) == BQ_OK &&
+                  strstr(bq_prep_records_cli_diagnostic, "warning: ") &&
+                  strstr(bq_prep_records_cli_diagnostic, "is complete, but its temporary sibling could not be removed"));
+    free(output);
+    bq_retirement_records_test_publish = 0;
+    written = listing >= 0 ? bq_prep_worker_unit_slurp(listing, "row-plan-after", &published_length) : NULL;
+    BQ_PREP_CHECK(written && published_length == generated.length && !memcmp(written, generated.bytes, published_length));
+    free(written);
+    /* The simulated failure left its named temporary; remove it. */
+    char leftover[320];
+    snprintf(leftover, sizeof(leftover), "%s/.row-plan-after.tmp-%ld", directory, (long)getpid());
+    BQ_PREP_CHECK(unlink(leftover) == 0 && unlink(fallback) == 0 && unlink(after) == 0);
     if (listing >= 0) close(listing);
     /* Lane D's budget writer through the same entry: the canonical record's
      * values as a reviewed input encode back to the record, which preflights
