@@ -1,0 +1,94 @@
+name: Issue 1236 focused validation
+on:
+  push:
+    branches: [codex/1236-bit-field-validation]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select exact baseline frontend
+        run: git restore --source=1be6fd8a0a5c138c1d0db87bc216c9a21bf04617 src/buster/lib/compiler/frontend/c/c_gen.c
+      - name: Bootstrap and configure
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+      - name: Reproduce baseline self-host fixed point
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
+      - name: Require the reported failure in every configuration
+        run: |
+          cat > "$RUNNER_TEMP/witness.c" <<'C'
+          struct U { unsigned char c:3; unsigned short h:5; unsigned long long w:33; unsigned int u:3; };
+          struct S { int x:5; signed char y:4; long long z:40; };
+          int main(void) {
+            struct U u = {7,31,0,7}; struct S s = {15,7,0};
+            int r1 = (u.c += 1), r2 = ++u.h;
+            unsigned long long r3 = --u.w;
+            int r4 = (u.u = 9), r5 = (s.x += 1), r6 = (s.y = 8);
+            int i = 0; u.c = 1; while (++u.c && i < 20) i++;
+            return r1 != 0 || r2 != 0 || r3 != 8589934591ULL || r4 != 1 ||
+                   r5 != -16 || s.x != -16 || r6 != -8 || s.y != -8 || i != 6;
+          }
+          C
+          for cc in clang gcc; do
+            "$cc" -O0 "$RUNNER_TEMP/witness.c" -o "$RUNNER_TEMP/reference"
+            "$RUNNER_TEMP/reference"
+          done
+          for form in -ffrontend-ssa -fno-frontend-ssa; do
+            for mode in none mir-stack fast quality; do
+              build/Release/ide cc "$form" "-fregister-allocator=$mode" -fverify-codegen "$RUNNER_TEMP/witness.c" -o "$RUNNER_TEMP/witness"
+              set +e
+              timeout 10 "$RUNNER_TEMP/witness"
+              status=$?
+              set -e
+              test "$status" = 1
+              echo "BASELINE_REPRO form=$form allocator=$mode expected_failure=1"
+            done
+          done
+  candidate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bootstrap and configure
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Extract registered fixture and run independent controls
+        run: |
+          python3 - <<'PY'
+          import ast, os, pathlib, re
+          text = pathlib.Path("src/buster/tests/compiler/driver/driver_test.c").read_text()
+          text = text.split("UnitTestResult compiler_driver_test_bit_field_assignment_results(", 1)[1]
+          text = text.split("String8 source = S8(", 1)[1].split("String8 source_path", 1)[0]
+          strings = re.findall(r'"(?:\\.|[^"\\])*"', text)
+          pathlib.Path(os.environ["RUNNER_TEMP"], "results.c").write_text("".join(ast.literal_eval(s) for s in strings))
+          PY
+          for cc in clang gcc; do
+            for opt in -O0 -O2; do
+              "$cc" "$opt" "$RUNNER_TEMP/results.c" -o "$RUNNER_TEMP/reference"
+              "$RUNNER_TEMP/reference"
+              echo "ORACLE compiler=$cc optimization=$opt status=pass"
+            done
+          done
+      - name: Require every candidate frontend and allocator
+        run: |
+          for form in -ffrontend-ssa -fno-frontend-ssa; do
+            for mode in none mir-stack fast quality; do
+              build/Release/ide cc "$form" "-fregister-allocator=$mode" -fverify-codegen "$RUNNER_TEMP/results.c" -o "$RUNNER_TEMP/results"
+              timeout 10 "$RUNNER_TEMP/results"
+              echo "CANDIDATE form=$form allocator=$mode status=pass"
+            done
+          done
+      - name: Check source growth
+        run: '"$RUNNER_TEMP/buster-build" source_size --rev fd633e9d10512617f11e2f3f08b7c21adfb2ea0c --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617'
