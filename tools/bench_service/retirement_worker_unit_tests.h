@@ -38,8 +38,10 @@
  * RETIREMENT_READY with exactly the published record's digest.
  * bq_prep_worker_unit_coordinator then checks the coordinator's side:
  * bq_retirement_coordinator_replay accepts that digest and refuses another,
- * a flipped record byte and the compiled profile; bq_worker_retirement_replay
- * (bq_worker_finish's hook) needs both digests and passes the smoke recipe;
+ * a flipped record byte and the compiled profile; bq_worker_retirement_finalize
+ * (bq_worker_finish's hook) needs the digests, the replay and the journalled
+ * authority, stops at the deadline, reloads the digests in recovery and holds
+ * a durable success, and passes the smoke recipe;
  * and bq_retirement_request_valid_pinned, bq_worker_finalization_recipe and
  * bq_worker_recipe_launchable admit the recipe only through the complete
  * seams. bq_prep_worker_unit_campaign_order checks that the campaign's

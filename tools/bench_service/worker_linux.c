@@ -27,9 +27,13 @@
  * seams' profile, which the compiled blocked one never is. Such a job loads
  * the installed budget (bq_retirement_coordinator_budget_load), follows a
  * BQPHASE2 channel whose RETIREMENT_READY digest bq_worker_phase_accept keeps
- * and whose MEASURED digest it hands off (bq_retirement_coordinator_handoff)
- * before acknowledging, and succeeds only if bq_worker_retirement_replay
- * reproduces the ready record in bq_worker_finish.
+ * and whose MEASURED digest it hands off (bq_retirement_coordinator_handoff,
+ * bound by the context chain to the coordinator's own digests) before
+ * writing MEASURED's record and acknowledging, and succeeds only if
+ * bq_worker_retirement_finalize replays the ready record and finds the
+ * journalled authority in bq_worker_finish. Recovery reloads those digests
+ * from the durable queue records (bq_worker_retirement_reload,
+ * bq_worker_phase_record_digest) and never rewrites a durable success.
  *
  * Manager seam: bq_worker_backend_systemd (bq_systemd_observe, bq_systemd_signal,
  * bq_systemd_join); readback checks bq_worker_observed and

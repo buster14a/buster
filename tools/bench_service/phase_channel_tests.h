@@ -510,6 +510,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
                  (!ready_kept || !strcmp(durable, BQ_TEST_PHASE_READY_HEX)));
         BQ_CHECK(bq_worker_phase_record_digest(queue, job, BQ_PHASE_MEASURED, durable) == (defect == 0) &&
                  (defect != 0 || !strcmp(durable, authority_sha256)));
+        /* A record is read only as this attempt's. */
+        BqJob other = *job;
+        other.token += 1;
+        BQ_CHECK(!bq_worker_phase_record_digest(queue, &other, BQ_PHASE_RETIREMENT_READY, durable) && !durable[0]);
         if (defect == 0)
         {
             /* The finalization check: the journalled authority, bound to the

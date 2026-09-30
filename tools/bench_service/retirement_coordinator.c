@@ -19,21 +19,36 @@
  *   bq_retirement_coordinator_handoff    before the MEASURED acknowledgement:
  *                                        the producer's receipt authority,
  *                                        named by the digest the MEASURED
- *                                        packet carried, copied and journalled
+ *                                        packet carried and bound by its
+ *                                        context chain to the coordinator's
+ *                                        own facts, copied and journalled
  *                                        into the queue-private root
  *                                        (tp_retirement_store_authority_handoff)
  *   bq_retirement_coordinator_replay     at finalization: bq_retirement_unit_
  *                                        replay_pinned over the attempt
  *                                        workspace with the ready digest the
  *                                        RETIREMENT_READY packet carried
+ *   bq_retirement_coordinator_authority_complete
+ *                                        at finalization: the journalled copy
+ *                                        of the authority MEASURED named,
+ *                                        classified COMPLETE
  *
  * Map: bq_retirement_coordinator_authority_read parses the producer's
  * canonical BQ-RETIREMENT-AUTHORITY-V3 record from
  * job-<id>-attempt-<token>/retirement-authority/ and requires its bytes to
  * hash to the channel's digest and to re-format byte for byte; the handoff
  * then reopens the receipt, its shards and the retained manifest itself.
+ * bq_retirement_context_chain_format is the canonical
+ * BQ-RETIREMENT-CONTEXT-CHAIN-V1 record (job, attempt, A digest, ready
+ * digest, row-plan pin, plan, context) PR 3's producer writes beside the
+ * authority; bq_retirement_coordinator_chain_check requires the stored chain
+ * to equal the one the coordinator formats from its own A digest, the
+ * channel's ready digest and the profile's row-plan pin. The chain names
+ * those facts; it does not yet prove the plan and context were derived from
+ * them, which needs PR 3's authority content (RETIREMENT_PREPARATION.md).
+ * bq_retirement_coordinator_authority_root opens the producer's root and
  * bq_retirement_coordinator_queue_root opens (creating once, 0700, fsynced)
- * the queue directory's retirement-authority/.
+ * the queue directory's retirement-authority/, only after the chain check.
  *
  * Production passes the compiled profile (bq_retirement_worker_unit_installed),
  * which bq_retirement_profile_complete refuses and which pins no campaign

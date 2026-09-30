@@ -1329,12 +1329,23 @@ The remaining work is split across PRs:
 - **PR 2:** the in-unit campaign through READY. It must start SETTLING only
   after RETIREMENT_READY (`bq_retirement_unit_campaign_begin` requires
   SETTLING to be the channel's next phase).
-- **PR 3:** composition, the authority and MEASURED, which it must send with
-  `bq_phase_exchange_digest_until(phases, BQ_PHASE_MEASURED,
-  authority.authority_sha256, deadline_ns)` after publishing the receipt
-  authority into `job-<id>-attempt-<token>/retirement-authority/` over the
-  attempt's result directory as the store root. A digest-less MEASURED is
-  refused on the `BQPHASE2` channel.
+- **PR 3:** composition, the authority and MEASURED. It must, in order:
+  1. publish the receipt authority into
+     `job-<id>-attempt-<token>/retirement-authority/`, with the attempt's
+     result directory as the store root;
+  2. write beside it, as `context-chain-job-<id>-<token>.txt` (mode `0400`),
+     the bytes `bq_retirement_context_chain_format` returns for its A digest,
+     the ready digest it sent, the profile's `row-plan-sha256=` pin and the
+     authority's plan and context;
+  3. send `bq_phase_exchange_digest_until(phases, BQ_PHASE_MEASURED,
+     authority.authority_sha256, deadline_ns)`. A digest-less MEASURED is
+     refused on the `BQPHASE2` channel.
+
+  PR 3 must also make the chain a derivation rather than a naming: the
+  coordinator should recompute the authority's plan from the replayed ready
+  record and the pinned profile, and verify that the final context descends
+  from a pre-sample context that binds the A and ready digests (see "What
+  the chain does not prove" below).
 - **PR 4:** the coordinator side below.
 
 A/A admission stays compiled out (#426, #1021).
@@ -1382,30 +1393,78 @@ Its receipt is `worker-phase-5`, with `protocol=BQPHASE2` and a
 own sequence, so a retirement job's final validation also requires it.
 
 **The authority handoff before MEASURED.** Before acknowledging a version-2
-MEASURED, `bq_worker_phase_accept` calls `bq_retirement_coordinator_handoff`.
-The handoff reads `authority-job-<id>-<token>.txt` from the attempt's
-`retirement-authority/`. It must be a single-link, owner-read-only file
-whose bytes hash to the packet's digest and re-format byte for byte as the
-canonical `BQ-RETIREMENT-AUTHORITY-V3` record. The handoff then calls
-`tp_retirement_store_authority_handoff` with the attempt's result directory
-as the store root and the queue directory's `retirement-authority/` (created
-`0700` on first use) as the queue-private root. A refused handoff sends no
-acknowledgement. An execution deadline reached before the handoff (which is
-then skipped) or during it also withholds the acknowledgement
-(`BQ_WORKER_TIMEOUT`).
+MEASURED, and before writing its record and receipt,
+`bq_worker_phase_accept` calls `bq_retirement_coordinator_handoff`.
+
+1. The handoff reads `authority-job-<id>-<token>.txt` from the attempt's
+   `retirement-authority/`. It must be a single-link, owner-read-only file
+   whose bytes hash to the packet's digest and re-format byte for byte as
+   the canonical `BQ-RETIREMENT-AUTHORITY-V3` record.
+2. `bq_retirement_coordinator_chain_check` then requires
+   `context-chain-job-<id>-<token>.txt` beside it (single-link, owner-read-only)
+   to equal, byte for byte, the `BQ-RETIREMENT-CONTEXT-CHAIN-V1` record the
+   coordinator formats itself. It uses the job and attempt, its own A digest,
+   the ready digest the RETIREMENT_READY packet carried and the seams'
+   `row-plan-sha256=` pin (which the replayed ready record's `row-plan=` also
+   names), plus the authority's plan and context. A self-consistent authority
+   whose chain names another ready digest, another A digest or another row
+   plan, or that has no chain, is refused before the queue-private root is
+   created and before any copy or journal.
+3. Only then does it call `tp_retirement_store_authority_handoff`, with the
+   attempt's result directory as the store root and the queue directory's
+   `retirement-authority/` (created `0700` on first use) as the queue-private
+   root.
+
+A refused handoff sends no acknowledgement. A pending cancellation or an
+expired execution deadline before the handoff skips it. A deadline reached
+during the handoff withholds the acknowledgement (`BQ_WORKER_TIMEOUT`). Only
+a completed handoff writes MEASURED's record and receipt, so a durable
+`worker-phase-4` means the authority was copied and journalled.
+
+**What the chain does not prove.** The chain makes the unit name the
+coordinator's facts next to the authority's plan and context. It does not
+prove that the plan or the context was derived from them: a same-UID unit
+can still write a chain that names the right digests beside a plan and
+context it made up. Closing that needs PR 3's definition of the authority's
+content. The coordinator would then recompute the execution plan from the
+replayed ready record and the pinned profile, and re-derive the context
+chain from the pre-sample context that binds the A and ready digests.
 
 On the producer side, the version-2 MEASURED acknowledgement window
 (`bq_phase_ack_deadline`) is the job's remaining execution deadline, not the
 5-second cap. Every other phase and the smoke recipe keep the cap.
 
 **The replay at finalization.** `bq_worker_run_pinned` keeps its own A
-digest, and `bq_worker_phase_accept` keeps the RETIREMENT_READY digest. For a
-retirement job, `bq_worker_finish` accepts success only if
-`bq_worker_retirement_replay` succeeds. That function runs
-`bq_retirement_coordinator_replay`, which calls
-`bq_retirement_unit_replay_pinned` over the attempt workspace with the
-seams' profile and roots. A missing digest, a failed replay or a changed
-record turns the job into a failure.
+digest, and `bq_worker_phase_accept` keeps the RETIREMENT_READY and MEASURED
+digests. For a retirement job, `bq_worker_finish` accepts success only if
+`bq_worker_retirement_finalize` succeeds. It checks, in order:
+
+1. `bq_retirement_coordinator_replay` calls
+   `bq_retirement_unit_replay_pinned` over the attempt workspace with the
+   seams' profile and roots.
+2. `bq_retirement_coordinator_authority_complete` rereads the queue-private
+   authority copy under the MEASURED digest and rechecks the chain. It then
+   requires `tp_retirement_store_authority_state` to classify the handoff
+   `COMPLETE` against the result.
+
+A missing digest, a failed replay, a changed record or a different authority
+fails the job. A pending cancellation or an expired execution deadline
+(backend clock) before the replay skips it, and one reached after it fails
+the finalization. The replay itself is one call, not interrupted mid-step.
+
+**Recovery.** `bq_worker_recover` uses the same seams-gated recipe check as
+the run. Its fresh finalization has no digests, so
+`bq_worker_retirement_reload` reloads each missing one from the
+coordinator's own durable records:
+
+- A from the queue's `preparation-<id>` record;
+- the ready and authority digests from the queue's `worker-phase-5` and
+  `worker-phase-4` records (`bq_worker_phase_record_digest`).
+
+A missing or malformed record leaves its digest empty, which fails closed.
+When a retirement success is already durable (FINALIZING or later) and its
+finalization fails, `bq_worker_finish` holds the job for reconciliation
+instead of rewriting it as a failure.
 
 **The budget loader.** When `BqWorkerConfig.retirement_budget` is empty, as
 in production, `bq_retirement_coordinator_budget_load` reads
@@ -1435,10 +1494,23 @@ exclusive admission) is `bq_request_valid_admitting(request, false)`. That
 queue is also built without the Linux retirement units, so it cannot
 evaluate the gate, and a retirement request still cannot be submitted.
 Opening submission needs a queue seam that carries the gate's verdict. That
-seam is left to the integration, together with restart classification
-(`tp_retirement_store_authority_state` in `bq_worker_recover`) and
+seam is left to the integration, together with
 `bq_worker_result_binding_validate`, which still accepts only the service
 recipe.
+
+**Still open.** These are inputs for the `bq_worker_recover` classification
+and for PR 3:
+
+- A handoff that times out after `tp_retirement_store_authority_handoff`
+  has already copied and journalled the authority leaves the copy and the
+  journal in the queue-private root, with no `worker-phase-4` and no
+  acknowledgement. Recovery must classify such attempts with
+  `tp_retirement_store_authority_state` (`COMPLETE` without a MEASURED
+  record, or `INCOMPLETE`) and poison them.
+- Before this change, MEASURED's `worker-phase-4` record was written before
+  the handoff. It is now written only after the handoff completes, so a
+  record without a `COMPLETE` handoff can only come from tampering or an
+  older build. Recovery should still check the two together.
 
 ## Capacity derivation
 
@@ -1853,9 +1925,21 @@ descriptor count changed.
 - **Coordinator (#881 PR 4).** With the channel's digest,
   `bq_retirement_coordinator_replay` accepts, and it refuses a changed
   digest, a flipped record byte (accepting again once restored) and the
-  compiled profile. `bq_worker_retirement_replay` refuses without the ready
-  digest or with a changed one, accepts with the channel's, and passes a
-  smoke job. The request, finalization and launch gates refuse the recipe
+  compiled profile. For the checks below, a real handoff first copies and
+  journals an authority whose chain names this attempt's A and ready digests.
+  - `bq_worker_retirement_finalize` refuses without the ready digest (no
+    durable record exists yet), with a changed digest, with a flipped record
+    byte even when every digest is intact, and with another authority digest.
+    It accepts with the channel's digests and passes a smoke job.
+  - The execution deadline (fake backend clock) stops it before the replay,
+    which never runs, and after it.
+  - With durable `worker-phase-5` and `worker-phase-4` queue records, a fresh
+    finalization reloads all three digests and accepts.
+  - A durable success whose `worker-phase-5` was replaced by another digest
+    is held by `bq_worker_finish` (an error, no failure record, outcome and
+    phase unchanged).
+
+  The request, finalization and launch gates refuse the recipe
   with no seams, the compiled profile or a blocked status, and admit it with
   the complete seams. A malformed request is refused either way, and the
   queue's `bq_request_valid` still refuses the recipe. On a `BQPHASE2`
@@ -1898,6 +1982,9 @@ In every case the keeper's socket is gone and no descriptor or child leaks.
   launch gate;
 - (PR 4) skipping the replay in the finish hook, ignoring its result, or not
   requiring the ready digest;
+- (PR 4 review) skipping the journalled-authority check, not holding a
+  durable success, not reloading the digests in recovery, or dropping the
+  deadline check before or after the replay;
 - (PR 4) letting the campaign begin require PREPARING instead of SETTLING as
   the next phase.
 
@@ -1909,7 +1996,13 @@ the 5-second cap, when `BQPHASE1`'s magic changes, when the coordinator skips
 the handoff, either deadline check, keeping the ready digest, the
 version-aware receipt validation or keeping the job in PREPARING at
 RETIREMENT_READY, and when the budget loader skips the pin or accepts a
-writable `recipes/`.
+writable `recipes/`. After the review it also fails when:
+
+- the chain's bytes are not compared;
+- the queue-private root is created before the chain check;
+- the finalization check ignores the queue copy's digest;
+- the durable-record parser accepts a record of another job, attempt or
+  phase.
 
 A stop budget that drifts from `BQ_WORKER_STOP_MILLISECONDS` does not
 compile.
