@@ -346,7 +346,8 @@ class WorkflowSetupTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
         expected = {
-            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/ci_zig_test.py",
+            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
+            "tools/ci_zig_test.py",
             "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
             "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
@@ -864,7 +865,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
 
     def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
         jobs = self.sample()
@@ -1096,7 +1097,8 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 if job == "test":
                     self.assertIn("\n    needs: lint\n", text)
                 else:
-                    self.assertNotIn("needs:", text)
+                    # Only the cheap main-push reuse decision may gate these lanes.
+                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "
