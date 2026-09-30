@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Queue/runner-assignment tests for tools/github_ci_time.py (#1805)."""
+"""Queue/runner-assignment tests for tools/github_ci_time.py (#1805) and the
+macOS runner demand of auxiliary workflows (#1825)."""
 from datetime import datetime, timezone
+from pathlib import Path
+import re
+import textwrap
 import unittest
 from unittest import mock
 import urllib.parse
 
 import github_ci_time
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class QueueTimingTests(unittest.TestCase):
@@ -87,6 +93,73 @@ class QueueTimingTests(unittest.TestCase):
             self.assertEqual((left - right).total_seconds(), 1)
         self.assertTrue(all((right - left).total_seconds() <= 1000 for left, right in windows))
 
+
+class MacosRunnerDemandTests(unittest.TestCase):
+    """#1825: auxiliary workflows request macOS runners only where they add coverage."""
+
+    WORKFLOWS = ROOT / ".github/workflows"
+
+    @staticmethod
+    def unix_harness(text):
+        step = text.split("      - name: Native harness tests (Unix)\n", 1)[1].split("\n      - ", 1)[0]
+        return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    @staticmethod
+    def path_pattern(glob):
+        parts = re.split(r"(\*\*|\*)", glob)
+        return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+                                  for part in parts) + r"\Z")
+
+    @staticmethod
+    def include_closure(roots):
+        """Every existing file a root can include, ignoring preprocessor conditions."""
+        pending = [ROOT / root for root in roots]
+        closure = set()
+        while pending:
+            path = pending.pop()
+            relative = path.relative_to(ROOT).as_posix()
+            if relative in closure:
+                continue
+            closure.add(relative)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for kind, name in re.findall(r'(?m)^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]', text):
+                candidates = [ROOT / "src" / name] if kind == "<" else [path.parent / name, ROOT / name, ROOT / "src" / name]
+                found = next((candidate for candidate in candidates if candidate.is_file()), None)
+                if found is not None:
+                    pending.append(found.resolve())
+        return closure
+
+    def test_throughput_verdict_never_waits_for_macos(self):
+        text = (self.WORKFLOWS / "compiler-throughput.yml").read_text(encoding="utf-8")
+        harness = text.split("\n  harness:\n", 1)[1].split("\n  regression-guard:\n", 1)[0]
+        self.assertIn("        os: [ubuntu-26.04, windows-2025]\n", harness)
+        self.assertNotIn("macos", text.replace("throughput-harness-macos.yml", ""))
+        self.assertEqual(text.count("    needs: harness\n"), 2)
+
+    def test_macos_harness_is_path_filtered_ready_and_identical(self):
+        throughput = (self.WORKFLOWS / "compiler-throughput.yml").read_text(encoding="utf-8")
+        text = (self.WORKFLOWS / "throughput-harness-macos.yml").read_text(encoding="utf-8")
+        self.assertEqual(self.unix_harness(text), self.unix_harness(throughput))
+        self.assertIn("    types: [opened, synchronize, reopened, ready_for_review]\n", text)
+        self.assertIn("!github.event.pull_request.draft", text)
+        self.assertIn("    runs-on: macos-26\n", text)
+        self.assertNotIn("merge_group", text)
+        globs = re.findall(r"^      - '([^']+)'$", text.split("    paths:\n", 1)[1].split("  workflow_dispatch:", 1)[0], re.M)
+        patterns = [self.path_pattern(glob) for glob in globs]
+        closure = self.include_closure(("build.c", "tools/throughput/tests.c", "tools/throughput/shared.c"))
+        closure.add("tools/allocation_census.py")
+        self.assertIn("tools/throughput/throughput.c", closure)
+        self.assertIn("src/buster/lib/os.c", closure)
+        uncovered = sorted(path for path in closure if not any(pattern.match(path) for pattern in patterns))
+        self.assertEqual(uncovered, [])
+        self.assertFalse(any(pattern.match("src/buster/lib/compiler/frontend/c/c_gen.c") for pattern in patterns))
+        self.assertFalse(any(pattern.match("docs/ci-runner-queue.md") for pattern in patterns))
+
+    def test_materializer_merge_groups_keep_only_the_linux_leg(self):
+        text = (self.WORKFLOWS / "native-retirement-materializer.yml").read_text(encoding="utf-8")
+        self.assertIn("  merge_group:\n    types: [checks_requested]\n", text)
+        self.assertIn("        runner: ${{ fromJSON(github.event_name == 'merge_group' && '[\"ubuntu-26.04\"]' "
+                      "|| '[\"ubuntu-26.04\", \"macos-26\"]') }}\n", text)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,15 @@ registry now classifies the two TLS APIs as metadata authorities and removes
 the old canonical TLS “neutral fixed sequence” exception. The remaining raw
 sites are explicit migration work, not hidden behind that counter.
 
+`machine_test_source_scan_writers` walks each sanitized body once, carrying
+the existing 256-entry architecture brace stack and recognizing all writer
+spellings at identifier boundaries. Unknown brace contexts retain the lexical
+statement/ternary look-back; this is not a C control-flow analysis. The
+`machine_test_source_writer_guards` fixture pins comments, strings, token
+boundaries, nested/else/ternary guards, unknown/default architecture and the
+stack limit. The [#1887 audit](performance-audits/2026-09-29T184335Z.md)
+records the reference differential, work census and scoped timing comparison.
+
 Mach-O dyld bind opcodes, unwind records, hashes, AArch64 words, target-address
 payloads and source `.byte` directives are not x86 instruction authorities.
 They must not be rewritten merely because a numeric constant resembles an
