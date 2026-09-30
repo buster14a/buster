@@ -1352,7 +1352,10 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
    three control files, the five `BQPHASE2` `worker-phase-N` receipts,
    `worker-phase-5` included, and PR 3's binding and A/A admission receipt,
-   `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`), so store files plus those entries
+   `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`, each at the per-file cap; and the
+   evidence files the pinned binding context names, at their exact count and
+   bytes, `bq_retirement_worker_evidence_measure`, at most
+   `BQ_RETIREMENT_WORKER_EVIDENCE_CAP`), so store files plus those entries
    stay within `BQ_WORKER_BUNDLE_ENTRY_CAP`. Every other result-root file is
    a store file (the untimed streams, D's documents, the post-sample record,
    both stages' streams and the composer's outputs), so the plan covers the
@@ -1419,6 +1422,37 @@ stand-in.
    preparation fixture's context comes from
    `retirement_binding_context_fixture.py`, and its bytes pass the #511
    validator structurally.
+2b. **The evidence the binding names.** Every `{path, bytes, sha256}`
+   descriptor the context's sections carry, except the admission receipt
+   and the workflow phases, names a file the producer publishes into the
+   result root (`bq_retirement_worker_evidence_publish`): the nine support
+   files, the validator source, the requested-work closures, both subjects'
+   source snapshot, binary and build receipt, the producer toolchain and
+   build files, the harness binary and statistics implementation, the
+   service, host-profile, qualification and lease receipts, the five
+   provenance receipts, the contract source and the admission record (39 in
+   the #511 record, `bq_retirement_worker_evidence_sites`). Each path must be
+   a flat name under `retirement-evidence-` (`[A-Za-z0-9._-]`, at most 128
+   bytes), so it cannot name a store file, composer output, control file or
+   phase receipt; a repeated path refuses. The subjects' binaries are copied
+   from the producer's held descriptors (the gate's pair, whose digests the
+   context check already requires); every other file comes from the
+   installed evidence directory `native-retirement-performance-v1.evidence`
+   under `recipes/` (service-owned, not writable; its files single-link and
+   read-only), whose files the pinned context covers by digest. The bytes
+   are read and hashed before anything is written and must be exactly the
+   descriptor's size and SHA-256: a changed installed file refuses with
+   `BQ_RECIPE_MISMATCH`, a changed held binary with `BQ_SOURCE_MISMATCH`, and
+   no copy is written under the refused name. Composition requires the same
+   count and bytes the store plan reserved, and passes the evidence and the
+   A/A admission receipt to the composer as the rest of the validator's
+   pre-replay closure (`TpRetirementComposeRequest.closure`), which it
+   rehashes and seals beside D's documents under the validator's
+   `_all_artifacts` names. The fixture's context and evidence directory come
+   from `retirement_binding_context_fixture.py`, whose service, host and
+   provenance receipts carry the fixture A/A receipt's identities and whose
+   contract source is the repository's contract (the fixture profile's
+   `contract-sha256=` pins its digest).
 3. **Composition and the authority.** `tp_retirement_compose` (a refusal
    prints its stage), then `tp_retirement_store_receipt_authority` into
    `<attempt>/retirement-authority/` with the result root as the store root:
@@ -1537,10 +1571,27 @@ MEASURING, A/A, the fixture admission, the post-A/A document, the freeze,
 A/B, READY, composition and MEASURED, then the finalization; all five
 documents are written at exactly the sizes the campaign retained before
 timing (`documents-sized.txt`), and the post-sample record, every stream
-kind of both stages, every composer output, the binding, the manifest and
-the bundle are published. The composed result is exported beside the runner
+kind of both stages, every composer output, the binding, the 39 evidence
+files its context names, the manifest and the bundle are published. The
+composed result is exported beside the runner
 (`build/bench-service-tools/retirement-worker-unit-result/`) for
 `retirement_compose_test.py` and `retirement_export_replay_real_test.py`.
+`bq_prep_worker_unit_evidence_refusals` publishes the evidence again into
+fresh directories and requires the refusals of swapped held binaries, an
+installed file with one byte changed, a missing one, and a context path
+outside the prefix or with a slash. `WorkerUnitEvidenceTests` runs the
+unchanged `native_retirement_performance_binding.py` over a copy of the
+exported result with lane F's two phases stubbed and the authority's receipt
+digest as the trust root (only `_check_support_output` and `_population` are
+replaced: the fixture census is not the approved #508 declaration): the
+execution, subject and provenance receipts pass the validator's own checks,
+each evidence file removed or changed is refused, and `validate()` accepts
+once exactly the fixture's known non-evidence refusals are waived
+(`WORKER_UNIT_KNOWN_GAPS`: the stand-in compilers' repeated, allocator-`none`
+batch metrics; lane D recording a runtime launch's executable as the
+compiler binary; the validator's nested `tools/throughput/retirement_stats.h`
+path, which the flat result root cannot hold; and the fixture's stand-in
+composer adapter). Unwaived, it stops at the first of them.
 Job 85 retains a failing untimed launch, job 86 a SIGTERM during A/A, job 87
 the deadline expiring during A/A, and job 88 a detached (`setsid`) sleeper
 left by its first second-label compile, found and killed right after that

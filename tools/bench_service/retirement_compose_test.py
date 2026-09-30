@@ -47,6 +47,12 @@ reads the worker-unit producer's own output (#881 PR 3): the #511 binding the
 C writer derived (structurally valid, bound to the result root's documents,
 mutations refused), the execution context over the bundle's raw digest, the
 producer authority and context chain, the result manifest and bundle index.
+WorkerUnitEvidenceTests run the unchanged validator over that result with
+lane F's two phases stubbed: every evidence file the binding names is
+published, sealed and accepted by the validator's evidence, execution-receipt,
+subject-receipt and provenance checks, and each one removed or changed is
+refused; validate() accepts with exactly the fixture's known non-evidence
+refusals (WORKER_UNIT_KNOWN_GAPS) waived.
 
 Spec directives written here (one per line): source, store, scratch,
 adapter PATH SHA256, authority, binding PATH SHA256, sealed, timeout NS,
@@ -65,7 +71,7 @@ the prior closure and the binding live beside the store files.
 No fixture here is service admission or performance evidence.
 """
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import copy
 import hashlib
 import io
@@ -73,6 +79,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -236,6 +243,79 @@ def _row_line(row, group, runtime):
     identity = row["identity"]
     dims = [identity[field] for field in binding.STATISTICAL_DIMENSIONS]
     return f"row {row['row']} {group} {int(runtime)} " + " ".join(dims)
+
+
+def _independent_replay(record, evidence, composed, family):
+    """The #510 publication and independent-replay phase over the sealed
+    closure the composer produced (lane F's step, reproduced for the test):
+    `record`'s sealed-result phase is set to composed["sealed"] and its
+    independent-replay phase written into `evidence`. The trusted adapter is
+    compiled from binding.__file__'s checkout."""
+    sealed_descriptor = composed["sealed"]
+    sealed = json.loads((evidence / sealed_descriptor["path"]).read_bytes())
+    bundle_descriptor = sealed["result_bundle"]
+    bundle = json.loads((evidence / bundle_descriptor["path"]).read_bytes())
+    record["workflow"]["phases"]["sealed_result"] = {key: sealed_descriptor[key]
+                                                     for key in ("path", "bytes", "sha256")}
+
+    def put(path, data):
+        (evidence / path).write_bytes(data)
+        return _descriptor(data, path)
+
+    with tempfile.TemporaryDirectory(prefix="retirement-compose-adapter-") as adapter_directory:
+        _executable, _binary, source_digest, toolchain_digest, build_command = \
+            binding._compile_trusted_retirement_adapter(Path(adapter_directory))
+    publication_id = "published-retirement-bundle-e"
+    downloaded_files = sealed["seal"]["files"] + [{
+        "name": "workflow.phases.sealed_result", "path": sealed_descriptor["path"],
+        "bytes": sealed_descriptor["bytes"], "sha256": sealed_descriptor["sha256"]}]
+    archive_files = [{key: item[key] for key in ("path", "bytes", "sha256")} for item in downloaded_files]
+    archive_manifest = {
+        "schema": "buster-native-retirement-independent-bundle-manifest-v1", "version": 1,
+        "publication_id": publication_id, "files": archive_files,
+        "root_sha256": binding._canonical_files_digest(
+            [{"name": item["path"], **item} for item in archive_files]),
+    }
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        manifest_bytes = _canonical(archive_manifest)
+        info = tarfile.TarInfo("bundle-manifest.json")
+        info.size = len(manifest_bytes)
+        archive.addfile(info, io.BytesIO(manifest_bytes))
+        for item in downloaded_files:
+            payload = (evidence / item["path"]).read_bytes()
+            info = tarfile.TarInfo(item["path"])
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    downloaded = put("retirement-downloaded-independent.bundle.tar", buffer.getvalue())
+    publication = put("retirement-performance-publication.json", _canonical({
+        "schema": binding.PUBLICATION_SCHEMA, "version": 1,
+        "publisher": "native-retirement-evidence-v1", "release": "retirement-v1",
+        "run_id": "run-e-composer", "service_id": record["execution"]["service"]["id"],
+        "publication_id": publication_id, "sealed_result_sha256": bundle_descriptor["sha256"],
+        "published_bundle_sha256": downloaded["sha256"], "downloaded_bundle_sha256": downloaded["sha256"],
+        "replay_result": "independently-replayed"}))
+    replay = put("retirement-independent-replay.bundle", _canonical({
+        "schema": binding.REPLAY_BUNDLE_SCHEMA, "version": 1,
+        "sealed_result_sha256": bundle_descriptor["sha256"],
+        "raw_measurements_sha256": composed["raw_measurements_sha256"],
+        "family_sha256": family["sha256"],
+        "member_invocations_sha256": binding._family_invocation_digest(family),
+        "member_count": len(family["members"]),
+        "adapter_command": "bench_throughput retirement-replay --input SERIES_FILE --output RESULT_JSON",
+        "adapter_build_command": build_command, "adapter_toolchain_sha256": toolchain_digest,
+        "adapter_source_sha256": source_digest,
+        "code_bytes_summary_sha256": binding._canonical_json_digest(bundle["code_bytes_summary"]),
+        "untimed_batches_sha256": bundle["untimed_batches"]["sha256"],
+        "publication_id": publication_id, "published_bundle_sha256": downloaded["sha256"],
+        "downloaded_bundle_sha256": downloaded["sha256"], "downloaded_bundle": downloaded,
+        "adapter_result": {key: composed["replay"][key] for key in ("path", "bytes", "sha256")},
+        "publication_receipt": publication}))
+    record["workflow"]["phases"]["independent_replay"] = put(
+        "retirement-independent-replay.json", _canonical({
+            "schema": binding.PHASE_SCHEMA["independent_replay"], "version": 1,
+            "status": "independently-replayed", "sealed_result_sha256": sealed_descriptor["sha256"],
+            "replay_bundle": replay, "publication_receipt": publication}))
 
 
 class ComposeEndToEndTests(unittest.TestCase):
@@ -447,75 +527,6 @@ class ComposeEndToEndTests(unittest.TestCase):
         }
         return record, spec, support_output, family
 
-    def _independent_replay(self, record, evidence, composed, family):
-        """The #510 publication and independent-replay phase over the sealed
-        closure the composer produced (lane F's step, reproduced for the test)."""
-        sealed_descriptor = composed["sealed"]
-        sealed = json.loads((evidence / sealed_descriptor["path"]).read_bytes())
-        bundle_descriptor = sealed["result_bundle"]
-        bundle = json.loads((evidence / bundle_descriptor["path"]).read_bytes())
-        record["workflow"]["phases"]["sealed_result"] = {key: sealed_descriptor[key]
-                                                         for key in ("path", "bytes", "sha256")}
-
-        def put(path, data):
-            (evidence / path).write_bytes(data)
-            return _descriptor(data, path)
-
-        with tempfile.TemporaryDirectory(prefix="retirement-compose-adapter-") as adapter_directory:
-            _executable, _binary, source_digest, toolchain_digest, build_command = \
-                binding._compile_trusted_retirement_adapter(Path(adapter_directory))
-        publication_id = "published-retirement-bundle-e"
-        downloaded_files = sealed["seal"]["files"] + [{
-            "name": "workflow.phases.sealed_result", "path": sealed_descriptor["path"],
-            "bytes": sealed_descriptor["bytes"], "sha256": sealed_descriptor["sha256"]}]
-        archive_files = [{key: item[key] for key in ("path", "bytes", "sha256")} for item in downloaded_files]
-        archive_manifest = {
-            "schema": "buster-native-retirement-independent-bundle-manifest-v1", "version": 1,
-            "publication_id": publication_id, "files": archive_files,
-            "root_sha256": binding._canonical_files_digest(
-                [{"name": item["path"], **item} for item in archive_files]),
-        }
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as archive:
-            manifest_bytes = _canonical(archive_manifest)
-            info = tarfile.TarInfo("bundle-manifest.json")
-            info.size = len(manifest_bytes)
-            archive.addfile(info, io.BytesIO(manifest_bytes))
-            for item in downloaded_files:
-                payload = (evidence / item["path"]).read_bytes()
-                info = tarfile.TarInfo(item["path"])
-                info.size = len(payload)
-                archive.addfile(info, io.BytesIO(payload))
-        downloaded = put("retirement-downloaded-independent.bundle.tar", buffer.getvalue())
-        publication = put("retirement-performance-publication.json", _canonical({
-            "schema": binding.PUBLICATION_SCHEMA, "version": 1,
-            "publisher": "native-retirement-evidence-v1", "release": "retirement-v1",
-            "run_id": "run-e-composer", "service_id": record["execution"]["service"]["id"],
-            "publication_id": publication_id, "sealed_result_sha256": bundle_descriptor["sha256"],
-            "published_bundle_sha256": downloaded["sha256"], "downloaded_bundle_sha256": downloaded["sha256"],
-            "replay_result": "independently-replayed"}))
-        replay = put("retirement-independent-replay.bundle", _canonical({
-            "schema": binding.REPLAY_BUNDLE_SCHEMA, "version": 1,
-            "sealed_result_sha256": bundle_descriptor["sha256"],
-            "raw_measurements_sha256": composed["raw_measurements_sha256"],
-            "family_sha256": family["sha256"],
-            "member_invocations_sha256": binding._family_invocation_digest(family),
-            "member_count": len(family["members"]),
-            "adapter_command": "bench_throughput retirement-replay --input SERIES_FILE --output RESULT_JSON",
-            "adapter_build_command": build_command, "adapter_toolchain_sha256": toolchain_digest,
-            "adapter_source_sha256": source_digest,
-            "code_bytes_summary_sha256": binding._canonical_json_digest(bundle["code_bytes_summary"]),
-            "untimed_batches_sha256": bundle["untimed_batches"]["sha256"],
-            "publication_id": publication_id, "published_bundle_sha256": downloaded["sha256"],
-            "downloaded_bundle_sha256": downloaded["sha256"], "downloaded_bundle": downloaded,
-            "adapter_result": {key: composed["replay"][key] for key in ("path", "bytes", "sha256")},
-            "publication_receipt": publication}))
-        record["workflow"]["phases"]["independent_replay"] = put(
-            "retirement-independent-replay.json", _canonical({
-                "schema": binding.PHASE_SCHEMA["independent_replay"], "version": 1,
-                "status": "independently-replayed", "sealed_result_sha256": sealed_descriptor["sha256"],
-                "replay_bundle": replay, "publication_receipt": publication}))
-
     def test_composed_sealed_result_validates(self):
         # The production 64 MiB shard size gives this small family one series
         # shard; a 4 KiB fixture size (#1880) spans several, with the
@@ -566,7 +577,7 @@ class ComposeEndToEndTests(unittest.TestCase):
                 binding._execution_context(record, composed["raw_measurements_sha256"])))
             trusted = _trusted_authority(self, authority, evidence, composed)
             self.assertEqual(trusted, composed["receipt"]["sha256"])
-            self._independent_replay(record, evidence, composed, family)
+            _independent_replay(record, evidence, composed, family)
             path = tests.write_record(root, record)
 
             def validate():
@@ -874,18 +885,25 @@ class ThroughputFixtureTests(unittest.TestCase):
 
 # The composed job-82 result the preparation runner exports beside itself
 # (retirement_worker_unit_tests.h, bq_prep_worker_unit_export): `result/`
-# (the result root), `authority/` (the producer authority and context chain)
-# and `census/` (the installed census the binding's support files name).
+# (the result root) and `authority/` (the producer authority and context
+# chain).
 WORKER_UNIT_RESULT = "retirement-worker-unit-result"
 WORKER_UNIT_BINDING = "retirement-binding.json"
 WORKER_UNIT_MANIFEST = "native-retirement-performance-v1.manifest"
 WORKER_UNIT_BUNDLE = "native-retirement-performance-v1.bundle"
 WORKER_UNIT_CHAIN_HEADER = "BQ-RETIREMENT-CONTEXT-CHAIN-V2"
 WORKER_UNIT_PENDING = {"bytes": 1, "sha256": "0" * 64}
-# The preparation fixture's installed census files under the binding's
-# `census/` support paths (retirement_binding_context_fixture.py).
+# The preparation fixture's installed census files, published into the
+# result root under the binding's support paths
+# (retirement_binding_context_fixture.py).
 WORKER_UNIT_CENSUS_ROLES = ("support_declaration", "manifest", "inputs", "rows", "performance_rows",
                             "validator_report")
+# Every evidence file the binding context names is published at a flat
+# result-root name with this prefix (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX);
+# the fixture's context names all 39 of the #511 record.
+WORKER_UNIT_EVIDENCE_PREFIX = "retirement-evidence-"
+WORKER_UNIT_EVIDENCE = 39
+WORKER_UNIT_ADMISSION = "retirement-aa-admission.json"
 
 
 def _sha256_file(path):
@@ -904,8 +922,8 @@ class WorkerUnitResultTests(unittest.TestCase):
     itself; `build/bench-service-tools/` is also COMPOSE_BINARY's directory.
     These checks read that output with the validator's own readers: the #511
     binding the C writer derived from the pinned context (structurally valid,
-    its pre-campaign documents and admission receipt bound, its two late
-    phases pending), the execution context over the result bundle's raw
+    its pre-campaign documents, admission receipt and published support files
+    bound, its two late phases pending), the execution context over the result bundle's raw
     digest, the producer authority and its context chain, the result manifest
     and BQ-BUNDLE-V1 index. Mutated bindings are refused by the validator.
     Absent that output (CI runs this file without the preparation runner),
@@ -956,12 +974,13 @@ class WorkerUnitResultTests(unittest.TestCase):
         for phase in ("sealed_result", "independent_replay"):
             self.assertEqual({key: workflow["phases"][phase][key] for key in ("bytes", "sha256")},
                              WORKER_UNIT_PENDING)
-        # The support files are the installed census's bytes.
+        # The support files are the installed census's bytes, published into
+        # the result root.
         files = record["support"]["files"]
         for role in WORKER_UNIT_CENSUS_ROLES:
             artifact = files[binding.SUPPORT_FILE_ROLES.index(role)]
-            self.assertTrue(artifact["path"].startswith("census/"))
-            binding._check_evidence(self.export, artifact, f"support.files.{role}")
+            self.assertTrue(artifact["path"].startswith(WORKER_UNIT_EVIDENCE_PREFIX))
+            binding._check_evidence(self.result, artifact, f"support.files.{role}")
         # The subjects are the sealed result's pinned binaries.
         sealed = json.loads((self.result / "retirement-sealed-result.json").read_bytes())
         self.assertEqual(sealed["post_aa_binding_sha256"], workflow["phases"]["post_aa_binding"]["sha256"])
@@ -1075,6 +1094,231 @@ class WorkerUnitResultTests(unittest.TestCase):
         finally:
             records.close()
 
+
+
+def _worker_unit_support_output(evidence, record):
+    """The #508 support facts of the fixture census the result root holds.
+
+    The fixture census is the schema-2 contract fixture, not the approved
+    #508 declaration, so the real _check_support_output refuses it at the
+    frozen declaration path; like test_composed_sealed_result_validates this
+    derives what the workflow check reads from the published census files:
+    their digests, the census rows, and compiler eligibility as the
+    performance rows declare it (the census's authenticated skips)."""
+    files = {item["name"]: item for item in record["support"]["files"]}
+    parsed, axes, family = binding._performance_rows(
+        binding._evidence_bytes(evidence, files["performance_rows"], "support.files.performance_rows"))
+    census_rows = binding._tsv(binding._evidence_bytes(evidence, files["rows"], "support.files.rows"),
+                               binding.ROW_FIELDS, "fixture census rows")
+    eligible = {row["row"] for row in parsed if row["metrics"]["compiler_wall_time"]}
+    return {
+        "manifest": {}, "inputs": [], "dependencies": [], "environment": [], "sources": {},
+        "rows": census_rows, "axes": axes, "family": family,
+        **{f"{role}_sha256": files[role]["sha256"]
+           for role in ("support_declaration", "manifest", "rows", "performance_rows", "validator_report")},
+        "object_row_count": len(census_rows),
+        "eligible_object_row_count": sum(row["row"] in eligible and row["identity"]["artifact_stage"] == "object"
+                                         for row in parsed),
+        "compiler_eligible_rows": eligible,
+        "group_count": len(census_rows) // len(binding.ALLOCATORS),
+    }
+
+
+# The real validator's refusals of the job-82 fixture that are not about
+# the evidence the binding names (checked against the validator's messages;
+# each must still occur, so a fixed one is removed here):
+WORKER_UNIT_KNOWN_GAPS = (
+    # The stand-in compilers (retirement_stand_in_compiler.h) copy one fixed
+    # tests/batch.metrics record into every timed and untimed batch, so every
+    # batch's metrics bytes repeat ...
+    "reuses another batch's per-input metrics content",
+    # ... and name allocator=none whatever the group's allocator.
+    "header is not one serial continue-on-failure batch of the frozen inputs",
+    # Lane D records a runtime launch's executable as the side's compiler
+    # binary (tp_retirement_measurement_run: executable->sha256), where the
+    # validator binds the row's program artifact.
+    "execution invocation binary, command, or oracle output is mismatched",
+    # The validator pins measurement.statistics_implementation to the path
+    # tools/throughput/retirement_stats.h, which the flat result root
+    # (BQ-BUNDLE-V1) cannot hold; the context names the flat evidence entry.
+    "independent replay must bind the reviewed retirement_stats.h source",
+    # The fixture's composer adapter is this runner's structural stand-in
+    # (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
+    # retirement-replay the validator rebuilds and re-runs.
+    "C statistics adapter replay differs from independently downloaded output",
+)
+
+
+class WorkerUnitEvidenceTests(unittest.TestCase):
+    """The real #511 validator over the worker unit's composed result (#881).
+
+    The producer publishes every file the pinned binding context names into
+    the result root (bq_retirement_worker_evidence_publish) and seals them
+    with lane D's documents: the census support files, validator source and
+    closures, both subjects' snapshots, binaries and build receipts, the
+    producer toolchain, the harness binary and statistics implementation,
+    the service, host-profile, qualification and lease receipts, the
+    provenance receipts, the contract source and the admission record.
+
+    Over a copy of the exported result root, with lane F's two phases stubbed
+    (the sealed-result phase naming the composed sealed result, and
+    _independent_replay's publication and replay) and the authority's receipt
+    digest as the out-of-band trust root, the unchanged
+    native_retirement_performance_binding checks every artifact, the
+    execution receipts, the subject receipts and the provenance, and refuses
+    each published evidence file removed or changed in place. Only
+    _check_support_output and _population are replaced, because the fixture
+    census is not the approved #508 declaration (_worker_unit_support_output).
+
+    The whole validate() still refuses the fixture for reasons outside the
+    evidence (WORKER_UNIT_KNOWN_GAPS): it stops at the first, and with
+    exactly those refusals waived it accepts, so any other gap (evidence or
+    not) fails here. Skipped without the exported result.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.export = Path(COMPOSE_BINARY).parent / WORKER_UNIT_RESULT
+        if not (cls.export / "result" / WORKER_UNIT_BINDING).is_file():
+            raise unittest.SkipTest(f"run `bench_service self-test` first: {cls.export} is missing")
+        cls.tests = binding_tests.BindingTests("test_complete_record_structural_contract_is_accepted")
+        authorities = sorted((cls.export / "authority").glob("authority-*.txt"))
+        # BQ-RETIREMENT-AUTHORITY-V3: line 5 is the execution receipt digest.
+        cls.trusted = authorities[0].read_text(encoding="ascii").split("\n")[5] if len(authorities) == 1 else None
+
+    def setUp(self):
+        # Beside the export, not under a shared temporary root whose
+        # identity other processes change (the #615 reader re-checks every
+        # ancestor of the evidence root).
+        self.temporary = tempfile.TemporaryDirectory(prefix="retirement-worker-unit-evidence-",
+                                                     dir=self.export.parent)
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.evidence = self.work / "evidence"
+        shutil.copytree(self.export / "result", self.evidence)
+        for path in self.evidence.iterdir():
+            path.chmod(0o600)
+        self.record = json.loads((self.evidence / WORKER_UNIT_BINDING).read_bytes())
+
+    def artifacts(self):
+        """The binding's evidence files the producer published: path to name."""
+        return {artifact["path"]: name for name, artifact in binding._all_artifacts(self.record) + [
+                ("contract.source", self.record["contract"]["source"])]
+                if artifact["path"].startswith(WORKER_UNIT_EVIDENCE_PREFIX)}
+
+    def final(self):
+        """Lane F's stub over the copy: both late phases, then the final
+        binding beside the evidence."""
+        bundle = json.loads((self.evidence / "retirement-result-bundle.json").read_bytes())
+        composed = {"sealed": _descriptor((self.evidence / "retirement-sealed-result.json").read_bytes(),
+                                          "retirement-sealed-result.json"),
+                    "raw_measurements_sha256": bundle["raw_measurements_sha256"],
+                    "replay": _descriptor((self.evidence / "retirement-statistics-replay.json").read_bytes(),
+                                          "retirement-statistics-replay.json")}
+        record = copy.deepcopy(self.record)
+        _independent_replay(record, self.evidence, composed, record["population"]["statistical_family"])
+        # Derived once, from the published census, before any mutation.
+        self.support_output = _worker_unit_support_output(self.evidence, record)
+        return self.tests.write_record(self.work, record), record
+
+    def validate(self, path, record, trusted=None):
+        with mock.patch.object(binding, "_check_support_output", return_value=self.support_output), \
+                mock.patch.object(binding, "_population", return_value=record["population"]):
+            return binding.validate(path, self.evidence, trusted_execution_receipt_sha256=trusted or self.trusted)
+
+    def test_published_evidence_is_what_the_binding_names(self):
+        artifacts = self.artifacts()
+        self.assertEqual(len(artifacts), WORKER_UNIT_EVIDENCE)
+        published = sorted(path.name for path in self.evidence.iterdir()
+                           if path.name.startswith(WORKER_UNIT_EVIDENCE_PREFIX))
+        self.assertEqual(published, sorted(artifacts))
+        for name, artifact in binding._all_artifacts(self.record) + [("contract.source",
+                                                                     self.record["contract"]["source"])]:
+            if artifact["path"] in artifacts:
+                binding._check_evidence(self.evidence, artifact, name)
+        # The subjects' binaries are the gate's held pair.
+        subjects = self.record["subjects"]
+        self.assertEqual(subjects["baseline"]["binary"]["path"], WORKER_UNIT_EVIDENCE_PREFIX + "baseline-ide")
+        self.assertEqual(subjects["candidate"]["binary"]["path"], WORKER_UNIT_EVIDENCE_PREFIX + "candidate-ide")
+        # The composer sealed them, and the admission receipt, with lane D's
+        # documents: the validator's pre-replay closure.
+        sealed = json.loads((self.evidence / "retirement-sealed-result.json").read_bytes())
+        sealed_paths = {item["path"]: item["name"] for item in sealed["seal"]["files"]}
+        for path, name in artifacts.items():
+            self.assertEqual(sealed_paths.get(path), name)
+        self.assertEqual(sealed_paths.get(WORKER_UNIT_ADMISSION), "execution.host.aa_admission_receipt")
+
+    def test_receipts_pass_the_validators_evidence_checks(self):
+        # The #437 service, host-profile, qualification, A/A admission and
+        # lease receipts, both subjects' snapshot and build receipts and the
+        # #510 provenance receipts, through the validator's own checks.
+        facts = binding._check_execution_evidence(self.evidence, self.record)
+        self.assertEqual(facts["native_target"], binding.NATIVE_TIMED_TARGET)
+        binding._check_subject_receipts(self.evidence, self.record)
+        binding._check_provenance_evidence(self.evidence, self.record, self.record["provenance"])
+
+    @contextmanager
+    def harness_checkout(self):
+        """A clean checkout at the binding's harness commit (the fixture
+        context names the HEAD it was generated at), from which the validator
+        rebuilds the reviewed #619 adapter."""
+        commit = self.record["measurement"]["harness_source_commit"]
+        with tempfile.TemporaryDirectory(prefix="retirement-worker-unit-adapter-") as directory:
+            repository = Path(directory) / "repository"
+            subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(repository)],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repository), "checkout", "--quiet", "--detach", commit], check=True,
+                           capture_output=True)
+            yield repository
+
+    def test_real_validator_over_the_worker_unit_result(self):
+        self.assertIsNotNone(self.trusted)
+        with self.harness_checkout() as repository, \
+                mock.patch.object(binding, "__file__",
+                                  str(repository / "tools" / "native_retirement_performance_binding.py")):
+            path, record = self.final()
+            # Every published evidence file (and the admission receipt the
+            # producer writes), removed or changed in place, is refused.
+            items = sorted(self.artifacts().items()) + [(WORKER_UNIT_ADMISSION,
+                                                         "execution.host.aa_admission_receipt")]
+            self.assertEqual(len(items), WORKER_UNIT_EVIDENCE + 1)
+            for leaf, name in items:
+                target = self.evidence / leaf
+                original = target.read_bytes()
+                target.unlink()
+                with self.subTest(missing=name), self.assertRaisesRegex(ValueError, "is missing"):
+                    self.validate(path, record)
+                changed = bytearray(original)
+                changed[-1] ^= 1
+                target.write_bytes(bytes(changed))
+                with self.subTest(changed=name), \
+                        self.assertRaisesRegex(ValueError, re.escape(name) + " digest does not match"):
+                    self.validate(path, record)
+                target.write_bytes(original)
+            # Unwaived, the first refusal is the first known gap: every
+            # evidence and execution-receipt check before it passed.
+            with self.assertRaisesRegex(ValueError, re.escape(WORKER_UNIT_KNOWN_GAPS[0])):
+                self.validate(path, record)
+            # With exactly the known gaps waived, the validator accepts; each
+            # waived gap still occurs.
+            real_fail, waived = binding._fail, set()
+
+            def waive(message):
+                gap = next((gap for gap in WORKER_UNIT_KNOWN_GAPS if gap in message), None)
+                if gap is None:
+                    real_fail(message)
+                waived.add(gap)
+
+            with mock.patch.object(binding, "_fail", waive):
+                result = self.validate(path, record)
+            self.assertEqual(waived, set(WORKER_UNIT_KNOWN_GAPS))
+            self.assertEqual(result["proof"], "evidence-and-receipts-checked-without-independent-git")
+            for check in ("evidence_checked", "execution_checked", "invocations_checked", "bundle_checked",
+                          "provenance_checked", "support_checked"):
+                self.assertTrue(result[check], check)
+            # Waived or not, another trust root is refused.
+            with mock.patch.object(binding, "_fail", waive), self.assertRaises(ValueError):
+                self.validate(path, record, trusted="f" * 64)
 
 if __name__ == "__main__":
     if len(sys.argv) not in (2, 3):

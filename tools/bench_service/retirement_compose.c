@@ -1467,7 +1467,8 @@ BUSTER_GLOBAL_LOCAL int tp_compose_evidence_file(int root, char const* path, uin
 /* Rehash the pre-sample closure below the store root (none is a store file;
  * the declared entry count and bytes are exact) and join its plan, post-A/A
  * and result-input plan entries to the identities the receipt, bundle and
- * sealed record bind. */
+ * sealed record bind; then rehash the external closure (no workflow phase:
+ * those are the prior's or lane F's). */
 BUSTER_GLOBAL_LOCAL int tp_compose_prior(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
@@ -1493,6 +1494,18 @@ BUSTER_GLOBAL_LOCAL int tp_compose_prior(TpComposeState* state)
             valid = 0;
     }
     valid = valid && plan == 1 && post == 1 && result_plan == 1 && total == request->declaration->prior_bytes;
+    /* The external closure: rehashed like the prior, never a store file;
+     * the seal refuses a repeated name or path. */
+    valid = valid && (!request->closure_count || request->closure);
+    for (unsigned i = 0; valid && i < request->closure_count; ++i)
+    {
+        TpRetirementComposeClosure const* entry = request->closure + i;
+        valid = tp_compose_printable(entry->name, TP_RETIREMENT_COMPOSE_NAME_BYTES) && entry->bytes &&
+                tp_compose_find(state, entry->path) == TP_COMPOSE_NONE &&
+                tp_compose_evidence_file(state->store->root, entry->path, entry->bytes, 0, entry->sha256, NULL, NULL,
+                                         NULL) &&
+                strncmp(entry->name, "workflow.phases.", strlen("workflow.phases."));
+    }
     return valid;
 }
 
@@ -2916,14 +2929,15 @@ BUSTER_GLOBAL_LOCAL int tp_compose_store_entry_add(TpComposeState* state, TpComp
 }
 
 /* The validator's exact sealed closure (_sealed_closure_files): the prior
- * pre-replay identities plus every composed and streamed artifact, sorted
+ * and external pre-replay identities plus every composed and streamed artifact, sorted
  * by name, with unique names and paths; the outer record binds its root.
  * (The by-path order predates the composer's own outputs, which are looked
  * up from their artifacts.) */
 BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    unsigned capacity = request->prior_count + request->transcript_count + request->metrics_count +
+    unsigned capacity = request->prior_count + request->closure_count + request->transcript_count +
+                        request->metrics_count +
                         request->untimed_metrics_count + request->sample_counts[0] + request->sample_counts[1] +
                         state->partitions + state->series_shard_count + 8;
     TpComposeEntry* entries = (TpComposeEntry*)tp_retirement_compose_allocate(state->arena,
@@ -2934,6 +2948,9 @@ BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
     for (unsigned i = 0; valid && i < request->prior_count; ++i)
         valid = tp_compose_entry(entries, &count, capacity, request->prior[i].path, request->prior[i].bytes,
                                  request->prior[i].sha256, "%s", request->prior[i].name);
+    for (unsigned i = 0; valid && i < request->closure_count; ++i)
+        valid = tp_compose_entry(entries, &count, capacity, request->closure[i].path, request->closure[i].bytes,
+                                 request->closure[i].sha256, "%s", request->closure[i].name);
     valid = valid &&
         tp_compose_entry(entries, &count, capacity, state->bundle.path, state->bundle.bytes, state->bundle.sha256,
                          "workflow.result_bundle") &&

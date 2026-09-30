@@ -152,7 +152,15 @@ forged receipt with recomputed in-bundle descriptors is rejected. The binding
 record's location inside the result is owned by E's result composer: the
 worker-unit producer writes it at the result root as `retirement-binding.json`
 (#881 PR 3), `COMPOSER_BINDING_PATH` in the script fixes that path, and any
-other `--binding` is refused. That record carries its sealed-result and
+other `--binding` is refused. Every evidence file that record names, besides
+the composer's and lane F's workflow phases, is a result-root entry too: the
+producer publishes the binding context's evidence (support files, closures,
+subjects' snapshots, binaries and build receipts, producer toolchain, harness
+and statistics implementation, service, host-profile, qualification and lease
+receipts, provenance receipts, contract source and admission record) as flat
+`retirement-evidence-*` files beside `retirement-aa-admission.json`, each at
+the size and digest the record binds, and the composer seals them; they are
+ordinary regular files of the bundle index and the export. That record carries its sealed-result and
 independent-replay phases as pending descriptors (the sealed result binds the
 record's digest), so it never passes a replay itself. Lane F's final binding
 is produced after the export, so it lives outside the service result: the

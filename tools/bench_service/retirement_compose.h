@@ -226,6 +226,14 @@ typedef struct TpRetirementComposeRequest
     unsigned code_count;
     TpRetirementComposeClosure const* prior;
     unsigned prior_count;
+    /* The rest of the binding's pre-replay closure (the validator's
+     * _sealed_closure_files): files below the store root that are neither
+     * store files nor declared prior entries but external entries of the
+     * store plan, such as the evidence the binding names and its A/A
+     * admission receipt. Each is rehashed and sealed under its name like a
+     * prior entry; none may repeat a prior or store path. May be empty. */
+    TpRetirementComposeClosure const* closure;
+    unsigned closure_count;
     char const* sealed_path;
 } TpRetirementComposeRequest;
 
