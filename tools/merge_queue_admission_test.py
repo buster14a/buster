@@ -266,11 +266,16 @@ class RulesTests(unittest.TestCase):
         self.assertNotIn(": write", text)
         self.assertNotIn("pull_request_target:", text)
         self.assertNotIn("secrets.", text)
-        self.assertIn("github.event_name == 'merge_group' && 'main' || github.sha", text)
         self.assertNotIn("github.event.merge_group.base_sha || github.sha", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("github.event_name == 'push' && github.run_id", text)
-        self.assertIn("check-group", text)
+        # The reconciler is the only merge-group producer of CONTEXT (#1807):
+        # no merge_group trigger, no runner-held check-group wait.
+        # group_owner keys on exactly this marker in the group head's file.
+        self.assertNotIn("\n  merge_group:\n", text)
+        self.assertNotIn("merge_group", text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0])
+        self.assertNotIn("check-group", text)
+        self.assertNotIn("timeout-minutes: 310", text)
 
 
 class CombinedTreeTests(unittest.TestCase):
