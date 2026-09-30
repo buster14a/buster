@@ -51,8 +51,8 @@ Branches whose tips are PR heads also remain under GitHub's `refs/pull/*/head`.
 | `claude/brave-feynman-1g8df5` | `7d70ae1dd` | [#1598](https://github.com/buster14a/buster/issues/1598): single tree-check registration table |
 | `claude/hopeful-bardeen-y44j61` | `7a2f2a77f` | [#1602](https://github.com/buster14a/buster/issues/1602): per-function FAST decline |
 | `codex/75-preserve-variadic-al` | `01589059b` | [#2013](https://github.com/buster14a/buster/issues/2013): indirect variadic call clobbers AL |
-| `codex/124-gpr-prewarm-candidate-20260924-a` | `e1cd8979d` | [#124](https://github.com/buster14a/buster/issues/124): distinct-key GPR prewarm, not measured |
-| `audit/parameter-matrix-238-14ebc9aa` | `14ebc9aab` | [#238](https://github.com/buster14a/buster/issues/238): allocator × optimization parameter-alignment regression |
+| `codex/124-gpr-prewarm-candidate-20260924-a` | `e1cd8979d` | [#2017](https://github.com/buster14a/buster/issues/2017) (part of #124): distinct-key GPR prewarm, not measured |
+| `audit/parameter-matrix-238-14ebc9aa` | `14ebc9aab` | [#2018](https://github.com/buster14a/buster/issues/2018) (follows #238): allocator × optimization parameter-alignment regression |
 
 ## Deleting
 
