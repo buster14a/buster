@@ -80,7 +80,20 @@ jobs:
           for cc in clang gcc; do
             for opt in -O0 -O2; do
               "$cc" "$opt" "$RUNNER_TEMP/results.c" -o "$RUNNER_TEMP/reference"
-              "$RUNNER_TEMP/reference"
+              if ! "$RUNNER_TEMP/reference"; then
+                python3 - <<'PY'
+          import os, pathlib, re
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "results.c")
+          text = path.read_text()
+          text = '#include <stdio.h>\n' + text
+          text = text.replace('result |= actual != (expected);', 'if (actual != (expected)) { printf("VALUE %s actual=%lld expected=%lld\\n", #expression, actual, (long long)(expected)); result = 1; }')
+          text = text.replace('result |= actual != (long long)(field);', 'if (actual != (long long)(field)) { printf("STORE %s actual=%lld read=%lld\\n", #expression, actual, (long long)(field)); result = 1; }')
+          path.with_name("diagnose.c").write_text(text)
+          PY
+                "$cc" "$opt" -fsanitize=undefined "$RUNNER_TEMP/diagnose.c" -o "$RUNNER_TEMP/diagnose"
+                "$RUNNER_TEMP/diagnose"
+                exit 1
+              fi
               echo "ORACLE compiler=$cc optimization=$opt status=pass"
             done
           done
