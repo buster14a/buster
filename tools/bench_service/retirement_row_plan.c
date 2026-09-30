@@ -8,6 +8,9 @@
  *
  * Entry points:
  *   bq_retirement_row_plan_import       the pinned plan for one attempt
+ *   bq_retirement_row_plan_parse        its decode, bind and derive of the
+ *                                       bytes, also run by the offline
+ *                                       generator (retirement_records.c)
  *   bq_retirement_row_observed_format   canonical row-evidence bytes
  *   bq_retirement_row_observed_parse    and back, canonical only
  *   bq_retirement_row_evidence_join     plan + observation -> gate evidence
@@ -628,6 +631,31 @@ bool bq_retirement_row_plan_release(BqRetirementRowPlan* plan)
     return ok;
 }
 
+/* Decodes, binds and derives the canonical bytes of a plan into imported
+ * (which carries the job and attempt), exactly as the importer does after
+ * its pin check; the offline generator (retirement_records.c) runs the same
+ * steps over its own output before emitting it. imported->text receives a
+ * NUL-split copy. BQ_RECIPE_MISMATCH for any other bytes. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_plan_parse(u8 const* bytes, u32 length,
+    BqRetirementProjection const* projection, BqRetirementRowPlan* imported)
+{
+    imported->text = bytes && length ? malloc((size_t)length + 1u) : NULL;
+    BqError result = !bytes || !length ? BQ_RECIPE_MISMATCH : imported->text ? BQ_OK : BQ_IO;
+    if (result == BQ_OK)
+    {
+        memcpy(imported->text, bytes, length);
+        imported->text[length] = 0;
+        for (u32 index = 0; index < length; index += 1)
+            if (imported->text[index] == '\n') imported->text[index] = 0;
+        BqRetirementCheckCursor cursor = {{(char8*)bytes, length}, imported->text, 0, memchr(bytes, 0, length) == NULL};
+        result = bq_retirement_row_plan_decode(&cursor, projection, imported) &&
+                 bq_retirement_row_plan_bind(imported, projection) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    }
+    if (result == BQ_OK) result = bq_retirement_row_plan_derive(imported, projection) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK) memcpy(imported->population_sha256, projection->population_sha256, SHA256_HEX_CAPACITY);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_plan_import_profile(int installed, String8 profile, BqJob const* job,
     BqRetirementProjection const* projection, BqRetirementRowPlan* plan)
 {
@@ -651,20 +679,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_plan_import_profile(int installed,
                      BQ_RETIREMENT_ROW_PLAN_BYTES_CAP, &bytes, &length, imported.authority_sha256, NULL) ?
                  BQ_OK : BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK && memcmp(imported.authority_sha256, pin, SHA256_HEX_CAPACITY)) result = BQ_RECIPE_MISMATCH;
-    imported.text = result == BQ_OK ? malloc((size_t)length + 1u) : NULL;
-    if (result == BQ_OK && !imported.text) result = BQ_IO;
-    if (result == BQ_OK)
-    {
-        memcpy(imported.text, bytes, length);
-        imported.text[length] = 0;
-        for (u32 index = 0; index < length; index += 1)
-            if (imported.text[index] == '\n') imported.text[index] = 0;
-        BqRetirementCheckCursor cursor = {{(char8*)bytes, length}, imported.text, 0, memchr(bytes, 0, length) == NULL};
-        result = bq_retirement_row_plan_decode(&cursor, projection, &imported) &&
-                 bq_retirement_row_plan_bind(&imported, projection) ? BQ_OK : BQ_RECIPE_MISMATCH;
-    }
-    if (result == BQ_OK) result = bq_retirement_row_plan_derive(&imported, projection) ? BQ_OK : BQ_RECIPE_MISMATCH;
-    if (result == BQ_OK) memcpy(imported.population_sha256, projection->population_sha256, SHA256_HEX_CAPACITY);
+    if (result == BQ_OK) result = bq_retirement_row_plan_parse(bytes, length, projection, &imported);
     free(bytes);
     if (recipes >= 0 && close(recipes) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK)

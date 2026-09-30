@@ -52,6 +52,12 @@
 #include "retirement_worker_compose.c"
 #include "retirement_worker_unit.c"
 #include "retirement_coordinator.c"
+/* The offline record generators (`retirement-records`): the row plan, the
+ * untimed-command contract and the budget's frozen counts from the staged
+ * census, reusing the importers above to check their own output, and lane
+ * D's budget writer. */
+#include "../throughput/retirement_budget_tool.h"
+#include "retirement_records.c"
 #endif
 #include "worker_linux.c"
 #include "export.c"
@@ -244,6 +250,15 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
+#ifdef __linux__
+    else if (argc >= 2 && !strcmp(argv[1], "retirement-records"))
+    {
+        valid = true;
+        error = bq_retirement_records_cli(argc - 2, argv + 2, output, diagnostics);
+        handled = true;
+        simple_diagnostic = true;
+    }
+#endif
     else if (argc == 10 && !strcmp(argv[1], "worker-unit"))
     {
         valid = bq_decimal(argv[3], true, &argument) && bq_decimal(argv[4], true, &attempt);
@@ -492,7 +507,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "gateway export JOB TOKEN FULL_SHA [EXPECTED_RECIPE] | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "
-                    "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
+                    "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | "
+                    "retirement-records row-plan|untimed-commands|budget-counts|budget-encode|budget-preflight ...\n");
         }
     }
     bq_close(&queue);

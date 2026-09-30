@@ -3295,6 +3295,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 #include "worker_budget_crosscheck_tests.h"
 #include "retirement_unit_campaign_tests.h"
 #include "retirement_worker_unit_tests.h"
+#include "retirement_records_tests.h"
 
 /* Every fixture of this runner (the default mode). */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_suite(void)

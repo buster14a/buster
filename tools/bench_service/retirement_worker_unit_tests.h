@@ -2067,6 +2067,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_bound(BqPrepOracleFixture* fixture,
     BQ_PREP_CHECK(bq_worker_result_binding_validate_pinned(&other, directory, seams) == BQ_CONFIGURATION_MISMATCH);
 }
 
+/* The record generators regenerate the authorities below
+ * (retirement_records_tests.h, included after this file). */
+BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRetirementProjection const* projection,
+    BqJob const* job, BqRetirementRowPlan const* row_plan);
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
@@ -2116,6 +2121,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         }
         ok = ok && bq_prep_worker_unit_observe(&row_plan, &observed);
         BQ_PREP_CHECK(ok);
+        if (ok)
+        {
+            bq_prep_records_test(fixture, projection, &reference->attempt.unit.job, &row_plan);
+            bq_prep_test_timing("worker-unit-records");
+        }
     }
     ok = ok && mkdirat(fixture->workspaces_fd, "results", 0700) == 0;
     BqRetirementWorkerUnitSeams seams = {

@@ -2756,6 +2756,8 @@ static void test_process_children(void)
 #include "retirement_samples_test.h"
 #include "retirement_artifact_test.h"
 #include "retirement_measurement_test.h"
+#include "retirement_budget_tool.h"
+#include "retirement_budget_tool_test.h"
 #ifdef __linux__
 #include "retirement_campaign_test.h"
 #include "retirement_unit_campaign_test.h"
@@ -2832,6 +2834,7 @@ int main(int argc, char** argv)
         test_retirement_execution();
         test_retirement_records(root);
         test_retirement_samples(root);
+        test_retirement_budget_tool(root);
         test_retirement_artifact(executable, root);
 #ifdef __linux__
         test_retirement_measurement(executable, root);
