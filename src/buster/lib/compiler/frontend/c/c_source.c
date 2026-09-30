@@ -8316,7 +8316,7 @@ struct CPreprocessSeal
     CPhaseBoundaryMetrics metrics;
 };
 
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 176);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 184);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 80);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceMap) == 32);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
