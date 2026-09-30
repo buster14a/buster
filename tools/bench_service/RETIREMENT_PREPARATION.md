@@ -1251,17 +1251,20 @@ untimed-commands digests), lane D's frozen campaign values
 (`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
 `campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
 status line, which must be exactly
-`status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`). A missing line, a
+`status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`, checked by the
+queue's own `bq_recipe_profile_admitted`). A missing line, a
 second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
 return each refuse. `bq_worker_unit` passes the compiled
 profile (`bq_retirement_worker_unit_installed`), which is blocked. A
 production retirement job is therefore still refused with `BQ_BAD_REQUEST`
 before the lease handoff, the keeper, any directory or any child. The
 coordinator's gates use the same completeness gate (see
-[the coordinator side](#coordinator-side-881-pr-4)); the portable queue's
-`bq_recipe_admitted`, `bq_recipe_service` and `bq_request_valid` still refuse
-the recipe in every build. Only the test seams admit it, with a complete
-fixture profile.
+[the coordinator side](#coordinator-side-881-pr-4)). The portable queue's
+`bq_recipe_admitted`, `bq_recipe_service` and `bq_request_valid` admit the
+recipe only when the compiled profile is admitted
+(`bq_recipe_retirement_admitted`), so they still refuse it. Only the test
+seams admit it: the worker's with a complete fixture profile, and queue.c's
+`bq_retirement_profile_test_override` with an admitted stand-in.
 
 **The unit process.** After the pause and the pre-exec lease recheck,
 `bq_retirement_worker_unit_run` performs these steps in order:
@@ -1750,14 +1753,36 @@ digest mismatch is `BQ_RECIPE_MISMATCH`. The loaded bytes then go through
 - `bq_worker_recipe_launchable`, which replaces the recipe-name check.
 
 With the compiled profile, a blocked status or no seams, each refuses. The
-portable queue's `bq_request_valid` (submission, journal replay, transport,
-exclusive admission) is `bq_request_valid_admitting(request, false)`. That
-queue is also built without the Linux retirement units, so it cannot
-evaluate the gate, and a retirement request still cannot be submitted.
-Opening submission needs a queue seam that carries the gate's verdict. That
-seam is left to the integration; `bq_worker_result_binding_validate` accepts
-a retirement result only through its complete-profile seam, and its public
-entry still refuses one.
+fourth, `bq_worker_result_binding_validate_pinned`, decides the same way.
+Each decides per recipe (#881 N1): the retirement recipe needs a complete
+seam profile even when the queue's predicate admits it, and the smoke recipe
+keeps `bq_recipe_service`. `bq_retirement_request_valid_pinned` passes the
+completeness verdict to `bq_request_valid_admitting`, which decides the
+retirement recipe by that verdict alone; the other three use
+`bq_worker_recipe_admitted`.
+`bq_worker_unit_pinned` likewise never sends a retirement job down the smoke
+exec path.
+
+**The queue seam (#881 P1).** The portable queue's `bq_request_valid`
+(submission, transport, exclusive admission) is
+`bq_request_valid_admitting(request, bq_recipe_retirement_admitted())`. That
+predicate is true only when the compiled profile carries exactly one
+`status=admitted` line, so a retirement request still cannot be submitted.
+When the compiled profile is admitted, submission, the gateway's
+`submit-retirement`, materialization, dispatch, reconciliation and export all
+open together. The coordinator's gates above still need every pin, and the
+Linux service refuses an admitted but incomplete compiled profile before any
+reservation (`bq_retirement_compiled_servable`: `serve`, the transport's
+submission check, which also accepts retirement only through the exclusive
+submit, and the worker's check of the queued head job before the lease).
+Journal replay accepts a schema-3 retirement SUBMIT whatever the build admits
+(`bq_recipe_real_journal`), so a journal written under an admitted profile
+stays replayable under a blocked build, with its retirement jobs inert. The
+read-only `recipe-identity` operation reports the profile's status
+(`blocked`, `admitted`, or `incomplete` for admitted without every pin) and the
+SHA-256 of the profile, contract and support declaration.
+`bq_worker_result_binding_validate` accepts a retirement result only through
+its complete-profile seam, and its public entry still refuses one.
 
 **Still open.** These are inputs for the `bq_worker_recover` classification:
 
