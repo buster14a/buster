@@ -45,7 +45,8 @@ class PerformanceIdentityTests(unittest.TestCase):
     def test_checked_in_support_bytes_match_reviewed_pin(self):
         self.assertIn(hashlib.sha256(self.declaration).hexdigest(),
                       (binding.SUPPORT_DECLARATION_SHA256,
-                       binding.NEXT_SUPPORT_DECLARATION_SHA256))
+                       binding.NEXT_SUPPORT_DECLARATION_SHA256,
+                       binding.APPLE_CI_SUPPORT_DECLARATION_SHA256))
 
     def test_support_counts_follow_checked_in_population(self):
         self.assertEqual(binding._approved_support_counts(),
