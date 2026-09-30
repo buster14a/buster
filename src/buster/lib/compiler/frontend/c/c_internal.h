@@ -214,6 +214,8 @@ BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParse
 BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
+BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.
@@ -1034,6 +1036,7 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool enum_constant_members_active;
+    bool type_identity_queries_active;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

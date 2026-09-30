@@ -1,0 +1,49 @@
+name: Issue 1229 focused validation
+on:
+  push:
+    branches: [codex/1229-c-type-identity]
+permissions:
+  contents: read
+concurrency:
+  group: issue1229-validation
+  cancel-in-progress: true
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
+      - run: ./build.sh generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+      - run: ./build.sh build --config Release -t ide
+      - run: ./build.sh test_self_host --config Release
+      - run: ./build.sh build --config Release -t test_all
+  candidate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
+      - run: ./build.sh generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+      - run: ./build.sh build --config Release -t ide
+      - name: Independent reference compilers
+        run: |
+          clang -std=gnu17 -Wno-generic-qual-type tests/basic_c_generic.c -o /tmp/generic-clang
+          /tmp/generic-clang
+          gcc -std=gnu17 tests/basic_c_generic.c -o /tmp/generic-gcc
+          /tmp/generic-gcc
+      - name: Issue family in all frontend and allocator forms
+        run: |
+          set -euo pipefail
+          for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+            for allocator in fast none quality mir-stack; do
+              build/Release/ide cc -std=gnu17 "$frontend" -fregister-allocator="$allocator" -fverify-codegen tests/basic_c_generic.c -o /tmp/generic-buster
+              /tmp/generic-buster
+            done
+          done
+      - run: ./build.sh test_self_host --config Release
+      - run: ./build.sh build --config Release -t test_all
+      - run: ./build.sh generate --cc clang --sanitize --no-fuzz --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+      - run: ./build.sh build --config Release -t test_all

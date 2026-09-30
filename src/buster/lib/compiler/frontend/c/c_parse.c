@@ -409,6 +409,14 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_identifier(CPa
                                                                             u32* alignas_capacity, u32* attribute_capacity, u32 token_index)
 {
     CToken token = preprocess.tokens[token_index];
+    CSymbolBuiltin builtin = C_SYMBOL_BUILTIN_NONE;
+    if (token.symbol && preprocess.symbols && token.symbol <= preprocess.symbols->predefined_limit)
+        builtin = (CSymbolBuiltin)preprocess.symbols->builtin_kinds[token.symbol];
+    else if (!token.symbol || !preprocess.symbols)
+        builtin = c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, token));
+    if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P)
+        c_parse_position_index_append(result->arena, &index->type_identity_positions, &index->type_identity_count,
+            &index->type_identity_capacity, token_index);
     u8 token_class = c_parse_token_class(result, preprocess, token_index);
     if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
     {
@@ -3547,6 +3555,9 @@ BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type);
 
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id);
 BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
+BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start);
+BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                    CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type);
 BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                           CTypeId return_type, u32 open, u32 end, u32* index_out);
@@ -5193,6 +5204,22 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 task_count -= 1;
                 continue;
             }
+            CTypeIdentityQuery* identity = c_parse_type_identity_find(result, task->start);
+            if (identity && identity->token_end == task->end)
+            {
+                if (identity->result_start != UINT32_MAX)
+                {
+                    task->start = identity->result_start;
+                    task->end = identity->result_end;
+                    task->operators_checked = false;
+                }
+                else
+                {
+                    last = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                    task_count -= 1;
+                }
+                continue;
+            }
             u32 best_precedence = UINT32_MAX;
             u32 best_operator = task->end;
             u32 question = task->end;
@@ -5758,6 +5785,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
+    c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
     CParseExpressionQuery* query = !machine->enum_constant_members_active && machine->expression_queries &&
         machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens && !machine->frame_count &&
         start >= machine->expression_query_start && start < end && end <= machine->expression_query_end
@@ -5905,149 +5933,291 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
 }
 #endif
 
-// Resolve one generic selection for typed semantic constant evaluation. Return
-// only the selected association's token range; no unselected association value
-// is evaluated and the original preprocessed token stream remains authoritative.
-BUSTER_C_INTERNAL bool c_parse_generic_selection_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                         CParseResult* result, CScopeId scope, u32 start, u32 end,
-                                                         u32* selected_start_out, u32* selected_end_out, u32* consumed_end_out)
+// C-language identity is retained with the semantic model, never in canonical
+// IR. Append-only rows survive the TU and participate in result checkpoints.
+BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start)
 {
-    bool valid = start + 2 < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")) &&
-                 c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    u32 close = valid ? c_parse_matching_delimiter_indexed(result, preprocess, start + 1) : UINT32_MAX;
-    valid &= close < end;
-    u32 controller_start = start + 2;
-    u32 controller_end = UINT32_MAX;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    for (u32 index = controller_start; valid && index < close; index += 1)
+    CTypeIdentityQuery* answer = 0;
+    for (u32 index = result->type_identity_query_count; index && !answer;)
+    {
+        CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
+        if (candidate->token_start == start) answer = candidate;
+    }
+    return answer;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeIdentityQuery answer)
+{
+    bool valid = true;
+    if (result->type_identity_query_count == result->type_identity_query_capacity)
+    {
+        u32 capacity = result->type_identity_query_capacity ? result->type_identity_query_capacity * 2 : 16;
+        valid = capacity > result->type_identity_query_capacity;
+        if (valid)
+        {
+            CTypeIdentityQuery* queries = arena_allocate(result->arena, CTypeIdentityQuery, capacity);
+            valid = queries != 0;
+            if (valid)
+            {
+                if (result->type_identity_query_count)
+                    memcpy(queries, result->type_identity_queries, result->type_identity_query_count * sizeof(*queries));
+                result->type_identity_queries = queries;
+                result->type_identity_query_capacity = capacity;
+            }
+        }
+    }
+    if (valid) result->type_identity_queries[result->type_identity_query_count++] = answer;
+    return valid;
+}
+
+// Read the full abstract declarator, including pointer-to-array and function
+// pointer associations. Scalar and declarator parsing keep their existing
+// explicit type-machine stacks and original source/scope identity.
+BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                     CScopeId scope, u32 start, u32 end)
+{
+    u32 cursor = start;
+    CTypeId type = c_parse_type_name_specifiers(machine, result, preprocess, scope, start, end, &cursor);
+    if (type.value < result->type_count)
+    {
+        type = c_parse_pointer_chain(result, preprocess, type, &cursor, end);
+        if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+            bool pointer_group = cursor + 1 < close &&
+                (c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_STAR) ||
+                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+            if (pointer_group && close < end)
+            {
+                type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, cursor, close, end, false);
+                cursor = end;
+            }
+            else
+            {
+                type = c_parse_local_function_suffix(machine, result, preprocess, type, cursor, end, &cursor);
+            }
+        }
+        type = c_parse_array_suffixes(result, preprocess, type, &cursor, end);
+    }
+    if (cursor != end) type = C_TYPE_ID_INVALID;
+    return type;
+}
+
+// First top-level separator in the original stream. Nested type names,
+// expressions, compound literals and parameter lists cannot split an arm.
+BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CPunctuator separator)
+{
+    u32 found = end;
+    for (u32 index = start; index < end && found == end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            parentheses += 1;
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            index = close < end ? close : end - 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        else if (c_token_is_punctuator(&token, separator))
         {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            controller_end = index;
-            break;
+            found = index;
         }
     }
-    valid &= controller_start < controller_end;
-    CTypeId controller_type = C_TYPE_ID_INVALID;
+    return found;
+}
+
+BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                     CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                     String8* message, u32* location)
+{
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, start + 1);
+    bool valid = close < end;
+    u32 controller_end = valid ? c_parse_identity_separator(result, preprocess, start + 2, close, C_PUNCTUATOR_COMMA) : end;
+    CTypeId controller = C_TYPE_ID_INVALID;
+    if (valid && (controller_end == close || controller_end == start + 2))
+    {
+        *message = S8("_Generic requires a controlling expression and at least one association");
+        valid = false;
+    }
     if (valid)
     {
-        valid = c_parse_expression_type_query(machine, arena, preprocess, result, scope, controller_start, controller_end, &controller_type);
+        valid = c_parse_expression_type_query(machine, arena, preprocess, result, scope, start + 2, controller_end, &controller);
+        controller = c_parse_auto_decay_type(result, controller);
+        valid &= controller.value < result->type_count;
+        if (!valid) *message = S8("could not determine the type of the _Generic controlling expression");
     }
-    controller_type = c_parse_auto_decay_type(result, controller_type);
+    u64 mark = machine->scratch_arena->position;
+    CTypeId* associations = valid ? arena_allocate(machine->scratch_arena, CTypeId, close - controller_end) : 0;
+    u32 association_count = 0;
     u32 match_count = 0;
-    u32 match_start = UINT32_MAX;
-    u32 match_end = UINT32_MAX;
+    CTypeIdentityQuery answer = {.token_start = start, .token_end = close + 1, .result_start = UINT32_MAX};
     u32 default_start = UINT32_MAX;
-    u32 default_end = UINT32_MAX;
-    u32 association_start = controller_end + 1;
-    while (valid && association_start < close)
+    u32 default_end = 0;
+    for (u32 arm = controller_end + 1; valid && arm < close;)
     {
-        u32 colon = UINT32_MAX;
-        u32 association_end = close;
-        parentheses = 0;
-        brackets = 0;
-        braces = 0;
-        for (u32 index = association_start; index < close; index += 1)
+        u32 colon = c_parse_identity_separator(result, preprocess, arm, close, C_PUNCTUATOR_COLON);
+        u32 arm_end = c_parse_identity_separator(result, preprocess, arm, close, C_PUNCTUATOR_COMMA);
+        *location = arm;
+        valid = colon < arm_end && colon > arm && colon + 1 < arm_end;
+        if (!valid)
         {
-            CToken token = preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && colon == UINT32_MAX &&
-                     c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-            {
-                colon = index;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            {
-                association_end = index;
-                break;
-            }
+            *message = S8("expected 'type-name: expression' or 'default: expression' in _Generic association");
         }
-        valid = colon > association_start && colon + 1 < association_end;
-        bool is_default = valid && colon == association_start + 1 && preprocess.tokens[association_start].kind == C_TOKEN_IDENTIFIER &&
-                          string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[association_start]), S8("default"));
-        if (valid && is_default)
+        else if (colon == arm + 1 && preprocess.tokens[arm].kind == C_TOKEN_IDENTIFIER &&
+                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[arm]), S8("default")))
         {
             valid = default_start == UINT32_MAX;
+            if (!valid) *message = S8("_Generic selection has more than one default association");
             default_start = colon + 1;
-            default_end = association_end;
+            default_end = arm_end;
         }
-        else if (valid)
+        else
         {
-            u32 type_index = association_start;
-            CTypeId association_type = c_parse_machineless_base_type(result, preprocess, scope, association_start, colon, &type_index);
-            if (association_type.value < result->type_count)
+            CTypeId type = c_parse_identity_type_name(machine, result, preprocess, scope, arm, colon);
+            u64 size = 0;
+            u32 alignment = 0;
+            valid = type.value < result->type_count && result->types[type.value].kind != C_TYPE_VOID &&
+                result->types[type.value].kind != C_TYPE_FUNCTION &&
+                c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
+            if (!valid) *message = S8("_Generic association requires a complete object type");
+            for (u32 previous = 0; valid && previous < association_count; previous += 1)
             {
-                association_type = c_parse_pointer_chain(result, preprocess, association_type, &type_index, colon);
-                association_type = c_parse_array_suffixes(result, preprocess, association_type, &type_index, colon);
+                if (c_parse_types_compatible(arena, result, preprocess, associations[previous], type))
+                {
+                    *message = S8("_Generic selection has multiple compatible type associations");
+                    valid = false;
+                }
             }
-            valid = association_type.value < result->type_count && type_index == colon;
-            if (valid && c_parse_types_compatible(arena, result, preprocess, controller_type, association_type))
+            if (valid)
             {
-                match_count += 1;
-                match_start = colon + 1;
-                match_end = association_end;
+                associations[association_count++] = type;
+                if (c_parse_types_compatible(arena, result, preprocess, controller, type))
+                {
+                    match_count += 1;
+                    answer.result_start = colon + 1;
+                    answer.result_end = arm_end;
+                }
             }
         }
-        association_start = association_end + 1;
+        arm = arm_end + 1;
     }
-    valid &= match_count <= 1 && (match_count == 1 || default_start != UINT32_MAX);
+    if (valid && !match_count)
+    {
+        answer.result_start = default_start;
+        answer.result_end = default_end;
+        valid = default_start != UINT32_MAX;
+        if (!valid)
+        {
+            *location = start;
+            *message = S8("_Generic controlling type is not compatible with any association and no default was provided");
+        }
+    }
+    valid &= match_count <= 1;
+    if (valid) valid = c_parse_type_identity_record(result, answer);
+    arena_set_position(machine->scratch_arena, mark);
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_types_compatible_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                        CParseResult* result, CScopeId scope, u32 start, u32 end)
+{
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, start + 1);
+    u32 comma = close < end ? c_parse_identity_separator(result, preprocess, start + 2, close, C_PUNCTUATOR_COMMA) : end;
+    bool valid = comma < close && close < end;
+    CTypeId left = valid ? c_parse_identity_type_name(machine, result, preprocess, scope, start + 2, comma) : C_TYPE_ID_INVALID;
+    CTypeId right = valid ? c_parse_identity_type_name(machine, result, preprocess, scope, comma + 1, close) : C_TYPE_ID_INVALID;
+    valid &= left.value < result->type_count && right.value < result->type_count;
     if (valid)
     {
-        *selected_start_out = match_count ? match_start : default_start;
-        *selected_end_out = match_count ? match_end : default_end;
-        *consumed_end_out = close + 1;
+        // GNU's predicate ignores qualifiers only at the outermost level.
+        left = c_parse_unqualified_type(result, left);
+        right = c_parse_unqualified_type(result, right);
+        bool compatible = c_parse_types_compatible(arena, result, preprocess, left, right);
+        valid = c_parse_type_identity_record(result, (CTypeIdentityQuery){
+            .token_start = start, .token_end = close + 1, .result_start = UINT32_MAX, .result_end = compatible});
     }
+    return valid;
+}
+
+// Children have later token starts than their parents. This reverse work walk
+// settles every nested identity before expression/type queries consume it;
+// the active guard prevents a query from recursively starting another walk.
+BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                     CParseResult* result, CScopeId scope, u32 start, u32 end)
+{
+    if (machine && !machine->type_identity_queries_active)
+    {
+        machine->type_identity_queries_active = true;
+        CTokenPositionIndex* positions = result->position_index;
+        u32 first = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start) : start;
+        u32 limit = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, end)
+                              : BUSTER_MIN(end, (u32)preprocess.token_count);
+        for (u32 cursor = limit; cursor > first;)
+        {
+            u32 index = positions ? positions->type_identity_positions[--cursor] : --cursor;
+            CToken token = preprocess.tokens[index];
+            if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
+                c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                !c_parse_type_identity_find(result, index))
+            {
+                String8 name = c_token_spelling(preprocess.spelling_base, token);
+                CScopeId token_scope = c_parse_scope_for_token(result, scope, index);
+                if (string_equal(name, S8("_Generic")))
+                {
+                    String8 message = {0};
+                    u32 location = index;
+                    c_parse_generic_selection_one(machine, arena, preprocess, result, token_scope, index, end, &message, &location);
+                }
+                else if (string_equal(name, S8("__builtin_types_compatible_p")))
+                {
+                    c_parse_types_compatible_builtin(machine, arena, preprocess, result, token_scope, index, end);
+                }
+            }
+        }
+        machine->type_identity_queries_active = false;
+    }
+}
+
+BUSTER_C_INTERNAL bool c_parse_generic_selection_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                       CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                       u32* selected_start_out, u32* selected_end_out, u32* consumed_end_out)
+{
+    c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
+    CTypeIdentityQuery* answer = c_parse_type_identity_find(result, start);
+    bool valid = answer && answer->token_end <= end && answer->result_start != UINT32_MAX;
+    if (valid)
+    {
+        *selected_start_out = answer->result_start;
+        *selected_end_out = answer->result_end;
+        *consumed_end_out = answer->token_end;
+    }
+    return valid;
+}
+
+// Direct lowering callers may have the model-building analysis contract only.
+// They use this same semantic resolver for a missing answer, on private scratch
+// machine storage; no canonical type is created to answer a C identity query.
+BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer)
+{
+    CTypeIdentityQuery* cached = c_parse_type_identity_find(result, start);
+    if (!cached && start < end && end <= preprocess.token_count)
+    {
+        u64 mark = scratch->position;
+        u32 capacity = end - start + 64;
+        CTypeParseMachine machine = {
+            .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+            .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
+            .mutations = arena_allocate(scratch, CTypeMutation, capacity),
+            .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
+            .scratch_arena = scratch,
+            .frame_capacity = capacity, .mutation_capacity = capacity, .expression_task_capacity = capacity,
+        };
+        c_parse_type_identity_prepare(&machine, scratch, preprocess, result, scope, start, end);
+        cached = c_parse_type_identity_find(result, start);
+        arena_set_position(scratch, mark);
+    }
+    bool valid = cached && cached->token_end <= end;
+    if (valid) *answer = *cached;
     return valid;
 }
 
@@ -6932,7 +7102,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
                             c_parse_pending_enum_member(preprocess, result, scope, declaration.token_start + token_offset) != 0;
         if (token.kind == C_TOKEN_IDENTIFIER &&
             (enumerator || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_types_compatible_p"))))
         {
             deferred = true;
             break;
@@ -21423,6 +21594,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
+    c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
     CParseConstant last = {.type = C_TYPE_ID_INVALID};
     u32 capacity = end > start ? end - start + 1 : 1;
     CParseConstantTask* tasks = arena_allocate(arena, CParseConstantTask, capacity);
@@ -21556,7 +21728,16 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 count -= 1;
                 continue;
             }
-            last = c_parse_constant_leaf(machine, arena, preprocess, result, scope, begin, limit);
+            CTypeIdentityQuery* identity = c_parse_type_identity_find(result, begin);
+            if (identity && identity->token_end == limit && identity->result_start == UINT32_MAX)
+            {
+                last = (CParseConstant){.integer = identity->result_end,
+                    .type = c_parse_expression_scalar_type(result, C_TYPE_INT), .valid = true};
+            }
+            else
+            {
+                last = c_parse_constant_leaf(machine, arena, preprocess, result, scope, begin, limit);
+            }
             count -= 1;
         }
         else if (task->state == 1)
@@ -23892,171 +24073,36 @@ BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(CTypeParseMachine* ma
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
+    c_parse_type_identity_prepare(machine, machine->scratch_arena, preprocess, result, declaration->scope, start, end);
     for (u32 generic = start; generic + 2 < end; generic += 1)
     {
         CToken token = preprocess.tokens[generic];
-        if ((skipped && skipped[generic - start]) || token.kind != C_TOKEN_IDENTIFIER || !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) ||
-            !c_token_is_punctuator(&preprocess.tokens[generic + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if ((!skipped || !skipped[generic - start]) && token.kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+            c_token_is_punctuator(&preprocess.tokens[generic + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
-            continue;
-        }
-        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, generic + 1);
-        if (close >= end)
-        {
-            continue;
-        }
-        u32 controller_end = UINT32_MAX;
-        for (u32 index = generic + 2; index < close && controller_end == UINT32_MAX; index += 1)
-        {
-            CToken current = preprocess.tokens[index];
-            if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+            CTypeIdentityQuery* answer = c_parse_type_identity_find(result, generic);
+            String8 message = {0};
+            u32 location = generic;
+            if (!answer)
             {
-                u32 nested = c_parse_matching_delimiter_indexed(result, preprocess, index);
-                index = nested < close ? nested : close;
+                CScopeId scope = c_parse_scope_for_token(result, declaration->scope, generic);
+                bool previous = machine->type_identity_queries_active;
+                machine->type_identity_queries_active = true;
+                c_parse_generic_selection_one(machine, arena, preprocess, result, scope, generic, end, &message, &location);
+                machine->type_identity_queries_active = previous;
+                answer = c_parse_type_identity_find(result, generic);
             }
-            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+            if (message.length)
             {
-                controller_end = index;
+                c_parse_lowering_constraint_consider(diagnostic, message, location, location);
             }
-        }
-        if (controller_end == UINT32_MAX)
-        {
-            continue;
-        }
-
-        CScopeId generic_scope = c_parse_scope_for_token(result, declaration->scope, generic);
-        u64 scratch_mark = machine->scratch_arena->position;
-        CTypeId controller_type = C_TYPE_ID_INVALID;
-        bool controller_resolved = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, generic_scope, generic + 2,
-                                                                 controller_end, &controller_type);
-        arena_set_position(machine->scratch_arena, scratch_mark);
-        if (controller_resolved)
-        {
-            controller_type = c_parse_auto_decay_type(result, controller_type);
-        }
-
-        u64 mark = machine->scratch_arena->position;
-        CTypeId* association_types = arena_allocate(machine->scratch_arena, CTypeId, close - controller_end + 1);
-        u32 association_type_count = 0;
-        u32 match_count = 0;
-        u32 default_count = 0;
-        bool generic_valid = true;
-        u32 association_start = controller_end + 1;
-        while (association_start < close && generic_valid)
-        {
-            u32 colon = UINT32_MAX;
-            u32 association_end = close;
-            for (u32 index = association_start; index < close; index += 1)
+            else if (answer && skipped)
             {
-                CToken current = preprocess.tokens[index];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                    c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    u32 nested = c_parse_matching_delimiter_indexed(result, preprocess, index);
-                    index = nested < close ? nested : close;
-                }
-                else if (colon == UINT32_MAX && c_token_is_punctuator(&current, C_PUNCTUATOR_COLON))
-                {
-                    colon = index;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    association_end = index;
-                    break;
-                }
-            }
-            if (colon == UINT32_MAX || colon == association_start || colon + 1 >= association_end)
-            {
-                c_parse_lowering_constraint_consider(diagnostic, S8("expected 'type-name: expression' or 'default: expression' in _Generic association"),
-                                                     association_start, association_start);
-                generic_valid = false;
-                continue;
-            }
-            bool is_default = colon == association_start + 1 && preprocess.tokens[association_start].kind == C_TOKEN_IDENTIFIER &&
-                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[association_start]), S8("default"));
-            if (is_default)
-            {
-                default_count += 1;
-                if (default_count > 1)
-                {
-                    c_parse_lowering_constraint_consider(diagnostic, S8("_Generic selection has more than one default association"),
-                                                         association_start, association_start);
-                    generic_valid = false;
-                }
-            }
-            else
-            {
-                CScopeId scope = c_parse_scope_for_token(result, declaration->scope, association_start);
-                u32 type_index = association_start;
-                CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, association_start, colon, &type_index);
-                if (type.value < result->type_count)
-                {
-                    type = c_parse_pointer_chain(result, preprocess, type, &type_index, colon);
-                    type = c_parse_array_suffixes(result, preprocess, type, &type_index, colon);
-                    if (type_index < colon && c_token_is_punctuator(&preprocess.tokens[type_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        type = c_parse_local_function_suffix(machine, result, preprocess, type, type_index, colon, &type_index);
-                    }
-                }
-                if (type.value < result->type_count && type_index == colon)
-                {
-                    CTypeKind kind = result->types[type.value].kind;
-                    u64 layout_mark = machine->scratch_arena->position;
-                    u64 size = 0;
-                    u32 alignment = 0;
-                    bool complete_object = kind != C_TYPE_VOID && kind != C_TYPE_FUNCTION &&
-                                           c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
-                    arena_set_position(machine->scratch_arena, layout_mark);
-                    BUSTER_UNUSED(size);
-                    BUSTER_UNUSED(alignment);
-                    if (!complete_object)
-                    {
-                        c_parse_lowering_constraint_consider(diagnostic, S8("_Generic association requires a complete object type"),
-                                                             association_start, association_start);
-                        generic_valid = false;
-                    }
-                    for (u32 previous = 0; generic_valid && previous < association_type_count; previous += 1)
-                    {
-                        if (c_parse_types_compatible_core(arena, result, preprocess, association_types[previous], type, true))
-                        {
-                            c_parse_lowering_constraint_consider(diagnostic, S8("_Generic selection has multiple compatible type associations"),
-                                                                 association_start, association_start);
-                            generic_valid = false;
-                        }
-                    }
-                    if (generic_valid)
-                    {
-                        association_types[association_type_count++] = type;
-                        match_count += controller_resolved && controller_type.value < result->type_count &&
-                                       c_parse_types_compatible_core(arena, result, preprocess, controller_type, type, true);
-                    }
-                }
-            }
-            if (association_end == close)
-            {
-                break;
-            }
-            association_start = association_end + 1;
-        }
-        if (generic_valid && controller_resolved && !match_count && !default_count)
-        {
-            c_parse_lowering_constraint_consider(
-                diagnostic, S8("_Generic controlling type is not compatible with any association and no default was provided"), generic, generic);
-        }
-        if (generic_valid && skipped)
-        {
-            u32 selected_start = 0;
-            u32 selected_end = 0;
-            u32 consumed = 0;
-            if (c_parse_generic_selection_range(machine, machine->scratch_arena, preprocess, result, generic_scope, generic, end,
-                                                &selected_start, &selected_end, &consumed))
-            {
-                memset(skipped + generic + 1 - start, 1, selected_start - generic - 1);
-                memset(skipped + selected_end - start, 1, consumed - selected_end);
+                memset(skipped + generic + 1 - start, 1, answer->result_start - generic - 1);
+                memset(skipped + answer->result_end - start, 1, answer->token_end - answer->result_end);
             }
         }
-        arena_set_position(machine->scratch_arena, mark);
     }
 }
 

@@ -1287,6 +1287,9 @@ typedef struct CTokenPositionIndex CTokenPositionIndex;
 struct CTokenPositionIndex
 {
     u32* vector_size_positions;
+    u32* type_identity_positions;
+    u32 type_identity_count;
+    u32 type_identity_capacity;
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
     // ':' punctuator — the necessary condition c_ir_named_label_at tests
@@ -1383,6 +1386,18 @@ struct CTypeLayoutStatistics
     u64 agenda_fallbacks;
 };
 
+// Frontend-only answers keyed by original source-token identity. A generic
+// stores its selected expression range; a compatibility builtin stores its
+// integer answer in result_end and uses UINT32_MAX for result_start.
+typedef struct CTypeIdentityQuery CTypeIdentityQuery;
+struct CTypeIdentityQuery
+{
+    u32 token_start;
+    u32 token_end;
+    u32 result_start;
+    u32 result_end;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1397,6 +1412,11 @@ struct CParseResult
     // Borrowed only while semantic constraints are checked. Scalar query
     // results share immutable types; declarator types remain independent.
     CTypeId* expression_scalar_types;
+    // Append-only, so speculative result snapshots also roll back answers.
+    // Allocated lazily: ordinary translation units carry no identity table.
+    CTypeIdentityQuery* type_identity_queries;
+    u32 type_identity_query_count;
+    u32 type_identity_query_capacity;
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;
