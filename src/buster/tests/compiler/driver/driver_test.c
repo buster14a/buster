@@ -8932,6 +8932,128 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     scratch_end(temporary);
     return result;
 }
+
+// Local-dynamic TLS from foreign objects (issue 1711): GCC and Clang emit
+// R_X86_64_TLSLD plus DTPOFF32 for a file-local __thread under -fPIC -O2,
+// with the __tls_get_addr call direct, through its GOT slot (-fno-plt), and
+// with the variables' DWARF locations as DTPOFF32/DTPOFF64 (-g).  Each object
+// links into a fixed-address executable and a PIE, where the sequence is
+// relaxed to local exec, and into a shared object, where it keeps its call
+// and gets the module's DTPMOD64 pair; a Buster PIE and the host toolchain
+// both load that library.  Values carried across two calls check that each
+// variable resolved to its own offset, in .tdata and in .tbss.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-local-dynamic-tls"), S8(""));
+    os_make_directory(directory);
+    String8 foreign_source = S8("__thread int ie_value = 11;\n"
+                                "static __thread int gd_value = 5;\n"
+                                "static __thread int zero_value;\n"
+                                "int foreign_entry(int x)\n"
+                                "{\n"
+                                "    ie_value += 1;\n"
+                                "    gd_value += 1;\n"
+                                "    zero_value += 3;\n"
+                                "    return x + ie_value + gd_value + zero_value;\n"
+                                "}\n");
+    String8 main_source = S8("int foreign_entry(int x);\n"
+                             "\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    int failed = foreign_entry(1) != 1 + 12 + 6 + 3;\n"
+                             "    failed |= (foreign_entry(1) != 1 + 13 + 7 + 6) << 1;\n"
+                             "    return failed;\n"
+                             "}\n");
+    String8 foreign_path = string_format_z(arena, S8("{S8}/foreign.c"), directory);
+    String8 main_path = string_format_z(arena, S8("{S8}/main.c"), directory);
+    BUSTER_TEST(arguments, file_write(foreign_path, BUSTER_SLICE_TO_BYTE_SLICE(foreign_source)) &&
+                               file_write(main_path, BUSTER_SLICE_TO_BYTE_SLICE(main_source)));
+    String8 compilers[] = {executable_resolve_in_path(arena, S8("gcc")), executable_resolve_in_path(arena, S8("clang"))};
+    String8 variants[] = {S8("-g0"), S8("-fno-plt"), S8("-g")};
+    u32 compiler_count = 0;
+    for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+    {
+        if (!compilers[compiler].length)
+        {
+            arguments->show(arguments, S8("local-dynamic TLS: {S8} not installed, skipped\n"), compiler ? S8("clang") : S8("gcc"));
+            continue;
+        }
+        compiler_count += 1;
+        for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
+        {
+            String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}.o"), directory, compiler, variant);
+            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool compiled = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, compiled);
+            if (!compiled)
+            {
+                continue;
+            }
+            // The object must carry the model this test is about.
+            FileMapRead object_map = file_map_read(arena, object_path, (FileReadOptions){0});
+            ObjectFile object = object_read(arena, object_map.bytes, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
+            u32 local_dynamic_count = 0;
+            u32 dtp_offset_count = 0;
+            for (u32 index = 0; object.error == OBJECT_ERROR_NONE && index < object.relocation_count; index += 1)
+            {
+                local_dynamic_count += object.relocations[index].kind == OBJECT_RELOCATION_X86_64_TLSLD;
+                dtp_offset_count += object.relocations[index].kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                                    object.relocations[index].kind == OBJECT_RELOCATION_X86_64_DTPOFF64;
+            }
+            BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE && local_dynamic_count != 0 && dtp_offset_count >= 2);
+            file_map_unmap(object_map);
+            for (u32 image = 0; image < 3; image += 1)
+            {
+                String8 program_path = string_format_z(arena, S8("{S8}/program-{u32}-{u32}-{u32}"), directory, compiler, variant, image);
+                CompilerDriverResult linked = {0};
+                bool host_ran = true;
+                if (image < 2)
+                {
+                    String8 command[] = {S8("-g0"), image ? S8("-pie") : S8("-no-pie"), S8("-o"), program_path, main_path, object_path};
+                    linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                }
+                else
+                {
+                    String8 library_name = string_format_z(arena, S8("foreign{u32}{u32}"), compiler, variant);
+                    String8 library_path = string_format_z(arena, S8("{S8}/lib{S8}.so"), directory, library_name);
+                    String8 library_command[] = {S8("-shared"), S8("-o"), library_path, object_path};
+                    linked = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_command)));
+                    String8 library_flag = string_format_z(arena, S8("-l{S8}"), library_name);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 command[] = {S8("-g0"), S8("-pie"), S8("-o"), program_path, main_path, S8("-L"), directory, library_flag};
+                        linked = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    }
+                    // The host toolchain's executable loads the same library.
+                    String8 host_program = string_format_z(arena, S8("{S8}-host"), program_path);
+                    String8 host_command[] = {S8("-o"), host_program, main_path, S8("-L"), directory, library_flag};
+                    String8 host_output = {0};
+                    host_ran = linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                               compiler_driver_test_image_host_compile(arena, host_command, BUSTER_ARRAY_LENGTH(host_command)) &&
+                               compiler_driver_test_image_run(arguments, arena, &host_program, 1, directory, &host_output);
+                }
+                if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("local-dynamic TLS link {S8} {S8} image {u32}: {S8}\n"), compilers[compiler], variants[variant], image,
+                                    linked.diagnostic);
+                }
+                String8 output = {0};
+                BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran &&
+                                           compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output));
+            }
+        }
+    }
+    BUSTER_TEST(arguments, compiler_count != 0);
+    scratch_end(temporary);
+    return result;
+}
 #endif
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -11726,6 +11848,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
