@@ -379,7 +379,8 @@ class ArchivedReplayTests(unittest.TestCase):
                       (materializer.SUPPORT_CONTRACT_SHA256,
                        materializer.NEXT_SUPPORT_CONTRACT_SHA256,
                        materializer.APPLE_CI_SUPPORT_CONTRACT_SHA256,
-                       materializer.PROPOSED_SUPPORT_CONTRACT_SHA256))
+                       materializer.PROPOSED_SUPPORT_CONTRACT_SHA256,
+                       materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
