@@ -12,7 +12,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Baseline Release self-host
         run: |
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/issue1233-driver
-          build/issue1233-driver generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          build/issue1233-driver test_self_host --config Release
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o /tmp/buster1233-driver
+          /tmp/buster1233-driver generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          /tmp/buster1233-driver test_self_host --config Release
