@@ -40730,18 +40730,20 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
         return false;
     }
     u32 close = c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    u32 operand_end = close + 1;
-    if (operand_end < expression_end)
+    u32 operand_end = close;
+    if (close > expression_start + 1 && close < expression_end - 1)
     {
-        CToken operand = builder->preprocess.tokens[operand_end];
+        operand_end = c_ir_unary_expression_end(builder, close + 1, expression_end);
+        CToken operand = builder->preprocess.tokens[operand_end - 1];
         // Keep an unevaluated operand's postfix operators inside sizeof.
-        // The general expression walker also identifies evaluated updates.
-        operand_end = operand.kind == C_TOKEN_IDENTIFIER &&
-                              c_token_in_well_known_set(builder->preprocess.spelling_base, operand, C_IR_UNEVALUATED_OPERAND_WORDS)
-                          ? c_ir_unevaluated_operand_end(builder, operand_end + 1, expression_end)
-                          : c_ir_unary_expression_end(builder, operand_end, expression_end);
+        // The boundary may follow prefixes or nested casts before that word.
+        if (operand.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, operand, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            operand_end = c_ir_unevaluated_operand_end(builder, operand_end, expression_end);
+        }
     }
-    if (close <= expression_start + 1 || close + 1 >= expression_end || operand_end != expression_end)
+    if (close <= expression_start + 1 || close >= expression_end - 1 || operand_end != expression_end)
     {
         return false;
     }
