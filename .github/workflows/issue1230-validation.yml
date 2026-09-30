@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 5e3093a74f56076807ecbf7e637681fa77552bc3
+          ref: a9778d0112d22265f5af149b6f8a01b0ad26e8b9
           persist-credentials: false
       - name: Install repository-standard latest stable LLVM
         timeout-minutes: 15
