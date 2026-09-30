@@ -368,7 +368,8 @@ BUSTER_C_INTERNAL String8 c_entity_section_name(Arena* arena, CPreprocessResult 
 // the COFF and Mach-O writers, which have one section per kind and nowhere to
 // put a named one, refuse it rather than drop it. The non-native emitters
 // answer for themselves: eBPF's program sections are the attribute's own
-// spelling, and Wasm is not decided here.
+// spelling, and Wasm names a data definition's segment (issue 1717) and,
+// as Clang does, accepts a function's without effect.
 BUSTER_C_INTERNAL String8 c_section_attribute_unsupported_output(Target target)
 {
     String8 result = {0};
