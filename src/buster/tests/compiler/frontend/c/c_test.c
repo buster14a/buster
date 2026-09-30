@@ -12,6 +12,45 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CToken tokens[] = {{.kind = C_TOKEN_IDENTIFIER}, {.kind = C_TOKEN_STRING_LITERAL}, {.kind = C_TOKEN_PUNCTUATOR}};
+    CDeclaration declarations[] = {{.token_count = 5, .body_token_count = 40}, {.token_count = 70, .body_token_count = 1}};
+    CArrayBound bounds[] = {{.token_count = 90}};
+    CEntity entities[] = {{.kind = C_ENTITY_LOCAL, .has_cleanup = true}, {.kind = C_ENTITY_LOCAL}};
+    CPreprocessResult preprocess = {.tokens = tokens, .token_count = BUSTER_ARRAY_LENGTH(tokens)};
+    CAnalysisResult parse = {
+        .type_count = 3,
+        .entity_count = BUSTER_ARRAY_LENGTH(entities),
+        .entities = entities,
+        .declaration_count = BUSTER_ARRAY_LENGTH(declarations),
+        .declarations = declarations,
+        .array_bound_count = BUSTER_ARRAY_LENGTH(bounds),
+        .array_bounds = bounds,
+    };
+    CIrLowerCapacityPlan plan = {0};
+    BUSTER_TEST(arguments, c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, plan.token_capacity == 3);
+    BUSTER_TEST(arguments, plan.type_capacity == C_TYPE_COUNT + 13);
+    BUSTER_TEST(arguments, plan.symbol_capacity == 7);
+    BUSTER_TEST(arguments, plan.function_capacity == 3);
+    BUSTER_TEST(arguments, plan.query_frame_capacity == 106);
+    CIrLowerCapacityPlan accepted = plan;
+    preprocess.token_count = (u64)UINT32_MAX + 1;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    preprocess.token_count = BUSTER_ARRAY_LENGTH(tokens);
+    parse.diagnostic_count = 1;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    parse.diagnostic_count = 0;
+    parse.type_count = UINT32_MAX;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
 {
     UnitTestResult result = {0};
@@ -27278,6 +27317,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);

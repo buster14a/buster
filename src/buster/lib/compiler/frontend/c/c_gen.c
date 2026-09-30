@@ -2,6 +2,9 @@
 // point is c_lower_to_ir at the bottom of the file: it sizes and fills one
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
+// c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
+// the program arena is touched. The remaining phase/state graph is in
+// docs/agents/compiler-phase-state.md.
 // There is no AST — lowering re-walks token ranges directly, resolving
 // identifiers through the parse result's scopes and answering structure
 // questions from a prebuilt matching-delimiter index
@@ -97,6 +100,8 @@
 //   CIrRowStreams, c_ir_row_streams_trim          dense, line-aligned
 //                                                 construction rows shared by
 //                                                 the functions of one module
+//   c_ir_lower_capacity_plan                      non-mutating count and
+//                                                 overflow validation
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
@@ -49467,49 +49472,70 @@ BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunctio
     }
 }
 
+bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out)
+{
+    bool valid = plan_out && !parse.diagnostic_count && preprocess.token_count <= UINT32_MAX;
+    u32 token_capacity = valid ? (u32)preprocess.token_count : 0;
+    u32 identifier_token_count = 0;
+    u32 string_literal_count = 0;
+    u64 type_capacity = 0;
+    u64 symbol_capacity = 0;
+    u64 function_capacity = 0;
+    u64 query_frame_capacity = 16;
+    if (valid)
+    {
+        for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
+        {
+            CTokenKind kind = preprocess.tokens[token_index].kind;
+            identifier_token_count += kind == C_TOKEN_IDENTIFIER;
+            string_literal_count += kind == C_TOKEN_STRING_LITERAL;
+        }
+        type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
+        symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
+        function_capacity = parse.declaration_count;
+        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+        {
+            function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
+        }
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.token_count + 16);
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.body_token_count + 16);
+        }
+        for (u32 bound_index = 0; bound_index < parse.array_bound_count; bound_index += 1)
+        {
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)parse.array_bounds[bound_index].token_count + 16);
+        }
+    }
+    valid = valid && type_capacity <= UINT32_MAX && symbol_capacity <= UINT32_MAX && function_capacity <= UINT32_MAX &&
+            query_frame_capacity <= UINT32_MAX;
+    if (valid)
+    {
+        *plan_out = (CIrLowerCapacityPlan){
+            .token_capacity = token_capacity,
+            .type_capacity = (u32)type_capacity,
+            .symbol_capacity = (u32)symbol_capacity,
+            .function_capacity = (u32)function_capacity,
+            .query_frame_capacity = (u32)query_frame_capacity,
+        };
+    }
+    return valid;
+}
+
 CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                          CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
-    if (!arena || parse.diagnostic_count)
+    CIrLowerCapacityPlan plan = {0};
+    if (!arena || !c_ir_lower_capacity_plan(preprocess, parse, &plan))
     {
         return result;
     }
-    if (preprocess.token_count > UINT32_MAX)
-    {
-        return result;
-    }
-    u32 token_capacity = (u32)preprocess.token_count;
-    u32 identifier_token_count = 0;
-    u32 string_literal_count = 0;
-    for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
-    {
-        CTokenKind kind = preprocess.tokens[token_index].kind;
-        identifier_token_count += kind == C_TOKEN_IDENTIFIER;
-        string_literal_count += kind == C_TOKEN_STRING_LITERAL;
-    }
-    u64 type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
-    u64 symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
-    u64 function_capacity = parse.declaration_count;
-    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-    {
-        function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
-    }
-    u64 query_frame_capacity = 16;
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration declaration = parse.declarations[declaration_index];
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.token_count + 16);
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.body_token_count + 16);
-    }
-    for (u32 bound_index = 0; bound_index < parse.array_bound_count; bound_index += 1)
-    {
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)parse.array_bounds[bound_index].token_count + 16);
-    }
-    if (type_capacity > UINT32_MAX || symbol_capacity > UINT32_MAX || function_capacity > UINT32_MAX || query_frame_capacity > UINT32_MAX)
-    {
-        return result;
-    }
+    u32 type_capacity = plan.type_capacity;
+    u32 symbol_capacity = plan.symbol_capacity;
+    u32 function_capacity = plan.function_capacity;
+    u32 query_frame_capacity = plan.query_frame_capacity;
     Arena* temporary_conflicts[] = {
         arena,
     };

@@ -2,6 +2,8 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
+
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
