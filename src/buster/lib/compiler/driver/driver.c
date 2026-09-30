@@ -3625,6 +3625,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             result.diagnostic = string_format(arena, S8("{S8}: relocation family {u32} has no object representation"), path, (u32)relocation.kind);
             return result;
         }
+        if (relocation.plt)
+        {
+            kind = OBJECT_RELOCATION_X86_64_PLT32;
+        }
         object.relocations[object.relocation_count++] = (ObjectRelocation){
             // The assembler's addend already carries the distance from the
             // relocated field to the end of its instruction, which is what an

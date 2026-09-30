@@ -1783,6 +1783,78 @@ static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
     {S8_INITIALIZER("xpaci x1\n"), {225, 67, 193, 218}},
 };
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_binding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 bindings[] = {S8(""), S8(".globl chosen\n"), S8(".globl chosen\n.hidden chosen\n"),
+                          S8(".weak chosen\n"), S8(".weak chosen\n.hidden chosen\n")};
+    for (u32 binding = 0; binding < BUSTER_ARRAY_LENGTH(bindings); binding += 1)
+    {
+        for (u32 forward = 0; forward < 2; forward += 1)
+        {
+            for (u32 late = 0; late < 2; late += 1)
+            {
+                String8 definition = S8("chosen:\nmov eax, 11\nret\n");
+                String8 references = S8("call chosen\nlea rax, [rip + chosen]\n");
+                String8 source = string_format(arguments->arena, S8(".intel_syntax noprefix\n.text\n{S8}{S8}{S8}{S8}"),
+                    late ? S8("") : bindings[binding], forward ? references : definition,
+                    forward ? definition : references, late ? bindings[binding] : S8(""));
+                AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+                bool retained = binding == 1 || binding >= 3;
+                if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+                    unit.relocation_count == (retained ? 2u : 0u)))
+                {
+                    for (u32 index = 0; index < unit.relocation_count; index += 1)
+                    {
+                        AssemblyUnitRelocation relocation = unit.relocations[index];
+                        if (BUSTER_REQUIRE(arguments, relocation.symbol < unit.symbol_count))
+                        {
+                            BUSTER_TEST(arguments, string_equal(unit.symbols[relocation.symbol].name, S8("chosen")) &&
+                                relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.addend == -4 &&
+                                relocation.offset == (forward ? 0u : 6u) + (index ? 8u : 1u) &&
+                                relocation.plt == (!index && binding != 4));
+                        }
+                    }
+                    if (!retained)
+                    {
+                        u8 const backward[] = {0xe8, 0xf5, 0xff, 0xff, 0xff, 0x48, 0x8d, 0x05, 0xee, 0xff, 0xff, 0xff};
+                        u8 const ahead[] = {0xe8, 7, 0, 0, 0, 0x48, 0x8d, 0x05, 0, 0, 0, 0};
+                        ByteSlice bytes = unit.sections[0].data;
+                        BUSTER_TEST(arguments, bytes.length == 18 && !memcmp(bytes.pointer + (forward ? 0 : 6),
+                            forward ? ahead : backward, sizeof(ahead)));
+                    }
+                }
+            }
+        }
+    }
+    String8 controls[] = {
+        S8(".text\n1: nop\nloop 1b\njmp 2f\n2: ret\n"),
+        S8(".text\n.weak chosen\nchosen: nop\nloop chosen\n"),
+        S8(".text\n.globl chosen\nchosen: ret\njmp chosen@PLT\n"),
+        S8(".text\n.globl chosen\n.hidden chosen\nchosen: ret\njmp chosen@PLT\n"),
+        S8(".text\ncall chosen\n.section .text.other,\"ax\",@progbits\nchosen: ret\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(controls); index += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, controls[index], (AssemblyEncodeOptions){.target = target});
+        u32 count = index == 0 || index == 3 ? 0 : 1;
+        if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.relocation_count == count))
+        {
+            if (count)
+            {
+                BUSTER_TEST(arguments, unit.relocations[0].kind == (index == 1 ? ASSEMBLY_RELOCATION_X86_PC8 : ASSEMBLY_RELOCATION_X86_PC32));
+                BUSTER_TEST(arguments, unit.relocations[0].plt == (index == 2));
+            }
+            if (!index) { BUSTER_TEST(arguments, unit.symbol_count == 0); }
+        }
+    }
+    AssemblyUnitResult invalid_plt = assembly_unit_encode(arguments->arena, S8(".text\nleaq chosen@PLT(%rip), %rax\n"),
+        (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, invalid_plt.diagnostic_count != 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1949,6 +2021,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArgu
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;

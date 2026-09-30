@@ -12,8 +12,8 @@
 //                                         instruction line, each producing a
 //                                         piece of bytes in a section
 //   assembly_unit_materialize             pieces concatenated per section and
-//                                         same-section PC-relative
-//                                         relocations resolved in place
+//                                         binding-invariant same-section
+//                                         PC-relative fixups resolved in place
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_unit_space ..                 text plumbing shared by the passes
@@ -911,9 +911,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
 
 // The local-label reference `1f`/`1b` and the `@PLT` suffix are the two
 // spellings the instruction layer below does not read. Both are rewritten
-// here into a plain symbol name, into a fresh copy of the line so the original
-// text stays available for diagnostics.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten)
+// here into a plain symbol name in a fresh copy, preserving the PLT request
+// beside the resulting relocation and the original text for diagnostics.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten, String8* plt_symbol)
 {
     bool changed = false;
     for (u64 index = 0; index < line.length && !changed; index += 1)
@@ -996,14 +996,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                 suffix_end += 1;
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
-            // A static link resolves a `@PLT` call the same way it resolves a
-            // plain one, so the suffix is dropped rather than turned into a
-            // relocation family this object model does not carry.
-            if (!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt")))
+            u64 name_begin = index;
+            while (name_begin && assembly_unit_name_character(line.pointer[name_begin - 1]))
+            {
+                name_begin -= 1;
+            }
+            if ((!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt"))) ||
+                name_begin == index || plt_symbol->length)
             {
                 assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("unsupported symbol modifier '@{S8}'"), suffix);
                 return false;
             }
+            *plt_symbol = string_slice(line, name_begin, index);
             index = suffix_end;
             continue;
         }
@@ -1037,7 +1041,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_prefix_only(String8 line)
 BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder, String8 line)
 {
     String8 rewritten = {0};
-    if (!assembly_unit_rewrite_line(builder, line, &rewritten))
+    String8 plt_symbol = {0};
+    if (!assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol))
     {
         return false;
     }
@@ -1061,6 +1066,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         return false;
     }
     u64 base = builder->section_offsets[builder->current_section];
+    bool plt_matched = !plt_symbol.length;
     for (u32 index = 0; index < encoded.relocation_count; index += 1)
     {
         AssemblyRelocation relocation = encoded.relocations[index];
@@ -1073,8 +1079,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         {
             return false;
         }
+        if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
+        {
+            bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
+                                 (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
+            plt_matched = direct_branch;
+            builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
+        }
     }
-    return assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
+    bool result;
+    if (plt_matched)
+    {
+        result = assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
+    }
+    else
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
+        result = false;
+    }
+    return result;
 }
 
 // ------------------------------------------------------------ the passes
@@ -1255,9 +1278,9 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
 }
 
 // Pieces become section bytes, and every relocation that names a symbol
-// defined in its own section with a PC-relative kind is resolved here rather
-// than handed to the linker -- exactly the branches and `lea`s a local label
-// produces.
+// defined in its own section with binding-invariant identity can be resolved
+// here. Weak definitions remain replaceable even when hidden; ELF globals
+// with default visibility remain preemptible in an external shared link.
 BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
 {
     for (u32 section = 0; section < builder->result.section_count; section += 1)
@@ -1292,6 +1315,8 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         filled[piece.section] += piece.length;
     }
     u32 kept = 0;
+    bool elf = builder->target.os == OPERATING_SYSTEM_LINUX || builder->target.os == OPERATING_SYSTEM_ANDROID ||
+               builder->target.os == OPERATING_SYSTEM_FREESTANDING;
     for (u32 index = 0; index < builder->result.relocation_count; index += 1)
     {
         AssemblyUnitRelocation relocation = builder->result.relocations[index];
@@ -1301,8 +1326,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
                     : relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 ? 4
                     : relocation.kind == ASSEMBLY_RELOCATION_X86_PC64 ? 8
                                                                       : 0;
-        if (!width || !symbol.defined || symbol.section != relocation.section)
+        bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
+        if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
         {
+            ByteSlice data = builder->result.sections[relocation.section].data;
+            bool direct_branch = width == 4 && relocation.offset &&
+                                 (data.pointer[relocation.offset - 1] == 0xe8 || data.pointer[relocation.offset - 1] == 0xe9);
+            relocation.plt = elf && (relocation.plt || (direct_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
             builder->relocation_lines[kept] = builder->relocation_lines[index];
             builder->result.relocations[kept++] = relocation;
             continue;

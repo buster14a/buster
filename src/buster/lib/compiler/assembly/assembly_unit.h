@@ -60,6 +60,8 @@ struct AssemblyUnitRelocation
     u32 section;
     u32 symbol;
     AssemblyRelocationKind kind;
+    // Direct x86 call/jump through the ELF PLT. Uses existing tail padding.
+    bool plt;
 };
 
 typedef struct AssemblyUnitResult AssemblyUnitResult;

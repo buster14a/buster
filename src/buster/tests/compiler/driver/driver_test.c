@@ -3165,6 +3165,184 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
 // suffix assembly unit through parsing, assembly, object serialization and
 // object reading. This reaches the native target resolver, unlike an
 // assembly_unit_encode-only test.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && defined(BUSTER_HOST_C_COMPILER)
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 strong = buster_test_temporary_path(arena, S8("assembly-binding-strong"), S8(".c"));
+    String8 strong_object = buster_test_temporary_path(arena, S8("assembly-binding-strong"), S8(".o"));
+    String8 host = S8(BUSTER_HOST_C_COMPILER);
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    bool strong_written = file_write(strong, BUSTER_SLICE_TO_BYTE_SLICE(S8("int chosen(void) { return 29; }\n")));
+    BUSTER_TEST(arguments, strong_written);
+    String8 host_strong[] = {host, S8("-g0"), S8("-O0"), S8("-fno-pie"), S8("-c"), strong, S8("-o"), strong_object};
+    bool strong_ready = strong_written && compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_strong)).result == PROCESS_RESULT_SUCCESS;
+    if (BUSTER_REQUIRE(arguments, strong_ready))
+    {
+        for (u32 variant = 0; variant < 6; variant += 1)
+        {
+            String8 binding = variant == 5 ? S8("") : variant == 3 ? S8(".weak chosen\n.hidden chosen\n") : S8(".weak chosen\n");
+            String8 definition = S8(".type chosen,@function\nchosen:\nmov eax, DEFAULT_RESULT\nret\n");
+            String8 wrappers = S8(".globl via_call\n.type via_call,@function\nvia_call:\nsub rsp,8\ncall chosen\nadd rsp,8\nret\n"
+                                  ".globl via_address\n.type via_address,@function\nvia_address:\nlea rax,[rip+chosen]\nret\n");
+            for (u32 preprocessed = 0; preprocessed < 2; preprocessed += 1)
+            {
+                u64 case_position = arena->position;
+                String8 assembly = buster_test_temporary_path(arena, S8("assembly-binding"), preprocessed ? S8(".S") : S8(".s"));
+                String8 buster_object = buster_test_temporary_path(arena, S8("assembly-binding-buster"), S8(".o"));
+                String8 foreign_object = buster_test_temporary_path(arena, S8("assembly-binding-foreign"), S8(".o"));
+                String8 caller = buster_test_temporary_path(arena, S8("assembly-binding-caller"), S8(".c"));
+                String8 caller_object = buster_test_temporary_path(arena, S8("assembly-binding-caller"), S8(".o"));
+                String8 executable = buster_test_temporary_path(arena, S8("assembly-binding-run"), S8(".out"));
+                String8 actual_definition = preprocessed ? definition : S8(".type chosen,@function\nchosen:\nmov eax,11\nret\n");
+                String8 source = string_format(arena, S8("{S8}.intel_syntax noprefix\n.text\n{S8}{S8}{S8}{S8}{S8}\n.section .note.GNU-stack,\"\",@progbits\n"),
+                    preprocessed ? S8("#define DEFAULT_RESULT 11\n") : S8(""), variant == 2 ? S8("") : binding,
+                    variant == 1 ? wrappers : actual_definition,
+                    variant == 4 ? S8(".section .text.wrapper,\"ax\",@progbits\n") : S8(""),
+                    variant == 1 ? actual_definition : wrappers, variant == 2 ? binding : S8(""));
+                String8 main_source = string_format(arena, S8("typedef int (*ChosenFunction)(void);\nextern int chosen(void);\nextern int via_call(void);\n"
+                    "extern ChosenFunction via_address(void);\nint main(void) { ChosenFunction p = via_address();\n"
+                    "return chosen() != 29 || via_call() != {u32} || p() != {u32} || (p == chosen) != {u32}; }\n"),
+                    variant == 5 ? 11u : 29u, variant == 5 ? 11u : 29u, variant == 5 ? 0u : 1u);
+                bool written = file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(caller, BUSTER_SLICE_TO_BYTE_SLICE(main_source));
+                if (BUSTER_REQUIRE(arguments, written))
+                {
+                    String8 compile[] = {S8("-c"), S8("-o"), buster_object, assembly};
+                    CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+                    BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, assembled.diagnostic);
+                    if (BUSTER_REQUIRE(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object))
+                    {
+                        u32 references = 0;
+                        for (u32 index = 0; index < assembled.object.relocation_count; index += 1)
+                        {
+                            ObjectRelocation relocation = assembled.object.relocations[index];
+                            if (relocation.symbol < assembled.object.symbol_count &&
+                                string_equal(assembled.object.symbols[relocation.symbol].name, S8("chosen")))
+                            {
+                                references += 1;
+                                BUSTER_TEST(arguments, relocation.addend == -4 &&
+                                    (relocation.kind == OBJECT_RELOCATION_X86_64_PC32 || relocation.kind == OBJECT_RELOCATION_X86_64_PLT32));
+                            }
+                        }
+                        BUSTER_TEST(arguments, references == (variant == 5 ? 0u : 2u));
+                        String8 foreign_compile[] = {host, S8("-c"), assembly, S8("-o"), foreign_object};
+                        String8 caller_compile[] = {host, S8("-g0"), S8("-O0"), S8("-fno-pie"), S8("-c"), caller, S8("-o"), caller_object};
+                        bool foreign_ready = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(foreign_compile)).result == PROCESS_RESULT_SUCCESS;
+                        bool caller_ready = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(caller_compile)).result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST(arguments, foreign_ready && caller_ready);
+                        for (u32 order = 0; order < 2; order += 1)
+                        {
+                            if (caller_ready)
+                            {
+                                String8 link[] = {host, S8("-no-pie"), order ? strong_object : buster_object,
+                                    order ? buster_object : strong_object, caller_object, S8("-o"), executable};
+                                bool linked = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)).result == PROCESS_RESULT_SUCCESS;
+                                BUSTER_TEST(arguments, linked);
+                                if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable)); }
+                            }
+                            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                            {
+                                for (u32 route = 0; route < 3; route += 1)
+                                {
+                                    if (route != 2 || foreign_ready)
+                                    {
+                                        TemporalArena run = scratch_begin(&arena, 1);
+                                        String8 weak_input = route == 0 ? assembly : route == 1 ? buster_object : foreign_object;
+                                        String8 strong_input = route == 0 ? strong : strong_object;
+                                        String8 command[] = {string_format(run.arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                                            order ? strong_input : weak_input, order ? weak_input : strong_input, caller, S8("-o"), executable};
+                                        CompilerDriverResult linked = compiler_driver_execute_invocation(run.arena,
+                                            compiler_driver_parse_arguments(run.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                                        String8 description = string_format(run.arena, S8("assembly binding variant={u32} preprocessed={u32} order={u32} mode={S8} route={u32}: {S8}"),
+                                            variant, preprocessed, order, modes[mode], route, linked.diagnostic);
+                                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, description);
+                                        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                                        {
+                                            BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(run.arena, executable), description);
+                                        }
+                                        scratch_end(run);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                os_file_delete(assembly);
+                os_file_delete(buster_object);
+                os_file_delete(foreign_object);
+                os_file_delete(caller);
+                os_file_delete(caller_object);
+                os_file_delete(executable);
+                arena_set_position(arena, case_position);
+            }
+        }
+    }
+    // External shared links must retain default-visible interposition, for
+    // both the ordinary branch spelling and an explicit @PLT request.
+    for (u32 explicit_plt = 0; explicit_plt < 2; explicit_plt += 1)
+    {
+        String8 assembly = buster_test_temporary_path(arena, S8("assembly-binding-shared"), S8(".s"));
+        String8 object_path = buster_test_temporary_path(arena, S8("assembly-binding-shared"), S8(".o"));
+        String8 library = buster_test_temporary_path(arena, S8("assembly-binding-shared"), S8(".so"));
+        String8 caller = buster_test_temporary_path(arena, S8("assembly-binding-interpose"), S8(".c"));
+        String8 executable = buster_test_temporary_path(arena, S8("assembly-binding-interpose"), S8(".out"));
+        String8 source = string_format(arena, S8(".intel_syntax noprefix\n.text\n.globl chosen\n.type chosen,@function\n"
+            "chosen: mov eax,11\nret\n.globl via_call\n.type via_call,@function\nvia_call: jmp chosen{S8}\n"
+            ".section .note.GNU-stack,\"\",@progbits\n"), explicit_plt ? S8("@PLT") : S8(""));
+        if (BUSTER_REQUIRE(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(source)) &&
+            file_write(caller, BUSTER_SLICE_TO_BYTE_SLICE(S8("int chosen(void) { return 29; }\nextern int via_call(void);\nint main(void) { return via_call() != 29; }\n")))))
+        {
+            String8 compile[] = {S8("-c"), assembly, S8("-o"), object_path};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+            if (BUSTER_REQUIRE(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object && assembled.object.relocation_count == 1))
+            {
+                BUSTER_TEST(arguments, assembled.object.relocations[0].kind == OBJECT_RELOCATION_X86_64_PLT32);
+                String8 shared[] = {host, S8("-shared"), object_path, S8("-o"), library};
+                bool shared_ready = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared)).result == PROCESS_RESULT_SUCCESS;
+                if (BUSTER_REQUIRE(arguments, shared_ready))
+                {
+                    String8 link[] = {host, caller, library, S8("-o"), executable};
+                    bool linked = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, linked);
+                    if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable)); }
+                }
+            }
+        }
+        os_file_delete(assembly);
+        os_file_delete(object_path);
+        os_file_delete(library);
+        os_file_delete(caller);
+        os_file_delete(executable);
+    }
+    // A retained narrow relocation has no ObjectFile representation. Fail
+    // before publication rather than resolving it to the losing weak body.
+    String8 narrow = buster_test_temporary_path(arena, S8("assembly-binding-narrow"), S8(".s"));
+    String8 narrow_output = buster_test_temporary_path(arena, S8("assembly-binding-narrow"), S8(".o"));
+    String8 sentinel = S8("existing object stays intact");
+    if (BUSTER_REQUIRE(arguments, file_write(narrow, BUSTER_SLICE_TO_BYTE_SLICE(S8(".text\n.weak chosen\nchosen: nop\nloop chosen\n"))) &&
+        file_write(narrow_output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+    {
+        String8 command[] = {S8("-c"), narrow, S8("-o"), narrow_output};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_OBJECT && refused.diagnostic.length != 0);
+        BUSTER_TEST(arguments, string_equal(BYTE_SLICE_TO_STRING(8, file_read(arena, narrow_output, (FileReadOptions){0})), sentinel));
+    }
+    os_file_delete(narrow);
+    os_file_delete(narrow_output);
+    os_file_delete(strong);
+    os_file_delete(strong_object);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11659,6 +11837,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
