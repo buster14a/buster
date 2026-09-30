@@ -24,7 +24,9 @@
  * (bq_retirement_request_valid_pinned, bq_worker_recipe_service in
  * bq_worker_finalization_recipe, bq_worker_recipe_launchable) admit the
  * retirement recipe only when bq_retirement_profile_complete accepts the
- * seams' profile, which the compiled blocked one never is. Such a job loads
+ * seams' profile, which the compiled blocked one never is. They decide per
+ * recipe (bq_worker_recipe_admitted, #881 N1), so the queue's own admission
+ * predicate never substitutes for that completeness gate. Such a job loads
  * the installed budget (bq_retirement_coordinator_budget_load), follows a
  * BQPHASE2 channel whose RETIREMENT_READY digest bq_worker_phase_accept keeps
  * and whose MEASURED digest it hands off (bq_retirement_coordinator_handoff,
@@ -2092,13 +2094,21 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_expired(BqWorkerFinalization con
     return expired;
 }
 
-/* The service recipe, or the retirement recipe when the finalization's seams
- * carry a profile that bq_retirement_profile_complete accepts. */
+/* The coordinator's recipe gate, decided per recipe (#881 N1): the
+ * retirement recipe only when the seams carry a profile that
+ * bq_retirement_profile_complete accepts, even when the queue's admission
+ * predicate (bq_recipe_service) already admits it; the smoke recipe through
+ * bq_recipe_service. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_recipe_admitted(BqRecipe selected, BqRetirementWorkerUnitSeams const* seams)
+{
+    bool admitted = selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ?
+                    seams != NULL && bq_retirement_profile_complete(seams->profile) : bq_recipe_service(selected);
+    return admitted;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_recipe_service(BqRecipe selected, BqWorkerFinalization const* finalization)
 {
-    bool admitted = bq_recipe_service(selected) ||
-                    (selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && finalization && finalization->retirement &&
-                     bq_retirement_profile_complete(finalization->retirement->profile));
+    bool admitted = bq_worker_recipe_admitted(selected, finalization ? finalization->retirement : NULL);
     return admitted;
 }
 
@@ -2935,8 +2945,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_sync_tree(int result_directory)
 
 /* A bound result's manifest, bundle and full digests are still the ones the
  * queue recorded. The service recipe is admitted; the retirement recipe only
- * when the seams' profile is complete (bq_retirement_profile_complete, #881
- * PR 3), which the compiled blocked profile never is, so every production
+ * when the seams' profile is complete (bq_worker_recipe_admitted, #881 PR 3
+ * and N1), which the compiled blocked profile never is, so every production
  * caller (the non-pinned entries) still refuses it. */
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_pinned(BqJob const* job, int result_directory,
                                                                      BqRetirementWorkerUnitSeams const* seams)
@@ -2944,8 +2954,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_pinned(BqJob const
     char path[BQ_PATH_CAP + 1] = {0};
     BqRecipeFiles recipe;
     BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
-    bool admitted = bq_recipe_service(selected) || (selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && seams &&
-                                                    bq_retirement_profile_complete(seams->profile));
+    bool admitted = bq_worker_recipe_admitted(selected, seams);
     BqError error = job && job->result_bound && admitted && bq_recipe_files(selected, &recipe) &&
                     bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
                     path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
@@ -5481,9 +5490,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_unit_pinned(String8 lease_file, String8 jo
     char workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
     BqRecipe recipe = bq_recipe_from_name(recipe_name);
     /* Retirement runs in a forked producer (retirement_worker_unit.c), and
-     * only with a complete profile; smoke keeps the recipe exec. */
-    bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && seams &&
-                      bq_retirement_profile_complete(seams->profile);
+     * only with a complete profile, whatever the queue's predicate admits;
+     * smoke keeps the recipe exec. */
+    bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_worker_recipe_admitted(recipe, seams);
     BqRecipeFiles files = {0};
     BqWorkerLease lease = {.descriptor = -1};
     int phase_descriptor = -1;
@@ -5492,7 +5501,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_unit_pinned(String8 lease_file, String8 jo
     BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
                     !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
                     !bq_worker_text(recipe_name, recipe_text, sizeof(recipe_text)) ||
-                    (!retirement && (!bq_recipe_admitted(recipe) || !bq_recipe_service(recipe))) ||
+                    (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? !retirement :
+                     !bq_recipe_admitted(recipe) || !bq_worker_recipe_admitted(recipe, seams)) ||
                     !bq_recipe_files(recipe, &files) || !files.command[0] || strcmp(recipe_text, files.name) ||
                     !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
                     !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||

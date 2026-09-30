@@ -97,12 +97,20 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
     "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256="};
 
-/* The only admitting status line; the compiled profile says status=blocked. */
-#define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "status=admitted"
+/* The only admitting status line (queue.h); the compiled profile says
+ * status=blocked. */
+#define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS BQ_RECIPE_PROFILE_ADMITTED_STATUS
+/* The queue's profile cap (queue.h) is sized from these pins and the
+ * compiled profile, so bq_installed_recipe can read an admitted profile. */
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins) == BQ_RETIREMENT_PROFILE_PINS);
+BUSTER_CT_CHECK(sizeof(bq_native_retirement_blocked_profile) - 1 <= BQ_RECIPE_PROFILE_BASE_CAP);
 
 /* Every digest pin, lane D's frozen campaign values (seed, pairs, resamples
  * and bootstrap members, each canonical and in range:
- * bq_retirement_unit_campaign_pins) and exactly one status=admitted line. */
+ * bq_retirement_unit_campaign_pins) and exactly one status=admitted line
+ * (bq_recipe_profile_admitted, the queue's own admission test: blocked, a
+ * blocked- prefix, a trailing space or carriage return, a second line or no
+ * line at all refuses). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
 {
     char pin[SHA256_HEX_CAPACITY];
@@ -110,23 +118,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
     bool complete = profile.pointer && profile.length > 0;
     for (u32 index = 0; complete && index < BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins); index += 1)
         complete = bq_retirement_profile_sha(profile, string_from_pointer(bq_retirement_worker_unit_pins[index]), pin);
-    complete = complete && bq_retirement_unit_campaign_pins(profile, &pins);
-    /* Exactly one status line, and it must be the admitting value byte for
-     * byte: blocked, a blocked- prefix, a trailing space or carriage return,
-     * a second line or no line at all refuses. */
-    u64 offset = 0;
-    u32 statuses = 0;
-    String8 line = {0};
-    String8 const status = S8("status=");
-    while (complete && bq_next_line(profile, &offset, &line))
-    {
-        if (line.length >= status.length && !memcmp(line.pointer, status.pointer, (size_t)status.length))
-        {
-            statuses += 1;
-            complete = string_equal(line, S8(BQ_RETIREMENT_PROFILE_ADMITTED_STATUS));
-        }
-    }
-    complete = complete && statuses == 1;
+    complete = complete && bq_retirement_unit_campaign_pins(profile, &pins) && bq_recipe_profile_admitted(profile);
     return complete;
 }
 

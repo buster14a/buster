@@ -68,7 +68,9 @@
  * a durable success, and passes the smoke recipe;
  * and bq_retirement_request_valid_pinned, bq_worker_finalization_recipe and
  * bq_worker_recipe_launchable admit the recipe only through the complete
- * seams. bq_prep_worker_unit_campaign_order checks that the campaign's
+ * seams, also while queue.c's test seam makes the queue's own predicate
+ * admit (#881 N1; the result binding likewise in bq_prep_worker_unit_bound).
+ * bq_prep_worker_unit_campaign_order checks that the campaign's
  * SETTLING follows RETIREMENT_READY on a BQPHASE2 channel.
  *
  * #881 PR 3: job 82 reaches MEASURED through the real coordinator path
@@ -2033,6 +2035,34 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fi
         BqWorkerFinalization plain = {.result_directory = -1, .retirement = gated[index]};
         BQ_PREP_CHECK(bq_worker_finalization_recipe(&smoke, &plain) && bq_worker_recipe_launchable(&plain));
     }
+    /* #881 N1: with the queue's own predicate admitting (queue.c's test seam
+     * stands an admitted but pin-less profile in for the compiled one), the
+     * gates still decide by the seams' profile alone: the compiled, the
+     * stand-in's installed seams and a blocked status refuse; only the
+     * complete seams admit. */
+    char admitting[BQ_RECIPE_PROFILE_CAP];
+    BQ_PREP_CHECK(bq_prep_worker_unit_status((char const*)installed.profile.pointer, "status=admitted\n", admitting,
+                                             sizeof(admitting)));
+    bq_retirement_profile_test_override = string_from_pointer(admitting);
+    BqRetirementWorkerUnitSeams stand_in = bq_retirement_worker_unit_installed();
+    BQ_PREP_CHECK(bq_recipe_retirement_admitted() && bq_request_valid(request) &&
+                  !bq_retirement_profile_complete(stand_in.profile) &&
+                  !bq_retirement_request_valid_pinned(request, stand_in.profile) &&
+                  !bq_retirement_request_valid_pinned(request, installed.profile) &&
+                  !bq_retirement_request_valid_pinned(request, refused.profile) &&
+                  bq_retirement_request_valid_pinned(request, seams->profile));
+    BqRetirementWorkerUnitSeams const* const admitting_gated[] = {NULL, &installed, &stand_in, &refused, seams};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(admitting_gated); index += 1)
+    {
+        bool complete = index == BUSTER_ARRAY_LENGTH(admitting_gated) - 1;
+        BqWorkerFinalization gate = {.result_directory = -1, .retirement = admitting_gated[index]};
+        BqWorkerFinalization launch = {.result_directory = -1, .retirement = admitting_gated[index]};
+        BQ_PREP_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &launch.recipe));
+        BQ_PREP_CHECK(bq_worker_finalization_recipe(&attempt->job, &gate) == complete &&
+                      bq_worker_recipe_launchable(&launch) == complete);
+    }
+    bq_retirement_profile_test_override = (String8){0};
+    BQ_PREP_CHECK(!bq_request_valid(request));
 }
 
 /* The composed job's result through the coordinator's remaining gates: the
@@ -2065,6 +2095,19 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_bound(BqPrepOracleFixture* fixture,
     BqJob other = bound;
     bq_prep_worker_unit_flip(other.result_full_digest);
     BQ_PREP_CHECK(bq_worker_result_binding_validate_pinned(&other, directory, seams) == BQ_CONFIGURATION_MISMATCH);
+    /* #881 N1: the queue's predicate admitting does not open the binding for
+     * an incomplete or blocked seam profile. */
+    char admitting[BQ_RECIPE_PROFILE_CAP];
+    BQ_PREP_CHECK(bq_prep_worker_unit_status((char const*)installed.profile.pointer, "status=admitted\n", admitting,
+                                             sizeof(admitting)));
+    bq_retirement_profile_test_override = string_from_pointer(admitting);
+    BqRetirementWorkerUnitSeams stand_in = bq_retirement_worker_unit_installed();
+    BQ_PREP_CHECK(bq_recipe_retirement_admitted() &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, &stand_in) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, &installed) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, &refused) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, seams) == BQ_OK);
+    bq_retirement_profile_test_override = (String8){0};
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)

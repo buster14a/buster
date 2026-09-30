@@ -169,7 +169,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
                             operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
-                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT;
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT ||
+                            operation == BQ_OP_RECIPE_IDENTITY;
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -182,6 +183,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
     u32 length = error == BQ_OK ? bq_u32(input + 12) : 0;
     if (error == BQ_OK && (schema != BQ_CONTROL_SCHEMA || length != size - BQ_CONTROL_HEADER ||
                           bq_transport_public_operation(operation) != BQ_OK))
+    {
+        error = BQ_BAD_REQUEST;
+    }
+    if (error == BQ_OK && operation == BQ_OP_RECIPE_IDENTITY && length)
     {
         error = BQ_BAD_REQUEST;
     }
@@ -523,7 +528,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
     else if (error == BQ_OK)
     {
         error = bq_dispatch(queue, request, size, response);
-        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS)
+        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS &&
+            operation != BQ_OP_RECIPE_IDENTITY)
         {
             /* Public receipts do not reveal global queue occupancy/sequence. */
             memset(response->bytes + BQ_CONTROL_HEADER + 20, 0, 8);
