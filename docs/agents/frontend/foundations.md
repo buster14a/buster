@@ -62,7 +62,15 @@ The current-value table is sparse `(block, owner)` state, not a blocks × locals
 matrix. Unresolved reads create provisional block parameters. Sealing waits
 until all backedges and goto predecessors are known; an iterative queue fills
 incoming values, forwarding through single-predecessor chains. Trivial
-parameters and unused parameter cycles are removed. Disconnected empty label
+parameters and unused parameter cycles are removed. A parameter is trivial
+when every edge out of a reachable block carries the same value; an edge out
+of an unreachable block never runs, so its value decides only when no
+reachable edge carries one. A braced statement ending in `break`, `goto`,
+`return` or `continue` leaves its continuation block without predecessors,
+yet the next `case` or label still receives an edge from it; counting that
+edge kept a merge of every local read after the label, the shape of a
+`case OP_X: { ... break; }` interpreter. MIR dominance likewise ignores dead
+edges into the entry component. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
 Condition lowering resolves a literal left operand of `||` or `&&` before
@@ -156,6 +164,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   semantics; exact SIMD uses a shared feature gate and explicit refusal.
   `IrSimdShape` owns integer/internal-predicate boundaries, consumed by C
   result typing and canonical validation. C masks remain integer values.
+
+- Identifier identity is established once, by `c_symbol_intern` in the
+  preprocessor: the token pass interns every lexed identifier and the `##`
+  paste interns the identifier it forms, so every identifier in the final
+  stream carries its exact id. Semantic analysis and lowering key names on
+  the id a token, entity (`CEntity.symbol`), member (`CMember.symbol`),
+  enumerator or parameter carries, so no lexed or pasted name is interned
+  again after preprocessing (the stage-1 self-host unit and the pinned
+  fixture grow the table by nothing). Every entity is named by an identifier
+  token, so entity and typedef lookups answer a punctuator or literal token
+  with "none" instead of interning its spelling. The lowering function-name
+  index inserts nothing: it groups declarations by their entity's id, and a
+  spelling without a carried id (a builtin's link name) asks the read-only
+  `c_symbol_find`. Spelling fallbacks, which may intern, remain for
+  symbol-less synthesized or hand-built rows and for parses without a table. `c_test_identifier_identity_once`
+  pins the no-growth contract, `c_test_symbol_find_collisions` the exact
+  probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
+  both the carried ids and the fallback on the same stream with ids cleared.
 
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
@@ -312,6 +338,19 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   key prefix while querying it. Neither publication rewinds the TU arena:
   canonical lowering copies the map's pointers into `IrProgram.source_map`,
   whose diagnostic, DWARF and CodeView consumers still borrow their storage.
+- `c_parse_types_compatible` answers a type id compared with itself (96.8%
+  of stage-1 calls) through `c_parse_types_self_compatible`, the pair walk
+  specialized to one chain: pointer, vector, array and enum steps keep the
+  walk's verdicts (an out-of-range id or array bound record is still
+  incompatible) and its side effect (an aggregate step asks
+  `c_parse_unqualified_type` for both halves, which appends a row for a
+  qualified aggregate lacking its link). Function types and enums whose
+  underlying type is not a leaf fall back to the unchanged
+  `c_parse_types_compatible_walk` before any side effect. The pair stack,
+  still sized by the whole type table (#1502), is allocated only for that
+  walk. `c_test_type_self_compatibility` compares the two for every type of a
+  type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
@@ -361,15 +400,31 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   8,192 and 16,384 tag boundaries and rollback across growth. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
-  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts.
+  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
+  tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
+  first: an unused slot on a complete index means no row, and a live slot
+  not marked `multiple` is the only row, whatever the reference scope. Only
+  duplicated, stale or incomplete keys search the type table (#1467);
+  `c_test_aggregate_unique_search` requires zero lowering search rows for
+  unique tags.
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip
-  relocation compaction. Overlapping clears preserve stable record order and
-  recompute the surviving bounds during that same compaction. The extent is a
-  conservative overlap test: holes inside it and arbitrary repeated overwrites
-  still take the full compaction path. GNU range copies use their parent
-  context's extent; separately materialized range values own a fresh context.
+  relocation compaction. The extent is a conservative overlap test; a clear
+  inside it (holes, unordered designators, repeated overwrites, overrides of a
+  GNU range default) goes through the context's
+  `CIrInitializerRelocationIndex` instead of the whole array (#1450). The index
+  buckets records by offset / pointer size, one group per exact offset, so a
+  clear visits the buckets its range spans plus the records it removes.
+  Removed records stay in the context's scratch as tombstones until they
+  outnumber the live ones, then one stable pass drops them; the context
+  publishes its live records, in stable record order, to the caller's array
+  when it finishes. Appenders see the caller's capacity plus the dead count.
+  The legacy folder's clears keep the whole-array compaction. GNU range copies
+  use their parent context's extent and index; separately materialized range
+  values own a fresh context. `c_test_initializer_relocation_index` replays
+  random append/clear scripts through both paths and requires identical
+  arrays and failure points.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
@@ -446,6 +501,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   ran correctly to their last statement before dying on the brace with SIGILL.
   `tests/basic_c_main_implicit_return.c` pins it under every allocator, and
   exit zero is reachable there only through the closing brace.
+- A noreturn call and `__builtin_unreachable()` share one rule,
+  `c_ir_end_control_flow_after_call`. Inside a branching operand (`? :`, `&&`,
+  `||`, a lowered branch condition) or a consumer that emits rows after the
+  value -- a return, an initializer, a switch controller -- the block stays
+  open, so `return (abort(), 0)` and the optimized `BUSTER_CHECK`'s
+  `(__builtin_unreachable(), 0)` arm reach their consumer or merge. An
+  expression statement ends its block with `IR_OPCODE_UNREACHABLE` after its
+  own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical
+  validation, and `c_test_cast_and_noreturn_operand_runtime` runs them under
+  every allocator.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the
@@ -646,6 +711,38 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
+- A member declarator followed by a token it cannot absorb
+  (`struct B { int member junk; };`, `int a, b c;`, `int (*fp)(void) junk;`)
+  abandons the aggregate with `C_DIAGNOSTIC_EXPECTED_DECLARATION`, "unexpected
+  token after member declarator", at that token
+  (`c_type_parse_aggregate_segment_trailing_token`). Each declarator of
+  `} a, b;` parses the failed definition again, and
+  `c_type_parse_aggregate_segment_fail` drops the repeated report. The report
+  is withheld where the member path misreads valid source: a decoration
+  keyword taken as the name (`typeof(int) _Alignas(8) m;`) and the width of a
+  parenthesized bit-field name (`int (x) : 3;`). Those segments still fail
+  silently. Regression: `c_test_member_declarator_trailing_token_diagnostics`
+  (GitHub #1534).
+- A member segment that cannot declare a member abandons its aggregate
+  definition through `c_type_parse_aggregate_segment_fail`, which carries the
+  segment's diagnostics over the rollback and drops one repeating a standing
+  report (each declarator of `} a, b;` parses the definition again). A missing
+  name (`int *;`, `int (*)(void);`, `int (*const)(void);`,
+  `int (* __attribute__((unused)))(void);`, `int , a;`, `int a, ;`) is
+  `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names -- the scan
+  steps over groups, pointers, their qualifiers and attributes first -- and a
+  parenthesized name behind decorations the declarator parse does not take is
+  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An
+  attribute after `*` is taken: `int (* __attribute__((unused)) p)(void);`
+  declares `p`. An empty
+  bit-field width likewise, and an unknown member type is
+  `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
+  (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment
+  without a member row. A member `_Static_assert` (C23 `static_assert`) also
+  declares no member: the segment defers it to the translation unit's
+  deferred assertions, once per token range however often the definition is
+  parsed. Regression:
+  `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
 
 ## Immutable aggregate and complex construction
 
@@ -680,6 +777,28 @@ Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
 Both native canonical emitters implement these Boolean operations as well as
 the existing machine selectors, including canonical fallback for x87 functions.
+
+A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
+result is 0 exactly when the whole value compares equal to 0.
+`c_ir_truth_value` is its one runtime owner, and `c_ir_emit_cast` answers a
+`_Bool` destination before any arm that dispatches on the source's
+representation (complex halves, binary16 runtime calls, x87 checks); only the
+representation-independent identity, qualifier and aggregate arms and the
+label-provenance refusal come first. A complex value therefore converts as
+`re != 0 || im != 0` in initializers (aggregate members included), assignments,
+arguments, returns, casts, compound assignments, atomic stores and VLA bounds,
+exactly as conditions already did. The complex arm had preceded the `_Bool`
+arm and kept only the real half, so `_Bool b = z` disagreed with `if (z)`
+(#1371). `c_ir_emit_complex_conversion` is the C 6.3.1.7p2 projection onto the
+other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
+still projects first. `c_test_complex_bool_conversion` checks that canonical
+shape on six target layouts in both frontend forms and runs literal
+float/double/long double rows (signed zeros, subnormal, infinite and NaN
+halves, projection controls) in every native allocator at O0/O2. Imaginary
+constants remain outside parse-side integer constant expressions
+(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
+not folded to real targets; `_Bool` bit-field stores fail canonical validation
+independently of this conversion.
 
 ## ABI decomposition ownership
 
@@ -799,6 +918,20 @@ constant folding and runtime operands consume that type. Static assertions using
 enumerators defer to typed semantic evaluation instead of replacing names with
 untyped decimal spellings. Full-width runtime constants use ordinary canonical
 shift/or operations; the one-immediate integer-constant contract is unchanged.
+
+A selection or iteration statement is a block (C17 6.8.4p3, 6.8.5p5). When an
+`if`, `switch` or `while` controlling expression defines a tag, as in
+`if (sizeof(enum { Q = 8 })) v = Q;`, `c_parse_bind_block_statements` opens a
+statement scope. That scope spans the rest of the expression and every
+substatement, including the else branch and the switch body, and ends with the
+statement. A `for` header uses its loop scope. The walk registers each tag
+defined directly in the header when it reaches the definition, so an earlier
+use still binds the outer name. `c_parse_publish_enum_members` then publishes
+an enum's constants, the same helper local declarations use. The walk steps
+over the enum's body; it still walks a struct or union body so the names in its
+member bounds keep their bindings. A header that defines no tag opens no scope.
+`c_test_controlling_expression_scope` and
+`compiler_driver_test_scoped_constant_execution` cover this (#1304).
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64, and validates canonical IR in both frontend SSA forms.
