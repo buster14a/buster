@@ -140,6 +140,32 @@ class DownloadTests(unittest.TestCase):
                 ci_llvm.download(asset("a", b"payload"), Path(temporary) / "a", None)
 
 
+class FetchReleasesTests(unittest.TestCase):
+    def response(self, payload):
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+        return Response(payload)
+
+    def test_retries_a_timed_out_listing(self):
+        outcomes = [TimeoutError("The read operation timed out"), self.response(b'[{"tag_name": "llvmorg-22.1.0"}]')]
+        with mock.patch.object(ci_llvm.urllib.request, "urlopen", side_effect=outcomes) as urlopen, \
+                mock.patch.object(ci_llvm.time, "sleep") as sleep:
+            self.assertEqual(ci_llvm.fetch_releases(None), [{"tag_name": "llvmorg-22.1.0"}])
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(5)
+
+    def test_gives_up_after_bounded_attempts(self):
+        with mock.patch.object(ci_llvm.urllib.request, "urlopen", side_effect=TimeoutError("stalled")) as urlopen, \
+                mock.patch.object(ci_llvm.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "could not list LLVM releases: stalled"):
+                ci_llvm.fetch_releases(None)
+        self.assertEqual(urlopen.call_count, ci_llvm.DOWNLOAD_ATTEMPTS)
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
