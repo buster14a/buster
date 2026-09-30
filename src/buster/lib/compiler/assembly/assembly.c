@@ -516,6 +516,9 @@ struct AssemblyInstruction
     bool metadata_include_implicit;
     bool metadata_private_pc8_long;
     u32 metadata_form_id;
+    u16 metadata_memory_width;
+    u8 metadata_memory_operand;
+    bool metadata_memory_source_width_cleared;
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
     u32 aarch64_scalar_integer_form_index;
@@ -12917,6 +12920,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .metadata_operand_count = (u8)operand_count,
         .metadata_include_implicit = query.include_implicit,
         .metadata_form_id = selection.form_id,
+        .metadata_memory_width = selection.selected_memory_width,
+        .metadata_memory_operand = selection.selected_memory_operand,
+        .metadata_memory_source_width_cleared = selection.selected_memory_source_width_cleared,
         .metadata_mnemonic = mnemonic,
         .metadata_address_size = address_size,
         .metadata_attributes = attributes,
@@ -13939,15 +13945,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     };
     u8 bytes[64] = {0};
     BusterX86MetadataRelocation metadata_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
-    // Layout already selected this form from these immutable physical
-    // operands. Revalidate and emit it without a second alternative search.
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+    // Retain layout's identity and source projections; emission checks the
+    // same form and does not search for another encoding.
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_selection((BusterX86MetadataEmitQuery){
         .physical = physical,
         .form_id = instruction->metadata_form_id,
         .output = bytes,
         .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
         .relocations = metadata_relocations,
         .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
+    }, (BusterX86MetadataSelectResult){
+        .status = BUSTER_X86_METADATA_ENCODE_SUCCESS,
+        .form_id = instruction->metadata_form_id,
+        .selected_memory_width = instruction->metadata_memory_width,
+        .selected_memory_operand = instruction->metadata_memory_operand,
+        .selected_memory_source_width_cleared = instruction->metadata_memory_source_width_cleared,
     });
     u32 metadata_size = instruction->size - (instruction->metadata_private_pc8_long ? 7u : 0u);
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != metadata_size ||
