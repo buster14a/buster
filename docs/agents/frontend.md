@@ -21,6 +21,7 @@ Layout and atomic ABI work often needs both the layout and atomics guides.
 Changes to places or calls also need the foundations guide. Native selection and
 allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
+The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
 ## Preprocessor include identity
 

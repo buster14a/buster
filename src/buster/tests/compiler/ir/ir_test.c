@@ -1439,10 +1439,12 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                 {
                     IrAbiValue expected = ir_test_abi_reference(&abi_program, (IrTypeId){type}, (IrAbiConvention)convention, (IrAbiUse)use);
                     IrAbiValue actual = ir_abi_context_value(&abi_program, abi_contexts + convention, (IrTypeId){type}, (IrAbiUse)use);
+                    IrAbiValue public_value = ir_type_abi_value(&abi_program, (IrTypeId){type}, (IrAbiConvention)convention, (IrAbiUse)use);
                     // IrAbiValue names its two tail bytes explicitly and every
                     // classifier result initializes them; there is no padding.
                     BUSTER_CT_CHECK(sizeof(IrAbiValue) == sizeof(IrAbiPart) * IR_ABI_MAX_PARTS + sizeof(u32) + 4);
                     BUSTER_TEST(arguments, memcmp(&actual, &expected, sizeof(actual)) == 0);
+                    BUSTER_TEST(arguments, memcmp(&public_value, &expected, sizeof(public_value)) == 0);
                 }
             }
         }
@@ -1466,6 +1468,47 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     IrProgram published_view = {.arena = arguments->arena, .types = {.types = abi_program.types.types, .count = abi_program.types.count}};
     IrAbiValue published_result = ir_type_abi_value(&published_view, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
     BUSTER_TEST(arguments, published_result.part_count == 2 && published_result.parts[0].abi_class == IR_ABI_CLASS_X87);
+
+    // A resident answer must not bypass either public entry's validation.
+    // These views retain warmed page pointers, so accepting one would be a hit.
+    IrAbiValue empty_abi = {0};
+    IrAbiContext warmed_context = published_view.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64];
+    u64 warmed_position = arguments->arena->position;
+    for (u32 guard = 0; guard < 4; guard += 1)
+    {
+        IrAbiContext rejected = warmed_context;
+        switch (guard)
+        {
+            case 0: rejected.type_storage = abi_program.types.types + 1; break;
+            case 1: rejected.page_capacity = 0; break;
+            case 2: rejected.convention = IR_ABI_CONVENTION_COUNT; break;
+            case 3: rejected.arena = 0; break;
+        }
+        IrAbiValue rejected_value = ir_abi_context_value(&published_view, &rejected, abi_f80, IR_ABI_USE_RESULT);
+        BUSTER_TEST(arguments, memcmp(&rejected_value, &empty_abi, sizeof(rejected_value)) == 0);
+        BUSTER_TEST(arguments, rejected.classified_values == warmed_context.classified_values &&
+                              rejected.allocated_bytes == warmed_context.allocated_bytes);
+        // A zero arena means uninitialized for the program-owned API. It
+        // legitimately creates a fresh context; the other guards must reject.
+        if (guard != 3)
+        {
+            published_view.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64] = rejected;
+            rejected_value = ir_type_abi_value(&published_view, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+            BUSTER_TEST(arguments, memcmp(&rejected_value, &empty_abi, sizeof(rejected_value)) == 0);
+        }
+    }
+    published_view.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64] = warmed_context;
+    IrAbiValue rejected_type = ir_type_abi_value(&published_view, (IrTypeId){published_view.types.count}, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    IrAbiValue rejected_use = ir_type_abi_value(&published_view, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_COUNT);
+    IrAbiValue rejected_convention = ir_type_abi_value(&published_view, abi_f80, IR_ABI_CONVENTION_COUNT, IR_ABI_USE_RESULT);
+    IrAbiValue rejected_program = ir_type_abi_value(0, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    IrAbiValue rejected_context = ir_abi_context_value(&published_view, 0, abi_f80, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, memcmp(&rejected_type, &empty_abi, sizeof(rejected_type)) == 0);
+    BUSTER_TEST(arguments, memcmp(&rejected_use, &empty_abi, sizeof(rejected_use)) == 0);
+    BUSTER_TEST(arguments, memcmp(&rejected_convention, &empty_abi, sizeof(rejected_convention)) == 0);
+    BUSTER_TEST(arguments, memcmp(&rejected_program, &empty_abi, sizeof(rejected_program)) == 0);
+    BUSTER_TEST(arguments, memcmp(&rejected_context, &empty_abi, sizeof(rejected_context)) == 0);
+    BUSTER_TEST(arguments, arguments->arena->position == warmed_position);
 
     // Grow across cache-page boundaries, defer unresolved layout, and give a
     // second compilation identical ids with different language type contents.

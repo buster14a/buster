@@ -1452,6 +1452,31 @@ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate
     return string_join_arena(arena, (SliceString8){.pointer = &string, .length = 1}, zero_terminate);
 }
 
+BUSTER_GLOBAL_LOCAL bool string8_os_boundary_input_valid(String8 string)
+{
+    bool valid = string.pointer || !string.length;
+    for (u64 index = 0; index < string.length && valid; index += 1)
+    {
+        valid = string.pointer[index] != 0;
+    }
+    return valid;
+}
+
+bool string8z_copy_arena(Arena* arena, String8 string, String8Z* result)
+{
+    if (result)
+    {
+        *result = (String8Z){0};
+    }
+    bool valid = result && string8_os_boundary_input_valid(string);
+    if (valid)
+    {
+        String8 copy = string_duplicate_arena(arena, string, true);
+        *result = (String8Z){.pointer = copy.pointer, .length = copy.length};
+    }
+    return valid;
+}
+
 SliceString8 string16_environment_block_to_slice_string(Arena* arena, const char16* environment_block)
 {
     SliceString8 result = {0};
@@ -1824,6 +1849,21 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
 
     String16 result = (String16){.pointer = pointer, .length = result_length};
     return result;
+}
+
+bool string16z_from_string8_arena(Arena* arena, String8 string, String16Z* result)
+{
+    if (result)
+    {
+        *result = (String16Z){0};
+    }
+    bool valid = result && string8_os_boundary_input_valid(string);
+    if (valid)
+    {
+        String16 copy = string16_from_string8(arena, string, true);
+        *result = (String16Z){.pointer = copy.pointer, .length = copy.length};
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool windows_command_line_argument_needs_quotes(String8 string)
