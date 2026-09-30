@@ -38,6 +38,7 @@ jobs:
         run: |
           python3 -B tools/bench_service/workflow_policy_test.py
           python3 -B tools/bench_service/dispatch_recipe_test.py
+          python3 -B tools/bench_service/zen5_profile_test.py
           python3 -B tools/bench_service/deploy/verify_github_actor_policy_test.py
           python3 -B tools/bench_service/deploy/verify_github_admission_test.py
           python3 -B tools/bench_service/deploy/verify_github_queue_test.py
