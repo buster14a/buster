@@ -17,6 +17,20 @@
 // storage invariants, so its append sites may use the construction-only path.
 #define ir_function_add_instruction(...) ir_instruction_append_trusted(__VA_ARGS__)
 
+// Validation/planning boundary for one translation unit. These counts are
+// derived only from finalized preprocess and parse rows; no arena state or IR
+// table is changed until the caller accepts the complete plan.
+typedef struct CIrLowerCapacityPlan CIrLowerCapacityPlan;
+struct CIrLowerCapacityPlan
+{
+    u32 token_capacity;
+    u32 type_capacity;
+    u32 symbol_capacity;
+    u32 function_capacity;
+    u32 query_frame_capacity;
+};
+BUSTER_F_DECL bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out);
+
 #define C_IR_EXT80_BIG_LIMBS 1024
 typedef struct CIrExt80Big CIrExt80Big;
 struct CIrExt80Big

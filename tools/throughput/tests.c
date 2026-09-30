@@ -1095,6 +1095,12 @@ static void test_workload_admission(char const* executable, char const* root)
     {
         size_t size = fread(report, 1, sizeof(report) - 1, file);
         CHECK(size < sizeof(report) - 1 && !ferror(file) && fclose(file) == 0);
+        // The low-stack child's report is otherwise only inside the CI artifact.
+        if (!(result.exit_code == 0 && !result.launch_error && !result.timed_out) || !strstr(report, "\"admitted\":true"))
+        {
+            fprintf(stderr, "THROUGHPUT_ADMISSION_REPORT exit=%d signal=%d launch_error=%d timed_out=%d\n%s\n",
+                    result.exit_code, result.signal_number, result.launch_error, result.timed_out, report);
+        }
         CHECK(strstr(report, "\"admitted\":true") && strstr(report, "\"performed_cells\":[") &&
               strstr(report, "\"object\":{\"command_count\":2") &&
               strstr(report, "\"translated_bytes\":32") && strstr(report, "\"runtime-transcript\"") &&
