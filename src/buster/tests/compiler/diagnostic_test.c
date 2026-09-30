@@ -79,6 +79,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_null_device_output(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-null-device-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-null-device-output"), S8(".bin"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-O0")};
+#if !BUSTER_WINDOWS
+    for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        TemporalArena scratch = scratch_begin(&arguments->arena, 1);
+        String8 command[] = {actions[action], S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), S8("/dev/null")};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(scratch.arena,
+            compiler_driver_parse_arguments(scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+            string_format(scratch.arena, S8("null device action={u32}: {S8}"), action, compiled.diagnostic));
+        scratch_end(scratch);
+    }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Source metrics are written by the public command, so use a real child.
+    String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-c"), input, S8("-o"), output,
+                                 S8("-fsource-metrics=/dev/null")};
+    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1, .search_path = 1});
+    BUSTER_TEST(arguments, child.handle != 0);
+    if (child.handle)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, 30000000);
+        BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+            BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+    }
+    BUSTER_TEST(arguments, os_file_delete(output));
+#endif
+#endif
+    // A failed link write names the artifact it could not publish.
+    String8 link_command[] = {actions[3], S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), output};
+    OsFileTestStep failure = {OS_FILE_TEST_REPLACE, OS_FILE_TEST_ERROR, 12345};
+    os_file_test_begin(output, &failure, 1);
+    CompilerDriverResult linked = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+    BUSTER_TEST(arguments, os_file_test_end() == 1);
+    BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK);
+    BUSTER_TEST_RAW(arguments, string_first_sequence(linked.diagnostic, output) < linked.diagnostic.length, linked.diagnostic);
+    BUSTER_TEST(arguments, os_file_delete(input));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -124,6 +171,7 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_null_device_output);
     CompilerDiagnostic copy;
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);

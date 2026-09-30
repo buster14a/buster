@@ -102,23 +102,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     }
                     program->fast_passes = IR_FAST_ALL;
                     IrValidationResult validation = ir_prepare_canonical_module(program, module, certified != 0);
-                    BUSTER_TEST(arguments, validation.error == expected);
-                    BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
-                                                                            : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
-                    BUSTER_TEST(arguments, !module->local_promotion_complete);
-                    BUSTER_TEST(arguments, certified ? module->local_promotion.promoted_locals > 0
-                                                    : module->local_promotion.promoted_locals == 0);
-                    BUSTER_TEST(arguments, certified ? function->instruction_count < old_instructions
-                                                    : function->instruction_count == old_instructions);
-                    BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
-                    BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
-                    BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
-                    // A failed scan must also keep the optional transforms off the module.
-                    BUSTER_TEST(arguments, module->fast.functions == 0 && !module->fast_complete);
+                    if (certified && variant >= 3)
+                    {
+                        // A fault inside one certified function predates
+                        // promotion, so the promotion-output check leaves it
+                        // to the consumers that accept it without transform
+                        // checks; FAST still declines the module.
+                        BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+                        BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0 && function->instruction_count < old_instructions);
+                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, validation.error == expected);
+                        BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
+                                                                                : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
+                        BUSTER_TEST(arguments, !module->local_promotion_complete);
+                        BUSTER_TEST(arguments, certified ? module->local_promotion.promoted_locals > 0
+                                                        : module->local_promotion.promoted_locals == 0);
+                        BUSTER_TEST(arguments, certified ? function->instruction_count < old_instructions
+                                                        : function->instruction_count == old_instructions);
+                        BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
+                        BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
+                        BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
+                        // A failed scan must also keep the optional transforms off the module.
+                        BUSTER_TEST(arguments, module->fast.functions == 0 && !module->fast_complete);
+                    }
                 }
             }
             scratch_end(temporary);
         }
+    }
+    // A certified function that already fails the strict validator and that
+    // promotion also rewrites must not be blamed on promotion in a checked
+    // build, and must not stop promotion of the other functions.
+    for (u32 certified = 0; certified < 2; certified += 1)
+    {
+        TemporalArena predating = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int test(int c){int x=3;if(c)x=7;return x;}int other(int c){int y=c;if(c)y=2;return y+1;}"), target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = 0;
+            IrFunction* other = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* candidate = module->functions + index;
+                if (string_equal(candidate->name, S8("test"))) function = candidate;
+                if (string_equal(candidate->name, S8("other"))) other = candidate;
+            }
+            bool corrupted = false;
+            for (u32 index = 0; other && index < other->instruction_count && !corrupted; index += 1)
+            {
+                IrInstruction* row = other->instructions + index;
+                if (row->opcode == IR_OPCODE_BINARY)
+                {
+                    row->binary_operation = IR_BINARY_COUNT;
+                    corrupted = true;
+                }
+            }
+            BUSTER_TEST(arguments, function && other && corrupted);
+            if (function && other && corrupted)
+            {
+                IrValidationResult original = ir_validate_canonical_module(program, module);
+                BUSTER_TEST(arguments, original.error != IR_VALIDATION_NONE && original.function.value == other->id.value);
+                program->fast_passes = IR_FAST_ALL;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, certified != 0);
+                if (certified)
+                {
+                    BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
+                    BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_LOCAL) == 0);
+                    BUSTER_TEST(arguments, ir_test_opcode_count(other, IR_OPCODE_LOCAL) == 0);
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    IrValidationResult after = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, after.error == original.error && after.function.value == other->id.value);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, prepared.error == original.error && prepared.function.value == other->id.value);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+                    BUSTER_TEST(arguments, module->local_promotion.promoted_locals == 0 && !module->local_promotion_complete);
+                }
+            }
+        }
+        scratch_end(predating);
     }
     // A preparation marker is not a certificate after a subsequent mutation.
     // The caller must revoke its input proof; preparation must then validate
