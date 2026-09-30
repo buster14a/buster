@@ -335,6 +335,11 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
+  The one exception is a phase arena (`CPreprocessOptions.phase_arena`): a
+  phase allocates what only it reads there and releases it before returning,
+  so no result may reference it. `c_preprocess_seal` copies the preprocessing
+  result out of it; semantic layout queries keep their tables there and
+  release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin

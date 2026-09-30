@@ -20,7 +20,9 @@
 // - c_analyze_semantics sizes its tables from a token census
 //   (c_parse_token_census, vectorized), then builds the CParseResult the
 //   lowering stage consumes: interned types, entities, scopes, and
-//   diagnostics.
+//   diagnostics. Layout queries (c_parse_type_layout_solve) keep their
+//   query-local tables in the machine's phase arena and release them on
+//   return (docs/compiler-lifetime.md).
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -3462,9 +3464,19 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         *alignment_out = cache->alignments[requested.value];
         return true;
     }
+    // Everything the solve allocates below is the query's own -- the tables
+    // sized to the whole type table or the agenda, bound token copies and
+    // spellings, evaluation buffers -- and nothing reads it after the query
+    // returns. With a phase arena it is released on return (nested queries
+    // release first, in stack order) instead of accumulating for the rest of
+    // the compile in whichever arena the caller passed, which several callers
+    // pass as the translation unit's. The layout cache stays in the result
+    // arena: it outlives the query and grows inside one.
+    Arena* query_arena = machine && machine->phase_arena ? machine->phase_arena : arena;
+    u64 query_mark = query_arena->position;
     CParseLayoutContext layout_context = {
         .machine = machine,
-        .arena = arena,
+        .arena = query_arena,
         .preprocess = preprocess,
         .result = result,
         .statistics = result->type_layout_statistics,
@@ -3491,6 +3503,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     if (!settled)
     {
         answered = c_parse_type_layout_passes(&layout_context, cache, size_out, alignment_out);
+    }
+    if (query_arena != arena)
+    {
+        machine->phase_released_bytes += arena_release_to_position(query_arena, query_mark);
+        machine->phase_releases += 1;
     }
     return answered;
 }
@@ -26170,6 +26187,19 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     {
         return result;
     }
+    // Query-local state goes to the unit's phase arena, or to a private one
+    // when the caller has none; without either the queries keep today's
+    // arenas, so a failed reservation costs memory, never the analysis.
+    Arena* phase_arena = preprocess.recovery ? preprocess.recovery->phase_arena : 0;
+    bool phase_arena_owned = !phase_arena;
+    if (phase_arena_owned)
+    {
+        phase_arena = arena_create((ArenaCreation){
+            .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+    }
+    u64 phase_start = phase_arena ? phase_arena->position : 0;
     Arena* machine_conflicts[] = {
         arena,
     };
@@ -26182,6 +26212,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .incomplete_array_chain = arena_allocate(machine_buffer_arena, CTypeId, incomplete_array_chain_capacity),
         .incomplete_array_chain_capacity = incomplete_array_chain_capacity,
         .scratch_arena = machine_temporary.arena,
+        .phase_arena = phase_arena,
         .layout_cache = {.tokens = preprocess.tokens},
         .promoted_member_work = arena_allocate(machine_buffer_arena, CParsePromotedMemberWork, promoted_member_capacity),
         .promoted_member_visited = arena_allocate(machine_buffer_arena, u32, promoted_member_capacity),
@@ -26867,6 +26898,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.analysis_complete = true;
     scratch_end(machine_temporary);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
+    if (phase_arena)
+    {
+        result.phase_released_bytes = machine.phase_released_bytes + arena_release_to_position(phase_arena, phase_start);
+        result.phase_releases = machine.phase_releases + 1;
+        if (phase_arena_owned)
+        {
+            c_phase_arena_retire(phase_arena);
+        }
+    }
     return result;
 }
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)

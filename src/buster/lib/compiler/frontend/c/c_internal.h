@@ -1082,6 +1082,14 @@ struct CTypeParseMachine
     CTypeId* incomplete_array_chain;
     u32 incomplete_array_chain_capacity;
     Arena* scratch_arena;
+    // Query-local state -- the layout solve's type-table-sized arrays and its
+    // bound evaluation -- is allocated here above a mark and released when the
+    // query returns. Null keeps it in the arena the query was handed.
+    Arena* phase_arena;
+    // What those releases returned, exactly; published as
+    // CParseResult.phase_released_bytes/phase_releases when analysis returns.
+    u64 phase_released_bytes;
+    u64 phase_releases;
     CTypeLayoutCache layout_cache;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
