@@ -65,6 +65,7 @@ struct EbpfSymbolRecord
     u8 type;
     bool defined;
     bool synthetic;
+    bool referenced;
 };
 
 typedef struct EbpfFunctionRecord EbpfFunctionRecord;
@@ -3034,6 +3035,19 @@ static bool ebpf_build_symbol_table(EbpfContext* context, EbpfSection* symtab, E
         ebpf_elf_symbol(&symtab->data, 0, EBPF_STB_LOCAL, EBPF_STT_SECTION, (u16)section->elf_index, 0, 0);
         elf_symbol_index += 1;
     }
+    // An undefined symbol is written only when a relocation names it.
+    for (u32 section_index = 0; section_index < context->section_count; section_index += 1)
+    {
+        EbpfSection* section = context->sections + section_index;
+        for (u32 relocation_index = 0; relocation_index < section->relocation_count; relocation_index += 1)
+        {
+            EbpfSymbolRecord* symbol = ebpf_symbol_by_key(context, section->relocations[relocation_index].symbol_key);
+            if (symbol)
+            {
+                symbol->referenced = true;
+            }
+        }
+    }
     for (u32 pass = 0; pass < 2; pass += 1)
     {
         u8 binding = pass == 0 ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL;
@@ -3044,7 +3058,7 @@ static bool ebpf_build_symbol_table(EbpfContext* context, EbpfSection* symtab, E
         for (u32 index = 0; index < context->symbol_count; index += 1)
         {
             EbpfSymbolRecord* symbol = context->symbols + index;
-            if (symbol->binding != binding)
+            if (symbol->binding != binding || (!symbol->defined && !symbol->referenced))
             {
                 continue;
             }
