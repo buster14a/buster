@@ -821,22 +821,28 @@ struct CMember
     // placed at byte alignment, which also stops it from raising the
     // aggregate's own alignment.
     bool is_packed;
-    u8 reserved[2];
+    // Produced once at the member declaration in its scope. Token ranges
+    // remain diagnostic provenance; no layout or promotion consumer folds them.
+    bool bit_width_resolved;
+    u8 reserved;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
 // names or the token range of its constant expression. Which of the two
 // spellings wrote it is not stored: token_start is always two tokens past the
 // keyword -- the keyword and its `(` -- so c_alignment_specifier_is_standard
-// reads it back out of the token stream, and this table is sized at one record
-// per token of the translation unit, where a flag word would commit four more
-// bytes per token for a fact only a rejected request ever asks about.
+// reads it back out of the token stream. This growable table stores only
+// requests and copies of shared runs. Non-type values are resolved once when
+// their record is appended, in the declaring scope; layout only reads them.
 typedef struct CAlignmentSpecifier CAlignmentSpecifier;
 struct CAlignmentSpecifier
 {
+    u64 requested_alignment;
     CTypeId type;
     u32 token_start;
     u32 token_count;
+    bool value_resolved;
+    bool value_evaluated;
 };
 
 // The GNU attributes a struct or union definition carries on the definition

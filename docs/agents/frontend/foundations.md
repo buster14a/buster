@@ -246,6 +246,18 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+  `c_parse_type_integer_constant` and the enumerator query own an independent
+  `C_CONSTANT_EVALUATION_TYPE` machine over a by-value semantic model. They
+  share existing rows for reads and append temporary rows past copied counts;
+  aggregate/definition indexes, token/scalar caches, symbol interning and layout
+  work counters are detached. Casts, generic controllers/association types and
+  `typeof` use the same private explicit frames, with machineless scalar reads
+  that cannot define or complete tags. New tag bodies remain unresolved.
+  Ordinary and pending enumerator bindings precede typedef cast detection.
+  The returned signed magnitude, rank and target width survive the query;
+  temporary type IDs do not. Declaration owners publish scalar types afterwards.
+  `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
+  active machine on successful and refused queries (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a

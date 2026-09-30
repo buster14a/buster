@@ -1701,6 +1701,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArgu
     return result;
 }
 
+// Width constants are resolved at the declaration, before later tags or
+// enumerators become visible. These expected layouts are independent ABI
+// values, so matching the folded and lowered answer alone cannot pass.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    CPreprocessOptions options = {.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23};
+    String8 source = S8("enum { W = 3 };\n"
+                        "struct Spelled { char c; unsigned b : (5); char x; };\n"
+                        "enum { SIZE = sizeof(struct Spelled), OFFSET = __builtin_offsetof(struct Spelled, x) };\n"
+                        "_Static_assert(SIZE == 4 && OFFSET == 2, \"folded layout\");\n"
+                        "struct Spelled spelled;\n"
+                        "struct Values { unsigned a : (unsigned char)261; unsigned b : '\\5';\n"
+                        " unsigned c : sizeof(int) * 8 - 7; unsigned d : _Generic(0, int : 3, default : 1);\n"
+                        " unsigned e : 010; unsigned : 0; _Bool yes : 1; };\n"
+                        "struct Values values;\n"
+                        "int local(void) { enum { W = 12 };\n"
+                        " struct Local { char c; unsigned b : W; char x; } object;\n"
+                        " _Static_assert(sizeof(struct Local) == 8, \"local width scope\");\n"
+                        " _Static_assert(__builtin_offsetof(struct Local, x) == 4, \"local offset\");\n"
+                        " _Static_assert(_Generic(+object.b, int : 1, unsigned : 2) == 1, \"promotion\");\n"
+                        " object.b = 4095; return object.b; }\n");
+    u32 expected_widths[] = {5, 5, 5, 25, 3, 8, 0, 1, 12};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            u32 bit_field_count = 0;
+            for (u32 index = 0; index < parse.member_count; index += 1)
+            {
+                CMember const* member = parse.members + index;
+                if (member->is_bit_field)
+                {
+                    BUSTER_TEST(arguments, member->bit_width_resolved);
+                    if (BUSTER_REQUIRE(arguments, bit_field_count < BUSTER_ARRAY_LENGTH(expected_widths)))
+                    {
+                        BUSTER_TEST(arguments, member->bit_width == expected_widths[bit_field_count]);
+                    }
+                    bit_field_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, bit_field_count == BUSTER_ARRAY_LENGTH(expected_widths));
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bit-field-width-authority.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("spelled"));
+                IrType* record = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                if (BUSTER_REQUIRE(arguments, record && record->field_count == 3))
+                {
+                    BUSTER_TEST(arguments, record->layout.size == 4 && record->layout.alignment == 4);
+                    BUSTER_TEST(arguments, record->fields[1].is_bit_field && record->fields[1].bit_width == 5 && record->fields[2].offset == 2);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    typedef struct CBitFieldWidthRejection CBitFieldWidthRejection;
+    struct CBitFieldWidthRejection
+    {
+        String8 source;
+        String8 message;
+        u32 column;
+    };
+    CBitFieldWidthRejection rejected[] = {
+        {S8("struct S { _Bool b : 2; };\n"), S8("bit-field width exceeds the width of its type"), 22},
+        {S8("struct S { int b : -1; };\n"), S8("bit-field width is negative"), 20},
+        {S8("struct S { int b : 40; };\n"), S8("bit-field width exceeds the width of its type"), 20},
+        {S8("struct S { unsigned b : 4294967296ULL; };\n"), S8("bit-field width exceeds the width of its type"), 25},
+        {S8("struct S { unsigned b : LATER; }; enum { LATER = 5 };\n"), S8("bit-field width is not an integer constant expression"), 25},
+        {S8("struct F; struct S { unsigned b : sizeof(struct F); }; struct F { char x[3]; };\n"),
+         S8("bit-field width is not an integer constant expression"), 35},
+        {S8("struct S { int b : (0); };\n"), S8("named bit-field 'b' has zero width"), 20},
+        {S8("struct S { int b : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 20},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index].source, options);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, analysis.diagnostic_count == 1))
+        {
+            BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, rejected[index].message);
+            BUSTER_TEST(arguments, analysis.diagnostics[0].location.line == 1 && analysis.diagnostics[0].location.column == rejected[index].column);
+        }
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("invalid-bit-field-width.c"), tokens, analysis, target);
+        BUSTER_TEST(arguments, !lowered.program);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13206,7 +13308,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
             }
         }
         BUSTER_TEST(arguments, bound_type && bound_type->kind == IR_TYPE_ARRAY && bound_type->element_count == 14);
-        // The bit-field width is folded during lowering, not at parse time, so
+        // The bit-field width is resolved at its declaration, so
         // the resolved field layout is where a misfolded width would show.
         BUSTER_TEST(arguments, bits_type && bits_type->kind == IR_TYPE_STRUCT && bits_type->field_count == 2);
         if (bits_type && bits_type->field_count == 2)
@@ -16211,6 +16313,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
 // answers and every piece of machine and result state they leave must agree.
 // A whole compile through the driver must also produce identical objects and
 // diagnostics in both modes.
+// Type-embedded constants query an immutable model while a declaration frame
+// is active. Pin the values independently and snapshot the shared prefixes,
+// lookup slots and machine state on both successful and refused queries.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestTypeConstantCase CTestTypeConstantCase;
+    struct CTestTypeConstantCase
+    {
+        String8 expression;
+        u64 value;
+        bool valid;
+    };
+    CTestTypeConstantCase cases[] = {
+        {S8("(5)"), 5, true},
+        {S8("0x5u"), 5, true},
+        {S8("010"), 8, true},
+        {S8("0b101"), 5, true},
+        {S8("'\\5'"), 5, true},
+        {S8("(unsigned char)261"), 5, true},
+        {S8("(K) + 5"), 10, true},
+        {S8("sizeof \"abcde\""), 6, true},
+        {S8("sizeof((int[3]){1,2,3})"), 12, true},
+        {S8("sizeof(0 ? obj : obj)"), 4, true},
+        {S8("sizeof(struct F *)"), 8, true},
+        {S8("_Generic((struct S *)0, struct S *: 9, default: 3)"), 9, true},
+        {S8("_Generic((__typeof__(obj) *)0, __typeof__(obj) *: 11, default: 3)"), 11, true},
+        {S8("_Generic(0, int: _Generic(0, int: 7, default: 9), default: 3)"), 7, true},
+        {S8("(1 << 40) + 3"), 0, false},
+        {S8("1 << -1"), 0, false},
+        {S8("1 << 4294967296ULL"), 0, false},
+        {S8("1 << ((__int128)1 << 64)"), 0, false},
+        {S8("1u << 31"), UINT64_C(2147483648), true},
+        {S8("(-1) << 1"), 0, false},
+        {S8("2147483647 + 1"), 0, false},
+        {S8("(-2147483647 - 1) - 1"), 0, false},
+        {S8("1073741824 * 2"), 0, false},
+        {S8("(-2147483647 - 1) / -1"), 0, false},
+        {S8("(-2147483647 - 1) % -1"), 0, false},
+        {S8("-(-2147483647 - 1)"), 0, false},
+        {S8("((__int128)1 << 126) + ((__int128)1 << 126)"), 0, false},
+        {S8("((__int128)1 << 126) * 2"), 0, false},
+        {S8("((unsigned __int128)-1) + 1"), 0, true},
+        {S8("1 ? 3 : (1 << 40)"), 3, true},
+        {S8("0 && (1 << 40)"), 0, true},
+        {S8("sizeof(struct S { int q; } *)"), 0, false},
+        {S8("_Generic((struct S { char q[40]; } *)0, struct S *: 9, default: 3)"), 0, false},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTestTypeConstantCase test = cases[case_index];
+        String8 source = string_format(temporary.arena,
+            S8("typedef int K; struct S { int q; }; struct F; struct S obj;"
+               " int f(void) { enum { K = 5 }; int probe = {S8}; return probe; }"), test.expression);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 start = UINT32_MAX;
+        u32 end = UINT32_MAX;
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        for (u32 index = 0; index < parse.entity_count; index += 1)
+        {
+            if (string_equal(parse.entities[index].name, S8("probe"))) scope = parse.entities[index].scope;
+        }
+        for (u32 index = 0; index + 1 < preprocess.token_count; index += 1)
+        {
+            if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("probe")) &&
+                c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_ASSIGN))
+            {
+                start = index + 2;
+                u32 depth = 0;
+                for (u32 cursor = start; cursor < preprocess.token_count && end == UINT32_MAX; cursor += 1)
+                {
+                    CToken token = preprocess.tokens[cursor];
+                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                        c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE)) depth += 1;
+                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE)) depth -= depth != 0;
+                    else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON)) end = cursor;
+                }
+            }
+        }
+        if (scope.value >= parse.scope_count)
+        {
+            for (u32 index = 1; index < parse.scope_count; index += 1)
+            {
+                if (parse.scopes[index].token_start <= start && start < parse.scopes[index].token_end) scope = (CScopeId){.value = index};
+            }
+        }
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, start < end && scope.value < parse.scope_count);
+        if (start < end && scope.value < parse.scope_count)
+        {
+            CTypeId scalar_types[C_TYPE_COUNT];
+            memset(scalar_types, 0xff, sizeof(scalar_types));
+            parse.expression_scalar_types = scalar_types;
+            CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
+            BUSTER_TEST(arguments, query.model_unchanged);
+            BUSTER_TEST(arguments, query.machine_unchanged);
+            BUSTER_TEST(arguments, query.constant.valid == test.valid);
+            if (query.constant.valid && test.valid)
+            {
+                BUSTER_TEST(arguments, !query.constant.is_negative && query.constant.magnitude_high == 0);
+                BUSTER_TEST(arguments, query.constant.magnitude == test.value);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21653,6 +21868,102 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignment_value_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("enum { A = 8 };\n"
+                        "struct EnumAligned { char c; int x __attribute__((aligned(A))); };\n"
+                        "struct CastAligned { char c; int x __attribute__((aligned((unsigned char)264))); };\n"
+                        "struct SizeAligned { char c; int x __attribute__((aligned(sizeof(double)))); };\n"
+                        "struct StandardAligned { char c; _Alignas(A) int x; };\n"
+                        "struct SuffixAligned { int x; int y; } __attribute__((aligned(sizeof(struct SuffixAligned))));\n"
+                        "struct OuterAligned { struct InnerAligned { int x; int y; } __attribute__((aligned(sizeof(struct InnerAligned)))) inner; char tail; };\n"
+                        "struct EnumAligned enum_object; struct CastAligned cast_object;\n"
+                        "struct SizeAligned size_object; struct StandardAligned standard_object;\n"
+                        "struct SuffixAligned suffix_object; struct OuterAligned outer_object;\n"
+                        "enum { DECL_A = 8 } own_enum_object __attribute__((aligned(DECL_A)));\n"
+                        "struct OwnDeclAligned { int x; int y; } own_decl_object __attribute__((aligned(sizeof(struct OwnDeclAligned))));\n"
+                        "_Static_assert(sizeof(struct EnumAligned) == 16, \"enum alignment fold\");\n"
+                        "_Static_assert(sizeof(struct CastAligned) == 16, \"cast alignment fold\");\n"
+                        "_Static_assert(sizeof(struct SizeAligned) == 16, \"sizeof alignment fold\");\n"
+                        "_Static_assert(sizeof(struct StandardAligned) == 16, \"standard alignment fold\");\n"
+                        "_Static_assert(_Alignof(struct SuffixAligned) == 8, \"suffix completed body\");\n"
+                        "_Static_assert(sizeof(struct OuterAligned) == 16, \"nested completed body\");\n"
+                        "int local_alignment(void) { enum { A = 16 };\n"
+                        "    struct LocalAligned { char c; int x __attribute__((aligned(A))); } value;\n"
+                        "    _Static_assert(sizeof(struct LocalAligned) == 32, \"local scope\");\n"
+                        "    return sizeof(value); }\n");
+    String8 const targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux")};
+    struct
+    {
+        String8 name;
+        u64 size;
+        u32 alignment;
+        u64 second_offset;
+    } const objects[] = {
+        {S8("enum_object"), 16, 8, 8},
+        {S8("cast_object"), 16, 8, 8},
+        {S8("size_object"), 16, 8, 8},
+        {S8("standard_object"), 16, 8, 8},
+        {S8("suffix_object"), 8, 8, 4},
+        {S8("outer_object"), 16, 8, 8},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TargetParseResult target = target_parse(targets[target_index]);
+        BUSTER_TEST(arguments, target.success);
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !parse.diagnostic_count);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("alignment-value-authority.c"), tokens, parse, target.target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1);
+            if (lowered.program && lowered.program->module_count == 1)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrGlobal* own_enum = c_test_find_ir_global(module, lowered.program, S8("own_enum_object"));
+                IrGlobal* own_decl = c_test_find_ir_global(module, lowered.program, S8("own_decl_object"));
+                BUSTER_TEST(arguments, own_enum && own_enum->alignment == 8);
+                BUSTER_TEST(arguments, own_decl && own_decl->alignment == 8);
+                for (u32 object_index = 0; object_index < BUSTER_ARRAY_LENGTH(objects); object_index += 1)
+                {
+                    IrGlobal* global = c_test_find_ir_global(module, lowered.program, objects[object_index].name);
+                    IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                    BUSTER_TEST(arguments, type && type->field_count == 2);
+                    if (type && type->field_count == 2)
+                    {
+                        BUSTER_TEST(arguments, type->layout.size == objects[object_index].size);
+                        BUSTER_TEST(arguments, type->layout.alignment == objects[object_index].alignment);
+                        BUSTER_TEST(arguments, type->fields[1].offset == objects[object_index].second_offset);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 const invalid[] = {
+        S8("enum { A = 3 }; _Alignas(A) int object;"),
+        S8("int object __attribute__((aligned(-8)));"),
+        S8("struct __attribute__((aligned(sizeof(struct PrefixAligned)))) PrefixAligned { int x; }; struct PrefixAligned object;"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && parse.diagnostic_count);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -22148,10 +22459,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     // named member of zero width is refused (C23 6.7.3.2p4), as it is by both
     // reference compilers. Accepted, it laid out a member that occupies no
     // bits and could still be assigned and read back. Each spelling is its own
-    // lowering because one report is issued per aggregate: the literal width,
-    // which the parse fast path also folds, the constant expression, which
-    // only the lowering below folds, and the union, whose members never share
-    // a storage unit and so reach the width along a different arm.
+    // analysis: the literal width, the constant expression, and the union.
+    // The producer rejects each at the width before lowering can run.
     struct
     {
         String8 source;
@@ -22169,12 +22478,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         CIRLowerResult named_zero = c_test_lower_source(named_zero_temporary.arena, zero_width_named_sources[index].source,
                                                         zero_width_named_sources[index].path, target_native, &named_zero_preprocess, &named_zero_parse);
         BUSTER_TEST(arguments, named_zero_preprocess.diagnostic_count == 0);
-        BUSTER_TEST(arguments, named_zero_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, named_zero.diagnostic_count == 1);
-        if (named_zero.diagnostic_count == 1)
+        BUSTER_TEST(arguments, named_zero_parse.diagnostic_count == 1);
+        BUSTER_TEST(arguments, named_zero.diagnostic_count == 0 && !named_zero.program);
+        if (named_zero_parse.diagnostic_count == 1)
         {
-            BUSTER_TEST(arguments, named_zero.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
-            BUSTER_STRING_TEST(arguments, named_zero.diagnostics[0].message, S8("named bit-field 'b' has zero width"));
+            BUSTER_TEST(arguments, named_zero_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
+            BUSTER_STRING_TEST(arguments, named_zero_parse.diagnostics[0].message, S8("named bit-field 'b' has zero width"));
         }
         scratch_end(named_zero_temporary);
     }
@@ -27042,6 +27351,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
@@ -27077,6 +27387,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
@@ -27754,6 +28065,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
+    BUSTER_TEST_FIXTURE(arguments, c_test_alignment_value_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
