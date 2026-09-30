@@ -140,6 +140,9 @@ SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376
 NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 # #1986 scheduling-test bytes only; corpus and target axes are unchanged.
 APPLE_CI_SUPPORT_DECLARATION_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210"
+# #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
+# byte/hash row updated; corpus and target axes are unchanged.
+PROPOSED_SUPPORT_DECLARATION_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -1646,7 +1649,8 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("#508 support declaration path is not the frozen declaration")
     support_sha256 = support_declaration["sha256"]
     if support_sha256 not in (SUPPORT_DECLARATION_SHA256,
-                             NEXT_SUPPORT_DECLARATION_SHA256, APPLE_CI_SUPPORT_DECLARATION_SHA256):
+                             NEXT_SUPPORT_DECLARATION_SHA256, APPLE_CI_SUPPORT_DECLARATION_SHA256,
+                             PROPOSED_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")
