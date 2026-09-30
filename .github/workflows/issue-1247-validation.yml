@@ -1,0 +1,102 @@
+name: Issue 1247 validation
+on:
+  push:
+    branches: [codex/1247-constant-facts-validation]
+permissions:
+  contents: read
+concurrency:
+  group: issue-1247-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  candidate:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: candidate
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: candidate
+      - name: Require enabled validation
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - name: Record revision and toolchains
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          clang --version
+          gcc --version
+      - name: Bootstrap and configure candidate
+        id: build
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --no-sanitize --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: All ordinary tests
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: build/Release/ide test --verbose=1 --ci=1
+      - name: Self-host fixed point
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        with:
+          persist-credentials: false
+          ref: 6eb73e977c32699d8828ca73b05ded20262aec28
+          path: baseline
+      - name: Build pinned baseline
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        id: baseline
+        working-directory: baseline
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-baseline-build"
+          "$RUNNER_TEMP/buster-baseline-build" generate --cc clang --ci --no-sanitize --linker DEFAULT
+          "$RUNNER_TEMP/buster-baseline-build" build --config Release -t ide
+      - name: Acceptance and layout corpus
+        if: ${{ always() && steps.build.outcome == 'success' && steps.baseline.outcome == 'success' }}
+        run: |
+          python3 tools/type_constant_acceptance.py \
+            --baseline "$GITHUB_WORKSPACE/baseline/build/Release/ide" \
+            --candidate "$GITHUB_WORKSPACE/candidate/build/Release/ide" \
+            --out "$RUNNER_TEMP/type-constant-results" \
+            --require-stage 3 \
+            --variant default= \
+            --variant no-ssa=-fno-frontend-ssa \
+            --variant none=-fregister-allocator=none \
+            --variant quality=-fregister-allocator=quality
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: type-constant-1247-${{ github.run_id }}
+          path: ${{ runner.temp }}/type-constant-results/
+          if-no-files-found: warn
+  sanitizer:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Require enabled validation
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - name: Generated sanitizer test target
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-sanitize-build"
+          "$RUNNER_TEMP/buster-sanitize-build" generate --cc clang --ci --sanitize --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-sanitize-build" build --config Debug -t test_all

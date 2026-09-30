@@ -118,18 +118,31 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   written through is the unsigned integer of the same width, because the shift
   has to see the raw byte. A zero-width bit-field keeps aligning to its declared
   type even inside a packed aggregate, which is also what Clang and GCC do.
-  **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
-  one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
-  refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
-  one-diagnostic-per-type budget with the rejected alignment specifier -- they
-  are one `definition_rejection` slot whose kind travels with the message --
-  and the definition still lays out, the way a rejected alignment specifier
-  still hands back an alignment, so the program hears about the member it wrote
-  rather than about a type that never got a layout.
+  Aggregate member construction stages each record's direct `CMember` values
+  on its range frame until that range completes, then publishes one contiguous
+  run. A nested definition may therefore complete before the enclosing record
+  without mixing its members into the enclosing run. The range's scratch mark
+  precedes every child; successful completion, failed completion, and discarded
+  frame cleanup release its staging allocations. CORE receives the explicit
+  published start/count instead of deriving them from a global append delta.
+  **A width is produced once at its member declaration** (#1247), with that
+  declaration's scope, by the protected type-constant evaluator. Its integer
+  value and `CMember.bit_width_resolved` occupy the existing member record;
+  the resolution flag reuses a reserved byte. The token range remains source
+  provenance. Parse-side layout and semantic promotion read that value, and
+  lowering requires it to be resolved; none retries width tokens after a later
+  declaration has become visible. Invalid constant expressions, negative
+  widths, widths above the declared integer type's width, and noninteger
+  member types are rejected at the width. `_Bool` admits at most one bit even
+  where its object representation occupies a byte.
+  **A zero width belongs to the unnamed bit-field alone**: C requires a named
+  one to be at least one bit wide (C23 6.7.3.2p4). The producer rejects both
+  `int b : 0;` and `int b : 1 - 1;`; unnamed zero-width fields retain their
+  boundary-placement rule. `c_test_bit_field_width_authority` checks independent
+  folded/emitted layout values, declaration-scope shadowing, integer promotion,
+  and width-located rejection of forward constants and incomplete `sizeof`
+  operands. The existing width-spelling and enum bit-field regressions cover
+  literal syntax and target-specific field types.
   On AArch64 the accesses this reaches land at whatever byte offset packing
   chose, and the scaled unsigned-immediate load/store addresses only multiples
   of its own width, so `codegen_canonical_a64_memory_operation_base` falls back
@@ -477,3 +490,36 @@ a diamond whose every type is attempted once, three invalid cycles (unresolved o
 order-dependent operands with their fallbacks, production enumerator folds,
 and a 160-program seeded random corpus of valid and invalid aggregates whose
 every type and member offset must match.
+
+## Alignment request values
+
+Non-type `CAlignmentSpecifier` operands resolve once when the alignment frame
+or GNU attribute collector appends their record. An aggregate suffix's rows
+are reserved during definition discovery and resolved by that aggregate's
+completion step, after its members become available. The producer calls
+`c_parse_type_integer_constant` with the declaring scope and stores the stable
+integer value and resolution flag. The record keeps its token range for source
+diagnostics; the parse layout, semantic alignment checks and canonical lowering
+read the stored value. Type-naming `_Alignas(T)` retains its semantic type and
+reads that type's resolved alignment. An unresolved non-type request leaves
+layout unresolved and is rejected by the existing semantic alignment owner.
+
+The alignment table starts with four rows and grows geometrically as requests
+and shared-run copies are appended. It therefore scales with alignment records
+rather than every token in the translation unit. Type-machine rollback restores
+its pointer, capacity and count with the existing result checkpoint; appended
+rows and copied runs require no writes into existing records.
+
+A pending aggregate suffix is excluded from the private attribute table used
+to evaluate its operand. This preserves the declaration point for
+`struct S { int x; } __attribute__((aligned(sizeof(struct S))))`: the operand
+sizes the completed body before that suffix's alignment applies. Prefix rows
+remain present and are never retried; a prefix asking for the incomplete
+aggregate's size therefore remains invalid. The completion producer writes
+only suffix rows appended within the active type-parse transaction.
+
+File declarator-position GNU requests also reserve their rows before base
+specifier construction, and resolve immediately after that construction. This
+makes an enum member or completed tag written in the same declaration visible
+to its following declarator attribute. Leading specifier requests retain their
+earlier evaluation point and are not retried.

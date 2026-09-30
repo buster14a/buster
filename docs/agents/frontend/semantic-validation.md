@@ -17,6 +17,30 @@ Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
 
+Initializer-inferred array bounds have one parser publisher,
+`c_parse_complete_initializer_array_bound`. Declaration-point completion is
+retained so a following `sizeof` or enum declaration can read an earlier local
+array's completed bound. The publisher uses typed designator evaluation in the
+initializer's scope, refuses negative or wider-than-64-bit indices, and checks
+the resulting object size against the target address width before publishing
+the count. Incomplete compound-literal array types are cloned first, so one
+literal cannot complete the incomplete typedef that another literal uses.
+
+File initializer owners and constexpr values are completed immediately after
+publishing each declaration, before later file declarations merge entities or
+complete tags. A failed file inference attempt is recorded in bound padding;
+late scans cannot turn that failure into a count using a later declaration.
+Both semantic entry points retry local owners after body binding; the validation
+path retries once more after preparing its query types. Each retry is one
+bounded scan. Speculative type-machine frames and copied
+TYPE-mode queries do not publish counts. Dependency completion is not yet an
+explicit semantic worklist: a count needing an unavailable element layout stays
+unresolved, and the lowering inference bridge and its diagnostics remain until
+that dependency path is replaced. `c_test_initializer_array_bound_authority`
+checks published counts before lowering, immutable bounds across lowering,
+typed arithmetic/casts, local scope, strings, brace elision and independent
+incomplete typedef/compound-literal instances.
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including
@@ -29,7 +53,7 @@ checks remain defensive checks for direct lowering callers.
 | --- | --- |
 | Invalid type/specifier combinations, incomplete and void objects, parameter/return layouts | Existing declarator analysis, `c_parse_validate_signature`, `c_parse_validate_vla_declarations` |
 | Integer literals, typed constant expressions, static assertions, `sizeof`/alignment, enum and designator values | `c_parse_typed_constant`, `c_parse_validate_deferred_assertions`, `c_parse_validate_sizeof_operands`; shared literal selection and floating-point bit helpers |
-| Zero-width named bit-fields, explicit alignment, array element stride, alignment redeclarations | `c_parse_validate_bit_field_widths`, `c_parse_validate_alignment_range`, `c_parse_validate_array_strides`, `c_parse_validate_alignment_redeclarations` |
+| Bit-field widths, explicit alignment, array element stride, alignment redeclarations | Declaration-point width producer with protected type-constant evaluation; `c_parse_validate_members`, `c_parse_validate_alignment_range`, `c_parse_validate_array_strides`, `c_parse_validate_alignment_redeclarations` |
 | Initializer shape, promoted members, separators, string width/bounds, automatic range designators, VLA initialization/storage | `c_parse_validate_initializer_shape`, `c_parse_infer_initializer_array_count_core`, `c_parse_validate_vla_declarations` |
 | Static scalar folding, calls, address constants, thread-local addresses, compound literal storage, constexpr restrictions | `c_parse_validate_static_initializers`, `c_parse_validate_static_scalar`, `c_parse_validate_compound_literals`; shared literal decoding and extended-float folding |
 | Places, qualifiers, updates, indirection, members, indexing, scalar/aggregate/function-pointer conversions | `c_parse_validate_const_assignments`, checked expression/type machine, `c_parse_incompatible_aggregate_value`, `c_parse_incompatible_function_initializer` |

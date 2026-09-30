@@ -3073,7 +3073,7 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_ARRAY_BOUND:
             return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
                    left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
-                   left.bound.has_inferred_count == right.bound.has_inferred_count;
+                   left.bound.has_inferred_count == right.bound.has_inferred_count && left.bound.state == right.bound.state;
         case C_IR_QUERY_FRAME_CONSTANT:
         case C_IR_QUERY_FRAME_SIZEOF:
         case C_IR_QUERY_FRAME_TYPE_PREDICTION:
@@ -43004,6 +43004,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
         }
         builder->parse.array_bounds[type->array_bound].inferred_count = count;
         builder->parse.array_bounds[type->array_bound].has_inferred_count = true;
+        builder->parse.array_bounds[type->array_bound].state = C_ARRAY_BOUND_INFERRED;
     }
     return true;
 }
@@ -49245,6 +49246,11 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
 {
+    if (bound.state == C_ARRAY_BOUND_CONSTANT || bound.state == C_ARRAY_BOUND_INFERRED)
+    {
+        *count_out = bound.inferred_count;
+        return true;
+    }
     CIrQueryFrame result = {0};
     if (!c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result) || !result.success)
     {
@@ -49305,13 +49311,13 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
             }
             requested = value->layout.alignment;
         }
-        else if (!c_ir_array_bound_evaluate(builder, (CArrayBound){
-                                                .token_start = specifier.token_start,
-                                                .token_count = specifier.token_count,
-                                            },
-                                            &requested))
+        else
         {
-            return C_IR_ALIGNMENT_PENDING;
+            if (!specifier.value_resolved)
+            {
+                return C_IR_ALIGNMENT_PENDING;
+            }
+            requested = specifier.requested_alignment;
         }
         if (!requested)
         {
@@ -50274,41 +50280,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection_member = field_index;
                     }
                     u32 member_bit_width = member->bit_width;
-                    if (member->is_bit_field && member->bit_width_token_count)
+                    if (member->is_bit_field)
                     {
-                        u64 evaluated_width = 0;
-                        if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
-                                                           .token_start = member->bit_width_token_start,
-                                                           .token_count = member->bit_width_token_count,
-                                                       },
-                                                       &evaluated_width) ||
-                            evaluated_width > UINT32_MAX)
-                        {
-                            fields_resolved = false;
-                            break;
-                        }
-                        member_bit_width = (u32)evaluated_width;
-                    }
-                    // C requires the width of a *named* bit-field to be at
-                    // least one bit (C23 6.7.3.2p4); zero is reserved for the
-                    // unnamed `int : 0;`, where the width is not a width at all
-                    // but the request to move the next member to a boundary
-                    // that the layout below performs. Accepted, the named
-                    // spelling laid out a member occupying no bits that could
-                    // still be assigned and read back. The check sits here,
-                    // where the constant expression has just been folded, so
-                    // `int b : 1 - 1;` is refused with the literal `int b : 0;`
-                    // rather than only the spelling the parse fast path folds.
-                    // The layout below still runs, the same way a rejected
-                    // alignment specifier still hands back an alignment: the
-                    // definition finishes and the program hears about the
-                    // member it wrote rather than about a type without a
-                    // layout.
-                    if (member->is_bit_field && member->name.length && !member_bit_width && !definition_rejection.length)
-                    {
-                        definition_rejection = string_format(arena, S8("named bit-field '{S8}' has zero width"), member->name);
-                        definition_rejection_member = field_index;
-                        definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
+                        BUSTER_CHECK(member->bit_width_resolved);
                     }
                     if (member->is_bit_field && (!field_type->layout.size || member_bit_width > field_type->layout.size * 8))
                     {

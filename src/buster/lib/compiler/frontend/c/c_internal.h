@@ -269,7 +269,7 @@ BUSTER_C_EXTERN u32 c_parse_type_name_attribute_start(CPreprocessResult preproce
 // is spelled: `aligned(16)`, `constructor(101)`. False when the spelling is
 // not one, which every caller reads as "the attribute named no argument".
 BUSTER_C_EXTERN bool c_parse_attribute_unsigned(String8 spelling, u32* value_out);
-BUSTER_C_EXTERN CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
+BUSTER_C_EXTERN CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CTypeId element_type, u32* index, u32 end);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
 // The token forms of the String8 lookups: the token's own interned id keys
@@ -866,6 +866,11 @@ struct CTypeParseFrame
     CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
+    // Direct members wait here until this range completes. Nested records
+    // publish their own disjoint runs while this vector stays on scratch.
+    CMember* staged_members;
+    u32 staged_member_count;
+    u32 staged_member_capacity;
     CType qualifiers;
     CType original_type;
     CTypeId type;
@@ -978,6 +983,17 @@ struct CParseExpressionQuery
     u32 flags;
 };
 
+typedef enum CConstantEvaluationMode
+{
+    C_CONSTANT_EVALUATION_NORMAL,
+    // Existing enum folding stays on the declaration machine until its
+    // owner prepares the protected query's type facts.
+    C_CONSTANT_EVALUATION_ENUM,
+    // Query-only type readers: no tag definition, shared cache publication,
+    // or re-entry into the declaration's active type-parse machine.
+    C_CONSTANT_EVALUATION_TYPE,
+} CConstantEvaluationMode;
+
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
@@ -1010,16 +1026,12 @@ struct CTypeParseMachine
     u32 mutation_type_limit;
     u32 expression_task_count;
     u32 expression_task_capacity;
-    // The enum currently evaluating an explicit initializer. Earlier members
-    // are visible before ordinary entity publication; the start bounds lookup
-    // to this definition so an unrelated enum cannot satisfy an identifier.
-    u32 enum_constant_member_start;
+    CConstantEvaluationMode constant_evaluation_mode;
     bool result_valid;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
-    bool enum_constant_members_active;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

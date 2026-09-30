@@ -246,6 +246,27 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+  `c_parse_type_integer_constant` owns an independent
+  `C_CONSTANT_EVALUATION_TYPE` machine over a by-value semantic model. It
+  share existing rows for reads and append temporary rows past copied counts;
+  aggregate/definition indexes, token/scalar caches, symbol interning and layout
+  work counters are detached. Casts, generic controllers/association types and
+  `typeof` use the same private explicit frames, with machineless scalar reads
+  that cannot define or complete tags. New tag bodies remain unresolved.
+  Private model growth uses a separate scratch arena from expression frames;
+  its rows survive frame rewinds until stable integer facts have been extracted.
+  Ordinary and pending enumerator bindings precede typedef cast detection.
+  The returned signed magnitude, rank and target width survive the query;
+  temporary type IDs do not. Existing enumerator folding retains the
+  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
+  including its machineless `sizeof` path. Migrating that consumer requires
+  declaration-owned preparation of source-ordered operand facts; this stage
+  adds the protected query without changing enum admission or arithmetic.
+  Its caller supplies the semantic model at the expression's declaration point.
+  Scope alone cannot reconstruct earlier tag completeness from a finished unit;
+  deferred consumers must retain the bindings and layout facts of their operands.
+  `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
+  active machine on successful and refused queries (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
