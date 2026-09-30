@@ -51,7 +51,7 @@ class AppleCIPolicyTests(unittest.TestCase):
         self.assertEqual(Counter(entries), Counter(github_ci_time.NATIVE))
 
     def test_mobile_inventory_rejects_missing_duplicate_foreign_and_intel_lanes(self):
-        original = mobile_coverage.WORKFLOW_PATH.read_text()
+        original = mobile_coverage.WORKFLOW_PATH.read_text(encoding="utf-8")
         ios = ("          - name: iOS AArch64\n            runner: macos-26\n"
                "            os: ios\n            arch: aarch64\n")
         self.assertEqual(original.count(ios), 1)
@@ -64,11 +64,11 @@ class AppleCIPolicyTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "ci.yml"
-            path.write_text(original)
+            path.write_text(original, encoding="utf-8", newline="\n")
             self.assertEqual(len(mobile_coverage._workflow_mobile_lanes(path)), 2)
             for name, text in mutations.items():
                 with self.subTest(mutation=name):
-                    path.write_text(text)
+                    path.write_text(text, encoding="utf-8", newline="\n")
                     with self.assertRaises(mobile_coverage.MobileCoverageError):
                         mobile_coverage._workflow_mobile_lanes(path)
 
