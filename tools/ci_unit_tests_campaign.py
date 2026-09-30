@@ -94,6 +94,15 @@ def native_phase(directory, identifier, test_jobs):
     return {"id": identifier, "elapsed_us": finished - child, "start": start, "end": end}
 
 
+def baseline_workers(environment):
+    # The default baseline keeps the ordinary two-worker tree quota. A
+    # four-worker baseline is the equal-budget control for the candidate's
+    # two groups of two workers.
+    text = environment.get("BUSTER_UNIT_BASELINE_JOBS", "2")
+    measure.require(text in ("2", "4"), "Baseline worker quota must be 2 or 4")
+    return int(text)
+
+
 def provenance(directory, binary, platform, environment):
     revision = environment.get("BUSTER_TEST_SOURCE_REVISION", "")
     measure.require(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "Missing exact source revision")
@@ -129,13 +138,14 @@ def assemble(directory, binary, platform, pairs, environment):
     measure.require(pairs in (1, 3), "Campaign requires one screening pair or three comparison pairs")
     measure.require(directory.is_dir(), "Campaign evidence directory does not exist")
     identities = provenance(directory, binary, platform, environment)
+    baseline_jobs = baseline_workers(environment)
     rows = inventory(directory / "inventory.log")
     samples = []
     phases = []
     for number in range(1, pairs * 2 + 1):
         arm = "baseline" if number % 2 else "candidate"
         identifier = f"sample-{number}-{arm}"
-        test_workers = 2 if arm == "baseline" else 4
+        test_workers = baseline_jobs if arm == "baseline" else 4
         phase = native_phase(directory / "phases", identifier, test_workers)
         phases.append(phase)
         manifest = {"schema": "buster-ci-unit-tests-measure-v1", "arm": arm,
@@ -170,7 +180,7 @@ def summary(result):
         for name, arm in (("Baseline", baseline), ("Candidate", candidate)):
             text += f"| {name} | {arm['n']} | {arm['median_wall_us'] / 1000000:.3f} s |\n"
         text += f"\nCandidate/baseline outer wall ratio: **{result['candidate_wall_ratio']:.3f}**. Exact module and assertion counts agree.\n"
-        text += "\nThe available runner budget is four workers. Baseline modules use two workers; candidate launches two isolated groups with two workers each.\n"
+        text += f"\nThe available runner budget is four workers. Baseline modules use {baseline['test_workers']} workers; candidate launches two isolated groups with two workers each.\n"
     text += "\nDiagnostic evidence only. `ci_complete=false`; `performance_accepted=false`. Queues, build/setup, artifact transfer and general CI throughput are outside these intervals.\n"
     return text
 

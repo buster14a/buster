@@ -63,7 +63,7 @@ class CampaignTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def populate(self, pairs):
+    def populate(self, pairs, baseline_jobs="2"):
         binary_hash = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         baseline = module(0, "c_frontend_tests", 11) + module(1, "compiler_driver_tests", 7) + terminal(18, 2)
         candidate = f"CI_UNIT_PLAN_V1 binary_sha256={binary_hash} source_revision={'a' * 40} workers=4 groups=2 group_workers=2\n"
@@ -78,7 +78,7 @@ class CampaignTests(unittest.TestCase):
             start = dict(common, state="running")
             end = dict(common, state="success", child_start_us=110, end_us=2110 if arm == "baseline" else 1610,
                        publication_start_us=2200, result=0, platform_status=0, spawned=1, timed_out=0,
-                       termination_requested=0, forcibly_terminated=0, test_jobs="2" if arm == "baseline" else "4", cpu_time="unknown", peak_rss="unknown")
+                       termination_requested=0, forcibly_terminated=0, test_jobs=baseline_jobs if arm == "baseline" else "4", cpu_time="unknown", peak_rss="unknown")
             (self.phases / f"{identifier}.{number}.start.json").write_text(json.dumps(start))
             (self.phases / f"{identifier}.{number}.end.json").write_text(json.dumps(end))
 
@@ -169,6 +169,22 @@ class CampaignTests(unittest.TestCase):
         path.write_text(json.dumps(end))
         with self.assertRaisesRegex(campaign.measure.EvidenceError, "Outer wall interval"):
             self.assemble()
+
+    def test_equal_budget_baseline_uses_four_workers(self):
+        self.environment["BUSTER_UNIT_BASELINE_JOBS"] = "4"
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "subprocess test quota differs"):
+            self.assemble()
+        self.populate(3, baseline_jobs="4")
+        result = self.assemble(3)
+        self.assertEqual(result["arms"]["baseline"]["test_workers"], 4)
+        self.assertIn("Baseline modules use 4 workers", campaign.summary(result))
+
+    def test_unsupported_baseline_quota_is_rejected(self):
+        for value in ("", "1", "3", "8", "four"):
+            with self.subTest(value=value):
+                self.environment["BUSTER_UNIT_BASELINE_JOBS"] = value
+                with self.assertRaisesRegex(campaign.measure.EvidenceError, "Baseline worker quota"):
+                    self.assemble()
 
     def test_missing_runner_source_quota_or_image_identity_is_rejected(self):
         for key in ("BUSTER_TEST_SOURCE_REVISION", "BUSTER_TEST_JOBS", "BUSTER_TEST_TABLE_AUDITS", "ImageOS", "ImageVersion", "RUNNER_ARCH"):
