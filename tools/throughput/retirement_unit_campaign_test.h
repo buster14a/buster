@@ -1716,8 +1716,11 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
         test_unit_campaign_program_file(fixture, step, "other.bin") &&
         test_unit_campaign_program_file(fixture, other, "prog.bin") && symlinkat("prog.bin", step, "link.bin") == 0 &&
         test_unit_campaign_program_identity(step, "prog.bin", &program) &&
-        test_unit_campaign_program_identity(other, "prog.bin", &foreign) &&
-        test_unit_campaign_program_identity(step, "link.bin", &linked);
+        test_unit_campaign_program_identity(other, "prog.bin", &foreign);
+    /* The link carries its target's identity: only not following it tells
+     * them apart. */
+    linked = program;
+    linked.leaf = "link.bin";
     CHECK(ok);
     char* argv[] = {"./prog.bin", "retirement-child", "runtime", "prog.bin", "ok", fixture->leak_text, NULL};
     char command_sha[65];

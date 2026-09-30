@@ -1099,6 +1099,21 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_campaign_checks(BqPrepOracleFixture
                   failure->present && failure->result == status);
 }
 
+/* How many runtime step directories (`runtime-*`) attempt's campaign work
+ * directory still holds, or UINT32_MAX when it cannot be listed. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_worker_unit_steps_left(int attempt)
+{
+    int directory = openat(attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY "/work",
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    DIR* listing = directory >= 0 ? fdopendir(directory) : NULL;
+    if (!listing && directory >= 0) close(directory);
+    u32 left = listing ? 0 : UINT32_MAX;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+        left += !strncmp(entry->d_name, "runtime-", 8);
+    if (listing) closedir(listing);
+    return left;
+}
+
 /* The staged post-sample record of attempt: its header, the A/A admission,
  * post-A/A binding and post-sample digests present, and the untimed, A/A and
  * A/B launch counts. */
@@ -1256,6 +1271,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         BQ_PREP_CHECK(bq_prep_worker_unit_post_sample(attempt->attempt, launches) && launches[0] &&
                       launches[1] == ((u64)timed_groups + BQ_PREP_ORACLE_REFERENCES) * per_unit &&
                       launches[2] == launches[1]);
+        /* Every successful runtime launch retired its step directory. */
+        BQ_PREP_CHECK(bq_prep_worker_unit_steps_left(attempt->attempt) == 0);
         measuring_ms = run.measuring_ms > run.started_ms ? run.measuring_ms - run.started_ms : 0;
         /* #881 PR 4: the coordinator's side over the ready digest the
          * channel carried. */
