@@ -6,6 +6,7 @@ candidate execution occurs while exercising request lifecycle decisions.
 """
 import base64
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -273,7 +274,7 @@ class CatchUpDetectionTests(unittest.TestCase):
                        check=True, capture_output=True)
         git(self.repo, "config", "user.name", "Catch-up Test")
         git(self.repo, "config", "user.email", "test@example.invalid")
-        self.fresh = git(ROOT, "rev-parse", "HEAD")
+        self.fresh = self.fresh_snapshot(git(ROOT, "rev-parse", "HEAD"))
 
     def commit(self, parent: str, path: str, content: bytes) -> str:
         blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
@@ -286,6 +287,27 @@ class CatchUpDetectionTests(unittest.TestCase):
         tree = subprocess.run(["git", "-C", str(self.repo), "write-tree"], env=env,
                               capture_output=True, text=True, check=True).stdout.strip()
         return git(self.repo, "commit-tree", tree, "-p", parent, "-m", "change " + path)
+
+    def fresh_snapshot(self, head: str) -> str:
+        """Base the tests on a commit whose snapshot matches its sources.
+
+        The checkout's own snapshot can lag its sources: after an ordinary merge
+        until its catch-up lands, and on a trust transition until the writer
+        publishes (its self-tests run on that candidate's commit).
+        """
+        import native_retirement_dependency_binding as authority
+        policy_raw = c._blob(self.repo, head, authority.POLICY_PATH)
+        policy = authority.parse_policy(policy_raw)
+
+        def identity(source: str) -> tuple[int, str]:
+            data = c._blob(self.repo, head, source)
+            return len(data), hashlib.sha256(data).hexdigest()
+
+        rendered, _records = authority.render_snapshot(policy_raw, policy, identity)
+        fresh = head
+        if rendered != c._blob(self.repo, head, authority.SNAPSHOT_PATH):
+            fresh = self.commit(head, authority.SNAPSHOT_PATH, rendered)
+        return fresh
 
     def test_snapshot_staleness_tracks_admitted_source_bytes_only(self):
         self.assertFalse(c.snapshot_stale(self.repo, self.fresh))
