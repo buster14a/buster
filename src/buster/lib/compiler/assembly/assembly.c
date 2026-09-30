@@ -4961,230 +4961,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_operands_need_rex(AssemblyInst
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_memory_displacement_size(AssemblyMemory memory, u32 tuple_scale, u32* result)
-{
-    if (memory.rip_relative || !memory.has_base)
-    {
-        return assembly_x86_memory_displacement_size(memory, result);
-    }
-    if (memory.displacement.has_symbol)
-    {
-        *result = 4;
-        return true;
-    }
-    if (!memory.displacement.addend && (memory.base.index & 7) != 5)
-    {
-        *result = 0;
-        return true;
-    }
-    if (tuple_scale && memory.displacement.addend % (s64)tuple_scale == 0)
-    {
-        s64 scaled = memory.displacement.addend / (s64)tuple_scale;
-        if (scaled >= INT8_MIN && scaled <= INT8_MAX)
-        {
-            *result = 1;
-            return true;
-        }
-    }
-    if (memory.displacement.addend >= INT32_MIN && memory.displacement.addend <= INT32_MAX)
-    {
-        *result = 4;
-        return true;
-    }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_memory_encoding_size(AssemblyMemory memory, u32 tuple_scale, u32* result)
-{
-    u32 displacement_size = 0;
-    if (!assembly_x86_evex_memory_displacement_size(memory, tuple_scale, &displacement_size))
-    {
-        return false;
-    }
-    u8 sib = !memory.rip_relative && (memory.has_index || !memory.has_base || (memory.base.index & 7) == 4);
-    *result = 1u + (u32)sib + displacement_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction* instruction, AssemblyVectorForm const* form)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOperand* third = instruction->operands + 2;
-    u8 move = (form->flags & ASSEMBLY_VECTOR_FORM_MOVE) != 0;
-    u8 mask_destination = (form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) != 0;
-    u8 source_rm = (form->flags & ASSEMBLY_VECTOR_FORM_SOURCE_RM) != 0;
-    u8 immediate = (form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE) != 0;
-    AssemblyRegister vector = {0};
-    AssemblyOperand* memory = 0;
-    if (mask_destination)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_OPMASK ||
-            (first->has_mask && first->mask == 0) || first->zeroing || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-            !assembly_x86_vector_register(second->reg) ||
-            (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        vector = second->reg;
-        memory = third->kind == ASSEMBLY_OPERAND_MEMORY ? third : 0;
-        if (third->kind == ASSEMBLY_OPERAND_REGISTER && third->reg.class != vector.class)
-        {
-            return false;
-        }
-        if (immediate &&
-            (instruction->operands[3].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[3].expression.has_symbol ||
-             instruction->operands[3].expression.addend < 0 || instruction->operands[3].expression.addend > UINT8_MAX))
-        {
-            return false;
-        }
-        u64 immediate_limit = instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPS || instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPD ? 31 : 7;
-        if (immediate && (u64)instruction->operands[3].expression.addend > immediate_limit)
-        {
-            return false;
-        }
-    }
-    else if (source_rm)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
-            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            instruction->operands[2].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[2].expression.has_symbol ||
-            instruction->operands[2].expression.addend < INT8_MIN || instruction->operands[2].expression.addend > UINT8_MAX)
-        {
-            return false;
-        }
-        vector = first->reg;
-        memory = second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-        if (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != vector.class)
-        {
-            return false;
-        }
-    }
-    else if (move)
-    {
-        if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        vector = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg : second->reg;
-        memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-        if (!assembly_x86_vector_register(vector) ||
-            (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != vector.class) ||
-            (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != vector.class))
-        {
-            return false;
-        }
-    }
-    else
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-            (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            !assembly_x86_vector_register(first->reg) || second->reg.class != first->reg.class)
-        {
-            return false;
-        }
-        vector = first->reg;
-        memory = third->kind == ASSEMBLY_OPERAND_MEMORY ? third : 0;
-        if (third->kind == ASSEMBLY_OPERAND_REGISTER && third->reg.class != vector.class)
-        {
-            return false;
-        }
-    }
-    if ((form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) && vector.class != ASSEMBLY_REGISTER_XMM)
-    {
-        return false;
-    }
-    if (vector.width != 128 && vector.width != 256 && vector.width != 512)
-    {
-        return false;
-    }
-    if (first->broadcast)
-    {
-        return false;
-    }
-    if (!mask_destination && (first->has_mask || first->zeroing))
-    {
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (!move || !first->has_mask || first->mask == 0 || first->zeroing)
-            {
-                return false;
-            }
-        }
-        else if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
-                 (first->has_mask && first->mask == 0) || (first->zeroing && !first->has_mask))
-        {
-            return false;
-        }
-    }
-    for (u32 operand_index = 1; operand_index < instruction->operand_count; operand_index += 1)
-    {
-        AssemblyOperand operand = instruction->operands[operand_index];
-        if (operand.has_mask || operand.zeroing || operand.rounding || operand.sae ||
-            (operand.broadcast && (!memory || instruction->operands + operand_index != memory)))
-        {
-            return false;
-        }
-    }
-    if (first->rounding || first->sae)
-    {
-        u8 supports_rounding = (form->flags & ASSEMBLY_VECTOR_FORM_ROUNDING) != 0;
-        u8 supports_sae = (form->flags & ASSEMBLY_VECTOR_FORM_SAE) != 0;
-        if ((first->rounding &&
-             (!supports_rounding || move || memory || (!(form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) && vector.width != 512))) ||
-            (first->sae && !first->rounding && (!supports_sae || move || memory || vector.width != 512)) ||
-            (first->sae && first->rounding && !supports_rounding))
-        {
-            return false;
-        }
-    }
-    if (memory)
-    {
-        u16 element_width = (u16)form->element_width * 8u;
-        u16 expected_width = (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ? element_width : vector.width;
-        if (memory->broadcast)
-        {
-            if (!(form->flags & ASSEMBLY_VECTOR_FORM_BROADCAST) || move || (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ||
-                memory->broadcast != vector.width / element_width)
-            {
-                return false;
-            }
-            expected_width = element_width;
-        }
-        if (memory->memory.width && memory->memory.width != expected_width)
-        {
-            return false;
-        }
-        memory->memory.width = expected_width;
-        u32 tuple_scale = memory->broadcast ? form->element_width :
-                            (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR ? form->element_width : vector.width / 8u);
-        u32 address_size = 0;
-        if (!assembly_x86_evex_memory_encoding_size(memory->memory, tuple_scale, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = (u8)immediate;
-        instruction->size = 4u + 1u + address_size + immediate;
-    }
-    else
-    {
-        if (first->broadcast || second->broadcast || third->broadcast)
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = 4u + 1u + 1u + immediate;
-    }
-    if (memory && (memory->rounding || memory->sae))
-    {
-        return false;
-    }
-    instruction->width = vector.width;
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_vector_register_valid(AssemblyRegister reg, u8 vector_width_mask)
 {
     return !reg.high_byte && reg.index < 16 &&
@@ -6431,7 +6207,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_nf_instruction_size(AssemblyInstructio
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* instruction)
 {
     AssemblyOpcode opcode = instruction->opcode;
-    AssemblyVectorForm const* vector_form = assembly_x86_vector_form(opcode);
     bool sized;
     if (!assembly_x86_lock_prefix_legal(instruction))
     {
@@ -6443,7 +6218,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         sized = false;
     }
-    else if (!vector_form && assembly_x86_instruction_has_any_decorator(*instruction))
+    else if (!assembly_x86_vector_form(opcode) && assembly_x86_instruction_has_any_decorator(*instruction))
     {
         sized = false;
     }
@@ -6476,10 +6251,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         sized = assembly_x86_apx_nf_instruction_size(instruction);
     }
-    else if (instruction->evex && vector_form)
-    {
-        sized = assembly_x86_evex_instruction_size(instruction, vector_form);
-    }
     else if (assembly_x86_instruction_has_extended_gpr(*instruction))
     {
         sized = assembly_x86_apx_legacy_instruction_size(instruction);
@@ -6500,7 +6271,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_source_layout_uses_metadata(AssemblyInstru
     bool result = (opcode >= ASSEMBLY_OPCODE_X86_NOP && opcode <= ASSEMBLY_OPCODE_X86_CMOVCC) ||
                   (opcode >= ASSEMBLY_OPCODE_X86_FLD && opcode <= ASSEMBLY_OPCODE_X86_FWAIT) ||
                   opcode == ASSEMBLY_OPCODE_X86_EMMS || assembly_x86_opcode_is_legacy_packed(opcode) ||
-                  (!instruction.evex && (assembly_x86_opcode_is_sse2(opcode) || assembly_x86_opcode_is_avx(opcode)));
+                  (assembly_x86_opcode_is_sse2(opcode) || assembly_x86_opcode_is_avx(opcode));
     return result;
 }
 
