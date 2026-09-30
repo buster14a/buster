@@ -308,6 +308,19 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   key prefix while querying it. Neither publication rewinds the TU arena:
   canonical lowering copies the map's pointers into `IrProgram.source_map`,
   whose diagnostic, DWARF and CodeView consumers still borrow their storage.
+- `c_parse_types_compatible` answers a type id compared with itself (96.8%
+  of stage-1 calls) through `c_parse_types_self_compatible`, the pair walk
+  specialized to one chain: pointer, vector, array and enum steps keep the
+  walk's verdicts (an out-of-range id or array bound record is still
+  incompatible) and its side effect (an aggregate step asks
+  `c_parse_unqualified_type` for both halves, which appends a row for a
+  qualified aggregate lacking its link). Function types and enums whose
+  underlying type is not a leaf fall back to the unchanged
+  `c_parse_types_compatible_walk` before any side effect. The pair stack,
+  still sized by the whole type table (#1502), is allocated only for that
+  walk. `c_test_type_self_compatibility` compares the two for every type of a
+  type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
