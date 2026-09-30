@@ -1468,8 +1468,10 @@ typedef struct BqPrepWorkerUnitForge
     bool relist, plan, rebind;
 } BqPrepWorkerUnitForge;
 
-enum { BQ_PREP_FORGE_UNTIMED, BQ_PREP_FORGE_RECORD, BQ_PREP_FORGE_BINDING, BQ_PREP_FORGE_RETAINED,
-       BQ_PREP_FORGE_FILES };
+/* Every result-root file the derivation reads, the retained manifest last
+ * (it lists the record's copy). */
+enum { BQ_PREP_FORGE_UNTIMED, BQ_PREP_FORGE_RECORD, BQ_PREP_FORGE_BINDING, BQ_PREP_FORGE_ADMISSION,
+       BQ_PREP_FORGE_RETAINED, BQ_PREP_FORGE_FILES };
 
 /* The derivation over a scratch result directory of copies with `forge`
  * applied (NULL: unedited). */
@@ -1479,7 +1481,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_forged(BqRetirementWorkerUnitSea
     BqPrepWorkerUnitForge const* forge)
 {
     static char const* const files[BQ_PREP_FORGE_FILES] = {BQ_RETIREMENT_WORKER_UNTIMED_PATH,
-        BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, BQ_RETIREMENT_WORKER_BINDING_PATH, TP_RETIREMENT_RETAINED_MANIFEST_PATH};
+        BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, BQ_RETIREMENT_WORKER_BINDING_PATH, BQ_RETIREMENT_WORKER_ADMISSION_PATH,
+        TP_RETIREMENT_RETAINED_MANIFEST_PATH};
     char scratch[] = "/tmp/bq-worker-unit-derive-XXXXXX";
     bool made = mkdtemp(scratch) != NULL;
     int copy = made ? open(scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
@@ -1547,8 +1550,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_forge_line(char const* record, char
  *   the carried post-sample context; a carried binding digest that is not
  *   the result's binding; an authority context that is not the binding's
  *   execution context;
- * and, over scratch copies of the result: an untimed record stream other
- * than the one the store sealed; a record byte no line check reads (its
+ * and, over scratch copies of every result-root file it reads (which the
+ * unedited copy derives): an untimed record stream other than the one the
+ * store sealed; an admission receipt other than the one the record names; a
+ * record byte no line check reads (its
  * retained line is stale); every checked line of the post-sample record
  * forged consistently (the record, its retained line and the authority's
  * retained digest), including its execution-plan line with the authority's
@@ -1604,9 +1609,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_derivation(BqPrepOracleFixture* fix
     static char const* const lines[] = {"job=", "attempt=", "plan=", "pre-sample=", "post-sample=", "log-untimed=",
         "log-aa=", "log-ab=", "pre-sample-plan=", "result-input-plan=", "post-aa-binding=", "aa-admission=", "family=",
         "timed-rows=", "execution-plan="};
-    BqPrepWorkerUnitForge forges[2u + BUSTER_ARRAY_LENGTH(lines) + 2u];
+    BqPrepWorkerUnitForge forges[3u + BUSTER_ARRAY_LENGTH(lines) + 2u];
     u32 count = 0;
     forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_UNTIMED, .find = "\"", .replace = "'"};
+    /* Another admission receipt than the one the record and binding name. */
+    forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_ADMISSION, .find = "\"admitted\":true",
+                                              .replace = "\"admitted\":TRUE"};
     forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_RECORD, .find = "\nlaunches=",
                                               .replace = "\nLaunches="};
     bool prepared = record && post && harness;
