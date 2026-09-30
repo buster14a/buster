@@ -384,7 +384,7 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
         {
             Arena* observed = test_arena_observed(context, arena, slot);
-            high_waters[slot] = observed ? observed->test_high_water : 0;
+            high_waters[slot] = observed ? observed->high_water : 0;
         }
         arguments->show(arguments, S8("TEST_FIXTURE_START_V1 kind={S8} module={S8} fixture={S8} index={u64}\n"),
                         module ? S8("module") : S8("fixture"), arguments->memory_module, name, result.index);
@@ -393,7 +393,7 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
             Arena* observed = test_arena_observed(context, arena, slot);
             if (observed)
             {
-                observed->test_high_water = high_waters[slot];
+                observed->high_water = high_waters[slot];
             }
         }
     }
