@@ -1,0 +1,57 @@
+name: Issue 1225 constant truth validation
+on:
+  push:
+    branches: [codex/1225-constant-value-truth]
+permissions:
+  contents: read
+jobs:
+  truth:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bootstrap hosted driver
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Configure baseline with new regressions
+        run: |
+          mkdir -p evidence
+          git show 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617:src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Baseline self-host fixed point
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release > evidence/baseline-self-host.log 2>&1'
+      - name: Require failure-first reproduction
+        run: |
+          set +e
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 > evidence/baseline-tests.log 2>&1
+          result=$?
+          set -e
+          echo "$result" > evidence/baseline-status.txt
+          test "$result" -ne 0
+          grep -F 'constant truth' evidence/baseline-tests.log
+      - name: Restore and validate candidate
+        run: |
+          git show "$GITHUB_SHA":src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 > evidence/candidate-frontend.log 2>&1
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all > evidence/candidate-suite.log 2>&1
+      - name: Candidate self-host fixed point and source size
+        run: |
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release > evidence/candidate-self-host.log 2>&1
+          "$RUNNER_TEMP/buster-build" source_size --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617 > evidence/source-size.log 2>&1
+      - name: Configure compiler sanitizers and run full suite
+        run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT --sanitize
+          "$RUNNER_TEMP/buster-build" build -t test_all > evidence/candidate-sanitizers.log 2>&1
+      - name: Retain correctness evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1225-truth-${{ github.sha }}
+          path: evidence/
+          retention-days: 14

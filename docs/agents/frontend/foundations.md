@@ -266,6 +266,15 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
+- Constant truth queries distinguish invalid, unknown, known false and known
+  true. `c_ir_constant_truth` materializes scalar places, preserves unknown
+  reads, and decays arrays/functions to addresses. Boolean casts, negation,
+  logical operators, conditional selection and static assertions consume that
+  checked result; they never interpret UNKNOWN as zero. Volatile/atomic reads
+  cannot use read-only storage as a constant certificate. Arithmetic and
+  comparison folding also materialize scalar places before reading payloads.
+  `c_test_constant_scalar_truth` checks constant initializers, unevaluated
+  predicate bits/effects, diagnostics and native execution (#1225).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
