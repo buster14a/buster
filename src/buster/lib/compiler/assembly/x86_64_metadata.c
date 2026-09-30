@@ -11983,15 +11983,27 @@ void buster_x86_metadata_prewarm(void)
 // Unlike prewarm_all_forms, an ordinary non-TLS compile never prepares them.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd[BUSTER_X86_METADATA_TLS_GD_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_le[BUSTER_X86_METADATA_TLS_GD_SIZE];
+// General dynamic's -fno-plt call, `data16 rex.W call [rip + helper]`, which
+// fills the same eight bytes as the padded direct call with its field at the
+// same offset.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd_indirect_call[BUSTER_X86_METADATA_TLS_GD_SIZE - 8];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_add[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+// Local dynamic's LEA and direct CALL, and the -fno-plt indirect CALL that can
+// stand in for the direct one.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld[BUSTER_X86_METADATA_TLS_LD_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld_indirect_call[BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET - 4];
 enum
 {
     BUSTER_X86_TLS_PREPARE_GD = 1,
     BUSTER_X86_TLS_PREPARE_LE = 2,
     BUSTER_X86_TLS_PREPARE_IE = 4,
-    BUSTER_X86_TLS_PREPARE_ALL = 7,
+    BUSTER_X86_TLS_PREPARE_LD = 8,
+    BUSTER_X86_TLS_PREPARE_ALL = 15,
 };
+// The bytes of local exec's `mov rax, fs:0`, the only instruction the
+// local-dynamic relaxation keeps.
+#define BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE 9u
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_prepared;
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_valid;
 
@@ -12058,6 +12070,15 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
             };
             valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd + 11, 5, S8("CALL"), operands, 1,
                                                   BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - 11, BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("helper"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            buster_x86_metadata_tls_gd_indirect_call[0] = 0x66;
+            buster_x86_metadata_tls_gd_indirect_call[1] = 0x48;
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd_indirect_call + 2, 6, S8("CALL"), operands, 1,
+                                                  BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - 10, BUSTER_X86_METADATA_RELOCATION_PC32);
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_GD;
         }
         if (missing & BUSTER_X86_TLS_PREPARE_LE)
@@ -12100,6 +12121,33 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
         }
+        if (missing & BUSTER_X86_TLS_PREPARE_LD)
+        {
+            operands[0] = buster_x86_metadata_tls_register(7);
+            operands[1] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("tls"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            u32 call_offset = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET + BUSTER_X86_METADATA_TLS_FIELD_SIZE;
+            bool valid = buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld, call_offset, S8("LEA"), operands, 2,
+                                                     BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET, BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32, .has_symbol = true, .symbol = S8("helper"),
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld + call_offset, BUSTER_X86_METADATA_TLS_LD_SIZE - call_offset,
+                                                  S8("CALL"), operands, 1, BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - call_offset,
+                                                  BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("helper"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld_indirect_call, sizeof(buster_x86_metadata_tls_ld_indirect_call),
+                                                  S8("CALL"), operands, 1, BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - call_offset,
+                                                  BUSTER_X86_METADATA_RELOCATION_PC32);
+            if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_LD;
+        }
         // Publish readiness last, including a cached failure. A changed
         // metadata shape must fail closed rather than using partial templates.
         buster_x86_metadata_tls_prepared |= missing;
@@ -12138,8 +12186,10 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
             {
                 // Both relocation fields are arbitrary; every other byte is
                 // part of the ABI envelope and must match before any write.
+                // The call is the padded direct one or the -fno-plt one.
                 if (memcmp(sequence, buster_x86_metadata_tls_gd, BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET) == 0 &&
-                    memcmp(sequence + 8, buster_x86_metadata_tls_gd + 8, 4) == 0)
+                    (memcmp(sequence + 8, buster_x86_metadata_tls_gd + 8, 4) == 0 ||
+                     memcmp(sequence + 8, buster_x86_metadata_tls_gd_indirect_call, 4) == 0))
                 {
                     replacement = buster_x86_metadata_tls_le;
                     size = BUSTER_X86_METADATA_TLS_GD_SIZE;
@@ -12172,6 +12222,39 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
             }
             result = true;
         }
+    }
+    return result;
+}
+
+u32 buster_x86_metadata_relax_tls_local_dynamic(u8* sequence, u32 capacity)
+{
+    u32 result = 0;
+    u32 call_offset = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET + BUSTER_X86_METADATA_TLS_FIELD_SIZE;
+    if (sequence && capacity >= BUSTER_X86_METADATA_TLS_LD_SIZE &&
+        buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_LD | BUSTER_X86_TLS_PREPARE_LE) &&
+        memcmp(sequence, buster_x86_metadata_tls_ld, BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET) == 0)
+    {
+        // Only the call's opcode bytes pick the envelope; both relocation
+        // fields are arbitrary.
+        u32 direct_opcode_size = BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - call_offset;
+        u32 indirect_opcode_size = BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - call_offset;
+        if (memcmp(sequence + call_offset, buster_x86_metadata_tls_ld + call_offset, direct_opcode_size) == 0)
+        {
+            result = BUSTER_X86_METADATA_TLS_LD_SIZE;
+        }
+        else if (capacity >= BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE &&
+                 memcmp(sequence + call_offset, buster_x86_metadata_tls_ld_indirect_call, indirect_opcode_size) == 0)
+        {
+            result = BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE;
+        }
+    }
+    if (result)
+    {
+        // data16 is the psABI's padding here too: redundant on a MOV whose
+        // REX.W already fixes the operand size.
+        u32 padding = result - BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE;
+        memset(sequence, 0x66, padding);
+        memcpy(sequence + padding, buster_x86_metadata_tls_le, BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE);
     }
     return result;
 }
