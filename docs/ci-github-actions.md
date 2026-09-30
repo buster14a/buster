@@ -225,7 +225,12 @@ matches the runner rather than letting a wall of unresolved externals explain
 it a minute later. Every Windows step enters the shell through
 `tools/ci_vs_dev_shell.ps1` (tested by `tools/ci_vs_dev_shell_test.py`); its
 options keep each step's own scope, so the MSVC reference differential still
-skips the LLVM prepend and the clang probe.
+skips the LLVM prepend and the clang probe. Each of that test's seven helper
+probes is still its own `powershell.exe` step process with its own files, but
+they launch together from `setUpClass`: one Windows PowerShell start takes
+about 23 s on the hosted AArch64 runner, and serial starts pushed the shared
+workflow-tools step past its five-minute budget
+([#2021](https://github.com/buster14a/buster/issues/2021)).
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different
@@ -283,6 +288,14 @@ unknown label, so keep the two in step when a runner changes.
 `python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
 summaries, native evidence packer and timing collector on each desktop platform
 (`python` on Windows).
+`python3 tools/ci_artifact_upload_test.py -v` runs in required Workflow lint.
+It checks the local upload action's two approved pins, failed-first-attempt and
+cancellation guards, identical artifact options, replacement on retry and
+blocking terminal failure, then executes its Bash backoff and reporting bodies.
+The backoff uses a fake sleep command so this offline test does not wait.
+These regressions leave the frozen support tests and their reviewed identities
+unchanged. They cover upload failures after the action starts; action dependency
+resolution before composite execution is tracked separately in #1790.
 `python3 tools/analyzer_selection_test.py -v` separately exercises the analyzer
 comparison-selection record, conservative event fallback, baseline-path
 admission and reference/candidate failure propagation on Unix runners.
