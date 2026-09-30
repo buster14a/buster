@@ -6653,14 +6653,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
     }
 }
 
-// `-soname,NAME`, `--soname=NAME`, `-h,NAME` or the pair `-soname` `NAME`,
-// however -Wl or -Xlinker delivered it.
+// -Wl has already been split; a separated SONAME operand is consumed once,
+// even when its bytes look like another option.
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_soname_option(String8 argument)
+{
+    return string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
+}
+
 BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLinkOptions options)
 {
     String8 result = {0};
-    static String8 const prefixes[] = {S8_INITIALIZER("-soname,"), S8_INITIALIZER("--soname,"), S8_INITIALIZER("-soname="),
-                                       S8_INITIALIZER("--soname="), S8_INITIALIZER("-h,")};
-    static String8 const separated[] = {S8_INITIALIZER("-soname"), S8_INITIALIZER("--soname"), S8_INITIALIZER("-h")};
+    static String8 const prefixes[] = {S8_INITIALIZER("-soname="), S8_INITIALIZER("--soname=")};
     for (u32 index = 0; index < options.linker_argument_count; index += 1)
     {
         String8 argument = options.linker_arguments[index];
@@ -6671,12 +6674,9 @@ BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLink
                 result = string_slice(argument, prefixes[prefix].length, argument.length);
             }
         }
-        for (u32 name = 0; index + 1 < options.linker_argument_count && name < BUSTER_ARRAY_LENGTH(separated); name += 1)
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(argument))
         {
-            if (string_equal(argument, separated[name]))
-            {
-                result = options.linker_arguments[index + 1];
-            }
+            result = options.linker_arguments[++index];
         }
     }
     return result;
@@ -6687,6 +6687,11 @@ BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_present(NativeExecutableLinkOp
     bool result = false;
     for (u32 index = 0; index < options.linker_argument_count; index += 1)
     {
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+            continue;
+        }
         for (u32 spelling = 0; spelling < spelling_count; spelling += 1)
         {
             result |= string_equal(options.linker_arguments[index], spellings[spelling]);
@@ -6931,7 +6936,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
     for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
     {
-        no_undefined |= string_equal(options.linker_arguments[index], S8("-z")) && string_equal(options.linker_arguments[index + 1], S8("defs"));
+        if (link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+        }
+        else
+        {
+            no_undefined |= string_equal(options.linker_arguments[index], S8("-z")) && string_equal(options.linker_arguments[index + 1], S8("defs"));
+        }
     }
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
     LinkElfPicImage image = {.object = object, .exports = exports, .shared = shared};
@@ -13539,7 +13551,7 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
         bool export_dynamic = string_equal(argument, S8("-E")) || string_equal(argument, S8("-export-dynamic")) ||
                               string_equal(argument, S8("--export-dynamic"));
         bool no_undefined = string_equal(argument, S8("--no-undefined")) || string_equal(argument, S8("-no-undefined"));
-        bool soname_pair = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
+        bool soname_pair = link_elf_linker_argument_soname_option(argument);
         bool soname_joined = string_starts_with_sequence(argument, S8("-soname=")) || string_starts_with_sequence(argument, S8("--soname="));
         valid = elf && (no_undefined || (export_dynamic && dynamic_image));
         if (elf && string_equal(argument, S8("-z")))

@@ -170,44 +170,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
     ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
     BUSTER_TEST(arguments, preserved.pointer && string_equal((String8){.pointer = preserved.pointer, .length = preserved.length}, sentinel));
     BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int missing(void); int answer(void) { return missing(); }\n"))));
-    // A SONAME literally named defs must not request -z defs. Inspect the
-    // artifact independently, and then require both undefined-check spellings
-    // to refuse this same source while preserving its previous shared image.
-    String8 shared[] = {S8("-shared"), S8("-g0"), S8("-Wl,-soname,defs"), S8("-o"), output, source};
-    CompilerDriverResult library = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared)));
-    if (BUSTER_REQUIRE(arguments, library.error == COMPILER_DRIVER_ERROR_NONE))
+    // SONAME operands remain literal even when they resemble linker flags.
+    String8 sonames[] = {S8("defs"), S8("--no-undefined"), S8("--soname=literal")};
+    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(sonames); name += 1)
     {
-        FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
-        u64 offset = 0, size = 0, address = 0;
-        if (BUSTER_REQUIRE(arguments, map.bytes.pointer && compiler_driver_test_elf_section_find(map.bytes, S8(".dynstr"), &offset, &size, &address)))
+        String8 shared[] = {S8("-shared"), S8("-g0"), string_format_z(arena, S8("-Wl,-soname,{S8}"), sonames[name]), S8("-o"), output, source};
+        CompilerDriverResult library = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared)));
+        if (BUSTER_REQUIRE(arguments, library.error == COMPILER_DRIVER_ERROR_NONE))
         {
-            u64 dynamic_offset = 0, dynamic_size = 0;
-            bool found_soname = false;
-            if (BUSTER_REQUIRE(arguments, compiler_driver_test_elf_section_find(map.bytes, S8(".dynamic"), &dynamic_offset, &dynamic_size, &address)))
+            FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
+            u64 offset = 0, size = 0, address = 0;
+            if (BUSTER_REQUIRE(arguments, map.bytes.pointer && compiler_driver_test_elf_section_find(map.bytes, S8(".dynstr"), &offset, &size, &address)))
             {
-                for (u64 entry = 0; entry + 16 <= dynamic_size; entry += 16)
+                u64 dynamic_offset = 0, dynamic_size = 0;
+                bool found_soname = false;
+                if (BUSTER_REQUIRE(arguments, compiler_driver_test_elf_section_find(map.bytes, S8(".dynamic"), &dynamic_offset, &dynamic_size, &address)))
                 {
-                    u64 tag = 0, value = 0;
-                    memcpy(&tag, map.bytes.pointer + dynamic_offset + entry, 8);
-                    memcpy(&value, map.bytes.pointer + dynamic_offset + entry + 8, 8);
-                    found_soname |= tag == 14 && value < size && size - value >= 5 && memcmp(map.bytes.pointer + offset + value, "defs", 5) == 0;
+                    for (u64 entry = 0; entry + 16 <= dynamic_size; entry += 16)
+                    {
+                        u64 tag = 0, value = 0;
+                        memcpy(&tag, map.bytes.pointer + dynamic_offset + entry, 8);
+                        memcpy(&value, map.bytes.pointer + dynamic_offset + entry + 8, 8);
+                        found_soname |= tag == 14 && value < size && size - value > sonames[name].length &&
+                                       memcmp(map.bytes.pointer + offset + value, sonames[name].pointer, sonames[name].length) == 0 &&
+                                       map.bytes.pointer[offset + value + sonames[name].length] == 0;
+                    }
                 }
+                BUSTER_TEST(arguments, found_soname);
             }
-            BUSTER_TEST(arguments, found_soname);
-        }
-        ByteSlice saved = {.pointer = arena_allocate(arena, u8, map.bytes.length), .length = map.bytes.length};
-        if (map.bytes.length) memcpy(saved.pointer, map.bytes.pointer, map.bytes.length);
-        file_map_unmap(map);
-        String8 undefined_options[] = {S8("-Wl,--no-undefined"), S8("-Wl,-z,defs")};
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(undefined_options); index += 1)
-        {
-            shared[2] = undefined_options[index];
-            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared)));
-            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
-            FileMapRead unchanged = file_map_read(arena, output, (FileReadOptions){0});
-            BUSTER_TEST(arguments, unchanged.bytes.pointer && unchanged.bytes.length == saved.length &&
-                                       memcmp(unchanged.bytes.pointer, saved.pointer, saved.length) == 0);
-            file_map_unmap(unchanged);
+            ByteSlice saved = {.pointer = arena_allocate(arena, u8, map.bytes.length), .length = map.bytes.length};
+            if (map.bytes.length) memcpy(saved.pointer, map.bytes.pointer, map.bytes.length);
+            file_map_unmap(map);
+            String8 undefined_options[] = {S8("-Wl,--no-undefined"), S8("-Wl,-z,defs")};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(undefined_options); index += 1)
+            {
+                shared[2] = undefined_options[index];
+                CompilerDriverResult refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
+                FileMapRead unchanged = file_map_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, unchanged.bytes.pointer && unchanged.bytes.length == saved.length &&
+                                           memcmp(unchanged.bytes.pointer, saved.pointer, saved.length) == 0);
+                file_map_unmap(unchanged);
+            }
         }
     }
     scratch_end(temporary);
