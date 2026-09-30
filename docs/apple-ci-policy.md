@@ -47,6 +47,10 @@ retained work fails. Historical timing inventories remain accepted only by
 the timing reader and stay in separate workflow/runner cohorts; they cannot
 certify a live `CI complete` run.
 
+The merge-queue watcher's live step budgets match the five desktop release
+lanes. Its separate historical Intel budget preserves cancellation of old
+workflow revisions and the #1866 incident regression; it schedules no work.
+
 ## Compiler and retirement boundaries
 
 The compiler's Apple x86-64 ABI, machine-code, Mach-O and platform sources are
