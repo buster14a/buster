@@ -1419,9 +1419,13 @@ code directory as `program-<stage>-<row>-<side>`, mode 0500. The code
 directory is service-private and no launch's sandbox covers it. Before each
 runtime launch, outside the timer, the service copies that program into a
 fresh step directory `runtime-<stage>-<sequence>` in the work directory
-(`O_CREAT | O_EXCL`, mode 0700, `fsync`), re-verifies the digest from the new
+(`O_CREAT | O_EXCL`, mode 0700), re-verifies the digest from the new
 descriptor and takes the launch's identity by `fstat` of it
-(`bq_retirement_unit_campaign_program`); a label-1 runtime command must also
+(`bq_retirement_unit_campaign_program`). The copy is not fsynced: the rehash
+and the exec read the page cache, and the step directory is retired after its
+launch with no later step or attempt reading it, so a flush of the file and
+the directory on every runtime launch would buy nothing. A label-1 runtime
+command must also
 be the gate's sealed runtime command for its side (the A/A second label's is
 not sealed, like its compiler command). A successful launch retires every
 file of its step directory and the directory; a subdirectory left there fails
@@ -1446,7 +1450,10 @@ directory. The producer is a child subreaper, so such a child becomes its own
 as its parents exit. After every launch (untimed batch, timed compile, timed
 runtime), outside the timer and before any output of it is kept, the driver
 requires the producer to have no child (`bq_retirement_unit_campaign_alone`,
-`tp_process_children`); a survivor is killed and reaped
+`tp_process_children`, which reads the producer's own thread child lists,
+`/proc/self/task/<tid>/children`, and falls back to reading every
+`/proc/<pid>/stat` only on a kernel without them: a whole-host scan per
+launch cost milliseconds each); a survivor is killed and reaped
 (`tp_process_children_sweep`) and the launch fails with `after`
 `BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS`, retained like any failure.
 The final sweep in `bq_retirement_worker_campaign_run` stays.
@@ -1485,6 +1492,18 @@ job 86 a SIGTERM during A/A, job 87 the deadline expiring during A/A, and
 job 88 a detached (`setsid`) sleeper left by its first second-label compile,
 found and killed right after that launch; each with the keeper stopped and
 nothing left running.
+
+Job 82 is the one full campaign and its launch count is fixed: the census
+fixture's 145 untimed object groups give 580 untimed batches, and each stage
+runs 2 × (2 rounds × 60 pairs + 2 warm-ups) = 244 launches for each of its 20
+timed units (18 groups and 2 runtime rows), 4,880 per stage, 10,340 in all;
+60 pairs is the contract's minimum. The failure jobs stop early. Job 85 stops
+at its first untimed launch. Job 86 is terminated as soon as its first A/A
+second-label launch leaves the stand-in's marker, and job 88 fails right after
+that launch. Only job 87 must spend its deadline margin in A/A. Per launch,
+the descendant check reads the producer's own child lists, and the stand-in
+forks one `cat` per file it writes.
+
 `bq_prep_test_worker_store_plan` covers the declaration, the retained-entry
 equality and the control-entry reservation at the exact store boundary, and
 `bq_prep_campaign_documents` checks sized bytes against written bytes. The

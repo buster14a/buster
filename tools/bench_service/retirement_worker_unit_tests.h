@@ -124,12 +124,15 @@ typedef enum BqPrepWorkerUnitMode
     BQ_PREP_WORKER_UNIT_RUN,
     BQ_PREP_WORKER_UNIT_TERMINATE,
     BQ_PREP_WORKER_UNIT_KILL_PRODUCER,
-    /* SIGTERM to the unit a few seconds after MEASURING is acknowledged. */
+    /* SIGTERM to the unit inside A/A: once the first second-label launch
+     * left the stand-in's marker, at most a few seconds after MEASURING. */
     BQ_PREP_WORKER_UNIT_TERMINATE_MEASURING,
 } BqPrepWorkerUnitMode;
 
-/* The MEASURING-to-SIGTERM delay: past the bind, documents and store plan,
- * inside A/A (whose second-label launches sleep a second for that job). */
+/* The bound on the MEASURING-to-SIGTERM wait when no marker appears: past
+ * the bind, documents and store plan, inside A/A (whose second-label
+ * launches sleep a second for that job). The marker normally ends it within
+ * one 50 ms poll of that launch's start. */
 #define BQ_PREP_WORKER_UNIT_TERMINATE_DELAY_MS 4000u
 
 typedef struct BqPrepWorkerUnitRun
@@ -264,7 +267,8 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const
  * execution deadline `milliseconds` after the handoff. mode TERMINATE sends
  * SIGTERM to the unit once the hanging generate recorded its pid;
  * KILL_PRODUCER then kills the producer (the broker CLI's parent);
- * TERMINATE_MEASURING sends SIGTERM to the unit
+ * TERMINATE_MEASURING sends SIGTERM to the unit once the stand-in's A/A
+ * marker exists (BQ_RETIREMENT_STAND_IN_AA_MARKER), or at the latest
  * BQ_PREP_WORKER_UNIT_TERMINATE_DELAY_MS after it acknowledged MEASURING.
  * result, when given, receives what the unit left in its result root. */
 BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitRun bq_prep_worker_unit_drive(BqPrepOracleFixture* fixture,
@@ -348,8 +352,11 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitRun bq_prep_worker_unit_drive(BqPrepOracleFi
                 open_channel = send(phase, message, BQ_PHASE_V2_MESSAGE_BYTES, MSG_NOSIGNAL) == BQ_PHASE_V2_MESSAGE_BYTES;
             if (open_channel && sent == BQ_PHASE_MEASURING) run.measuring_ms = bq_worker_monotonic_milliseconds();
         }
+        struct stat marker;
         if (mode == BQ_PREP_WORKER_UNIT_TERMINATE_MEASURING && !acted && run.measuring_ms &&
-            bq_worker_monotonic_milliseconds() >= run.measuring_ms + BQ_PREP_WORKER_UNIT_TERMINATE_DELAY_MS)
+            (fstatat(attempt->attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY "/work/"
+                     BQ_RETIREMENT_STAND_IN_AA_MARKER, &marker, AT_SYMLINK_NOFOLLOW) == 0 ||
+             bq_worker_monotonic_milliseconds() >= run.measuring_ms + BQ_PREP_WORKER_UNIT_TERMINATE_DELAY_MS))
             acted = kill(unit, SIGTERM) == 0;
         pid_t driver = acted || mode == BQ_PREP_WORKER_UNIT_TERMINATE_MEASURING ? 0 :
                        bq_prep_worker_unit_driver(fixture, &attempt->job);

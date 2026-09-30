@@ -16,19 +16,27 @@
  * the fixture's untimed contract names the timed batch target). They prove the
  * campaign's mechanics, never a compiler. Jobs select behaviours by the work
  * directory's path: job 85 fails every launch; jobs 86 and 87 sleep a second
- * in every A/A second-label launch; job 88's second-label launches leave a
- * detached (`setsid`) sleeper behind, its pid in escaped.pid in the work
- * directory. The two sides differ only in their
- * comment, so their digests differ.
+ * in every A/A second-label launch, and job 86's also leave
+ * BQ_RETIREMENT_STAND_IN_AA_MARKER in the work directory, so the fixture's
+ * SIGTERM lands in the first of them instead of after a fixed delay; job 88's
+ * second-label launches leave a detached (`setsid`) sleeper behind, its pid
+ * in escaped.pid in the work directory. Every launch costs one dash exec
+ * and one `cat` per file it writes (plus `chmod` for an executable): the
+ * path test reads $PWD, which dash sets from getcwd at start-up, instead of
+ * forking for $(pwd). The two sides differ only in their comment, so their
+ * digests differ.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_STAND_IN_COMPILER_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_STAND_IN_COMPILER_H
 
+#define BQ_RETIREMENT_STAND_IN_AA_MARKER "aa.started"
+
 #define BQ_RETIREMENT_STAND_IN_COMPILER(side) \
     "#!/bin/sh\n# stand-in compiler " side "\n" \
-    "case \"$(pwd)\" in\n" \
+    "case \"$PWD\" in\n" \
     "  */job-85-attempt-*) exit 9 ;;\n" \
-    "  */job-86-attempt-*|*/job-87-attempt-*) case \"$*\" in *--label=2*) sleep 1 ;; esac ;;\n" \
+    "  */job-86-attempt-*) case \"$*\" in *--label=2*) : > " BQ_RETIREMENT_STAND_IN_AA_MARKER "; sleep 1 ;; esac ;;\n" \
+    "  */job-87-attempt-*) case \"$*\" in *--label=2*) sleep 1 ;; esac ;;\n" \
     "  */job-88-attempt-*) case \"$*\" in *--label=2*)\n" \
     "    setsid sh -c 'exec sleep 60' </dev/null >/dev/null 2>&1 & echo $! > escaped.pid ;; esac ;;\n" \
     "esac\n" \

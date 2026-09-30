@@ -291,11 +291,64 @@ static void tp_cancel_handler(int signal_number)
 
 #ifdef __linux__
 #include <dirent.h>
-/* This process's children through /proc, other than `allowed` (0: none). A
- * child subreaper's escaped descendants (a `setsid` grandchild of a launch)
- * are among them once their parents exit; zombies count. Up to capacity pids
- * go to found. Returns the count, or UINT32_MAX when /proc cannot be read. */
-static inline uint32_t tp_process_children(pid_t allowed, pid_t* found, uint32_t capacity)
+/* This process's children from each of its threads' /proc children lists
+ * (/proc/self/task/<tid>/children, CONFIG_PROC_CHILDREN), which the kernel
+ * builds from the thread's own child list: zombies included, and a
+ * reparented orphan is on the list of the thread that adopted it. One small
+ * read per thread instead of a /proc/<pid>/stat read per process on the
+ * host, which the per-launch check below cannot afford. Returns the count
+ * of children other than `allowed` (up to capacity pids go to found), or
+ * UINT32_MAX when the main thread's list cannot be read (a kernel without
+ * it). A thread that exits during the walk hands its children to another
+ * thread; the campaign producer is single-threaded. */
+static inline uint32_t tp_process_children_listed(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    char path[64];
+    int length = snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    int probe = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    DIR* tasks = probe >= 0 ? opendir("/proc/self/task") : NULL;
+    if (probe >= 0) close(probe);
+    uint32_t count = tasks ? 0 : UINT32_MAX;
+    for (struct dirent* entry = tasks ? readdir(tasks) : NULL; entry && count != UINT32_MAX; entry = readdir(tasks))
+    {
+        char listed[288];
+        length = entry->d_name[0] >= '1' && entry->d_name[0] <= '9' ?
+            snprintf(listed, sizeof(listed), "/proc/self/task/%s/children", entry->d_name) : -1;
+        int file = length > 0 && (size_t)length < sizeof(listed) ? open(listed, O_RDONLY | O_CLOEXEC) : -1;
+        /* Space-separated decimal pids; a number may span two reads. */
+        char text[4096];
+        long pid = 0;
+        ssize_t read_bytes = file >= 0 ? read(file, text, sizeof(text)) : 0;
+        while (read_bytes > 0)
+        {
+            for (ssize_t at = 0; at < read_bytes; ++at)
+            {
+                int digit = text[at] >= '0' && text[at] <= '9';
+                if (digit) pid = pid * 10 + (text[at] - '0');
+                if (!digit && pid > 0 && (pid_t)pid != allowed)
+                {
+                    if (count < capacity) found[count] = (pid_t)pid;
+                    count += 1;
+                }
+                if (!digit) pid = 0;
+            }
+            read_bytes = read(file, text, sizeof(text));
+        }
+        if (pid > 0 && (pid_t)pid != allowed)
+        {
+            if (count < capacity) found[count] = (pid_t)pid;
+            count += 1;
+        }
+        if (file >= 0) close(file);
+        if (read_bytes < 0) count = UINT32_MAX;
+    }
+    if (tasks) closedir(tasks);
+    return count;
+}
+
+/* The same answer from every /proc/<pid>/stat on the host (its parent
+ * field), for a kernel without the thread lists. */
+static inline uint32_t tp_process_children_scanned(pid_t allowed, pid_t* found, uint32_t capacity)
 {
     DIR* listing = opendir("/proc");
     uint32_t count = listing ? 0 : UINT32_MAX;
@@ -321,6 +374,18 @@ static inline uint32_t tp_process_children(pid_t allowed, pid_t* found, uint32_t
         }
     }
     if (listing) closedir(listing);
+    return count;
+}
+
+/* This process's children through /proc, other than `allowed` (0: none). A
+ * child subreaper's escaped descendants (a `setsid` grandchild of a launch)
+ * are among them once their parents exit; zombies count. Up to capacity pids
+ * go to found. Returns the count, or UINT32_MAX when /proc cannot be read:
+ * the thread lists when the kernel has them, else the host scan. */
+static inline uint32_t tp_process_children(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    uint32_t count = tp_process_children_listed(allowed, found, capacity);
+    if (count == UINT32_MAX) count = tp_process_children_scanned(allowed, found, capacity);
     return count;
 }
 
