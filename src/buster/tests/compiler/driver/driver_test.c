@@ -8262,7 +8262,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
             String8 node_arguments[] = {node, S8("test")};
             CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer-policy"), S8("ready-stamped-complete"), S8("ready-complete"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline, completion_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && run.node_ready && run.node_done && run.node_exit &&
                                        run.done_uptime_microseconds == 250000 && run.exit_uptime_microseconds == 260000 &&
                                        compiler_driver_test_wasm_node_succeeded(run));
@@ -8273,7 +8273,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
             String8 node_arguments[] = {node, S8("test")};
             CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer-policy"), S8("stamped-then-teardown-hang"), S8("ready-stamped-complete"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline, timeout_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && run.readiness_files_ok && run.startup_ready && run.wait.timed_out &&
                                        run.terminal_marker && run.node_done && run.node_exit &&
                                        run.wait_microseconds <= timeout_upper_bound);
@@ -8284,7 +8284,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
             String8 node_arguments[] = {node, S8("test")};
             CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer-policy"), S8("stamped-then-event-loop-hang"), S8("ready-stamped-complete"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline, timeout_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && run.readiness_files_ok && run.startup_ready && run.wait.timed_out &&
                                        run.terminal_marker && run.node_done && !run.node_exit &&
                                        run.wait_microseconds <= timeout_upper_bound);
@@ -8295,7 +8295,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
             String8 node_arguments[] = {node, S8("test")};
             CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer-policy"), S8("stamp-without-summary"), S8("ready-stamped-complete"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline, completion_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && !run.wait.timed_out && run.node_done && run.node_exit && !run.terminal_marker &&
                                        string_equal(compiler_driver_test_wasm_node_status(run), S8("incomplete-output")) &&
                                        !compiler_driver_test_wasm_node_succeeded(run));
@@ -8304,7 +8304,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
             String8 node_arguments[] = {node, S8("test")};
             CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer-policy"), S8("malformed-stamp"), S8("ready-stamped-complete"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline, completion_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && !run.wait.timed_out && !run.node_done && !run.terminal_marker &&
                                        !compiler_driver_test_wasm_node_succeeded(run));
         }
