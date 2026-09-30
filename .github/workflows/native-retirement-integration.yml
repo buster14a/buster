@@ -656,6 +656,26 @@ jobs:
           printf '{\n  "status": "published",\n  "commit": "%s",\n  "tree": "%s",\n  "evidence_sha256": "%s"\n}\n' \
             "$commit" "$final_tree" "$evidence" \
             > "$RUNNER_TEMP/native-retirement/publication.json"
+          # A bot-owned catch-up (#1893) is queued by the writer, not its
+          # opener: GitHub starts no merge_group workflows for an entry that
+          # GITHUB_TOKEN enqueued, so enable auto-merge with the publication
+          # credential, replacing any enablement the built-in token made.
+          catch_up_owner=$(jq -r '"\(.user.login)/\(.user.type)"' <<<"$pr_json")
+          if [[ "$head_ref" == native-retirement/catch-up && "$catch_up_owner" == 'github-actions[bot]/Bot' ]]; then
+            if [[ "$AUTOMATIC_PR_CI" != true ]]; then
+              echo '::error::Published catch-up was not queued: enabling auto-merge requires NATIVE_RETIREMENT_PUBLICATION_TOKEN.'
+              exit 1
+            fi
+            node=$(jq -r '.node_id' <<<"$pr_json")
+            enabled_by=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '.auto_merge.enabled_by.login // ""')
+            if [[ -n "$enabled_by" ]]; then
+              GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+                -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' >/dev/null
+            fi
+            GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+              -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' >/dev/null
+          fi
       - name: Retain publication evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
