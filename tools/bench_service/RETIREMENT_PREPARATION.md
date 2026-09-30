@@ -592,7 +592,9 @@ The `tool=` line repeats `n` times. The five lines from `check=` to
   record that does not bind is `BQ_RECIPE_MISMATCH`. A hosted check has
   `argv=0` and `environment=0`, is a `semantic` check, and its pinned output
   is the record's digest. The record schema is provisional until the hosted
-  acceptance workflow publishes it.
+  acceptance workflow publishes it. `retirement_required_checks.py` emits
+  the authority from a reviewed plan (see
+  [Production context generators](#production-context-generators-881)).
 - **Tokens.** An argument or environment value may contain one token:
   `{{binary:0|1}}` (a held matched binary), `{{source:0|1}}` (A's
   materialized root), `{{tool:N}}` or `{{work}}` (the check's new working
@@ -1418,7 +1420,9 @@ stand-in.
    lane F's final binding fills them (see `EXPORT.md`). The
    preparation fixture's context comes from
    `retirement_binding_context_fixture.py`, and its bytes pass the #511
-   validator structurally.
+   validator structurally. A production context comes from
+   `retirement_binding_context.py` (see
+   [Production context generators](#production-context-generators-881)).
 3. **Composition and the authority.** `tp_retirement_compose` (a refusal
    prints its stage), then `tp_retirement_store_receipt_authority` into
    `<attempt>/retirement-authority/` with the result root as the store root:
@@ -1771,6 +1775,85 @@ entry still refuses one.
   the handoff. It is now written only after the handoff completes, so a
   record without a `COMPLETE` handoff can only come from tampering or an
   older build. Recovery should still check the two together.
+
+## Production context generators (#881)
+
+Two tools emit the reviewed, pre-campaign inputs the production profile
+pins. Neither runs in the service; an operator runs them once per admitted
+recipe, reviews the output and pins its digest. Each verifies every input it
+can and fails closed, printing a message and exiting 1, on a missing or
+disagreeing fact. Neither ever replaces an existing output file.
+`retirement_context_generators_test.py` holds their failure-first tests.
+The preparation runner (`bench_service self-test`) runs both tools' output
+through the real importers and checkers: `bq_prep_worker_unit_production_context`
+and `bq_prep_worker_unit_generated_checks`, in `retirement_worker_unit_tests.h`.
+
+### The binding-context generator
+
+`retirement_binding_context.py --inputs INPUTS --evidence-root ROOT --census
+CENSUS --binaries-record RECORD --profile PROFILE --output OUTPUT` writes
+`native-retirement-performance-v1.binding-context`. The bytes are exactly
+what `bq_retirement_worker_binding_import` and
+`bq_retirement_worker_binding_check` accept:
+
+- the header;
+- one canonical-JSON line per section, in the importer's order;
+- `admission=`;
+- the admission-receipt sentinel as `execution.host`'s first member.
+
+The tool re-parses its own bytes with that layout (`check_context`) before
+it writes them. `--template` prints the INPUTS shape.
+
+| Input | Source | Verified |
+|---|---|---|
+| Contract source | INPUTS path under ROOT, plus commit and tree | Hashed; must equal PROFILE `contract-sha256=` |
+| Six pinned #508 support files | CENSUS `support.tsv`, `manifest.txt`, `inputs.tsv`, `rows.tsv`, `performance-rows.json`, `validator-report.json`, published as `census/<name>` | Hashed; each must equal its PROFILE pin |
+| Other support files, validator source, closure, requested work | INPUTS paths under ROOT | Hashed; #511 support and requested-work checks, including the root digests |
+| Population | Derived from the census performance rows | Row count, rows digest, axes, family and source digests; #511 population check |
+| Subject binaries | INPUTS paths under ROOT | Hashed; must equal RECORD's digests (the matched-build import, `BQ-RETIREMENT-BINARIES-V2`) |
+| Subject commits, snapshots and build receipts | INPUTS | The build receipts must bind each snapshot and binary to the producer (#511 `_check_subject_receipts`); the two commits and trees must differ |
+| Producer, measurement, service, lease receipt, provenance receipts, admission record | INPUTS paths under ROOT, plus tokens and commits | Hashed; #511 section checks |
+| **Host facts (#422)** | INPUTS `host`: `machine_id`, the qualification receipt and the host profile | Required, never defaulted. Both receipts must name the machine, the native target and the lease protocol. The receipt must qualify the host for the profile's id and version, and the profile must be native-only |
+| Campaign policy | INPUTS `campaign`: seed, pairs per round, resamples, bootstrap members | Seed a positive uint64; pairs even and in 60..254; resamples in 100000..1000000; bootstrap members equal to the derived family's count |
+
+The decision rules are the approved #511 constants plus the campaign values.
+Every section passes the #511 validator's structural check, and every
+artifact path is unique.
+
+The host facts and the qualification and host-profile receipts need #422
+(the qualified host). The campaign values, the census and the binaries need
+9700X data: the frozen #426 values, the full census, and the matched build
+of the admitted pair on the service host. Until those exist, only the test
+record (`retirement_binding_context_fixture.py --production-inputs`) can
+drive the tool. With the record's own binaries its output is byte-identical
+to the fixture generator's.
+
+One admitted context pins exactly one baseline/candidate pair (gap audit
+N9). The subjects' binary digests are in the context, and
+`bq_retirement_worker_binding_check` requires them to equal the gate's held
+binaries. A rebuild that yields other bytes, or another pair, needs a new
+context and a new `binding-context-sha256=` pin.
+
+### The required-checks generator
+
+`retirement_required_checks.py --plan PLAN --checks-dir CHECKS --hosted-record
+RECORD --output OUTPUT [--census CENSUS]` writes
+`native-retirement-performance-v1.required-checks` in the canonical text
+[above](#the-required-check-authority).
+
+| Input | Verified |
+|---|---|
+| PLAN (`bq-retirement-required-checks-plan-v1`): the sealed projection's support and census-rows pins, population seal, native target and row counts; A's candidate commit and tree; tool names; the checks | Every field against the importer's bounds, token grammar and environment order, and the whole set against its coverage rules |
+| CHECKS (installed as `native-retirement-performance-v1.checks/`) | Each named tool is hashed and must be a regular ELF executable; the directory holds nothing else |
+| RECORD (`BQ-RETIREMENT-HOSTED-ACCEPTANCE-V1`, provisional) | Consumed, never produced here. It must name the plan's candidate commit and tree and hold `lane=<target> passed` for every hosted check. Its digest becomes `hosted=` and each hosted check's output |
+| CENSUS (optional) | The support and census-rows pins must be its `support.tsv` and `rows.tsv` digests |
+
+The population seal is the C projection's
+(`bq_retirement_oracle_population_hash`) and cannot be recomputed in Python.
+The importer re-derives it and refuses a mismatch. The workflow that
+publishes the hosted record is separate work; until it exists, the record
+schema stays provisional. Coverage needs #422 for the native target's native
+checks and 9700X data for the projection facts.
 
 ## Capacity derivation
 

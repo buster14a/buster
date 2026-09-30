@@ -91,7 +91,15 @@
  * bq_prep_worker_unit_forged), and the binding writer's refusals
  * (bq_prep_worker_unit_binding_refusals); a tampered manifest or bundle digest
  * and a missing context chain (bq_prep_worker_unit_result_refusals). Each
- * section's wall time is printed (bq_prep_test_timing). */
+ * section's wall time is printed (bq_prep_test_timing).
+ *
+ * #881 production generators: retirement_required_checks.py over the
+ * reference projection's plan emits exactly the installed authority, which
+ * the importer accepts (bq_prep_worker_unit_generated_checks), and
+ * retirement_binding_context.py over the fixture's test record with the
+ * gate's held binaries emits a context the binding check accepts and whose
+ * swapped, missing or moved-sentinel variants it refuses
+ * (bq_prep_worker_unit_production_context). */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 
@@ -1213,6 +1221,131 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_composition(BqPrepOracleFixture* fi
     return ok;
 }
 
+/* text as a JSON string into out (the checks' scripts are printable ASCII,
+ * so only quotes and backslashes are escaped); its length, or 0. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_worker_unit_json_text(char* out, u32 capacity, char const* text)
+{
+    u32 used = 0;
+    bool ok = capacity > 2u;
+    if (ok) out[used++] = '"';
+    for (size_t index = 0; ok && text[index]; index += 1)
+    {
+        ok = used + 3u < capacity && text[index] >= 0x20 && text[index] <= 0x7e;
+        if (ok && (text[index] == '"' || text[index] == '\\')) out[used++] = '\\';
+        if (ok) out[used++] = text[index];
+    }
+    ok = ok && used + 2u < capacity;
+    if (ok)
+    {
+        out[used++] = '"';
+        out[used] = 0;
+    }
+    return ok ? used : 0;
+}
+
+/* The reviewed check plan (retirement_required_checks.py's PLAN) that
+ * describes exactly the authority bq_check_test_authority composes for these
+ * specs over projection, naming commit as A's candidate. Its length, or 0. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_worker_unit_checks_plan(char* text, u32 capacity,
+    BqRetirementProjection const* projection, char const* commit, char const* tree, BqCheckTestSpec const* specs,
+    u32 count)
+{
+    BqRetirementPrepared const* prepared = &projection->prepared;
+    u32 eligible = 0;
+    for (u32 row = 0; row < prepared->rows; row += 1) eligible += projection->rows[row].compiler_eligible != 0;
+    int used = snprintf(text, capacity, "{\"schema\":\"bq-retirement-required-checks-plan-v1\",\"projection\":{"
+        "\"support_sha256\":\"%s\",\"census_sha256\":\"%s\",\"population_sha256\":\"%s\",\"native_target\":%u,"
+        "\"rows\":%u,\"object_rows\":%u,\"eligible_rows\":%u},\"candidate\":{\"commit\":\"%s\",\"tree\":\"%s\"},"
+        "\"tools\":[\"sh\"],\"checks\":[", prepared->support_sha256, prepared->census_sha256,
+        projection->population_sha256, prepared->native_target, prepared->rows, prepared->object_rows, eligible,
+        commit, tree);
+    bool ok = used > 0 && (u32)used < capacity;
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        BqCheckTestSpec const* spec = specs + index;
+        char script[1024], output[64], output_sha256[SHA256_HEX_CAPACITY];
+        int output_length = snprintf(output, sizeof(output), "check-%u ok\n", index);
+        bq_digest(output, (u32)output_length, (char8*)output_sha256);
+        int line = snprintf(text + used, capacity - (u32)used, "%s{\"kind\":\"%s\",\"target\":%u,\"rows\":%u,"
+                            "\"evidence\":\"%s\",\"timeout_seconds\":%u,\"memory_mib\":1024,"
+                            "\"configuration\":\"fixture %s %u\",", index ? "," : "", spec->kind, spec->target,
+                            spec->rows, spec->evidence, spec->timeout, spec->kind, spec->target);
+        ok = line > 0 && (u32)line < capacity - (u32)used;
+        used += ok ? line : 0;
+        ok = ok && (!spec->script || bq_prep_worker_unit_json_text(script, sizeof(script), spec->script));
+        line = !ok ? -1 : !spec->script ? snprintf(text + used, capacity - (u32)used, "\"argv\":[],\"environment\":[]}") :
+               snprintf(text + used, capacity - (u32)used, "\"stdout_sha256\":\"%s\",\"argv\":[\"{{tool:0}}\","
+                        "\"-c\",%s,\"check-%u\",\"{{binary:%u}}\",\"{{source:0}}\",\"{{binary:%u}}\",\"{{source:1}}\","
+                        "\"{{tool:0}}\"],\"environment\":[\"LC_ALL=C\",\"PATH=/usr/bin:/bin\",\"WORK={{work}}\"]}",
+                        output_sha256, script, index, spec->binary, 1u - spec->binary);
+        ok = line > 0 && (u32)line < capacity - (u32)used;
+        used += ok ? line : 0;
+    }
+    ok = ok && (u32)used + 3u < capacity;
+    if (ok) used += snprintf(text + used, capacity - (u32)used, "]}\n");
+    return ok ? (u32)used : 0;
+}
+
+/* The production required-check generator (retirement_required_checks.py)
+ * over the reference projection (#1020 step 9): a plan of the specs
+ * bq_check_test_install pinned, the installed shell tool and the hosted
+ * acceptance record. Its bytes must be exactly the installed authority,
+ * which the importer accepts for the reference attempt under their own pin;
+ * a plan naming another candidate commit than the record's is refused by the
+ * generator. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_generated_checks(BqPrepOracleFixture* fixture,
+    BqPrepOracleAttempt* reference, BqCheckTestSpec const* specs, u32 count)
+{
+    BqRetirementProjection const* projection = &reference->projection;
+    BqRetirementPreparation const* preparation = &reference->attempt.unit.preparation;
+    char plan_path[256], output[256], tools[256], record[256], other[48];
+    int lengths[4] = {snprintf(plan_path, sizeof(plan_path), "%s/required-checks.plan", fixture->workspaces),
+                      snprintf(output, sizeof(output), "%s/required-checks.generated", fixture->workspaces),
+                      snprintf(tools, sizeof(tools), "%s/" BQ_RETIREMENT_CHECK_TOOLS_DIRECTORY, fixture->recipes),
+                      snprintf(record, sizeof(record), "%s/" BQ_RETIREMENT_HOSTED_ACCEPTANCE_NAME, fixture->recipes)};
+    bool ok = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lengths); index += 1)
+        ok = ok && lengths[index] > 0 && (size_t)lengths[index] < sizeof(plan_path);
+    char* plan = malloc(BQ_CHECK_TEST_AUTHORITY_CAP);
+    char* emit[] = {"python3", "-W", "error", "tools/bench_service/retirement_required_checks.py", "--plan", plan_path,
+                    "--checks-dir", tools, "--hosted-record", record, "--output", output, NULL};
+    /* Refused first: another candidate commit than the record names. */
+    snprintf(other, sizeof(other), "%s", preparation->subjects[1].commit);
+    other[0] = other[0] == 'a' ? 'b' : 'a';
+    u32 length = ok && plan ? bq_prep_worker_unit_checks_plan(plan, BQ_CHECK_TEST_AUTHORITY_CAP, projection, other,
+                                                              preparation->subjects[1].tree, specs, count) : 0;
+    BQ_PREP_CHECK(length && bq_prep_test_write_bytes(plan_path, plan, length) && !bq_prep_test_run(emit) &&
+                  access(output, F_OK) != 0 && unlink(plan_path) == 0);
+    length = ok && plan ? bq_prep_worker_unit_checks_plan(plan, BQ_CHECK_TEST_AUTHORITY_CAP, projection,
+                                                          preparation->subjects[1].commit,
+                                                          preparation->subjects[1].tree, specs, count) : 0;
+    ok = length && bq_prep_test_write_bytes(plan_path, plan, length) && bq_prep_test_run(emit);
+    BQ_PREP_CHECK(ok);
+    int workspaces = open(fixture->workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int recipes = open(fixture->recipes, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    u32 generated_length = 0, installed_length = 0;
+    char* generated = ok && workspaces >= 0 ? bq_prep_worker_unit_slurp(workspaces, "required-checks.generated",
+                                                                        &generated_length) : NULL;
+    char* installed = ok && recipes >= 0 ? bq_prep_worker_unit_slurp(recipes, BQ_RETIREMENT_REQUIRED_CHECKS_NAME,
+                                                                     &installed_length) : NULL;
+    BQ_PREP_CHECK(generated && installed && generated_length == installed_length &&
+                  !memcmp(generated, installed, installed_length));
+    char digest[SHA256_HEX_CAPACITY] = {0}, profile[128];
+    if (generated) bq_digest(generated, generated_length, (char8*)digest);
+    snprintf(profile, sizeof(profile), "required-checks-sha256=%s\n", digest);
+    BqRetirementRequiredChecks checks = {.hosted = -1};
+    BQ_PREP_CHECK(generated && bq_retirement_required_checks_import_profile(fixture->installed_fd,
+                      string_from_pointer(profile), &reference->attempt.unit.job, preparation, projection, &checks) ==
+                      BQ_OK && checks.count == count && checks.tool_count == 1);
+    if (checks.owned) BQ_PREP_CHECK(bq_retirement_required_checks_release(&checks));
+    if (workspaces >= 0) close(workspaces);
+    if (recipes >= 0) close(recipes);
+    BQ_PREP_CHECK(unlink(plan_path) == 0 && (!generated || unlink(output) == 0));
+    free(generated);
+    free(installed);
+    free(plan);
+}
+
 /* One retirement worker-unit driven by the real coordinator path (#881 PR 4,
  * now reaching MEASURED): the attempt is the queue's active preparing job,
  * the lease and phase channel are handed to a forked worker-unit, and
@@ -1707,6 +1840,140 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_derivation(BqPrepOracleFixture* fix
     free(record);
 }
 
+/* A held binary's bytes into the new file `path` (mode 0600). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_copy_held(int descriptor, char const* path)
+{
+    int file = descriptor >= 0 ? open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    char buffer[65536];
+    off_t offset = 0;
+    ssize_t got = 1;
+    bool ok = file >= 0;
+    while (ok && got > 0)
+    {
+        got = pread(descriptor, buffer, sizeof(buffer), offset);
+        ok = got >= 0 && (got == 0 || bq_write_all(file, (u8 const*)buffer, (u32)got));
+        offset += ok ? (off_t)got : 0;
+    }
+    ok = ok && offset > 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* Whether bytes (length, NUL-terminated) with `edit` applied parse as a
+ * context and pass the check. edit 0 keeps them; 1 swaps the measurement and
+ * population lines; 2 drops the provenance line; 3 moves the admission
+ * sentinel out of execution.host to execution's own first member (still
+ * canonical, since aa_admission_receipt sorts before host). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_context_accepted(char const* bytes, u32 length, u32 edit,
+    String8 profile, BqRetirementCorrectness const* gate, char const family_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementUnitCampaignPins const* pins, TpRetirementPlan const* plan)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+    BqRetirementWorkerBindingContext context = {.bytes = malloc(length + 1u), .length = 0};
+    char const* measurement = strstr(bytes, "\nmeasurement=");
+    char const* population = measurement ? strstr(measurement, "\npopulation=") : NULL;
+    char const* producer = population ? strstr(population, "\nproducer=") : NULL;
+    char const* provenance = producer ? strstr(producer, "\nprovenance=") : NULL;
+    char const* requested = provenance ? strstr(provenance, "\nrequested_work=") : NULL;
+    char const* host = strstr(bytes, "\nexecution={\"host\":{" BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL ",");
+    size_t sentinel = strlen(BQ_RETIREMENT_WORKER_ADMISSION_SENTINEL);
+    bool ok = arena && context.bytes && requested && host;
+    u8* out = context.bytes;
+    if (ok && edit == 0) memcpy(out, bytes, length);
+    if (ok && edit == 1)
+    {
+        size_t head = (size_t)(measurement - bytes), first = (size_t)(population - measurement);
+        size_t second = (size_t)(producer - population);
+        memcpy(out, bytes, head);
+        memcpy(out + head, population, second);
+        memcpy(out + head + second, measurement, first);
+        memcpy(out + head + second + first, producer, length - (size_t)(producer - bytes));
+    }
+    if (ok && edit == 2)
+    {
+        size_t head = (size_t)(provenance - bytes);
+        memcpy(out, bytes, head);
+        memcpy(out + head, requested, length - (size_t)(requested - bytes));
+    }
+    if (ok && edit == 3)
+    {
+        /* "\nexecution={" SENTINEL ",\"host\":{" rest-after-sentinel-comma */
+        size_t head = (size_t)(host - bytes) + strlen("\nexecution={");
+        size_t at = head + strlen("\"host\":{");
+        memcpy(out, bytes, head);
+        memcpy(out + head, bytes + at, sentinel);
+        out[head + sentinel] = ',';
+        memcpy(out + head + sentinel + 1u, "\"host\":{", strlen("\"host\":{"));
+        memcpy(out + at + sentinel + 1u, bytes + at + sentinel + 1u, length - (at + sentinel + 1u));
+    }
+    context.length = edit == 2 ? (u32)(length - (size_t)(requested - provenance)) : length;
+    ok = ok && bq_retirement_worker_binding_parse(arena, &context) &&
+         bq_retirement_worker_binding_check(&context, profile, gate, family_sha256, pins, plan);
+    bq_retirement_worker_binding_release(&context);
+    if (arena) arena_destroy(arena, 1);
+    return ok;
+}
+
+/* The production context generator (retirement_binding_context.py) over the
+ * preparation fixture's test record as its inputs (the fixture's
+ * --production-inputs over the installed census, with the replayed gate's
+ * two held binaries copied out and lane D's frozen campaign values): the
+ * context parses and passes bq_retirement_worker_binding_check against the
+ * inputs' profile pins (the fixture profile's census pins and a contract pin
+ * of the record's contract source) and this campaign, and is refused with
+ * two sections swapped, with a section dropped and with the admission
+ * sentinel moved out of execution.host. Run twice, the generator emits the
+ * same bytes. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_production_context(BqPrepOracleFixture* fixture,
+    BqRetirementCorrectness const* gate, BqRetirementDocumentFamily const* family,
+    BqRetirementUnitCampaignPins const* pins, TpRetirementPlan const* plan, BqRetirementHeldBinaries const* held)
+{
+    char root[] = "/tmp/bq-production-context-XXXXXX";
+    char paths[8][96], values[3][24];
+    static char const* const names[8] = {"baseline", "candidate", "inputs", "inputs/inputs.json", "inputs/evidence",
+                                         "inputs/binaries.record", "inputs/profile", "context"};
+    bool ok = mkdtemp(root) != NULL;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        int named = snprintf(paths[index], sizeof(paths[index]), "%s/%s", root, names[index]);
+        ok = named > 0 && (size_t)named < sizeof(paths[index]);
+    }
+    snprintf(values[0], sizeof(values[0]), "%" PRIu64, (uint64_t)pins->seed);
+    snprintf(values[1], sizeof(values[1]), "%u", pins->pairs);
+    snprintf(values[2], sizeof(values[2]), "%u", pins->resamples);
+    char* inputs[] = {"python3", "-W", "error", "tools/bench_service/retirement_binding_context_fixture.py",
+                      "--production-inputs", paths[2], fixture->census, paths[0], paths[1], values[0], values[1],
+                      values[2], NULL};
+    char* generate[] = {"python3", "-W", "error", "tools/bench_service/retirement_binding_context.py", "--inputs",
+                        paths[3], "--evidence-root", paths[4], "--census", fixture->census, "--binaries-record",
+                        paths[5], "--profile", paths[6], "--output", paths[7], NULL};
+    ok = ok && bq_prep_worker_unit_copy_held(held->descriptors[0], paths[0]) &&
+         bq_prep_worker_unit_copy_held(held->descriptors[1], paths[1]) && mkdir(paths[2], 0700) == 0 &&
+         bq_prep_test_run(inputs) && bq_prep_test_run(generate);
+    BQ_PREP_CHECK(ok);
+    int directory = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    u32 length = 0, profile_length = 0, again_length = 0;
+    char* bytes = directory >= 0 ? bq_prep_worker_unit_slurp(directory, "context", &length) : NULL;
+    char* profile = directory >= 0 ? bq_prep_worker_unit_slurp(directory, "inputs/profile", &profile_length) : NULL;
+    /* Deterministic: a second run emits the same bytes. */
+    ok = bytes && profile && unlink(paths[7]) == 0 && bq_prep_test_run(generate);
+    char* again = ok ? bq_prep_worker_unit_slurp(directory, "context", &again_length) : NULL;
+    BQ_PREP_CHECK(again && again_length == length && !memcmp(again, bytes, length));
+    for (u32 edit = 0; bytes && profile && edit < 4; edit += 1)
+    {
+        bool accepted = bq_prep_worker_unit_context_accepted(bytes, length, edit, string_from_pointer(profile), gate,
+                                                             family->sha256, pins, plan);
+        if (accepted != (edit == 0)) fprintf(stderr, "RETIREMENT_PREP production context edit %u accepted %d\n", edit,
+                                             (int)accepted);
+        BQ_PREP_CHECK(accepted == (edit == 0));
+    }
+    if (directory >= 0) close(directory);
+    free(again);
+    free(profile);
+    free(bytes);
+    if (root[0] && access(root, F_OK) == 0) bq_prep_test_cleanup(root);
+}
+
 /* The binding writer's context check (bq_retirement_worker_binding_check)
  * accepts the installed context and refuses, each alone: a pinned support
  * file at another digest, another contract, another candidate or baseline
@@ -1715,7 +1982,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_derivation(BqPrepOracleFixture* fix
  * admission receipt that is not the sentinel or is not execution's first
  * member. A non-canonical section is refused by the parse. */
 BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_binding_refusals(BqPrepOracleFixture* fixture,
-    BqRetirementWorkerUnitSeams const* seams, BqRetirementUnitReplayed const* replayed)
+    BqRetirementWorkerUnitSeams const* seams, BqRetirementUnitReplayed const* replayed,
+    BqRetirementHeldBinaries const* held)
 {
     BqRetirementCorrectness const* gate = &replayed->gate.correctness;
     String8 profile = seams->profile;
@@ -1821,6 +2089,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_binding_refusals(BqPrepOracleFixtur
                   !bq_retirement_worker_binding_check(&shifted, profile, gate, family.sha256, &pins, &plan));
     bq_retirement_worker_binding_release(&shifted);
     if (arena) arena_destroy(arena, 1);
+    if (ready) bq_prep_worker_unit_production_context(fixture, gate, &family, &pins, &plan, held);
     free(installed);
     bq_retirement_documents_partition_release(&timed);
     bq_retirement_documents_population_release(&population);
@@ -2116,6 +2385,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         }
         ok = ok && bq_prep_worker_unit_observe(&row_plan, &observed);
         BQ_PREP_CHECK(ok);
+        if (ok) bq_prep_worker_unit_generated_checks(fixture, reference, specs, BQ_CHECK_TEST_CHECKS);
     }
     ok = ok && mkdirat(fixture->workspaces_fd, "results", 0700) == 0;
     BqRetirementWorkerUnitSeams seams = {
@@ -2229,7 +2499,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
             {
                 bq_prep_worker_unit_derivation(fixture, attempt, &seams, composed, &replayed);
                 bq_prep_test_timing("job-82-derivation");
-                bq_prep_worker_unit_binding_refusals(fixture, &seams, &replayed);
+                bq_prep_worker_unit_binding_refusals(fixture, &seams, &replayed, &reference->built.binaries);
                 bq_prep_test_timing("job-82-binding-refusals");
             }
             BQ_PREP_CHECK(bq_retirement_unit_replayed_release(&replayed));
