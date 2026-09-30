@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CANDIDATE_SHA: 7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+      CANDIDATE_SHA: 52404109119551c6fa270d054a72f1ef0e9c5916
       BASELINE_SHA: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
       ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -21,7 +21,7 @@ jobs:
         run: test "$CI_ENABLED" = true
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+          ref: 52404109119551c6fa270d054a72f1ef0e9c5916
           path: candidate
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -29,6 +29,16 @@ jobs:
           ref: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
           path: baseline
           persist-credentials: false
+      - name: Install Clang 22 from LLVM's signed package repository
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o "$RUNNER_TEMP/llvm-key.asc"
+          gpg --dearmor --output "$RUNNER_TEMP/llvm-key.gpg" "$RUNNER_TEMP/llvm-key.asc"
+          sudo install -m 0644 "$RUNNER_TEMP/llvm-key.gpg" /usr/share/keyrings/buster-validation-llvm.gpg
+          printf '%s\n' 'deb [signed-by=/usr/share/keyrings/buster-validation-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/buster-validation-llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-22 libclang-rt-22-dev lld-22
+          echo /usr/lib/llvm-22/bin >> "$GITHUB_PATH"
       - name: Record exact revisions and build hosted drivers
         run: |
           set -euo pipefail
@@ -84,6 +94,14 @@ jobs:
                       failures += status != 0
           raise SystemExit(bool(failures))
           PY
+      - name: Retain focused results immediately
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1234-focused-52404109119551c6fa270d054a72f1ef0e9c5916
+          path: ${{ runner.temp }}/vla-validation/
+          if-no-files-found: error
+          retention-days: 7
       - name: Candidate full Release suite
         if: ${{ !cancelled() }}
         working-directory: candidate
@@ -114,7 +132,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1234-validation-7f3f5a570e9a6fc8026c4ab2015fd86e58566dca
+          name: issue-1234-validation-52404109119551c6fa270d054a72f1ef0e9c5916
           path: ${{ runner.temp }}/vla-validation/
           if-no-files-found: error
           retention-days: 7

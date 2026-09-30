@@ -5855,6 +5855,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "static int calls;\n"
         "static int three(void) { calls++; return 3; }\n"
         "static int one(void) { calls++; return 1; }\n"
+        "static unsigned long keep_size(unsigned long size) { return size; }\n"
+        "static void *keep_pointer(void *pointer) { return pointer; }\n"
+        "static int parameter_sizes(int n, int values[n])\n"
+        "{ return sizeof(values) != 8 || sizeof(__typeof__(values)) != 8; }\n"
         "struct M { double d; int i; };\n"
         "struct context { unsigned num; };\n"
         "static int type_names(void)\n"
@@ -5873,6 +5877,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    calls = 0;\n"
         "    fail |= sizeof(char[three()][three()]) != 9 || calls != 2;\n"
         "    calls = 0;\n"
+        "    fail |= keep_size(sizeof(int[three()])) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
         "    fail |= _Alignof(struct M[three()]) != 8 || calls != 0;\n"
         "    calls = 0;\n"
         "    fail |= sizeof(sizeof(int[three()])) != sizeof(sizeof(0)) || calls != 0;\n"
@@ -5882,6 +5888,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "{\n"
         "    int fail = 0, n = 3;\n"
         "    int v[n], matrix[2][n], (*pv)[n] = &matrix[0];\n"
+        "    fail |= parameter_sizes(n, v);\n"
         "    calls = 0;\n"
         "    fail |= sizeof(*(pv + one())) != 12 || calls != 1;\n"
         "    fail |= sizeof(*&v) != 12;\n"
@@ -5929,7 +5936,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "        b[1][2] = 37;\n"
         "        fail |= a[1][2] != 37 || sizeof(*b) != 40;\n"
         "        calls = 0;\n"
-        "        int (*p)[three()] = (int (*)[three()])a;\n"
+        "        int (*p)[three()] = keep_pointer((int (*)[three()])a);\n"
         "        fail |= calls != 2 || sizeof(*p) != 12;\n"
         "        free(a);\n"
         "    }\n"
@@ -5939,9 +5946,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "int main(void)\n"
         "{\n"
         "    int fail = type_names();\n"
-        "    fail |= computed_operands();\n"
-        "    fail |= typedef_bounds();\n"
-        "    fail |= heap_and_cast();\n"
+        "    fail |= computed_operands() << 1;\n"
+        "    fail |= typedef_bounds() << 2;\n"
+        "    fail |= heap_and_cast() << 3;\n"
         "    return fail;\n"
         "}\n");
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vla-runtime-types"), S8(".c"));
@@ -5969,7 +5976,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
 #if !BUSTER_ANDROID && !BUSTER_IOS
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        String8 run_arguments[] = {executable};
+                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments),
+                            (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                        {
+                            ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                            String8 context = string_format(temporary.arena,
+                                S8("VLA runtime types: {S8} {S8} {S8}; native status={u32}, timeout={u32}; exit bits: type names=1, computed operands=2, typedef bounds=4, heap/casts=8"),
+                                optimizations[optimization], modes[mode], frontends[frontend], waited.platform_status, (u32)waited.timed_out);
+                            BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS, context);
+                        }
                     }
 #endif
                     scratch_end(temporary);
