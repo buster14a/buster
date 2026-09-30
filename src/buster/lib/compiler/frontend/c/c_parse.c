@@ -5803,6 +5803,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     }
     else if (literal)
     {
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_LITERAL_ANSWERS, 1);
         valid = c_parse_expression_literal_query(machine, arena, preprocess, result, scope, start, end, flags, type_out);
         if (query && valid && !machine->expression_constraint.length)
             *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
