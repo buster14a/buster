@@ -4,6 +4,11 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- Type-embedded constant producers use the protected TYPE query contract
+  described in [foundations](foundations.md). It reads a declaration-point
+  model and returns stable integer facts without entering the live declaration
+  machine. Enum consumers retain the explicit ENUM compatibility mode until
+  their declaration preparation is migrated (#1247).
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and

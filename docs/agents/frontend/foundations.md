@@ -262,6 +262,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   including its machineless `sizeof` path. Migrating that consumer requires
   declaration-owned preparation of source-ordered operand facts; this stage
   adds the protected query without changing enum admission or arithmetic.
+  Its caller supplies the semantic model at the expression's declaration point.
+  Scope alone cannot reconstruct earlier tag completeness from a finished unit;
+  deferred consumers must retain the bindings and layout facts of their operands.
   `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
   active machine on successful and refused queries (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private

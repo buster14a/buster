@@ -1914,7 +1914,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
 BUSTER_C_INTERNAL CTypeId c_parse_type_name_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                          u32 start, u32 end, u32* declarator_start);
 
-BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
                                                                  CPreprocessResult preprocess, CParseResult* result,
                                                                  CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -21690,6 +21690,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 last.integer = c_parse_constant_truth(last);
                 last.is_float = false;
                 last.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
+                {
+                    last.integer_high = 0;
+                    last.float_width = 0;
+                }
                 count -= 1;
                 continue;
             }
@@ -21714,6 +21719,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     last.integer = !c_parse_constant_truth(last);
                     last.is_float = false;
                     last.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                    if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
+                    {
+                        last.integer_high = 0;
+                        last.float_width = 0;
+                    }
                 }
                 else
                 {
@@ -21875,6 +21885,9 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
 // copy's pointers. Scalar-query publication and work counters are private too.
 // New tag bodies are refused by the TYPE-mode scalar step before it can enter
 // the declaration parser. Only signed magnitude, rank and target width escape.
+// The caller supplies the semantic model at the expression's declaration point.
+// A full-unit model may contain later bindings and tag completions; deferred
+// consumers must freeze their operand facts before using this reader.
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                                        CScopeId scope, u32 start, u32 end, String8* syntax_error,
                                                                        u32* syntax_token)
@@ -21960,7 +21973,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
     return constant;
 }
 
-BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
                                                                  CPreprocessResult preprocess, CParseResult* result,
                                                                  CScopeId scope, u32 start, u32 end)
 {
