@@ -1,7 +1,7 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, six
-# independent native mode lanes, four Unix differential lanes and three mobile
+# Build/test policy remains in build.c. Two shards per desktop lane, five
+# independent native mode lanes, three Unix differential lanes and two mobile
 # lanes retain full coverage. See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -149,7 +149,7 @@ jobs:
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
-        lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
+        lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
         shard: [release, checks]
         include:
           - name: Linux x86-64
@@ -166,13 +166,6 @@ jobs:
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
-          - name: macOS x86-64
-            lane: macos-x86_64
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
-            zig_target: x86_64-macos
           - name: macOS AArch64
             lane: macos-aarch64
             runner: macos-26
@@ -286,12 +279,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase workflow-tools --log "$RUNNER_TEMP/buster-ci/resources-workflow-tools.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           workflow_tools_started=$SECONDS
           run_suite() {
             local suite=$1 log=$2 started=$SECONDS status
@@ -394,12 +381,6 @@ jobs:
           set -euo pipefail
           # This step also runs without the Release-only preflight steps.
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase install-zig --log "$RUNNER_TEMP/buster-ci/resources-install-zig.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
       # Ordinary mode retains the previous main-push write policy. Prime mode
@@ -495,12 +476,6 @@ jobs:
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase combinations --log "$RUNNER_TEMP/buster-ci/resources-combinations.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
@@ -663,7 +638,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The mode matrix is independent from the combination matrix on all six
+  # The mode matrix is independent from the combination matrix on all five
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
@@ -688,11 +663,6 @@ jobs:
             platform: unix
             os: linux
             arch: aarch64
-          - name: macOS x86-64 native
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
           - name: macOS AArch64 native
             runner: macos-26
             platform: unix
@@ -786,12 +756,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/modes.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase native-modes --log "$RUNNER_TEMP/buster-ci/resources-native-modes.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           # generate recreates build/, so the driver and logs must live outside it.
           driver="$RUNNER_TEMP/buster-build"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain             --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -942,12 +906,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/differential.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase native-differential --log "$RUNNER_TEMP/buster-ci/resources-native-differential.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           driver="$RUNNER_TEMP/buster-build"
           if [[ ! -f "$BUSTER_CI_OBSERVATION_ROOT/toolchain.json" ]]; then
             "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain               --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -1036,10 +994,6 @@ jobs:
           - name: Android x86-64
             runner: ubuntu-26.04
             os: android
-            arch: x86_64
-          - name: iOS x86-64
-            runner: macos-26-intel
-            os: ios
             arch: x86_64
           - name: iOS AArch64
             runner: macos-26
@@ -1170,18 +1124,12 @@ jobs:
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+          BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/ios.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            python3 tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase ios-simulator --log "$RUNNER_TEMP/buster-ci/resources-ios-simulator.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           ./ios/test_ci.sh --all
 
       - name: Mobile result and reproduction
@@ -1529,8 +1477,8 @@ jobs:
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
         run: |
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All twelve desktop shards | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
-            printf '| All six native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All ten desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"

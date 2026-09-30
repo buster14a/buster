@@ -288,13 +288,6 @@ jobs:
             python: python3
             sanitizer: required
             sanitizer_reason: available
-          - name: macOS x86-64 native
-            runner: macos-26-intel
-            slug: macos-x86_64
-            platform: unix
-            python: python3
-            sanitizer: required
-            sanitizer_reason: available
           - name: macOS AArch64 native
             runner: macos-26
             slug: macos-aarch64
