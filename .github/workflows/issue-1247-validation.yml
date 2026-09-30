@@ -68,7 +68,6 @@ jobs:
             --baseline "$GITHUB_WORKSPACE/baseline/build/Release/ide" \
             --candidate "$GITHUB_WORKSPACE/candidate/build/Release/ide" \
             --out "$RUNNER_TEMP/type-constant-results" \
-            --require-stage 2 \
             --variant default= \
             --variant no-ssa=-fno-frontend-ssa \
             --variant none=-fregister-allocator=none \

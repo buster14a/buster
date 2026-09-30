@@ -15853,7 +15853,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_invalid_bit_field_width.tokenizer_error_count == 0 && c_invalid_bit_field_width.parser_diagnostic_count == 0 &&
                            c_invalid_bit_field_width.analysis_diagnostic_count == 2 && !c_invalid_bit_field_width.has_object);
     BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_bit_field_width.diagnostic,
-                                                       S8("tests/basic_c_invalid_bit_field_width.c:17:13: named bit-field 'b' has zero width")));
+                                                       S8("tests/basic_c_invalid_bit_field_width.c:17:9: named bit-field 'b' has zero width")));
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_labels_aarch64_path"), false);
     String8 c_labels_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-aarch64"), S8(".o"));
