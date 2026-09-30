@@ -193,8 +193,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     return result;
 }
 
-// Static assertions containing local-object sizeof operands must agree in the
-// semantic-only and object actions, including both frontend SSA forms.
+// Static assertions containing local-object sizeof or _Generic operands must
+// agree in the semantic-only and object actions, including both frontend SSA
+// forms.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -242,6 +243,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
+            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+        // #1697: _Generic selects on a block-scope object's type.
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, long: 1, default: 0), \"generic local\");\n"
+            "}\n"), true, {0}},
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"generic local\");\n"
             "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
