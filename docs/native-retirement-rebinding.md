@@ -100,6 +100,12 @@ Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
 
+Pull-request admission (the `Native retirement merge admission` check and the
+rebind job's policy step) evaluates against the trusted main checkout. If main
+advances after that checkout, the step re-fetches the new main into the trusted
+and candidate checkouts and re-evaluates, up to three attempts in total, rather
+than failing the candidate. It fails only if main keeps advancing throughout.
+
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at
 workflow start. A queued predecessor that changes that policy requires a fresh
