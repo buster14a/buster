@@ -207,7 +207,7 @@ cat > "$payload/broker-state-probe.c" <<'PROBE'
 int main(int argc, char** argv)
 {
     if (argc != 5) return 2;
-    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1,
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
                                .operation = BQ_BROKER_START, .stage = BQ_BROKER_OUTER,
                                .job = strtoull(argv[1], NULL, 10), .attempt = strtoull(argv[2], NULL, 10)};
     snprintf(request.base, sizeof(request.base), "%s", argv[3]);

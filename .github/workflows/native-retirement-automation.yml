@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   workflow_run:
-    workflows: [Buster CI, Native retirement trusted integration]
+    workflows: [Buster CI, Native retirement trusted integration, Native retirement catch-up]
     types: [completed]
   schedule:
     - cron: '7,17,27,37,47,57 * * * *'
