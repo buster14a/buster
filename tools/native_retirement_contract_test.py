@@ -448,7 +448,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(records), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(len(set(identities)), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(identities, sorted(identities))
-        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_APPLICABILITY_LEDGER_SHA256)
+        ledger_sha256 = sha(ledger_path.read_bytes())
+        self.assertIn(ledger_sha256, contract.ACCEPTED_APPLICABILITY_LEDGER_SHA256)
+        producer = (ledger_path.parents[1] / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        match = re.search(r'nrc_applicability_ledger_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);', producer)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), ledger_sha256)
         for record in records:
             self.assertIn(record["applicability"], contract.AUTHENTICATED_APPLICABILITY_CLASSES)
             fixture_path = ledger_path.parents[1] / record["fixture"]

@@ -55,6 +55,11 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
 FULL_APPLICABILITY_LEDGER_SHA256 = "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa"
+# #1007 successor: the same 374 identities with only the four
+# tests/basic_c_f80_machine.c fixture_sha256 cells updated to its 7,233-byte successor.
+PROPOSED_APPLICABILITY_LEDGER_SHA256 = "31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9"
+ACCEPTED_APPLICABILITY_LEDGER_SHA256 = (FULL_APPLICABILITY_LEDGER_SHA256,
+                                        PROPOSED_APPLICABILITY_LEDGER_SHA256)
 LEGACY_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
 LEGACY_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
 LEGACY_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
@@ -509,7 +514,7 @@ def validate_applicability_ledger(directory, manifest, rows, inputs, profile, ga
     fields, records = table_with_fields(path)
     assert fields == APPLICABILITY_LEDGER_FIELDS
     if profile == FULL_CENSUS_PROFILE:
-        assert ledger_sha256 == FULL_APPLICABILITY_LEDGER_SHA256
+        assert ledger_sha256 in ACCEPTED_APPLICABILITY_LEDGER_SHA256
         assert len(records) == FULL_APPLICABILITY_LEDGER_COUNT
     if "applicability_ledger_entries" in manifest:
         assert manifest["applicability_ledger_entries"] == str(len(records))

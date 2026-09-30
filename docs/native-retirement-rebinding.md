@@ -252,10 +252,17 @@ trusted-reader bootstrap admits the exact proposed successor digest
 (`PROPOSED_SUPPORT_*`): the current declaration with only the
 `tests/basic_c_f80_machine.c` row changed to 7,233 bytes and SHA-256
 `3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`; the
-declaration stays 79,744 bytes. After that bootstrap is trusted, a separate
-policy transition may update only that fixture, its byte/hash row, and the
-benchmark-service support pins; all 559 inputs, 411 subjects, and 78,912 row
-identities remain fixed.
+declaration stays 79,744 bytes. The same bootstrap admits the successor
+applicability ledger digest
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` (65,467
+bytes) next to the current
+`934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa` in the
+full-census validator: the same 374 identities with only the four
+`tests/basic_c_f80_machine.c` `fixture_sha256` cells updated. After that
+bootstrap is trusted, a separate policy transition may update only that
+fixture, its support byte/hash row, those four applicability cells, the
+census producer's applicability-ledger pin, and the benchmark-service support
+pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
 
 ### Solo-maintainer authorization
 
