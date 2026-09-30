@@ -68,4 +68,10 @@ BUSTER_F_DECL void c_test_source_map_publish_appended(Arena* arena, CSourceMapRe
 // that lie in [start, end). Written field by field, independently of the
 // seal, so a released phase range must report zero.
 BUSTER_F_DECL u64 c_test_preprocess_references_range(CPreprocessResult const* result, void const* start, void const* end);
+// The identifier table's production entry points: `intern` inserts, `find`
+// answers the id a spelling already has and never inserts, `count` is the
+// number of ids the table has handed out.
+BUSTER_F_DECL u32 c_test_symbol_intern(CSymbolTable* table, String8 name);
+BUSTER_F_DECL u32 c_test_symbol_find(CSymbolTable const* table, String8 name);
+BUSTER_F_DECL u32 c_test_symbol_count(CSymbolTable const* table);
 #endif

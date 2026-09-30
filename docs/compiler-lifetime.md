@@ -76,7 +76,7 @@ next unit on that thread (see the same-thread rule in the
 | Release fill (`arena_test_fill_releases`) | `c_test_phase_arena_release`, `compiler_driver_test_released_phase_fill` | a surviving reader in builds without AddressSanitizer: output, diagnostics and object bytes must not change |
 | AddressSanitizer poisoning | `arena_release_to_position` | the first stale access, at its source |
 | Poisoning positive control | `arena_tests` child mode `released_read` | a sanitized build whose poisoning silently stopped working |
-| Lexer message lifetime | `c_test_lexer_diagnostic_message_lifetime` | a diagnostic message left behind in a rewound temporary arena |
+| Lexer message lifetime | `c_test_lex_diagnostic_message_lifetime` | a diagnostic message left behind in a rewound temporary arena |
 
 `CPreprocessDetail.boundary` counts, exactly, what the seal copied (bytes,
 arrays and strings, pointer fields) and what the phase released.
