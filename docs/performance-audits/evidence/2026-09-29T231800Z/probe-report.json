@@ -1,0 +1,1632 @@
+{
+  "revision": "fa2bfc18e88af0efa1ff061a24e65a82ca67be5e",
+  "platform": "Linux-7.0.0-1012-azure-x86_64-with-glibc2.43",
+  "evidence_class": "diagnostic identity/execution, no timing acceptance",
+  "manifest_sha256": "cf47b974bcfb1115e2718f7b428edf4f049b30e78a74246b54c9bc3ea67478e8",
+  "policy": "Explicit QUALITY only: reuse valid FAST baseline iff spill_count == 0 and reload_count == 0; no tuning thresholds.",
+  "commands": [
+    {
+      "argv": [
+        "clang",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/host-version.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/host-version.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/leaf.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/leaf.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/leaf.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/leaf.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-leaf/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/pressure.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/pressure.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/pressure.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/design/pressure.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/design-pressure/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/calls.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/calls.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/calls.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/calls.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-calls/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/loops.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/loops.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/loops.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/loops.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-loops/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/switch.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/switch.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/switch.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/switch.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-switch/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/vector.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/vector.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/vector.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/vector.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-vector/reference-run.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/baseline-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/volatile.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/candidate-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/volatile.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-compile.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/trusted-ide",
+        "cc",
+        "-O0",
+        "-g0",
+        "-fverify-codegen",
+        "-fno-machine-fallback",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/volatile.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/trusted.o",
+        "-fregister-allocator=quality"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/trusted-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/trusted-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "-g0",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-funsigned-char",
+        "-c",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/heldout/volatile.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference.o"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-compile.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-compile.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/baseline-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/candidate-run.stderr"
+    },
+    {
+      "argv": [
+        "clang",
+        "-O0",
+        "/home/runner/work/buster/buster/tests/optimization_effort_probe/driver.c",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference.o",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-link.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-link.stderr"
+    },
+    {
+      "argv": [
+        "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference.exe"
+      ],
+      "returncode": 0,
+      "stdout": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-run.stdout",
+      "stderr": "/home/runner/work/buster/buster/evidence/probe/heldout-volatile/reference-run.stderr"
+    }
+  ],
+  "fixtures": [
+    {
+      "fixture": "design/leaf.c",
+      "split": "design",
+      "source_sha256": "6338b64d9a98b5bba7c3e7e3a6b7f0f041848d4f686acbffa04dcc8ae68c186a",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 3,
+              "values": 1,
+              "valid": 1,
+              "spills": 0,
+              "reloads": 0,
+              "eligible": 1,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "baseline",
+              "rows": 9,
+              "values": 6,
+              "valid": 1,
+              "spills": 3,
+              "reloads": 1,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "baseline",
+              "rows": 13,
+              "values": 8,
+              "valid": 1,
+              "spills": 5,
+              "reloads": 2,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 3,
+              "values": 1,
+              "eligible": 1,
+              "candidates": 0
+            },
+            {
+              "rows": 9,
+              "values": 6,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 13,
+              "values": 8,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 3,
+              "values": 1,
+              "valid": 1,
+              "spills": 0,
+              "reloads": 0,
+              "eligible": 1,
+              "skip": 1,
+              "avoided_payload": 98332,
+              "interval_size": 24
+            },
+            {
+              "variant": "candidate",
+              "rows": 9,
+              "values": 6,
+              "valid": 1,
+              "spills": 3,
+              "reloads": 1,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "candidate",
+              "rows": 13,
+              "values": 8,
+              "valid": 1,
+              "spills": 5,
+              "reloads": 2,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 9,
+              "values": 6,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 13,
+              "values": 8,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "cf138ea42e2d3f926aeade06c99c77e1aa4a4b6f1233b147676e93b6160df352",
+      "baseline_object_bytes": 2864,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "cf138ea42e2d3f926aeade06c99c77e1aa4a4b6f1233b147676e93b6160df352",
+      "candidate_object_bytes": 2864,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "cf138ea42e2d3f926aeade06c99c77e1aa4a4b6f1233b147676e93b6160df352",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 3,
+      "eligible_functions": 1,
+      "candidate_skipped_functions": 1,
+      "avoided_requested_payload_bytes": 98332,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "design/pressure.c",
+      "split": "design",
+      "source_sha256": "097479bf4ab4f9b581d25a98c5a08c1bf14f782a2cfb62a30dce32886dc5595c",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 31,
+              "values": 29,
+              "valid": 1,
+              "spills": 16,
+              "reloads": 15,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "baseline",
+              "rows": 102,
+              "values": 66,
+              "valid": 1,
+              "spills": 44,
+              "reloads": 43,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 31,
+              "values": 29,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 102,
+              "values": 66,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 31,
+              "values": 29,
+              "valid": 1,
+              "spills": 16,
+              "reloads": 15,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "candidate",
+              "rows": 102,
+              "values": 66,
+              "valid": 1,
+              "spills": 44,
+              "reloads": 43,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 31,
+              "values": 29,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 102,
+              "values": 66,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "315b082943a452a3ec1d0e3767e36942d9a53058b332951e83d2592b5e9ae903",
+      "baseline_object_bytes": 4128,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "315b082943a452a3ec1d0e3767e36942d9a53058b332951e83d2592b5e9ae903",
+      "candidate_object_bytes": 4128,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "315b082943a452a3ec1d0e3767e36942d9a53058b332951e83d2592b5e9ae903",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 2,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "heldout/calls.c",
+      "split": "heldout",
+      "source_sha256": "9c80f01c9f1d3e1585b9719683998bd300ad7dc95cc167c4bb99a8b6d97cbc02",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 8,
+              "values": 6,
+              "valid": 1,
+              "spills": 3,
+              "reloads": 2,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "baseline",
+              "rows": 24,
+              "values": 13,
+              "valid": 1,
+              "spills": 12,
+              "reloads": 7,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "baseline",
+              "rows": 40,
+              "values": 20,
+              "valid": 1,
+              "spills": 12,
+              "reloads": 10,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 8,
+              "values": 6,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 24,
+              "values": 13,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 40,
+              "values": 20,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 8,
+              "values": 6,
+              "valid": 1,
+              "spills": 3,
+              "reloads": 2,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "candidate",
+              "rows": 24,
+              "values": 13,
+              "valid": 1,
+              "spills": 12,
+              "reloads": 7,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            },
+            {
+              "variant": "candidate",
+              "rows": 40,
+              "values": 20,
+              "valid": 1,
+              "spills": 12,
+              "reloads": 10,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 8,
+              "values": 6,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 24,
+              "values": 13,
+              "eligible": 0,
+              "candidates": 0
+            },
+            {
+              "rows": 40,
+              "values": 20,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "6933e688b778254f1133f34206f0f8f675a4f902b267b6446d9b3b51a7dc781f",
+      "baseline_object_bytes": 3344,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "6933e688b778254f1133f34206f0f8f675a4f902b267b6446d9b3b51a7dc781f",
+      "candidate_object_bytes": 3344,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "6933e688b778254f1133f34206f0f8f675a4f902b267b6446d9b3b51a7dc781f",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 3,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "heldout/loops.c",
+      "split": "heldout",
+      "source_sha256": "155cd430474f49aceaaa6fd18c820d445b0c1f43c2dc3dc4adeab310da25cae4",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 41,
+              "values": 31,
+              "valid": 1,
+              "spills": 23,
+              "reloads": 18,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 41,
+              "values": 31,
+              "eligible": 0,
+              "candidates": 1
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 41,
+              "values": 31,
+              "valid": 1,
+              "spills": 23,
+              "reloads": 18,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 41,
+              "values": 31,
+              "eligible": 0,
+              "candidates": 1
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "db448e572c825a8a2fa538768e9af29329c8415819386d10697c74d3190ccbea",
+      "baseline_object_bytes": 3000,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "db448e572c825a8a2fa538768e9af29329c8415819386d10697c74d3190ccbea",
+      "candidate_object_bytes": 3000,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "db448e572c825a8a2fa538768e9af29329c8415819386d10697c74d3190ccbea",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 1,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "heldout/switch.c",
+      "split": "heldout",
+      "source_sha256": "407b6116ed0ee5273d85e6ed943f183fbf9a7e445acbd67271f8b6b430ce381a",
+      "observer": {
+        "baseline": {
+          "functions": [],
+          "heaps": []
+        },
+        "candidate": {
+          "functions": [],
+          "heaps": []
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "5f455f3f6b589a3f54a283d895f643282737efa6dfc6a9dacd33b75ac089755c",
+      "baseline_object_bytes": 2952,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "5f455f3f6b589a3f54a283d895f643282737efa6dfc6a9dacd33b75ac089755c",
+      "candidate_object_bytes": 2952,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "5f455f3f6b589a3f54a283d895f643282737efa6dfc6a9dacd33b75ac089755c",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 0,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "heldout/vector.c",
+      "split": "heldout",
+      "source_sha256": "99d38821a6a9d231033b1b259c6d78af99afb1191a4a0190b0d9d3345889a898",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 107,
+              "values": 79,
+              "valid": 1,
+              "spills": 14,
+              "reloads": 8,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 107,
+              "values": 79,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 107,
+              "values": 79,
+              "valid": 1,
+              "spills": 14,
+              "reloads": 8,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 107,
+              "values": 79,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "1782299512af4e1e333943212b1eb93e6fb99245dac0fe7b787ce047ac395d46",
+      "baseline_object_bytes": 3048,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "1782299512af4e1e333943212b1eb93e6fb99245dac0fe7b787ce047ac395d46",
+      "candidate_object_bytes": 3048,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "1782299512af4e1e333943212b1eb93e6fb99245dac0fe7b787ce047ac395d46",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 1,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    },
+    {
+      "fixture": "heldout/volatile.c",
+      "split": "heldout",
+      "source_sha256": "2db775ba6dd36692d8ce5c448984808ab45da1aca8e44e0e503af8f479a97ac8",
+      "observer": {
+        "baseline": {
+          "functions": [
+            {
+              "variant": "baseline",
+              "rows": 88,
+              "values": 59,
+              "valid": 1,
+              "spills": 14,
+              "reloads": 10,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 88,
+              "values": 59,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        },
+        "candidate": {
+          "functions": [
+            {
+              "variant": "candidate",
+              "rows": 88,
+              "values": 59,
+              "valid": 1,
+              "spills": 14,
+              "reloads": 10,
+              "eligible": 0,
+              "skip": 0,
+              "avoided_payload": 0,
+              "interval_size": 24
+            }
+          ],
+          "heaps": [
+            {
+              "rows": 88,
+              "values": 59,
+              "eligible": 0,
+              "candidates": 0
+            }
+          ]
+        }
+      },
+      "baseline_compile_ok": true,
+      "baseline_object_sha256": "05877fed1f5536ed3ce4c5b8d61758a00726ab8cb5272c218a9ce577933173f7",
+      "baseline_object_bytes": 3000,
+      "candidate_compile_ok": true,
+      "candidate_object_sha256": "05877fed1f5536ed3ce4c5b8d61758a00726ab8cb5272c218a9ce577933173f7",
+      "candidate_object_bytes": 3000,
+      "object_identity": true,
+      "trusted_compile_ok": true,
+      "trusted_observer_object_identity": true,
+      "trusted_object_sha256": "05877fed1f5536ed3ce4c5b8d61758a00726ab8cb5272c218a9ce577933173f7",
+      "diagnostic_facts_identity": true,
+      "observed_functions": 1,
+      "eligible_functions": 0,
+      "candidate_skipped_functions": 0,
+      "avoided_requested_payload_bytes": 0,
+      "baseline_eligible_heaps_empty": true,
+      "candidate_skips_match_rule": true,
+      "independent_execution_identity": true,
+      "passed": true
+    }
+  ],
+  "compilers": {
+    "baseline": {
+      "path": "/home/runner/work/buster/buster/evidence/baseline-ide",
+      "sha256": "4f7e443232d238ebacafc85c9b69d9d3b74da61814fc1be404e745700048036a"
+    },
+    "candidate": {
+      "path": "/home/runner/work/buster/buster/evidence/candidate-ide",
+      "sha256": "3c4d9964786c7ea32a5c6857b14e63042f0950c85fd47140570660758842c00e"
+    },
+    "trusted": {
+      "path": "/home/runner/work/buster/buster/evidence/trusted-ide",
+      "sha256": "e97210e2a4fef006429b88738b9be445cf896f4b56de695912745fe382480448"
+    }
+  },
+  "unrun": [
+    "trusted uninstrumented A/B compiler throughput",
+    "9700X performance acceptance",
+    "self-built compiler performance",
+    "self-host fixed point (external build-driver gate)"
+  ],
+  "mechanism_observed": true,
+  "passed": true
+}
