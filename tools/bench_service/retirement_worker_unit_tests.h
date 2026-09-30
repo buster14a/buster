@@ -1718,6 +1718,32 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed
     return ok;
 }
 
+/* (#1880) The installed context with contract.source's size set to `size`
+ * (canonical JSON: its descriptor is {"bytes":N,"path":...,"sha256":...}). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_resize(char const* installed, u32 length, u64 size,
+    BqRetirementWorkerBindingContext* edited)
+{
+    static char const path[] = ",\"path\":\"docs/native-retirement-performance-contract.md\"";
+    char const* at = strstr(installed, path);
+    char const* bytes = NULL;
+    for (char const* cursor = at; cursor && cursor > installed && !bytes; cursor -= 1)
+        if (!strncmp(cursor, "{\"bytes\":", strlen("{\"bytes\":"))) bytes = cursor + strlen("{\"bytes\":");
+    char number[32];
+    int written = snprintf(number, sizeof(number), "%" PRIu64, size);
+    bool ok = bytes && written > 0 && (size_t)written < sizeof(number);
+    size_t head = ok ? (size_t)(bytes - installed) : 0, tail = ok ? (size_t)(at - installed) : 0;
+    edited->bytes = ok ? malloc(length + sizeof(number) + 1u) : NULL;
+    ok = ok && edited->bytes;
+    if (ok)
+    {
+        memcpy(edited->bytes, installed, head);
+        memcpy(edited->bytes + head, number, (size_t)written);
+        memcpy(edited->bytes + head + (size_t)written, installed + tail, length - tail + 1u);
+        edited->length = (u32)(head + (size_t)written + length - tail);
+    }
+    return ok;
+}
+
 /* (#881 P4) The evidence the binding context names: the installed context
  * lists all 39 files of the #511 record under their validator names, the
  * store plan's measure gives the same totals, and the publication from the
@@ -1727,8 +1753,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed
  * one byte changed and a missing one (BQ_RECIPE_MISMATCH). Refused at
  * listing: binding paths without an unambiguous result-root name
  * (bq_retirement_worker_evidence_map) and requested-work items beyond
- * BQ_RETIREMENT_WORKER_EVIDENCE_CAP (the cap itself lists). Each listed
- * file's result-root name is its binding path mapped by lane F's rule. */
+ * BQ_RETIREMENT_WORKER_EVIDENCE_CAP (the cap itself lists), and (#1880) an
+ * entry one byte over the retirement evidence cap (the cap itself lists).
+ * Each listed file's result-root name is its binding path mapped by lane F's
+ * rule. */
 BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixture* fixture,
     BqRetirementWorkerUnitSeams const* seams, BqJob const* reference)
 {
@@ -1839,6 +1867,24 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
         BQ_PREP_CHECK(made && listed_grown == (count == extra) &&
                       (!listed_grown || list->count == BQ_RETIREMENT_WORKER_EVIDENCE_CAP));
         bq_retirement_worker_binding_release(&grown);
+        if (scratch_arena) arena_destroy(scratch_arena, 1);
+    }
+    /* (#1880) An entry may be listed up to BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP
+     * (a frozen toolchain file), above the ordinary 64 MiB cap. */
+    for (u32 over = 0; installed && over < 2; over += 1)
+    {
+        Arena* scratch_arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30,
+                                                             .flags = {.no_pool = 1}});
+        BqRetirementWorkerBindingContext sized = {0};
+        bool made = scratch_arena &&
+                    bq_prep_worker_unit_evidence_resize(installed, length,
+                                                        BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP + over, &sized);
+        bool listed_sized = made && bq_retirement_worker_binding_parse(scratch_arena, &sized) &&
+                            bq_retirement_worker_evidence_list(&sized, list);
+        BQ_PREP_CHECK(made && listed_sized == !over &&
+                      (!listed_sized || (!strcmp(list->items[0].name, "contract.source") &&
+                                         list->items[0].bytes == BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP)));
+        bq_retirement_worker_binding_release(&sized);
         if (scratch_arena) arena_destroy(scratch_arena, 1);
     }
     for (u32 side = 0; side < 2; side += 1)

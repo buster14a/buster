@@ -6052,6 +6052,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_transport_worker_signal_handoff();
     bq_test_export_inventory();
     bq_test_export_evidence_cap();
+    bq_test_export_evidence_publish();
     bq_test_export(true);
     bq_test_export(false);
     bq_test_retirement_poison_hold();
@@ -6084,6 +6085,7 @@ int main(int argc, char** argv)
     {
         bq_test_export_inventory();
         bq_test_export_evidence_cap();
+        bq_test_export_evidence_publish();
         bq_test_export(true);
         bq_test_export(false);
         printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);

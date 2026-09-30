@@ -682,4 +682,87 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_evidence_cap(void)
     if (root >= 0) close(root);
     BQ_CHECK(rmdir(path) == 0);
 }
+
+/* The number of entries in directory `path`, or UINT32_MAX. */
+BUSTER_GLOBAL_LOCAL u32 bq_test_evidence_entries(char const* path)
+{
+    DIR* listing = opendir(path);
+    u32 entries = listing ? 0 : UINT32_MAX;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+        entries += strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..");
+    if (listing) closedir(listing);
+    return entries;
+}
+
+/* #1880: #1998's evidence publication streams each binding-context evidence
+ * file, so an entry at BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP (a frozen
+ * toolchain file) from the installed evidence directory and one from a held
+ * descriptor are published at their listed digests while the peak resident
+ * set grows by far less than one entry; a changed last byte of either source
+ * refuses with its own mismatch and leaves no evidence file. */
+BUSTER_GLOBAL_LOCAL void bq_test_export_evidence_publish(void)
+{
+    u64 const cap = BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP;
+    char evidence[BQ_PATH_CAP + 1] = "/tmp/bq-evidence-installed-XXXXXX";
+    char result[BQ_PATH_CAP + 1] = "/tmp/bq-evidence-result-XXXXXX";
+    BqRetirementWorkerEvidenceList* list = calloc(1, sizeof(*list));
+    bool made = list && bq_test_mkdtemp_physical(evidence, sizeof(evidence)) &&
+                bq_test_mkdtemp_physical(result, sizeof(result));
+    int installed = made ? open(evidence, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int root = made ? open(result, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int held[2] = {-1, -1};
+    char const* names[2] = {BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "toolchain--bin--clang",
+                            BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "subjects--baseline--ide"};
+    bool ready = installed >= 0 && root >= 0 && bq_test_evidence_sparse(installed, names[0], cap, 't') &&
+                 bq_test_evidence_sparse(installed, "held-baseline", cap, 'h');
+    held[0] = ready ? openat(installed, "held-baseline", O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    ready = ready && held[0] >= 0;
+    for (u32 index = 0; ready && index < 2; index += 1)
+    {
+        BqRetirementWorkerEvidence* item = &list->items[index];
+        u64 size = 0;
+        snprintf(item->name, sizeof(item->name), "evidence-%u", index);
+        snprintf(item->stored, sizeof(item->stored), "%s", names[index]);
+        item->bytes = cap;
+        item->held = index;
+        ready = bq_worker_bundle_file_digest(installed, index ? "held-baseline" : names[0], cap, &size,
+                                             item->sha256) && size == cap;
+    }
+    if (ready)
+    {
+        list->count = 2;
+        list->bytes = 2 * cap;
+    }
+    BQ_CHECK(ready);
+    u64 peak = bq_test_peak_rss();
+    BQ_CHECK(ready && bq_retirement_worker_evidence_publish(list, installed, held, root) == BQ_OK);
+    for (u32 index = 0; ready && index < 2; index += 1)
+    {
+        u64 size = 0;
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        BQ_CHECK(bq_worker_bundle_file_digest(root, names[index], cap, &size, digest) && size == cap &&
+                 !strcmp(digest, list->items[index].sha256));
+        BQ_CHECK(unlinkat(root, names[index], 0) == 0);
+    }
+    u64 grown = bq_test_peak_rss() - peak;
+    if (grown >= BQ_WORKER_BUNDLE_FILE_CAP) fprintf(stderr, "EVIDENCE_PUBLISH_TEST peak_rss_growth=%" PRIu64 "\n", grown);
+    BQ_CHECK(grown < BQ_WORKER_BUNDLE_FILE_CAP);
+    /* One changed last byte (same inode and size): the installed file, then
+     * the held binary. Nothing is left in the result root. */
+    BQ_CHECK(ready && bq_test_evidence_tail(installed, names[0], 'x') &&
+             bq_retirement_worker_evidence_publish(list, installed, held, root) == BQ_RECIPE_MISMATCH &&
+             bq_test_evidence_entries(result) == 0 && bq_test_evidence_tail(installed, names[0], 't'));
+    BQ_CHECK(ready && bq_test_evidence_tail(installed, "held-baseline", 'x') &&
+             bq_retirement_worker_evidence_publish(list, installed, held, root) == BQ_SOURCE_MISMATCH &&
+             bq_test_evidence_entries(result) == 0);
+    if (held[0] >= 0) close(held[0]);
+    if (root >= 0) close(root);
+    if (installed >= 0)
+    {
+        BQ_CHECK(bq_remove_workspace_payload(installed));
+        close(installed);
+    }
+    BQ_CHECK(!made || (rmdir(result) == 0 && rmdir(evidence) == 0));
+    free(list);
+}
 #endif
