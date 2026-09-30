@@ -65,6 +65,7 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
         shell: bash
