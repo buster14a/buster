@@ -5153,6 +5153,10 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return error;
 }
 
+/* The producer's wait bound (retirement_worker_unit.c) uses the worker's stop
+ * budget. */
+BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_UNIT_STOP_NS == (u64)BQ_WORKER_STOP_MILLISECONDS * 1000000ull);
+
 /* seams selects the retirement producer's profile and roots: the installed
  * ones in production (bq_retirement_worker_unit_installed), whose blocked
  * profile bq_retirement_profile_complete refuses before the lease handoff. */

@@ -23,9 +23,16 @@
  * failure (the gate's no-children check passes, so the keeper is not the
  * producer's child); SIGTERM to the unit during the hanging generate of job
  * 63, forwarded to the producer's self-pipe, ending cancelled with the stage
- * gone; the failing generate of job 67; and the producer killed during the
- * hanging generate of job 64. Jobs 63, 64 and 67 select those driver
- * behaviours in retirement_matched_build_fixture.c. */
+ * gone; the failing generate of job 67; the producer killed during the
+ * hanging generate of job 64; the detached (setsid, double-fork) grandchild
+ * job 73's generate leaves, which only the producer's subreaper exposes:
+ * the gate refuses and the producer sweeps it (BQ_CLEANUP_FAILED, no ready
+ * record, the grandchild gone); and a SIGTERM raised in the unit's teardown
+ * window after job 30's failing generate
+ * (bq_retirement_worker_unit_test_late_term), consumed and reported as
+ * cancelled instead of ending the unit before its keeper stops. Jobs 30, 63,
+ * 64, 67 and 73 select those driver behaviours in
+ * retirement_matched_build_fixture.c. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 
@@ -34,6 +41,9 @@
 #define BQ_PREP_WORKER_UNIT_CANCEL 63u
 #define BQ_PREP_WORKER_UNIT_CRASH 64u
 #define BQ_PREP_WORKER_UNIT_FAILURE 67u
+#define BQ_PREP_WORKER_UNIT_ESCAPE 73u
+/* Job 30 (token 40) also fails its generate. */
+#define BQ_PREP_WORKER_UNIT_LATE_TERM 30u
 /* The unit's exit status when it kept a child or a descriptor. */
 #define BQ_PREP_WORKER_UNIT_UNCLEAN 200
 #define BQ_PREP_WORKER_UNIT_MILLISECONDS 300000u
@@ -218,6 +228,34 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_ready(int attempt, char digest[SHA2
     return listing && found == 1 && named;
 }
 
+/* complete without its status lines, then status (which may be empty). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_status(char const* complete, char const* status, char* out,
+    size_t capacity)
+{
+    size_t used = 0;
+    bool ok = capacity > 0;
+    char const* line = complete;
+    while (ok && line && *line)
+    {
+        char const* end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) + 1u : strlen(line);
+        if (strncmp(line, "status=", 7))
+        {
+            ok = used + length < capacity;
+            if (ok) memcpy(out + used, line, length);
+            used += ok ? length : 0;
+        }
+        line = end ? end + 1 : NULL;
+    }
+    size_t tail = strlen(status);
+    ok = ok && used + tail < capacity;
+    if (ok)
+    {
+        memcpy(out + used, status, tail + 1u);
+    }
+    return ok;
+}
+
 /* The compiled blocked profile, a blocked status and a missing pin are
  * refused before the lease handoff: no keeper directory, no retirement
  * directory, no child. */
@@ -227,8 +265,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_refused(BqPrepOracleFixture* fixtur
     char job_text[24], token_text[24], blocked[4096], missing[4096];
     snprintf(job_text, sizeof(job_text), "%" PRIu64, (uint64_t)attempt->job.id);
     snprintf(token_text, sizeof(token_text), "%" PRIu64, (uint64_t)attempt->job.token);
-    int length = snprintf(blocked, sizeof(blocked), "%.*sstatus=blocked\n", (int)seams->profile.length,
-                          (char const*)seams->profile.pointer);
+    int length = bq_prep_worker_unit_status(fixture->profile, "status=blocked\n", blocked, sizeof(blocked)) ? 1 : -1;
     char const* pin = strstr(fixture->profile, "row-plan-sha256=");
     char const* end = pin ? strchr(pin, '\n') : NULL;
     int missing_length = end ? snprintf(missing, sizeof(missing), "%.*s%s", (int)(pin - fixture->profile),
@@ -236,8 +273,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_refused(BqPrepOracleFixture* fixtur
     BqRetirementWorkerUnitSeams refused[2] = {*seams, *seams};
     refused[0].profile = string_from_pointer(blocked);
     refused[1].profile = string_from_pointer(missing);
-    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(blocked) && missing_length > 0 &&
-                  (size_t)missing_length < sizeof(missing));
+    BQ_PREP_CHECK(length > 0 && missing_length > 0 && (size_t)missing_length < sizeof(missing));
     String8 lease = S8("/tmp/bq-worker-unit-absent/host.lock"), result = S8("/tmp/bq-worker-unit-absent/result");
     String8 workspaces = string_from_pointer(fixture->workspaces);
     BQ_PREP_CHECK(bq_worker_unit(lease, string_from_pointer(job_text), string_from_pointer(token_text),
@@ -285,14 +321,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_profiles(char const* complete)
         line = end ? end + 1 : NULL;
     }
     BQ_PREP_CHECK(pins == BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins));
-    char const* statuses[] = {"status=blocked\n", "status=ready\n", "status=ready\nstatus=ready\n"};
-    bool expected[] = {false, true, false};
+    /* Exactly one status line, whose value is exactly the admitting one. */
+    char const* statuses[] = {"status=admitted\n", "", "status=blocked\n", "status=blocked-pending\n",
+                              "status=admitted \n", "status=admitted\r\n", "status=Admitted\n", "status=\n",
+                              "status=admitted\nstatus=admitted\n", "status=admitted\nstatus=blocked\n"};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statuses); index += 1)
-    {
-        int length = snprintf(changed, sizeof(changed), "%s%s", complete, statuses[index]);
-        BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(changed) &&
-                      bq_retirement_profile_complete(string_from_pointer(changed)) == expected[index]);
-    }
+        BQ_PREP_CHECK(bq_prep_worker_unit_status(complete, statuses[index], changed, sizeof(changed)) &&
+                      bq_retirement_profile_complete(string_from_pointer(changed)) == (index == 0));
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
@@ -339,12 +374,14 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                                    BQ_CHECK_TEST_CHECKS, 0, pin, sizeof(pin)) &&
              plan_length && bq_row_test_install(fixture->recipes, plan_text, plan_length, row_pin) &&
              budget_length > 0 && (size_t)budget_length < sizeof(budget_pin) &&
-             strlen(fixture->profile) + strlen(pin) + strlen(row_pin) + strlen(budget_pin) < sizeof(fixture->profile);
+             strlen(fixture->profile) + strlen(pin) + strlen(row_pin) + strlen(budget_pin) +
+             strlen(BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "\n") < sizeof(fixture->profile);
         if (ok)
         {
             strcat(fixture->profile, pin);
             strcat(fixture->profile, row_pin);
             strcat(fixture->profile, budget_pin);
+            strcat(fixture->profile, BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "\n");
         }
         ok = ok && bq_retirement_row_plan_import_profile(fixture->installed_fd, string_from_pointer(fixture->profile),
                                                          &reference->attempt.unit.job, projection, &row_plan) == BQ_OK &&
@@ -387,21 +424,29 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
     }
 
     /* (c) and (d): SIGTERM to the unit, a failing stage and a killed
-     * producer, each during the build. */
-    u64 const jobs[] = {BQ_PREP_WORKER_UNIT_CANCEL, BQ_PREP_WORKER_UNIT_FAILURE, BQ_PREP_WORKER_UNIT_CRASH};
+     * producer, each during the build; a detached grandchild left by a
+     * generate, which only the producer's subreaper sees (it fails the gate
+     * and is swept); and a SIGTERM raised in the unit's teardown window
+     * (after a failing stage), which is consumed and reported. */
+    u64 const jobs[] = {BQ_PREP_WORKER_UNIT_CANCEL, BQ_PREP_WORKER_UNIT_FAILURE, BQ_PREP_WORKER_UNIT_CRASH,
+                        BQ_PREP_WORKER_UNIT_ESCAPE, BQ_PREP_WORKER_UNIT_LATE_TERM};
     BqPrepWorkerUnitMode const modes[] = {BQ_PREP_WORKER_UNIT_TERMINATE, BQ_PREP_WORKER_UNIT_RUN,
-                                          BQ_PREP_WORKER_UNIT_KILL_PRODUCER};
-    int const expected[] = {BQ_WORKER_CANCEL_SIGNAL, BQ_WORKER_FAILED, BQ_CLEANUP_FAILED};
+                                          BQ_PREP_WORKER_UNIT_KILL_PRODUCER, BQ_PREP_WORKER_UNIT_RUN,
+                                          BQ_PREP_WORKER_UNIT_RUN};
+    int const expected[] = {BQ_WORKER_CANCEL_SIGNAL, BQ_WORKER_FAILED, BQ_CLEANUP_FAILED, BQ_CLEANUP_FAILED,
+                            BQ_WORKER_CANCEL_SIGNAL};
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(jobs); index += 1)
     {
-        bool begun = bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, jobs[index], fixture->installed_fd,
-                                               fixture->workspaces_fd, &fixture->preparation, fixture->profile,
-                                               fixture->toolchain_root, attempt);
-        BQ_PREP_CHECK(begun);
+        bool started = bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, jobs[index], fixture->installed_fd,
+                                                 fixture->workspaces_fd, &fixture->preparation, fixture->profile,
+                                                 fixture->toolchain_root, attempt);
+        BQ_PREP_CHECK(started);
         observed.job_id = attempt->job.id;
         observed.attempt_token = attempt->job.token;
-        BqPrepWorkerUnitRun run = begun ? bq_prep_worker_unit_drive(fixture, attempt, &seams, modes[index]) :
-                                          (BqPrepWorkerUnitRun){.status = -1};
+        bq_retirement_worker_unit_test_late_term = jobs[index] == BQ_PREP_WORKER_UNIT_LATE_TERM;
+        BqPrepWorkerUnitRun run = started ? bq_prep_worker_unit_drive(fixture, attempt, &seams, modes[index]) :
+                                            (BqPrepWorkerUnitRun){.status = -1};
+        bq_retirement_worker_unit_test_late_term = false;
         struct stat info = {0};
         bool staged = modes[index] == BQ_PREP_WORKER_UNIT_RUN || run.driver > 0;
         if (run.status != expected[index]) fprintf(stderr, "RETIREMENT_PREP worker-unit job %" PRIu64 " exited %d\n",
@@ -413,7 +458,19 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         /* The cancelled stage was killed and proven gone by the build. */
         if (modes[index] == BQ_PREP_WORKER_UNIT_TERMINATE)
             BQ_PREP_CHECK(run.driver > 0 && kill(run.driver, 0) != 0 && errno == ESRCH);
-        if (begun) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
+        /* The escaped grandchild was reparented to the producer and killed
+         * there; one left alive (under init) is stopped here. */
+        if (jobs[index] == BQ_PREP_WORKER_UNIT_ESCAPE)
+        {
+            char path[256], text[32];
+            int length = snprintf(path, sizeof(path), "%s/job-73-escaped.pid", fixture->workspaces);
+            u32 used = length > 0 && (size_t)length < sizeof(path) ? bq_prep_test_read_text(path, text, sizeof(text)) : 0;
+            pid_t escaped = used ? (pid_t)strtol(text, NULL, 10) : 0;
+            bool gone = escaped > 1 && kill(escaped, 0) != 0 && errno == ESRCH;
+            BQ_PREP_CHECK(gone);
+            if (escaped > 1 && !gone) kill(escaped, SIGKILL);
+        }
+        if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
     }
     bq_retirement_row_observed_release(&observed);
     if (row_plan.owned) BQ_PREP_CHECK(bq_retirement_row_plan_release(&row_plan));
