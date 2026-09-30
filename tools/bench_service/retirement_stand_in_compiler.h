@@ -7,7 +7,8 @@
  * census manifest names them and the projection's compiler join holds. They
  * are dash scripts in lane B's campaign argv shape (retirement_worker_unit_tests.h
  * pins the row plan): `compile SOURCE FIXTURE OUTPUT METRICS --label=N`
- * copies SOURCE/FIXTURE.out and .metrics out of A's candidate root;
+ * copies SOURCE/FIXTURE.out and .metrics out of A's candidate root (`program`,
+ * the runtime rows' compile, copies SOURCE/FIXTURE.program, an executable);
  * `batch GROUP SOURCE @LIST METRICS --label=N` writes r<row>.o (the row from
  * the metrics leaf, b<row>.metrics timed or u<row>.metrics untimed) from
  * SOURCE/tests/unit.c.o and the one-input metrics record
@@ -29,6 +30,9 @@
     "esac\n" \
     "if [ \"$1\" = compile ]; then\n" \
     "  cat \"$2/$3.out\" > \"$4\" && chmod 0700 \"$4\" && cat \"$2/$3.metrics\" > \"$5\" && exit 0\n" \
+    "  exit 1\nfi\n" \
+    "if [ \"$1\" = program ]; then\n" \
+    "  cat \"$2/$3.program\" > \"$4\" && chmod 0700 \"$4\" && cat \"$2/$3.metrics\" > \"$5\" && exit 0\n" \
     "  exit 1\nfi\n" \
     "if [ \"$1\" = batch ]; then\n" \
     "  m=$5; r=${m#?}; r=${r%.metrics}\n" \

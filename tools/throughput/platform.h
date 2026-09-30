@@ -16,8 +16,11 @@
  * reports over a pipe. The parent takes the start time after that report,
  * arms the timeout and releases the child to execve argv[0] (the side's slot
  * path), so the timer covers one pipe wake-up, the exec and the program, and
- * none of the placement or sandbox entry. Without a ruleset the timer starts
- * before the fork, as before.
+ * none of the placement or sandbox entry. A runtime launch
+ * (TpProcessInputs.program, lane B's `./{{output}}` shape) instead executes
+ * the program its compile step left in slot 7, relative to slot 7, after the
+ * child rechecked that file's identity (tp_process_program_same). Without a
+ * ruleset the timer starts before the fork, as before.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -368,6 +371,19 @@ static uint64_t tp_process_monotonic_ns(void)
  * environment. Ordinary throughput keeps its existing path-based launch.
  * These descriptors must be private, >= 3 and close-on-exec; the caller owns
  * their lifetime. This is process plumbing, not the service sandbox or lease. */
+
+/* A layout launch's program (lane B's runtime shape, `./{{output}}`): the
+ * leaf its compile step wrote in the work directory (slot 7) and that file's
+ * identity, as the caller observed it after the compile step. */
+typedef struct TpProcessProgram
+{
+    char const* leaf;
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    struct timespec changed;
+} TpProcessProgram;
+
 typedef struct TpProcessInputs
 {
     int executable, directory, log;
@@ -394,6 +410,13 @@ typedef struct TpProcessInputs
     int sources[2];
     int ruleset;
     uint64_t memory_bytes;
+    /* Optional, layout only: a runtime launch executes `program` instead of
+     * the binary slot (the slot stays placed, as in lane B's row producer).
+     * args[0] must then be exactly "./" and its leaf, and the child, after
+     * entering the sandbox, requires the leaf in slot 7 to be the same
+     * regular file (no symbolic link; device, inode, size and change time)
+     * and executes it relative to slot 7 (execveat, AT_SYMLINK_NOFOLLOW). */
+    TpProcessProgram const* program;
 } TpProcessInputs;
 
 #ifdef __linux__
@@ -403,6 +426,31 @@ static inline int tp_process_layout_binary(char const* argument, int side)
     char expected[32];
     int written = snprintf(expected, sizeof(expected), "/proc/self/fd/%d", BQ_RETIREMENT_ROW_SLOT_BINARY + side);
     int ok = argument && written > 0 && (size_t)written < sizeof(expected) && !strcmp(argument, expected);
+    return ok;
+}
+
+/* The runtime shape args[0] must have under a layout with a program: exactly
+ * "./" and the program's leaf, a single path component other than `.` and
+ * `..`. */
+static inline int tp_process_layout_program(char const* argument, TpProcessProgram const* program)
+{
+    char const* leaf = program ? program->leaf : NULL;
+    size_t length = leaf ? strnlen(leaf, 256) : 0;
+    int ok = argument && leaf && length && length < 256 && !memchr(leaf, '/', length) && strcmp(leaf, ".") &&
+             strcmp(leaf, "..") && argument[0] == '.' && argument[1] == '/' && !strcmp(argument + 2, leaf);
+    return ok;
+}
+
+/* In the layout child, after it entered its sandbox: the program leaf in
+ * slot 7 is still the observed regular file. */
+static inline int tp_process_program_same(TpProcessProgram const* program)
+{
+    struct stat info;
+    int found = fstatat(BQ_RETIREMENT_ROW_SLOT_WORK, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0;
+    int ok = found && S_ISREG(info.st_mode) && info.st_dev == program->device && info.st_ino == program->inode &&
+             info.st_size == program->size && info.st_ctim.tv_sec == program->changed.tv_sec &&
+             info.st_ctim.tv_nsec == program->changed.tv_nsec;
+    if (found && !ok) errno = ESTALE;
     return ok;
 }
 #endif
@@ -434,8 +482,10 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         unsigned checked = layout ? 6u : 3u;
         int valid = inputs->environment != NULL &&
             (!inputs->cancellation || (inputs->cancellation >= 3 && fcntl(inputs->cancellation, F_GETFD) >= 0)) &&
-            (!layout || ((inputs->side == 0 || inputs->side == 1) && args && tp_process_layout_binary(args[0],
-                inputs->side)));
+            (layout || !inputs->program) &&
+            (!layout || ((inputs->side == 0 || inputs->side == 1) && args &&
+                         (inputs->program ? tp_process_layout_program(args[0], inputs->program) :
+                                            tp_process_layout_binary(args[0], inputs->side))));
         for (unsigned i = 0; valid && i < checked; ++i)
         {
             int flags = descriptors[i] >= 3 ? fcntl(descriptors[i], F_GETFD) : -1;
@@ -563,6 +613,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             if (!failure && parked < 0) failure = tp_process_errno();
             if (!failure && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0) failure = tp_process_errno();
             if (!failure && !bq_retirement_sandbox_enter(parked)) failure = tp_process_errno();
+            if (!failure && inputs->program && !tp_process_program_same(inputs->program)) failure = tp_process_errno();
             ssize_t written = write(report, &failure, sizeof(failure));
             child_ok = !failure && written == (ssize_t)sizeof(failure);
             close(report);
@@ -579,7 +630,10 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             if (!layout) sigaction(SIGPIPE, &previous_pipe, NULL);
 #ifdef __linux__
-            if (layout) execve(args[0], args, inputs->environment);
+            if (layout && inputs->program)
+                syscall(SYS_execveat, BQ_RETIREMENT_ROW_SLOT_WORK, inputs->program->leaf, args, inputs->environment,
+                        AT_SYMLINK_NOFOLLOW);
+            else if (layout) execve(args[0], args, inputs->environment);
             else if (inputs)
             {
                 /* Neither a sample spool nor an unrelated supervisor handle

@@ -120,22 +120,69 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_search_prefix(char const* query, char outp
  * every compile, the same x86-64 relocatable object whether a batch member's
  * (.o) or a single compile's (.out; lane B's plan compiles untimed object rows
  * singly while the untimed contract batches them, and a row's artifact is
- * the same either way). Every census row names tests/unit.c, so one of each
- * serves every row. Sorted by path, as the manifest lists them. */
-#define BQ_PREP_ORACLE_OUTPUTS 4u
+ * the same either way), and the program a runtime row's compile writes
+ * (.program, BQ_PREP_ORACLE_PROGRAM). Every census row names tests/unit.c,
+ * so one of each serves every row. Sorted by path, as the manifest lists
+ * them. */
+#define BQ_PREP_ORACLE_OUTPUTS 5u
+#define BQ_PREP_ORACLE_PROGRAM 4u
+#define BQ_PREP_ORACLE_OUTPUT_BYTES (1u << 20)
 BUSTER_GLOBAL_LOCAL char const* const bq_prep_oracle_output_names[BQ_PREP_ORACLE_OUTPUTS] = {
-    "tests/batch.metrics", "tests/unit.c.metrics", "tests/unit.c.o", "tests/unit.c.out"};
+    "tests/batch.metrics", "tests/unit.c.metrics", "tests/unit.c.o", "tests/unit.c.out", "tests/unit.c.program"};
+
+/* The runtime rows' program: a host executable that prints exactly what the
+ * reference oracle's program prints (the reference flags below make it
+ * `puts("independent")`), built once with the host compiler this fixture
+ * already runs, so every snapshot and observation shares its bytes. Returns
+ * its size, 0 when it cannot be built. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_test_oracle_program(char* bytes, u32 capacity)
+{
+    static char program[BQ_PREP_ORACLE_OUTPUT_BYTES];
+    static u32 built = 0;
+    if (!built)
+    {
+        char root[] = "/tmp/bq-prep-program-XXXXXX", source[64], output[64];
+        bool made = mkdtemp(root) != NULL;
+        int named[2] = {snprintf(source, sizeof(source), "%s/program.c", root),
+                        snprintf(output, sizeof(output), "%s/program", root)};
+        bool ok = made && named[0] > 0 && (size_t)named[0] < sizeof(source) && named[1] > 0 &&
+                  (size_t)named[1] < sizeof(output) &&
+                  bq_prep_test_write(source, "#include <unistd.h>\n"
+                                             "int main(void) { return write(1, \"independent\\n\", 12) != 12; }\n");
+        char* argv[] = {"/usr/bin/cc", "-O1", "-o", output, source, NULL};
+        ok = ok && bq_prep_test_run(argv);
+        int file = ok ? open(output, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        struct stat info = {0};
+        u32 read_bytes = 0;
+        ok = file >= 0 && fstat(file, &info) == 0 && info.st_size > 0 &&
+             (u64)info.st_size <= sizeof(program) &&
+             bq_read_file(file, (u8*)program, (u32)info.st_size, &read_bytes) && read_bytes == (u32)info.st_size;
+        if (file >= 0) close(file);
+        if (ok) built = read_bytes;
+        if (made)
+        {
+            unlink(output);
+            unlink(source);
+            rmdir(root);
+        }
+    }
+    u32 size = built && built <= capacity ? built : 0;
+    if (size) memcpy(bytes, program, size);
+    return size;
+}
 
 /* One stand-in output's bytes (a malloc'd buffer the caller frees). */
 BUSTER_GLOBAL_LOCAL char* bq_prep_test_oracle_output(u32 index, u32* length)
 {
-    char* bytes = malloc(1u << 16);
+    char* bytes = malloc(BQ_PREP_ORACLE_OUTPUT_BYTES);
     u32 size = 0;
     char empty[SHA256_HEX_CAPACITY];
     bq_digest("", 0, (char8*)empty);
     BqRowTestInput input = {"tests/unit.c", "ok", "driver.none", empty, index == 0};
     if (bytes && index < 2)
         size = bq_row_test_metrics(bytes, 1u << 16, 0, index ? "link" : "object", &input, 1);
+    else if (bytes && index == BQ_PREP_ORACLE_PROGRAM)
+        size = bq_prep_test_oracle_program(bytes, BQ_PREP_ORACLE_OUTPUT_BYTES);
     else if (bytes && index < BQ_PREP_ORACLE_OUTPUTS)
     {
         /* bq_row_test_elf's layout, in memory: one code section. */

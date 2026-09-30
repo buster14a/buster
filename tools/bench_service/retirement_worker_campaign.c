@@ -1062,10 +1062,39 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_stage_publish(BqRetirementWorkerCa
     return ok;
 }
 
+/* The sizes the store plan binds for D's documents, retained before any
+ * timing as a new read-only file in the campaign directory
+ * (BQ_RETIREMENT_WORKER_SIZED_NAME: the header, then one `<path> <bytes>`
+ * line per document in bq_retirement_unit_campaign_document_paths order), so
+ * the written documents can be checked against them afterwards. */
+#define BQ_RETIREMENT_WORKER_SIZED_NAME "documents-sized.txt"
+#define BQ_RETIREMENT_WORKER_SIZED_HEADER "BQ-RETIREMENT-UNIT-CAMPAIGN-SIZED-V1\n"
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_sized_write(int directory,
+    uint64_t const bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS])
+{
+    char text[512];
+    int length = snprintf(text, sizeof(text), "%s", BQ_RETIREMENT_WORKER_SIZED_HEADER);
+    for (u32 index = 0; length > 0 && (size_t)length < sizeof(text) && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS;
+         index += 1)
+    {
+        int line = snprintf(text + length, sizeof(text) - (size_t)length, "%s %" PRIu64 "\n",
+                            bq_retirement_unit_campaign_document_paths[index], bytes[index]);
+        length = line > 0 ? length + line : -1;
+    }
+    bool ok = directory >= 3 && length > 0 && (size_t)length < sizeof(text);
+    int file = ok ? openat(directory, BQ_RETIREMENT_WORKER_SIZED_NAME,
+                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && file >= 0 && bq_write_all(file, (u8 const*)text, (u32)length) && fchmod(file, 0400) == 0 &&
+         fsync(file) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    ok = ok && fsync(directory) == 0;
+    return ok;
+}
+
 /* MEASURING through the store plan: the acknowledgement, the commands from
  * the row plan, both stages bound after it, the store-based bind, the timed
- * rows and documents sized for lane E, the store planned and the untimed
- * streams published, then attach. */
+ * rows and documents sized for lane E (and retained), the store planned and
+ * the untimed streams published, then attach. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_bind(BqRetirementWorkerCampaign* campaign,
     BqRetirementCampaignUnitStore const* unit, BqPhaseChannel* phases, int cancellation_fd, u64 deadline_ns,
     BqJob const* job, BqRetirementUnitGate const* unit_gate, char const ready_sha256[SHA256_HEX_CAPACITY],
@@ -1136,6 +1165,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_bind(BqRetirementWorke
         !bq_retirement_unit_campaign_documents_measure(&campaign->driver, &campaign->campaign, sources,
                                                        campaign->document_bytes))
         result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK && !bq_retirement_worker_sized_write(campaign->directory, campaign->document_bytes))
+        result = BQ_IO;
     if (result == BQ_OK)
     {
         campaign->store_files = bq_retirement_worker_allocate(campaign->arena, TP_RETIREMENT_STORE_FILES,

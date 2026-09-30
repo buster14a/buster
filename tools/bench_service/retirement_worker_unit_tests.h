@@ -172,19 +172,49 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_keeper_gone(BqPrepOracleFixture con
     return gone;
 }
 
+/* The campaign's stream kinds by store-path prefix and suffix: 0 untimed
+ * records, 1 untimed metrics, then per stage transcripts, metrics, row
+ * samples and batch samples (A/A 2..5, A/B 6..9). A/B sample prefixes end in
+ * the first index digit. */
+#define BQ_PREP_WORKER_UNIT_STREAM_KINDS 10u
+BUSTER_GLOBAL_LOCAL char const* const bq_prep_worker_unit_stream_prefixes[BQ_PREP_WORKER_UNIT_STREAM_KINDS] = {
+    BQ_RETIREMENT_WORKER_UNTIMED_PATH, "retirement-metrics-untimed-", "retirement-execution-aa-",
+    "retirement-metrics-aa-", "retirement-samples-aa-", "retirement-batches-aa-", "retirement-execution-ab-",
+    "retirement-metrics-ab-", "retirement-samples-0", "retirement-batches-0"};
+BUSTER_GLOBAL_LOCAL char const* const bq_prep_worker_unit_stream_suffixes[BQ_PREP_WORKER_UNIT_STREAM_KINDS] = {
+    "", ".txt", ".jsonl", ".txt", ".jsonl", ".jsonl", ".jsonl", ".txt", ".jsonl", ".jsonl"};
+
+BUSTER_GLOBAL_LOCAL u32 bq_prep_worker_unit_stream_kind(char const* name)
+{
+    u32 kind = BQ_PREP_WORKER_UNIT_STREAM_KINDS;
+    for (u32 index = 0; kind == BQ_PREP_WORKER_UNIT_STREAM_KINDS && index < BQ_PREP_WORKER_UNIT_STREAM_KINDS;
+         index += 1)
+        if (!strncmp(name, bq_prep_worker_unit_stream_prefixes[index], strlen(bq_prep_worker_unit_stream_prefixes[index])))
+            kind = index;
+    return kind;
+}
+
 /* What a finished unit left in its result root (lane E's store root): each
  * workflow document's size (0 when absent), the published untimed records and
- * untimed metrics shards, and every entry. */
+ * untimed metrics shards, every entry, the post-sample record's size, the
+ * stream kinds published (each entry a stream the attempt staged under the
+ * same name with the same size) and how many entries are none of these. */
 typedef struct BqPrepWorkerUnitResult
 {
     u64 document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
-    u32 untimed_records, untimed_metrics, entries;
+    u64 record_bytes;
+    u32 untimed_records, untimed_metrics, entries, published_kinds, unmatched;
 } BqPrepWorkerUnitResult;
 
-BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const* result_root)
+BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const* result_root, int attempt)
 {
     BqPrepWorkerUnitResult result = {0};
     int directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int staged = openat(attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY "/streams",
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat record = {0};
+    if (directory >= 0 && fstatat(directory, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, &record, AT_SYMLINK_NOFOLLOW) == 0)
+        result.record_bytes = (u64)record.st_size;
     for (u32 index = 0; directory >= 0 && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
     {
         struct stat info = {0};
@@ -204,8 +234,20 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const
             if (tp_retirement_metrics_shard_path(expected, TP_RETIREMENT_UNTIMED_METRICS_TAG, index) &&
                 !strcmp(entry->d_name, expected))
                 result.untimed_metrics |= 1u << index;
+        bool known = !strcmp(entry->d_name, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD);
+        for (u32 index = 0; index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+            known = known || !strcmp(entry->d_name, bq_retirement_unit_campaign_document_paths[index]);
+        u32 kind = known ? BQ_PREP_WORKER_UNIT_STREAM_KINDS : bq_prep_worker_unit_stream_kind(entry->d_name);
+        struct stat published = {0}, copy = {0};
+        bool stream = kind < BQ_PREP_WORKER_UNIT_STREAM_KINDS && staged >= 0 &&
+                      fstatat(dirfd(listing), entry->d_name, &published, AT_SYMLINK_NOFOLLOW) == 0 &&
+                      fstatat(staged, entry->d_name, &copy, AT_SYMLINK_NOFOLLOW) == 0 &&
+                      S_ISREG(published.st_mode) && published.st_size == copy.st_size;
+        if (stream) result.published_kinds |= 1u << kind;
+        result.unmatched += !known && !stream;
     }
     if (listing) closedir(listing);
+    if (staged >= 0) close(staged);
     return result;
 }
 
@@ -339,7 +381,7 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitRun bq_prep_worker_unit_drive(BqPrepOracleFi
     bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
     if (result_directory >= 0) close(result_directory);
-    if (result && ok) *result = bq_prep_worker_unit_result(result_root);
+    if (result && ok) *result = bq_prep_worker_unit_result(result_root, attempt->attempt);
     if (made) bq_prep_test_cleanup(root);
     return run;
 }
@@ -616,8 +658,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_profiles(char const* complete)
  * runs its output; each timed object group its own batch template 2 + g)
  * with this fixture's short timeouts, each object group's metrics leaf
  * b<row>.metrics (the stand-in names r<row>.o from it, so every group must
- * have one member) and one more batch template, the untimed contract's
- * (*untimed_template). text is malloc'd. */
+ * have one member), one more batch template, the untimed contract's
+ * (*untimed_template), and last the runtime rows' compile template, whose
+ * stand-in mode writes the executable the runtime step runs. text is
+ * malloc'd. */
 BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_plan_text(BqRetirementDocumentPopulation const* population,
     BqRetirementDocumentPartition const* partition, BqRetirementProjection const* projection,
     char const cpu_model[SHA256_HEX_CAPACITY], u32 cpu, TpRetirementCampaignBudget const* budget,
@@ -629,7 +673,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_plan_text(BqRetirementDocumentPopul
     *untimed_template = 2u + partition->object_groups;
     bq_retirement_row_text(text, "BQ-RETIREMENT-ROW-PLAN-V1\nsupport=%s\ncensus=%s\npopulation=%s\nnative-target=%u\n"
         "cpu=%s %u\ntemplates=%u\n", prepared->support_sha256, prepared->census_sha256, projection->population_sha256,
-        native, cpu_model, cpu, 3u + partition->object_groups);
+        native, cpu_model, cpu, 4u + partition->object_groups);
     bq_retirement_row_text(text, "template=0 compile %u 1024\nargv=7\narg={{binary}}\narg=compile\narg={{source:1}}\n"
         "arg={{fixture}}\narg={{output}}\narg={{metrics}}\narg=--label={{label}}\nenvironment=2\nenv=LC_ALL=C\n"
         "env=PATH=/usr/bin:/bin\n", timeout);
@@ -642,17 +686,22 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_plan_text(BqRetirementDocumentPopul
             "arg={{source:1}}\narg=@{{inputs}}\narg={{metrics}}\narg=--label={{label}}\nenvironment=2\nenv=LC_ALL=C\n"
             "env=PATH=/usr/bin:/bin\n", 2u + batch, timeout, group);
     }
+    u32 program = 3u + partition->object_groups;
+    bq_retirement_row_text(text, "template=%u compile %u 1024\nargv=7\narg={{binary}}\narg=program\narg={{source:1}}\n"
+        "arg={{fixture}}\narg={{output}}\narg={{metrics}}\narg=--label={{label}}\nenvironment=2\nenv=LC_ALL=C\n"
+        "env=PATH=/usr/bin:/bin\n", program, timeout);
     bq_retirement_row_text(text, "rows=%u\n", prepared->rows);
     for (u32 index = 0; text->ok && index < prepared->rows; index += 1)
     {
         BqRetirementTrustedRow const* row = projection->rows + index;
         String8 fixture = bq_retirement_document_value(population, index, BQ_RETIREMENT_DOCUMENT_FIXTURE);
-        bool compile = row->compiler_eligible != 0;
+        bool compile = row->compiler_eligible != 0, runtime = bq_retirement_row_native_runtime(row, native);
+        char compiled[16];
+        snprintf(compiled, sizeof(compiled), "%u", runtime ? program : 0u);
         text->ok = !compile || fixture.length;
         bq_retirement_row_text(text, "row=%u %s %s %.*s\n", index,
-            bq_retirement_row_timed_object(row, native) ? "batch" : compile ? "0" : "-",
-            bq_retirement_row_native_runtime(row, native) ? "1" : "-", compile ? (int)fixture.length : 1,
-            compile ? (char const*)fixture.pointer : "-");
+            bq_retirement_row_timed_object(row, native) ? "batch" : compile ? compiled : "-", runtime ? "1" : "-",
+            compile ? (int)fixture.length : 1, compile ? (char const*)fixture.pointer : "-");
     }
     bq_retirement_row_text(text, "groups=%u\n", partition->object_groups);
     for (u32 group = 0, batch = 0; text->ok && group < partition->count; group += 1)
@@ -728,15 +777,17 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_output_side(u32 index, TpRetirement
 
 /* The observation an honest producer would make of plan with the stand-in
  * compilers: every compile writes A's candidate snapshot's object (a single
- * compile's .out, a batch member's .o: the same bytes), with its real
+ * compile's .out, a batch member's .o: the same bytes; a runtime row's
+ * compile the .program executable), with its real
  * artifact digest and, for a row with a code obligation, the code section
  * lane D's reader parses; diagnostics are empty and runtime outputs the
  * independent oracle's (bq_row_test_observe's shape). */
 BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_observe(BqRetirementRowPlan const* plan, BqRetirementRowObserved* observed)
 {
-    TpRetirementCodeSide object = {0}, program = {0};
-    bool ok = bq_prep_worker_unit_output_side(2, &object) && bq_prep_worker_unit_output_side(3, &program) &&
-              !strcmp(object.artifact_sha256, program.artifact_sha256) && bq_row_test_observe(plan, observed);
+    TpRetirementCodeSide object = {0}, single = {0}, program = {0};
+    bool ok = bq_prep_worker_unit_output_side(2, &object) && bq_prep_worker_unit_output_side(3, &single) &&
+              bq_prep_worker_unit_output_side(BQ_PREP_ORACLE_PROGRAM, &program) &&
+              !strcmp(object.artifact_sha256, single.artifact_sha256) && bq_row_test_observe(plan, observed);
     char empty[SHA256_HEX_CAPACITY];
     bq_digest("", 0, (char8*)empty);
     for (u32 index = 0; ok && index < plan->row_count; index += 1)
@@ -745,7 +796,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_observe(BqRetirementRowPlan const* 
         BqRetirementRowPlanRow const* planned = plan->rows + index;
         BqRetirementRowFact* fact = observed->facts + index;
         bool batch = planned->compile == BQ_RETIREMENT_ROW_PLAN_BATCH;
-        TpRetirementCodeSide const* output = batch ? &object : &program;
+        TpRetirementCodeSide const* output = batch ? &object :
+                                             planned->runtime != BQ_RETIREMENT_ROW_PLAN_NONE ? &program : &single;
         for (u32 side = 0; planned->compile != BQ_RETIREMENT_ROW_PLAN_NONE && side < 2; side += 1)
         {
             BqRetirementObservedSide* facts = fact->side + side;
@@ -830,7 +882,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_authorities(BqPrepOracleFixture* fi
  * `key=` line. */
 typedef struct BqPrepWorkerUnitFailure
 {
-    long long result, reason, step, stage, launched, kind, status, exit, cancelled, sequence, log_bytes;
+    long long result, reason, step, stage, launched, kind, status, exit, cancelled, sequence, log_bytes, after,
+        purpose;
     bool present;
 } BqPrepWorkerUnitFailure;
 
@@ -843,10 +896,11 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitFailure bq_prep_worker_unit_failure(int atte
                                                        BQ_RETIREMENT_WORKER_FAILURE_BYTES) : 0;
     if (directory >= 0) close(directory);
     static char const* const keys[] = {"\nresult=", "\nreason=", "\nstep=", "\nstage=", "\nlaunched=", "\nkind=",
-                                       "\nstatus=", "\nexit=", "\ncancelled=", "\nsequence=", "\nlog-bytes="};
+                                       "\nstatus=", "\nexit=", "\ncancelled=", "\nsequence=", "\nlog-bytes=",
+                                       "\nafter=", "\npurpose="};
     long long* values[] = {&failure.result, &failure.reason, &failure.step, &failure.stage, &failure.launched,
                            &failure.kind, &failure.status, &failure.exit, &failure.cancelled, &failure.sequence,
-                           &failure.log_bytes};
+                           &failure.log_bytes, &failure.after, &failure.purpose};
     failure.present = length && !strncmp(text, BQ_RETIREMENT_WORKER_FAILURE_HEADER,
                                          strlen(BQ_RETIREMENT_WORKER_FAILURE_HEADER));
     for (u32 index = 0; failure.present && index < BUSTER_ARRAY_LENGTH(keys); index += 1)
@@ -858,19 +912,14 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitFailure bq_prep_worker_unit_failure(int atte
     return failure;
 }
 
-/* The staged streams of attempt: each kind's files numbered contiguously
- * from 0000 (zero-padded, so their names sort in index order), counts[kind]
- * receiving how many: 0 untimed records, 1 untimed metrics, then per stage
- * transcripts, metrics, row samples and batch samples (A/A 2..5, A/B 6..9). */
-#define BQ_PREP_WORKER_UNIT_STREAM_KINDS 10u
+/* The staged streams of attempt: each kind's files
+ * (bq_prep_worker_unit_stream_prefixes) numbered contiguously from 0000
+ * (zero-padded, so their names sort in index order), counts[kind] receiving
+ * how many. */
 BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_streams(int attempt, u32 counts[BQ_PREP_WORKER_UNIT_STREAM_KINDS])
 {
-    static char const* const prefixes[BQ_PREP_WORKER_UNIT_STREAM_KINDS] = {BQ_RETIREMENT_WORKER_UNTIMED_PATH,
-        "retirement-metrics-untimed-", "retirement-execution-aa-", "retirement-metrics-aa-", "retirement-samples-aa-",
-        "retirement-batches-aa-", "retirement-execution-ab-", "retirement-metrics-ab-", "retirement-samples-0",
-        "retirement-batches-0"};
-    static char const* const suffixes[BQ_PREP_WORKER_UNIT_STREAM_KINDS] = {"", ".txt", ".jsonl", ".txt", ".jsonl",
-        ".jsonl", ".jsonl", ".txt", ".jsonl", ".jsonl"};
+    char const* const* prefixes = bq_prep_worker_unit_stream_prefixes;
+    char const* const* suffixes = bq_prep_worker_unit_stream_suffixes;
     u64 seen[BQ_PREP_WORKER_UNIT_STREAM_KINDS] = {0};
     memset(counts, 0, BQ_PREP_WORKER_UNIT_STREAM_KINDS * sizeof(*counts));
     char path[64];
@@ -881,11 +930,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_streams(int attempt, u32 counts[BQ_
     bool ok = listing != NULL;
     for (struct dirent* entry = listing ? readdir(listing) : NULL; ok && entry; entry = readdir(listing))
     {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        u32 kind = BQ_PREP_WORKER_UNIT_STREAM_KINDS;
-        for (u32 index = 0; kind == BQ_PREP_WORKER_UNIT_STREAM_KINDS && index < BQ_PREP_WORKER_UNIT_STREAM_KINDS;
-             index += 1)
-            if (!strncmp(entry->d_name, prefixes[index], strlen(prefixes[index]))) kind = index;
+        /* The post-sample record is staged beside the streams. */
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+            !strcmp(entry->d_name, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD))
+            continue;
+        u32 kind = bq_prep_worker_unit_stream_kind(entry->d_name);
         size_t name = strlen(entry->d_name);
         size_t prefix = kind < BQ_PREP_WORKER_UNIT_STREAM_KINDS ? strlen(prefixes[kind]) : 0;
         /* A/B sample prefixes end in the first index digit. */
@@ -937,7 +986,60 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_campaign_checks(BqPrepOracleFixture
                       S8("self-test"), fixture->driver, fixture->toolchain_root, fixture->broker,
                       fixture->workspaces, attempt->digest, digest) == BQ_OK);
     *failure = bq_prep_worker_unit_failure(attempt->attempt);
-    BQ_PREP_CHECK(failure->present && failure->result == status);
+    BQ_PREP_CHECK(status == BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED ? !failure->present :
+                  failure->present && failure->result == status);
+}
+
+/* The staged post-sample record of attempt: its header, the A/A admission,
+ * post-A/A binding and post-sample digests present, and the untimed, A/A and
+ * A/B launch counts. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_record(int attempt, u64 launches[3])
+{
+    char text[BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX + 1] = {0};
+    int directory = openat(attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY "/streams",
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    u32 length = directory >= 0 ? bq_prep_test_read_at(directory, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, text,
+                                                       BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX) : 0;
+    if (directory >= 0) close(directory);
+    bool ok = length && !strncmp(text, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER,
+                                 strlen(BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER));
+    static char const* const digests[] = {"\naa-admission=", "\npost-aa=", "\npost-aa-binding=", "\npost-sample=",
+                                          "\nlog-aa=", "\nlog-ab="};
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(digests); index += 1)
+    {
+        char const* at = strstr(text, digests[index]);
+        char const* value = at ? at + strlen(digests[index]) : NULL;
+        ok = value && strlen(value) > 64 && value[64] == '\n';
+        for (u32 digit = 0; ok && digit < 64; digit += 1)
+            ok = (value[digit] >= '0' && value[digit] <= '9') || (value[digit] >= 'a' && value[digit] <= 'f');
+    }
+    char const* counts = ok ? strstr(text, "\nlaunches=") : NULL;
+    unsigned long long values[3] = {0};
+    ok = counts && sscanf(counts, "\nlaunches=%llu,%llu,%llu\n", &values[0], &values[1], &values[2]) == 3;
+    for (u32 index = 0; index < 3; index += 1) launches[index] = ok ? values[index] : 0;
+    return ok;
+}
+
+/* The document sizes the campaign retained before timing
+ * (BQ_RETIREMENT_WORKER_SIZED_NAME) are exactly `written`, all nonzero. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_sized(int attempt, u64 const written[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS])
+{
+    char text[1024] = {0}, expected[1024];
+    int directory = openat(attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    u32 length = directory >= 0 ? bq_prep_test_read_at(directory, BQ_RETIREMENT_WORKER_SIZED_NAME, text,
+                                                       sizeof(text) - 1u) : 0;
+    if (directory >= 0) close(directory);
+    int used = snprintf(expected, sizeof(expected), "%s", BQ_RETIREMENT_WORKER_SIZED_HEADER);
+    bool ok = length > 0;
+    for (u32 index = 0; ok && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+    {
+        int line = snprintf(expected + used, sizeof(expected) - (size_t)used, "%s %" PRIu64 "\n",
+                            bq_retirement_unit_campaign_document_paths[index], (uint64_t)written[index]);
+        ok = written[index] && line > 0 && (size_t)line < sizeof(expected) - (size_t)used;
+        used += ok ? line : 0;
+    }
+    ok = ok && (size_t)used == length && !memcmp(text, expected, length);
+    return ok;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
@@ -998,9 +1100,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
     if (ok) bq_prep_worker_unit_profiles(fixture->profile);
 
     /* (b) and (a): refused with the compiled profile, then through the ready
-     * record, SETTLING and MEASURING into A/A with the complete one. The
-     * A/A compiler campaign runs every group's 2 x (2 x pairs + warmups)
-     * launches per round; its first runtime launch is where it stops. */
+     * record, SETTLING, MEASURING, A/A (every runtime launch on the program
+     * its own untimed compile step reproduced), the fixture admission, the
+     * post-A/A document, the freeze, A/B and READY with the complete one,
+     * where the producer stops before composition. */
     u64 measuring_ms = 0;
     ok = ok && bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, BQ_PREP_WORKER_UNIT_SUCCESS,
                                          fixture->installed_fd, fixture->workspaces_fd, &fixture->preparation,
@@ -1015,31 +1118,35 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         BqPrepWorkerUnitRun run = bq_prep_worker_unit_drive(fixture, attempt, &seams, BQ_PREP_WORKER_UNIT_RUN,
                                                             BQ_PREP_WORKER_UNIT_MILLISECONDS, &result);
         BqPrepWorkerUnitFailure failure = {0};
-        bq_prep_worker_unit_campaign_checks(fixture, attempt, &seams, &run, BQ_WORKER_FAILED, 4, &failure);
-        u64 compiles = (u64)timed_groups * 2u * (TP_RETIREMENT_ROUNDS * 60u + TP_RETIREMENT_WARMUPS);
-        if (failure.sequence != (long long)compiles || failure.stage != 1)
+        bq_prep_worker_unit_campaign_checks(fixture, attempt, &seams, &run, BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED, 4,
+                                            &failure);
+        if (failure.present)
             fprintf(stderr, "RETIREMENT_PREP worker-unit campaign stopped at stage %lld step %lld sequence %lld "
-                    "(expected %" PRIu64 ") kind %lld reason %lld launched %lld status %lld exit %lld\n", failure.stage,
-                    failure.step, failure.sequence, (uint64_t)compiles, failure.kind, failure.reason, failure.launched,
-                    failure.status, failure.exit);
-        /* Every A/A compiler launch ran; the first runtime launch was refused
-         * before any child (lane B's ./{{output}} runtime argv is not lane
-         * D's binary slot). */
-        BQ_PREP_CHECK(failure.stage == 1 && failure.kind == 1 && !failure.launched &&
-                      failure.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && failure.sequence == (long long)compiles &&
-                      failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND);
-        /* The four pre-A/A documents in the result store, the untimed streams
-         * published into it, and every stream staged in index order. */
+                    "kind %lld reason %lld launched %lld status %lld exit %lld after %lld purpose %lld\n", failure.stage,
+                    failure.step, failure.sequence, failure.kind, failure.reason, failure.launched, failure.status,
+                    failure.exit, failure.after, failure.purpose);
+        /* READY: all five documents in the result store at exactly the sizes
+         * retained before timing, the post-sample record and every stream
+         * kind of both stages published there (each an unchanged staged
+         * stream, nothing else), and every stream staged in index order. */
         u32 counts[BQ_PREP_WORKER_UNIT_STREAM_KINDS];
-        BQ_PREP_CHECK(result.document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE] &&
-                      result.document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN] &&
-                      result.document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN] &&
-                      result.document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE] &&
-                      !result.document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA] && result.untimed_records == 1 &&
-                      result.untimed_metrics == 1u && result.entries == 6);
+        bool documented = true;
+        for (u32 index = 0; index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+            documented = documented && result.document_bytes[index];
+        BQ_PREP_CHECK(documented && bq_prep_worker_unit_sized(attempt->attempt, result.document_bytes));
+        BQ_PREP_CHECK(result.record_bytes && result.untimed_records == 1 && result.untimed_metrics == 1u &&
+                      result.published_kinds == (1u << BQ_PREP_WORKER_UNIT_STREAM_KINDS) - 1u && !result.unmatched);
         BQ_PREP_CHECK(bq_prep_worker_unit_streams(attempt->attempt, counts) && counts[0] == 1 && counts[1] >= 1 &&
                       counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1 &&
                       counts[7] >= 1 && counts[8] >= 1 && counts[9] >= 1);
+        /* The post-sample record: the admission, post-A/A and post-sample
+         * digests, and every A/A and A/B launch, each stage 2 x (rounds x
+         * pairs + warmups) per group and per runtime row (both reference
+         * rows run their program). */
+        u64 launches[3] = {0}, per_unit = 2u * (TP_RETIREMENT_ROUNDS * 60u + TP_RETIREMENT_WARMUPS);
+        BQ_PREP_CHECK(bq_prep_worker_unit_record(attempt->attempt, launches) && launches[0] &&
+                      launches[1] == ((u64)timed_groups + BQ_PREP_ORACLE_REFERENCES) * per_unit &&
+                      launches[2] == launches[1]);
         measuring_ms = run.measuring_ms > run.started_ms ? run.measuring_ms - run.started_ms : 0;
         /* #881 PR 4: the coordinator's side over the ready digest the
          * channel carried. */

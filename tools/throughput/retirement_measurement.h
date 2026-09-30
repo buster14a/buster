@@ -368,18 +368,43 @@ typedef struct TpRetirementLaunch
     unsigned group_kind;
 } TpRetirementLaunch;
 
+/* A runtime launch's program in the work directory (the descriptor that
+ * becomes slot 7): args[0] is exactly "./" and the program's leaf (lane B's
+ * runtime template, `./{{output}}`), and that leaf is, without following a
+ * link, the single-link, owner-executable regular file of this user that the
+ * caller observed after the compile step (device, inode, size and change
+ * time). A link, a replaced or pre-planted file, or one from another step's
+ * directory is refused. */
+static int tp_retirement_launch_program(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs)
+{
+    TpProcessProgram const* program = inputs->program;
+    struct stat info;
+    int ok = program && tp_retirement_artifact_leaf(program->leaf) &&
+        tp_process_layout_program(command->arguments[0], program) &&
+        fstatat(inputs->directory, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
+        info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 0022) && (info.st_mode & S_IXUSR) &&
+        info.st_dev == program->device && info.st_ino == program->inode && info.st_size == program->size &&
+        info.st_ctim.tv_sec == program->changed.tv_sec && info.st_ctim.tv_nsec == program->changed.tv_nsec;
+    return ok;
+}
+
 /* The canonical layout's launch (inputs->ruleset >= 3, retirement_sandbox.h):
  * the child cannot resolve a caller path, so the command's directory must be
- * exactly BQ_RETIREMENT_ROW_WORK_PATH and its args[0] the binary slot of the
- * side, and the descriptor that becomes slot 7 (fstat `cwd`) must be a
- * private directory of this user; a compiler launch's output directory must
- * be that same directory (the artifact is read where the child wrote it). */
+ * exactly BQ_RETIREMENT_ROW_WORK_PATH, and the descriptor that becomes slot 7
+ * (fstat `cwd`) must be a private directory of this user. Exactly two argv
+ * shapes launch: a compiler command (kind 0) runs the binary slot of the
+ * side and names no program, and its output directory must be slot 7 (the
+ * artifact is read where the child wrote it); a runtime command (kind 1)
+ * runs the program its compile step wrote in slot 7
+ * (tp_retirement_launch_program). */
 static int tp_retirement_launch_layout(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs,
     struct stat const* cwd, int output_directory)
 {
     struct stat output;
     int ok = command->directory && !strcmp(command->directory, BQ_RETIREMENT_ROW_WORK_PATH) && command->arguments &&
-        tp_process_layout_binary(command->arguments[0], inputs->side) && cwd->st_uid == geteuid() &&
+        (command->kind == 1 ? tp_retirement_launch_program(command, inputs) :
+         !inputs->program && tp_process_layout_binary(command->arguments[0], inputs->side)) &&
+        cwd->st_uid == geteuid() &&
         inputs->memory_bytes == (uint64_t)command->memory_mib << 20 &&
         !(cwd->st_mode & 0022) &&
         (command->kind || (output_directory >= 3 && fstat(output_directory, &output) == 0 &&
@@ -410,7 +435,7 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
         fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity) &&
         fstat(inputs->directory, &cwd) == 0 && S_ISDIR(cwd.st_mode) &&
         (inputs->ruleset >= 3 ? tp_retirement_launch_layout(command, inputs, &cwd, output_directory) :
-         lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
+         !inputs->program && lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
          cwd.st_dev == named_cwd.st_dev && cwd.st_ino == named_cwd.st_ino) &&
         fstat(inputs->log, &log) == 0 && S_ISREG(log.st_mode) && log.st_nlink == 1 && !log.st_size &&
         lseek(inputs->log, 0, SEEK_CUR) == 0 && (fcntl(inputs->log, F_GETFL) & O_ACCMODE) == O_RDWR;
