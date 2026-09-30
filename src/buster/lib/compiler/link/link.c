@@ -4076,7 +4076,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+            u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                        relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result->error = LINK_ERROR_RELOCATION;
@@ -4803,7 +4804,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -5931,7 +5933,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -6817,7 +6820,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
         ObjectSection* section = object->sections + relocation->section;
         ObjectSymbol* symbol = object->symbols + relocation->symbol;
         u8 symbol_class = image->classes[relocation->symbol];
-        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         bool valid = action == LINK_ELF_PIC_ACTION_SKIP ||
                      (relocation->offset <= section->data.length && width <= section->data.length - relocation->offset);
         u64 section_start = section_offsets[relocation->section];
@@ -7612,7 +7616,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+        u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -9643,7 +9648,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+                width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                            relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -12712,7 +12718,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+            u64 width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                        relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -12780,7 +12787,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+                width = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                            relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -13666,4 +13674,3 @@ NativeExecutableLinkResult link_elf_test_section_table_append(Arena* arena, Byte
     return result;
 }
 #endif
-

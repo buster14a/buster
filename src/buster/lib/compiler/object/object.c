@@ -1380,7 +1380,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    bool wide = kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64;
+    return wide ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -5639,7 +5640,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+                        relocation_width = (kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                                    kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
@@ -5735,7 +5737,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                                        kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -14244,7 +14247,8 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u64 relocation_size = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
+        u64 relocation_size = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
@@ -14462,4 +14466,3 @@ void object_release_executable(ObjectExecutable executable)
         os_unreserve(executable.address, executable.allocation_size);
     }
 }
-
