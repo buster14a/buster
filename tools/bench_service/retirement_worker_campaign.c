@@ -708,7 +708,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_streams_publish(TpRetirementStore*
     for (u32 index = 0; ok && index < used; index += 1)
     {
         FILE* source = group->streams[index];
-        TpRetirementPending pending;
+        TpRetirementPending pending = {0};
         ok = fflush(source) == 0 && fseek(source, 0, SEEK_SET) == 0 &&
              tp_retirement_store_begin(store, group->paths[index], TP_RETIREMENT_STORE_FILE_BYTES, &pending);
         Sha256 hash;

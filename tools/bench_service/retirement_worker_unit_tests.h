@@ -32,17 +32,19 @@
  * untimed batches with real launches), MEASURING (the store-based bind, the
  * documents sized before lane E's store plan and written at exactly those
  * sizes, the untimed streams published, attach), A/A (each runtime launch
- * running lane B's `./{{output}}` program, which its row's compile step
- * reproduced in a fresh step directory; the runtime rows compile the host
+ * running lane B's `./{{output}}` program, retained from the stage's own
+ * compile and copied into a fresh step directory; the runtime rows compile the host
  * program BQ_PREP_ORACLE_PROGRAM, which prints the reference oracle's
  * output), the fixture admission, the post-A/A document, the freeze, A/B and
  * READY: all five documents at the sizes retained before timing
  * (bq_prep_worker_unit_sized), the post-sample record with every launch
  * (bq_prep_worker_unit_post_sample) and every stream kind published
  * (bq_prep_worker_unit_result). Failure retention (campaign-failure.txt)
- * on a failing untimed launch (job 85), a SIGTERM during A/A (job 86) and the
+ * on a failing untimed launch (job 85), a SIGTERM during A/A (job 86), the
  * deadline expiring during A/A (job 87, whose launches cannot fit the time
- * left), each with the keeper stopped and nothing left running. SIGTERM to
+ * left) and a detached (setsid) sleeper left by a timed compile (job 88),
+ * found by the descendant check after that launch; each with the keeper
+ * stopped and nothing left running. SIGTERM to
  * the unit during the hanging generate of job
  * 63, forwarded to the producer's self-pipe, ending cancelled with the stage
  * gone; the failing generate of job 67; the producer killed during the
@@ -101,6 +103,7 @@
 #define BQ_PREP_WORKER_UNIT_UNTIMED_FAILURE 85u
 #define BQ_PREP_WORKER_UNIT_AA_TERMINATE 86u
 #define BQ_PREP_WORKER_UNIT_AA_DEADLINE 87u
+#define BQ_PREP_WORKER_UNIT_AA_ESCAPE 88u
 /* The unit's exit status when it kept a child or a descriptor. */
 #define BQ_PREP_WORKER_UNIT_UNCLEAN 200
 #define BQ_PREP_WORKER_UNIT_MILLISECONDS 300000u
@@ -1960,10 +1963,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 
     /* (b) and (a): refused with the compiled profile, then, through the real
      * coordinator path, the ready record, SETTLING, MEASURING, A/A (every
-     * runtime launch on the program its own untimed compile step
-     * reproduced), the fixture admission, the post-A/A document, the freeze,
-     * A/B, READY, composition, the authority and MEASURED with the complete
-     * one (#881 PR 3). */
+     * runtime launch on the program retained from the stage's own compile),
+     * the fixture admission, the post-A/A document, the freeze, A/B, READY,
+     * composition, the authority and MEASURED with the complete one (#881
+     * PR 3). */
     u64 measuring_ms = 0;
     ok = ok && bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, BQ_PREP_WORKER_UNIT_SUCCESS,
                                          fixture->installed_fd, fixture->workspaces_fd, &fixture->preparation,
@@ -2069,12 +2072,16 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
      * (SETTLING, job 85's stand-ins exit 9), SIGTERM during A/A (job 86) and
      * the job deadline expiring during A/A (job 87: no launch fits the time
      * left). Jobs 86 and 87 sleep in every A/A second-label launch, so A/A
-     * outlasts both. */
+     * outlasts both. Job 88's first second-label compile leaves a detached
+     * (setsid) sleeper, which the check after that very launch finds (the
+     * producer is its subreaper), kills and fails with, long before the
+     * campaign's end. */
     u64 const campaign_jobs[] = {BQ_PREP_WORKER_UNIT_UNTIMED_FAILURE, BQ_PREP_WORKER_UNIT_AA_TERMINATE,
-                                 BQ_PREP_WORKER_UNIT_AA_DEADLINE};
+                                 BQ_PREP_WORKER_UNIT_AA_DEADLINE, BQ_PREP_WORKER_UNIT_AA_ESCAPE};
     BqPrepWorkerUnitMode const campaign_modes[] = {BQ_PREP_WORKER_UNIT_RUN, BQ_PREP_WORKER_UNIT_TERMINATE_MEASURING,
-                                                   BQ_PREP_WORKER_UNIT_RUN};
-    int const campaign_expected[] = {BQ_WORKER_FAILED, BQ_WORKER_CANCEL_SIGNAL, BQ_WORKER_TIMEOUT};
+                                                   BQ_PREP_WORKER_UNIT_RUN, BQ_PREP_WORKER_UNIT_RUN};
+    int const campaign_expected[] = {BQ_WORKER_FAILED, BQ_WORKER_CANCEL_SIGNAL, BQ_WORKER_TIMEOUT, BQ_WORKER_FAILED};
+    u64 compile_launches = (u64)timed_groups * 2u * (TP_RETIREMENT_ROUNDS * 60u + TP_RETIREMENT_WARMUPS);
     /* Job 87's deadline leaves the success run's time to MEASURING, a margin
      * and one launch timeout: A/A starts and then no launch fits. */
     u64 margin = measuring_ms / 2u > 5000u ? measuring_ms / 2u : 5000u;
@@ -2100,9 +2107,24 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         else if (index == 1)
             BQ_PREP_CHECK(failure.stage == 1 && failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND &&
                           (failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CANCELLED || failure.cancelled == 1));
-        else
+        else if (index == 2)
             BQ_PREP_CHECK(failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE && failure.stage == 1 &&
                           !failure.launched && failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND);
+        else
+        {
+            /* Found after the launch that left it: a finished A/A compiler
+             * launch, early in the cursor, and the sleeper is gone. */
+            char text[32];
+            u32 used = bq_prep_test_read_at(attempt->attempt, BQ_RETIREMENT_WORKER_CAMPAIGN_DIRECTORY
+                                                 "/work/escaped.pid", text, sizeof(text));
+            pid_t escaped = used ? (pid_t)strtol(text, NULL, 10) : 0;
+            bool gone = escaped > 1 && kill(escaped, 0) != 0 && errno == ESRCH;
+            if (escaped > 1 && !gone) kill(escaped, SIGKILL);
+            BQ_PREP_CHECK(failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.stage == 1 &&
+                          failure.launched == 1 && failure.after == BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS &&
+                          failure.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !failure.kind &&
+                          failure.sequence < (long long)compile_launches && gone);
+        }
         if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
     }
 
