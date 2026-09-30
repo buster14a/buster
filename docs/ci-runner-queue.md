@@ -85,13 +85,18 @@ indicates a provider outage.
 | pull_request, cancelled | 202 | 4.7% |
 | merge_group, failure | 112 | 2.6% |
 
-Each `ci.yml` run needs eight macOS jobs, so the ceiling runs about six CI
+At the measured revision, each `ci.yml` run needed eight macOS jobs, so the ceiling runs about six CI
 runs at once. Between 6 and 16 merge-group `ci.yml` runs were active
 simultaneously (`max_entries_to_build: 20`); 16 ended cancelled, 1 failed and
 12 succeeded. All five `main` push runs revalidated a SHA whose merge-group
 `ci.yml` run had already succeeded. Successful `ci.yml` runs created in the
 window: 12 merge-group (median 2175 s created-to-updated), 10 pull-request and
 3 push.
+
+Current CI requests four Apple jobs after #1986: macOS AArch64 release, checks
+and native, plus iOS AArch64. The eight-job population and queue measurements
+above remain historical. Halving requested Apple jobs is not a measured
+latency or runner-minute speedup; see [Apple CI policy](apple-ci-policy.md).
 
 ## Candidate corrections
 

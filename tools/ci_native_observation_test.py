@@ -645,7 +645,7 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIsNotNone(lanes)
         self.assertIsNotNone(shards)
         self.assertEqual(lanes.group(1).split(", "), [
-            "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64",
+            "linux-x86_64", "linux-aarch64", "macos-aarch64",
             "windows-x86_64", "windows-aarch64",
         ])
         self.assertEqual(shards.group(1).split(", "), ["release", "checks"])
@@ -702,7 +702,6 @@ class NativeObservationTest(unittest.TestCase):
         )
         self.assertEqual(entries, [
             ("Android x86-64", "ubuntu-26.04", "android", "x86_64"),
-            ("iOS x86-64", "macos-26-intel", "ios", "x86_64"),
             ("iOS AArch64", "macos-26", "ios", "aarch64"),
         ])
         steps = dict(re.findall(
