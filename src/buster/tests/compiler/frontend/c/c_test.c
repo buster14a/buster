@@ -3899,6 +3899,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_rollback_growth(UnitTestArg
     return result;
 }
 
+// A frame that can abandon a partial parse -- an aggregate segment, a typeof or
+// _Atomic operand -- snapshots the parse result into the machine's row for its
+// own slot, and every frame of a run shares the root query's token stream, so a
+// push copies neither. The seam holds up to 512 rows live at once and rolls
+// each back to exactly its own. The parses then run the same storage through
+// the production paths: every level of a typeof chain takes a snapshot while
+// the next one runs, inside aggregates and _Atomic too, and `struct Broken`'s
+// rejected member, abandoned with its declaration, leaves no record behind.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_snapshot_rows(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_type_parse_frame_bytes() < sizeof(CParseResult));
+    u32 depths[] = {1, 2, 8, 64, 512};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        TemporalArena rows = scratch_begin(0, 0);
+        BUSTER_TEST(arguments, c_test_type_parse_snapshot_rows_restore(rows.arena, depths[depth_index]));
+        scratch_end(rows);
+    }
+    s64 first_residue[5] = {0};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        u32 depth = depths[depth_index];
+        u32 counts[2][5] = {0};
+        for (u32 broken = 0; broken < 2; broken += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            u64 capacity = (u64)depth * 16 + 64;
+            char8* chain = arena_allocate(temporary.arena, char8, capacity);
+            u64 chain_length = 0;
+            for (u32 level = 1; level < depth; level += 1)
+            {
+                c_test_append_source(chain, capacity, &chain_length, S8("typeof("));
+            }
+            c_test_append_source(chain, capacity, &chain_length, S8("typeof(object + 0)"));
+            for (u32 level = 1; level < depth; level += 1)
+            {
+                c_test_append_source(chain, capacity, &chain_length, S8(" *)"));
+            }
+            String8 chain_text = {chain, chain_length};
+            u64 source_capacity = chain_length * 4 + 512;
+            char8* source = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 length = 0;
+            c_test_append_source(source, source_capacity, &length, S8("long object;\nstruct Node { long value; } node;\ntypedef "));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(" chain;\nstruct Holder { struct Inner { "));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(" member; _Atomic("));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(") atomic; } inner; typeof(node.value * 2) tail; };\n"));
+            if (broken)
+            {
+                c_test_append_source(source, source_capacity, &length, S8("struct Broken { _Alignas(8) "));
+                c_test_append_source(source, source_capacity, &length, chain_text);
+                c_test_append_source(source, source_capacity, &length, S8(" member junk; };\n"));
+            }
+            c_test_append_source(source, source_capacity, &length, S8("typedef typeof(object + 0) after;\n"));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, broken || parse.diagnostic_count == 0);
+            u32 resolved = 0;
+            for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+            {
+                String8 name = parse.entities[entity].name;
+                if (!string_equal(name, S8("chain")) && !string_equal(name, S8("after")))
+                {
+                    continue;
+                }
+                u32 pointers = string_equal(name, S8("chain")) ? depth - 1 : 0;
+                CTypeId type = parse.entities[entity].type;
+                for (u32 pointer = 0; pointer < pointers && type.value < parse.type_count; pointer += 1)
+                {
+                    BUSTER_TEST(arguments, parse.types[type.value].kind == C_TYPE_POINTER);
+                    type = parse.types[type.value].element_type;
+                }
+                bool is_long = type.value < parse.type_count && parse.types[type.value].kind == C_TYPE_LONG;
+                BUSTER_TEST(arguments, is_long);
+                resolved += is_long;
+            }
+            BUSTER_TEST(arguments, resolved == 2);
+            u32 table_counts[] = {parse.type_count, parse.member_count, parse.parameter_count, parse.array_bound_count, parse.alignment_count};
+            memcpy(counts[broken], table_counts, sizeof(table_counts));
+            scratch_end(temporary);
+        }
+        // Types, members, parameters, array bounds, alignment records.
+        for (u32 table = 0; table < 5; table += 1)
+        {
+            s64 residue = (s64)counts[1][table] - (s64)counts[0][table];
+            if (depth_index == 0)
+            {
+                first_residue[table] = residue;
+            }
+            BUSTER_TEST_RAW(arguments, residue == first_residue[table] && (table != 4 || residue == 0),
+                            string_format(arguments->arena, S8("depth={u32} table={u32}: the abandoned declaration left {s64}, at depth 1 {s64}"), depth, table,
+                                          residue, first_residue[table]));
+        }
+    }
+    return result;
+}
+
 // A member reached through anonymous structs and unions is found by a
 // breadth-first search over those aggregates, whose queue is its own visited
 // set: a search that reaches a few of them must not touch a flag per row of the
@@ -27432,6 +27533,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
     BUSTER_TEST_FIXTURE(arguments, c_test_promoted_member_search);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
