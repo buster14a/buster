@@ -27740,6 +27740,18 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
         return false;
     }
     c_ir_sizeof_statement_expression_operand(builder, &start, &end);
+    // `&(0, a)` names no lvalue (C 6.5.17p2, 6.5.3.2p1). Record the constraint
+    // so the operand is refused rather than typed by the prediction fallback.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND) &&
+        c_ir_has_root_comma(builder, start + 1, end))
+    {
+        if (!builder->sizeof_operand_constraint.length)
+        {
+            builder->sizeof_operand_constraint = S8("cannot take the address of a comma expression");
+            builder->sizeof_operand_constraint_token = start;
+        }
+        return false;
+    }
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -30443,6 +30455,16 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             // Split the sequence before ?: or &&/||. In particular, a false
             // left operand cannot suppress the final comma operand, and a
             // deferred right-hand call must not enter the arithmetic core.
+            // The machine carries a void result as an integer placeholder, so
+            // the scalar constraint (C 6.8.4.1, 6.8.5) is checked on the type.
+            IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, task.start, task.end));
+            if (sequence_type && sequence_type->kind == IR_TYPE_VOID)
+            {
+                builder->failure_message = S8("controlling expression must have scalar type");
+                builder->failure_token_index = task.start;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
             frame->as.condition.leaf_true_block = task.true_block;
             frame->as.condition.leaf_false_block = task.false_block;
             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
