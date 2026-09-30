@@ -41,8 +41,10 @@
  * (bq_prep_worker_unit_post_sample) and every stream kind published
  * (bq_prep_worker_unit_result). Failure retention (campaign-failure.txt)
  * on a failing untimed launch (job 85), a SIGTERM during A/A (job 86), the
- * deadline expiring during A/A (job 87, whose launches cannot fit the time
- * left) and a detached (setsid) sleeper left by a timed compile (job 88),
+ * deadline expiring during A/A (job 87, whose deadline the A/A deadline seam
+ * bq_retirement_worker_campaign_test_aa_deadline_ns places inside A/A, so its
+ * first A/A launch cannot fit the time left, whatever the host load) and a
+ * detached (setsid) sleeper left by a timed compile (job 88),
  * found by the descendant check after that launch; each with the keeper
  * stopped and nothing left running. SIGTERM to
  * the unit during the hanging generate of job
@@ -2914,9 +2916,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
     /* Failure retention inside the campaign: a failing untimed launch
      * (SETTLING, job 85's stand-ins exit 9), SIGTERM during A/A (job 86) and
      * the job deadline expiring during A/A (job 87: no launch fits the time
-     * left). Jobs 86 and 87 sleep in every A/A second-label launch, so A/A
-     * outlasts both. Job 88's first second-label compile leaves a detached
-     * (setsid) sleeper, which the check after that very launch finds (the
+     * left, so its first A/A launch is refused). Job 86 sleeps in every A/A
+     * second-label launch, so A/A outlasts its SIGTERM. Job 88's first
+     * second-label compile leaves a detached (setsid) sleeper, which the check after that very launch finds (the
      * producer is its subreaper), kills and fails with, long before the
      * campaign's end. */
     u64 const campaign_jobs[] = {BQ_PREP_WORKER_UNIT_UNTIMED_FAILURE, BQ_PREP_WORKER_UNIT_AA_TERMINATE,
@@ -2925,10 +2927,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                                                    BQ_PREP_WORKER_UNIT_RUN, BQ_PREP_WORKER_UNIT_RUN};
     int const campaign_expected[] = {BQ_WORKER_FAILED, BQ_WORKER_CANCEL_SIGNAL, BQ_WORKER_TIMEOUT, BQ_WORKER_FAILED};
     u64 compile_launches = (u64)timed_groups * 2u * (TP_RETIREMENT_ROUNDS * 60u + TP_RETIREMENT_WARMUPS);
-    /* Job 87's deadline leaves the success run's time to MEASURING, a margin
-     * and one launch timeout: A/A starts and then no launch fits. */
-    u64 margin = measuring_ms / 2u > 5000u ? measuring_ms / 2u : 5000u;
-    u32 deadline_ms = (u32)(measuring_ms + margin + BQ_PREP_WORKER_UNIT_TIMEOUT_SECONDS * 1000u);
+    /* Job 87's deadline falls half a launch timeout after its A/A begins
+     * (bq_retirement_worker_campaign_test_aa_deadline_ns), whatever the time
+     * to get there: the first A/A launch cannot fit, under any load (#2001). */
     for (u32 index = 0; ok && measuring_ms && index < BUSTER_ARRAY_LENGTH(campaign_jobs); index += 1)
     {
         bool started = bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, campaign_jobs[index],
@@ -2937,9 +2938,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         BQ_PREP_CHECK(started);
         observed.job_id = attempt->job.id;
         observed.attempt_token = attempt->job.token;
+        bq_retirement_worker_campaign_test_aa_deadline_ns = campaign_jobs[index] == BQ_PREP_WORKER_UNIT_AA_DEADLINE ?
+            BQ_PREP_WORKER_UNIT_TIMEOUT_SECONDS * UINT64_C(500000000) : 0;
         BqPrepWorkerUnitRun run = started ? bq_prep_worker_unit_drive(fixture, attempt, &seams, campaign_modes[index],
-            campaign_jobs[index] == BQ_PREP_WORKER_UNIT_AA_DEADLINE ? deadline_ms : BQ_PREP_WORKER_UNIT_MILLISECONDS,
-            NULL) : (BqPrepWorkerUnitRun){.status = -1};
+            BQ_PREP_WORKER_UNIT_MILLISECONDS, NULL) : (BqPrepWorkerUnitRun){.status = -1};
+        bq_retirement_worker_campaign_test_aa_deadline_ns = 0;
         BqPrepWorkerUnitFailure failure = {0};
         bq_prep_worker_unit_campaign_checks(fixture, attempt, &seams, &run, campaign_expected[index], index ? 4 : 3,
                                             &failure);
@@ -2952,7 +2955,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                           (failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CANCELLED || failure.cancelled == 1));
         else if (index == 2)
             BQ_PREP_CHECK(failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE && failure.stage == 1 &&
-                          !failure.launched && failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND);
+                          !failure.launched && failure.sequence == 0 &&
+                          failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND);
         else
         {
             /* Found after the launch that left it: a finished A/A compiler

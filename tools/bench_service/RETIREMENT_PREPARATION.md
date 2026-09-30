@@ -1563,7 +1563,10 @@ timed units (18 groups and 2 runtime rows), 4,880 per stage, 10,340 in all;
 60 pairs is the contract's minimum. The failure jobs stop early. Job 85 stops
 at its first untimed launch. Job 86 is terminated as soon as its first A/A
 second-label launch leaves the stand-in's marker, and job 88 fails right after
-that launch. Only job 87 must spend its deadline margin in A/A. Per launch,
+that launch. Job 87 stops at its first A/A launch: a correctness-test seam
+(`bq_retirement_worker_campaign_test_aa_deadline_ns`) pulls its deadline to
+half a launch timeout after A/A begins, so no launch fits whatever the host
+load (#2001). Per launch,
 the descendant check reads the producer's own child lists, and the stand-in
 forks one `cat` per file it writes. PR 3's end-to-end and refusal cases
 reuse job 82's single run: one finalization, one replay shared by every

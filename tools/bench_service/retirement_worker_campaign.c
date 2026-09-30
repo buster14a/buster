@@ -35,6 +35,8 @@
  * admission has no authority (#426, #1021) and stays compiled out; the
  * preparation fixture compiles the driver's fixture admission and supplies
  * the receipt stand-in (bq_retirement_worker_campaign_fixture_receipt).
+ * Correctness-test builds also carry the A/A deadline seam
+ * (bq_retirement_worker_campaign_test_aa_deadline_ns).
  *
  * Entry point: bq_retirement_worker_campaign_run. Release in reverse on
  * every path: bq_retirement_worker_campaign_release (store abort unless
@@ -141,6 +143,14 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_sample_tags[TP_RETIRE
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
     TpRetirementCampaign const* campaign, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
     u32* length, char digest[SHA256_HEX_CAPACITY]);
+#endif
+#ifdef BQ_RETIREMENT_CORRECTNESS_TEST_ONLY
+/* Test seam (never in the installed service, which retirement_unit.c
+ * enforces): when nonzero, the driver's deadline is pulled to at most this
+ * many nanoseconds after A/A begins, so the preparation fixture's
+ * deadline-during-A/A job (retirement_worker_unit_tests.h, job 87) expires
+ * in A/A however long the attempt took to reach it (#2001). */
+BUSTER_GLOBAL_LOCAL u64 bq_retirement_worker_campaign_test_aa_deadline_ns;
 #endif
 
 BUSTER_GLOBAL_LOCAL void* bq_retirement_worker_allocate(Arena* arena, u64 count, u64 size)
@@ -1247,6 +1257,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWor
     BqError result = bq_retirement_unit_campaign_documents(driver, sources) ? BQ_OK : BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && !bq_retirement_worker_documents_sized(campaign, 0, BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA))
         result = BQ_CORRUPT;
+#ifdef BQ_RETIREMENT_CORRECTNESS_TEST_ONLY
+    u64 aa_begins = bq_phase_clock(), aa_span = bq_retirement_worker_campaign_test_aa_deadline_ns;
+    if (result == BQ_OK && aa_span && aa_begins && aa_begins < driver->deadline_ns &&
+        aa_span < driver->deadline_ns - aa_begins)
+        driver->deadline_ns = aa_begins + aa_span;
+#endif
     BqRetirementUnitCampaignStreams streams = bq_retirement_worker_stage_view(campaign, 0);
     if (result == BQ_OK && !bq_retirement_unit_campaign_stage(driver, campaign->commands.commands, count, &streams))
         result = BQ_WORKER_FAILED;
