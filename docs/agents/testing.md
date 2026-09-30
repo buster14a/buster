@@ -315,12 +315,12 @@ their errors. The registered link tests cover these boundaries and byte-identica
 output relative to an object without the unused marker.
 
 `compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
-with the PATH `clang` at `x86-64`, `haswell` and `znver5`. Each row runs only
-when the host CPU can execute it. The Zen 5 row also requires that Clang accept
-`-march=znver5`, which Clang supports from version 19. A single probe compile
-checks this, and an older Clang (Ubuntu 24.04 ships 18) prints
-`PADDED_VECTOR_ZNVER5_ROW status=not-run` with its version line. The row is then
-not run and is not counted as passed.
+with the PATH `clang` at baseline, Haswell and Zen 5. Each row runs only when
+the host CPU can execute it. Buster compiles its half of the Zen 5 row for
+`znver5`, and Clang compiles its half for `x86-64-v4`, which has the same
+64-byte vector ABI. Clang accepts `znver5` only from version 19 (Ubuntu 24.04
+ships 18), but it accepts `x86-64-v4` from version 12, so the row needs no
+host-compiler gate; see the [layout guide](frontend/layout.md).
 
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
