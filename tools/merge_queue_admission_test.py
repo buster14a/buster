@@ -484,6 +484,53 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertNotIn("--allow-pending", native_run.call_args.args[0])
                 self.assertIn("--repository", native_run.call_args.args[0])
 
+    def test_unattested_retirement_groups_also_require_ephemeral_reconstruction(self):
+        for mode, required in (("ordinary-merge-group", False),
+                               ("ordinary-bound-merge-group", True),
+                               ("trusted-integration-merge-group", True)):
+            with self.subTest(mode=mode):
+                checks = gate.required_checks({"status": "admitted", "mode": mode})
+                self.assertEqual(set(gate.CHECKS.items()) <= set(checks.items()), True)
+                self.assertEqual("native-retirement-rebind.yml" in checks, required)
+        rows, jobs = results()
+        expected = candidate()
+        checks = gate.required_checks({"mode": "ordinary-bound-merge-group"})
+        _, pending = gate.check_results(gate.latest_runs(rows, expected, checks), jobs, expected, checks)
+        self.assertEqual(pending, ["Reconstruct candidate closure ephemerally: missing workflow"])
+        index = len(rows) + 1
+        rows.append(dict(rows[0], id=index, path=".github/workflows/native-retirement-rebind.yml"))
+        for conclusion in ("failure", "cancelled", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                jobs[(index, 1)] = [{"id": 900, "run_id": index, "run_attempt": 1,
+                                     "name": "Reconstruct candidate closure ephemerally",
+                                     "head_sha": expected["head"], "status": "completed",
+                                     "conclusion": conclusion}]
+                with self.assertRaisesRegex(gate.AdmissionError, "did not succeed"):
+                    gate.check_results(gate.latest_runs(rows, expected, checks), jobs, expected, checks)
+        jobs[(index, 1)][0]["conclusion"] = "success"
+        evidence, pending = gate.check_results(
+            gate.latest_runs(rows, expected, checks), jobs, expected, checks)
+        self.assertEqual(pending, [])
+        self.assertEqual(len(evidence), len(gate.CHECKS) + 1)
+
+    def test_bound_group_collects_reconstruction_on_both_passes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            event = Path(temporary) / "event.json"
+            event.write_text("{}")
+            arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
+                                        repo_root=Path(temporary), wait_seconds=0)
+            retirement = {"status": "admitted", "mode": "ordinary-bound-merge-group"}
+            with patch.object(gate, "identity", return_value=candidate()), \
+                    patch.object(gate, "live_identity", return_value=True), \
+                    patch.object(gate, "verify_trusted_policy"), patch.object(gate, "GitHub") as api, \
+                    patch.object(gate, "retirement_admission", return_value=retirement), \
+                    patch.object(gate, "collect", return_value=([{"run_id": 1}], [])) as collect:
+                api.return_value.get.return_value = live_rules()
+                gate.run_gate(arguments)
+                self.assertEqual(collect.call_count, 2)
+                for call in collect.call_args_list:
+                    self.assertIn("native-retirement-rebind.yml", call.args[2])
+
     def test_publication_change_during_ci_rejects_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
             event = Path(temporary) / "event.json"

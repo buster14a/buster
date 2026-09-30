@@ -26,7 +26,10 @@ On GitHub-hosted machines, bootstrap `build/build` with the image's Clang as
 place of `./build.sh`. Canonical local bootstrapping still uses TCC. On Windows
 use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
-all three. Hardware counters currently have a Linux implementation only.
+all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
+it runs weekly, on demand, and for ready pull requests that change a harness
+input, so the Linux comparison never waits for a macOS runner. Hardware
+counters currently have a Linux implementation only.
 
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction

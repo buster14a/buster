@@ -34,8 +34,11 @@
 //   c_parse_position_index_build                  classification, the
 //                                                 matching-delimiter index
 //   c_parse_builtin_type_layout,                  target-dependent type
-//   c_parse_type_layout                           sizes/alignments, aggregate
-//                                                 and bit-field layout
+//   c_record_layout_place,                        sizes/alignments, the one
+//   c_parse_type_layout                           member-placement authority
+//                                                 both layout engines use
+//                                                 (CRecordLayoutRule), and
+//                                                 aggregate/bit-field layout
 //   c_semantic_check_named_call_arities          bound call constraints without IR
 //   c_parse_bfloat16_builtin,                    target builtin signatures
 //   c_parse_validate_bfloat16_builtin_calls       checked before unused pruning
@@ -1010,6 +1013,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machin
                                                          u32* declarator_start);
 
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_fallback_symbol(CParseResult* result, u32 symbol, String8 name);
 BUSTER_C_SHARED CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
 
 BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
@@ -1691,6 +1695,215 @@ BUSTER_C_SHARED void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
     }
 }
 
+/* Record member placement, the rule both layout engines follow (issue #1439).
+
+   The engines evaluate what only they can -- a width's constant expression,
+   alignment specifiers, packing -- and hand the member here to be placed. They
+   used to carry a copy each of the System V bit-field rule, with comments
+   insisting the two must agree; they did agree, for every target, including
+   the Windows and AAPCS64 targets whose ABI says otherwise. Agreement between
+   the two engines is therefore not evidence of a correct layout: the oracle
+   is the Clang-derived corpus that record_layout_tests checks both
+   engines against.
+
+   ITANIUM and AAPCS64 follow Clang's ItaniumRecordLayoutBuilder::LayoutBitField.
+   A bit-field takes the next bit unless it would straddle an aligned storage
+   unit of its declared type; a zero-width one moves the next member to its
+   type's boundary; a packed one takes the next bit. `#pragma pack`, with any
+   value, suppresses the straddle padding (#1318). AAPCS64 differs only in
+   that unnamed and zero-width containers raise the record's alignment
+   (#1344), and then by the declared type's natural alignment, which neither
+   packing nor `#pragma pack` lowers for a zero-width field.
+
+   MICROSOFT follows Clang's MicrosoftRecordLayoutBuilder::layoutBitField and
+   layoutZeroWidthBitField. A bit-field opens a storage unit of its declared
+   type's size at that type's (packing-capped) alignment and the next
+   bit-field shares it only while its declared type is the same size and its
+   bits fit. A zero-width bit-field is ignored unless it closes such a unit,
+   and a union's bit-fields widen it without raising its alignment. The
+   record is always a whole number of units, so a unit never needs fitting.
+
+   One Microsoft corner is deliberately the MSVC one: GCC's MinGW `ms_struct`
+   emulation, which Clang reproduces for `*-windows-gnu`, differs for empty
+   records, `__attribute__((packed))` records with bit-fields, and a union's
+   zero-width bit-field. Buster's Windows targets are the MSVC ABI (they
+   predefine _MSC_VER). */
+
+// Clang's MicrosoftRecordLayoutBuilder for every Windows environment, and its
+// AArch64 targets' unnamed and zero-width bit-field alignment everywhere but
+// Darwin. UEFI keeps its architecture's rule: PE/COFF output does not imply
+// the Windows C layout (docs/uefi-target.md), and Clang agrees for both UEFI
+// triples. record_layout_tests pins the choice for each target against Clang.
+BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
+{
+    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    return target.os == OPERATING_SYSTEM_WINDOWS ? C_RECORD_LAYOUT_MICROSOFT
+           : target.cpu_arch == CPU_ARCH_AARCH64 && !apple ? C_RECORD_LAYOUT_AAPCS64
+                                                            : C_RECORD_LAYOUT_ITANIUM;
+}
+
+BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment)
+{
+    CRecordLayoutCursor cursor = {
+        .alignment = 1,
+        .pack_alignment = pack_alignment,
+        .policy = (u8)c_record_layout_rule(target),
+        .is_union = is_union,
+    };
+    return cursor;
+}
+
+BUSTER_C_INTERNAL u64 c_record_layout_align_bits(u64 bit_position, u64 alignment_bits)
+{
+    u64 remainder = alignment_bits ? bit_position % alignment_bits : 0;
+    return remainder ? bit_position + (alignment_bits - remainder) : bit_position;
+}
+
+BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member)
+{
+    CRecordLayoutPlacement placement = {0};
+    u64 unit_bits = member.size * 8;
+    u64 alignment_bits = (u64)member.alignment * 8;
+    if (!member.is_bit_field)
+    {
+        // An ordinary member closes any open Microsoft unit and is placed the
+        // same way under every rule.
+        cursor->unit_open = false;
+        cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+        if (cursor->is_union)
+        {
+            cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+        }
+        else
+        {
+            placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+            cursor->bit_position = placement.bit_position + unit_bits;
+        }
+        placement.unit_offset = placement.bit_position / 8;
+    }
+    else if (cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
+    {
+        if (!member.bit_width)
+        {
+            // Only a zero-width field that ends a unit moves anything.
+            if (cursor->unit_open)
+            {
+                cursor->unit_open = false;
+                if (cursor->is_union)
+                {
+                    cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+                }
+                else
+                {
+                    cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                    cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+                }
+            }
+            placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
+        }
+        else if (!cursor->is_union && cursor->unit_open && cursor->unit_bits == unit_bits && member.bit_width <= cursor->unit_remaining_bits)
+        {
+            placement.bit_position = cursor->bit_position - cursor->unit_remaining_bits;
+            cursor->unit_remaining_bits -= member.bit_width;
+        }
+        else
+        {
+            cursor->unit_open = true;
+            cursor->unit_bits = unit_bits;
+            if (cursor->is_union)
+            {
+                cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+            }
+            else
+            {
+                placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                cursor->bit_position = placement.bit_position + unit_bits;
+                cursor->unit_remaining_bits = unit_bits - member.bit_width;
+                cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+            }
+        }
+        // The open unit ends at the cursor: the field is read through it.
+        placement.unit_offset = member.bit_width && !cursor->is_union ? (cursor->bit_position - unit_bits) / 8 : placement.bit_position / 8;
+    }
+    else
+    {
+        u32 contribution = member.alignment;
+        // GNU `aligned(N)` on a bit-field starts it at the next multiple of N
+        // bytes -- unconditionally, not only when it would straddle its
+        // storage unit there, and against the operand rather than the
+        // alignment the declared type raises it to. `unsigned a : 20; unsigned
+        // b : 5 __attribute__((aligned(1)));` puts b at bit 24 where the
+        // straddle rule alone puts it at 20. Measured against clang and gcc
+        // 2026-08-30.
+        if (!cursor->is_union && member.alignment_request)
+        {
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.alignment_request * 8);
+        }
+        if (cursor->is_union)
+        {
+            // The bits the member occupies, not its declared type's width: a
+            // union member starts at bit zero and the size rounds up to the
+            // alignment afterwards, so a packed `union { char c; int b : 5; }`
+            // is one byte under Clang and GCC.
+            cursor->bit_position = BUSTER_MAX(cursor->bit_position, (u64)member.bit_width);
+            contribution = member.bit_width ? member.alignment : BUSTER_MAX(member.natural_alignment, member.alignment_request);
+        }
+        else if (!member.bit_width)
+        {
+            // A zero-width bit-field places nothing and moves the next member
+            // to its declared type's boundary. Packing moves it all the same:
+            // GCC and Clang keep aligning it even inside a packed aggregate.
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.natural_alignment * 8);
+            contribution = BUSTER_MAX(member.natural_alignment, member.alignment_request);
+        }
+        else if (member.is_packed || cursor->pack_alignment)
+        {
+            // A packed bit-field has no storage unit to straddle, and neither
+            // has one under `#pragma pack` of any value: Clang and GCC place it
+            // at the next bit (#1318).
+        }
+        else if (cursor->bit_position % alignment_bits + member.bit_width > unit_bits)
+        {
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+        }
+        placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
+        if (!cursor->is_union)
+        {
+            cursor->bit_position += member.bit_width;
+        }
+        // The storage unit of the declared type that contains the first bit,
+        // or, for a field placed at the next bit, the byte it starts in.
+        bool next_bit = member.bit_width && (member.is_packed || cursor->pack_alignment);
+        // Such a field's declared-type unit may not cover its bits or may
+        // overhang the record, so the IR layout fits the unit it is read
+        // through once the record's size is known.
+        cursor->needs_unit_fitting |= next_bit;
+        placement.unit_offset = unit_bits && member.bit_width && !next_bit ? placement.bit_position / unit_bits * member.size : placement.bit_position / 8;
+        if (member.is_named || cursor->policy == C_RECORD_LAYOUT_AAPCS64)
+        {
+            cursor->alignment = BUSTER_MAX(cursor->alignment, contribution);
+        }
+    }
+    return placement;
+}
+
+BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment)
+{
+    u64 size = (cursor->bit_position + 7) / 8;
+    u64 remainder = alignment ? size % alignment : 0;
+    if (remainder)
+    {
+        size += alignment - remainder;
+    }
+    // An empty C record is four bytes under the Microsoft rule, or its
+    // alignment when an aligned attribute asked for more.
+    if (!size && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
+    {
+        size = BUSTER_MAX(alignment, 4u);
+    }
+    return size;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
 
@@ -2318,7 +2531,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                             for (u32 member_index = 0; member_index < result->enum_member_count && !folded_constant; member_index += 1)
                             {
                                 CEnumMember* member = &result->enum_members[member_index];
-                                if (string_equal(member->name, name))
+                                if (token.symbol && member->symbol ? member->symbol == token.symbol : string_equal(member->name, name))
                                 {
                                     constant_is_negative = member->is_negative;
                                     constant_value = member->value;
@@ -2375,17 +2588,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             {
                 continue;
             }
-            // Bits, not bytes: this mirrors the System V bit-field placement
-            // the IR layout in c_gen performs, and the two must agree or a
-            // sizeof folded during the parse contradicts the object it sizes.
-            u64 bit_position = 0;
-            u32 alignment = 1;
+            // Members are placed by c_record_layout_place, the rule the IR
+            // layout in c_gen places them by too, so a sizeof folded during the
+            // parse cannot contradict the object it sizes (#1439).
             u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
             CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
             if (aggregate_attributes.is_packed)
             {
                 pack_alignment = 1;
             }
+            CRecordLayoutCursor record = c_record_layout_begin(preprocess.target, type.kind == C_TYPE_UNION, pack_alignment);
             bool fields_resolved = true;
             bool aggregate_provisional = false;
             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
@@ -2434,121 +2646,37 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                     fields_resolved = false;
                     break;
                 }
-                if (member.is_bit_field)
+                if (member.is_bit_field && (member.bit_width > member_size * 8 || !member_size))
                 {
-                    u64 unit_bits = member_size * 8;
-                    u64 alignment_bits = (u64)member_alignment * 8;
-                    if (member.bit_width > unit_bits || !unit_bits)
-                    {
-                        fields_resolved = false;
-                        break;
-                    }
-                    // An unnamed bit-field's declared type does not raise the
-                    // aggregate's alignment; a named one's does, and neither
-                    // does a GNU `aligned` written on an unnamed one.
-                    if (member.name.length)
-                    {
-                        alignment = BUSTER_MAX(alignment, member_alignment);
-                    }
-                    // GNU `aligned(N)` on a bit-field starts it at the next
-                    // multiple of N bytes -- unconditionally, not only when it
-                    // would straddle its storage unit there, and against the
-                    // operand rather than the alignment the declared type
-                    // raises it to. `unsigned a : 20; unsigned b : 5
-                    // __attribute__((aligned(1)));` puts b at bit 24 where the
-                    // straddle rule alone puts it at 20, so this is the one
-                    // request that moves a bit-field *down*. Measured against
-                    // clang and gcc 2026-08-30; the IR layout in c_gen spells
-                    // the same rule.
-                    if (type.kind != C_TYPE_UNION && member_alignment_request)
-                    {
-                        u64 request_bits = (u64)member_alignment_request * 8;
-                        u64 request_remainder = bit_position % request_bits;
-                        if (request_remainder)
-                        {
-                            bit_position += request_bits - request_remainder;
-                        }
-                    }
-                    if (type.kind == C_TYPE_UNION)
-                    {
-                        if (member.bit_width)
-                        {
-                            // The bits the member occupies, not its declared
-                            // type's width: a union member starts at bit zero
-                            // and the size rounds up to the alignment below,
-                            // which is the same arm the IR layout in c_gen
-                            // takes.
-                            bit_position = BUSTER_MAX(bit_position, (u64)member.bit_width);
-                        }
-                        continue;
-                    }
-                    if (!member.bit_width)
-                    {
-                        // Packing does not move a zero-width bit-field: GCC
-                        // and Clang keep aligning it to its declared type, so
-                        // `struct __attribute__((packed)) { int a : 3; int : 0;
-                        // int b : 3; }` still measures five bytes.
-                        u64 zero_width_bits = (u64)natural_alignment * 8;
-                        u64 zero_width_remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
-                        if (zero_width_remainder)
-                        {
-                            bit_position += zero_width_bits - zero_width_remainder;
-                        }
-                        continue;
-                    }
-                    if (packed_member)
-                    {
-                        // A packed bit-field takes the next bit, with no
-                        // storage unit to straddle; the IR layout picks the
-                        // unit it is read through from the same position.
-                        bit_position += member.bit_width;
-                        continue;
-                    }
-                    u64 bit_remainder = bit_position % alignment_bits;
-                    if (bit_remainder + member.bit_width > unit_bits)
-                    {
-                        bit_position += alignment_bits - bit_remainder;
-                    }
-                    bit_position += member.bit_width;
-                    continue;
+                    fields_resolved = false;
+                    break;
                 }
-                alignment = BUSTER_MAX(alignment, member_alignment);
-                if (type.kind == C_TYPE_UNION)
+                CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
+                                                                                      .size = member_size,
+                                                                                      .natural_alignment = natural_alignment,
+                                                                                      .alignment = member_alignment,
+                                                                                      .alignment_request = member_alignment_request,
+                                                                                      .bit_width = member.bit_width,
+                                                                                      .is_bit_field = member.is_bit_field,
+                                                                                      .is_named = member.name.length != 0,
+                                                                                      .is_packed = packed_member,
+                                                                                  });
+                if (offset_out && !member.is_bit_field && type.member_start + member_index == offset_member)
                 {
-                    if (offset_out && type.member_start + member_index == offset_member)
-                    {
-                        *offset_out = 0;
-                    }
-                    bit_position = BUSTER_MAX(bit_position, member_size * 8);
-                    continue;
+                    *offset_out = placement.unit_offset;
                 }
-                u64 alignment_bits = (u64)member_alignment * 8;
-                u64 remainder = bit_position % alignment_bits;
-                if (remainder)
-                {
-                    bit_position += alignment_bits - remainder;
-                }
-                if (offset_out && type.member_start + member_index == offset_member)
-                {
-                    *offset_out = bit_position / 8;
-                }
-                bit_position += member_size * 8;
             }
             if (!fields_resolved)
             {
                 continue;
             }
+            u32 alignment = record.alignment;
             if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
                                                      &alignment, 0, &aggregate_provisional))
             {
                 continue;
             }
-            u64 size = (bit_position + 7) / 8;
-            u64 remainder = size % alignment;
-            if (remainder)
-            {
-                size += alignment - remainder;
-            }
+            u64 size = c_record_layout_size(&record, alignment);
             sizes[type_index] = size;
             alignments[type_index] = alignment;
             provisional[type_index] = aggregate_provisional;
@@ -2631,11 +2759,19 @@ BUSTER_C_INTERNAL u32 c_parse_token_symbol(CParseResult* result, char8 const* sp
 
 // Resolve an identifier token's entity: interned tokens skip the name hash
 // entirely, symbol-less tokens intern on demand so the symbol-keyed buckets
-// stay authoritative.
+// stay authoritative. Every entity is named by an identifier token -- a
+// declarator, enumerator, parameter or function name -- so a punctuator or
+// literal resolves to nothing, and asking would intern its spelling into
+// the identifier table as if it were a name.
 BUSTER_C_SHARED CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base, CScopeId scope, CToken const* token)
 {
-    String8 spelling = c_token_spelling(spelling_base, *token);
-    return c_parse_lookup_entity_symbol(result, scope, c_parse_symbol_or_intern(result, token->symbol, spelling), spelling);
+    CEntityId found = C_ENTITY_ID_INVALID;
+    if (c_token_may_spell_word(*token))
+    {
+        String8 spelling = c_token_spelling(spelling_base, *token);
+        found = c_parse_lookup_entity_symbol(result, scope, c_parse_symbol_or_intern(result, token->symbol, spelling), spelling);
+    }
+    return found;
 }
 
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_at_symbol(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 symbol, String8 name,
@@ -3040,7 +3176,16 @@ void c_test_member_search_counts(u64* searches, u64* tables)
 }
 #endif
 
-BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, String8 name, u32* bit_width_out)
+// Does this member carry the name a query token spells? Both sides hold the
+// id the one symbol table assigned, so ids settle it; a row or query without
+// one (unnamed member, synthesized token, no table) compares spellings.
+BUSTER_C_INTERNAL bool c_parse_member_named(CMember const* member, u32 symbol, String8 name)
+{
+    return symbol && member->symbol ? member->symbol == symbol : string_equal(member->name, name);
+}
+
+// `symbol` is the id the member-name token carries, 0 when it has none.
+BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out)
 {
     if (bit_width_out)
     {
@@ -3057,7 +3202,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
     for (u32 index = 0; index < value.member_count && field_type.value == C_ID_UNDERLYING_INVALID; index += 1)
     {
         CMember member = result->members[value.member_start + index];
-        if (string_equal(member.name, name))
+        if (c_parse_member_named(&member, symbol, name))
         {
             field_type = member.type;
             if (bit_width_out && member.is_bit_field)
@@ -3091,7 +3236,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
             for (u32 field_index = 0; field_index < candidate->member_count; field_index += 1)
             {
                 CMember* member = &result->members[candidate->member_start + field_index];
-                if (string_equal(member->name, name))
+                if (c_parse_member_named(member, symbol, name))
                 {
                     field_type = member->type;
                     if (bit_width_out && member->is_bit_field)
@@ -3194,7 +3339,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
         break;
     }
     CType qualifiers = {.is_const = type_value->is_const, .is_volatile = type_value->is_volatile};
-    type = c_parse_member_type(arena, result, type, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0);
+    type = c_parse_member_type(arena, result, type, preprocess.tokens[index + 1].symbol,
+                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0);
     if (type.value < result->type_count && (qualifiers.is_const || qualifiers.is_volatile))
     {
         type = c_parse_add_qualified_type(result, type, qualifiers);
@@ -3987,7 +4133,7 @@ BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreproce
             if (aggregate.value < result->type_count &&
                 (result->types[aggregate.value].kind == C_TYPE_STRUCT || result->types[aggregate.value].kind == C_TYPE_UNION))
             {
-                c_parse_member_type(arena, result, aggregate,
+                c_parse_member_type(arena, result, aggregate, preprocess.tokens[end - 1].symbol,
                     c_token_spelling(preprocess.spelling_base, preprocess.tokens[end - 1]), &width);
             }
         }
@@ -6367,7 +6513,7 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, C
     return 0;
 }
 
-BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, String8 name, CTypeId* type_out,
+BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, u32 symbol, String8 name, CTypeId* type_out,
                                                       u32* root_field_out, bool* ambiguous_out)
 {
     if (ambiguous_out)
@@ -6419,7 +6565,7 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
         for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
         {
             CMember* field = result->members + type->member_start + field_index;
-            if (string_equal(field->name, name))
+            if (c_parse_member_named(field, symbol, name))
             {
                 if (!found)
                 {
@@ -6735,7 +6881,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             u32 field_index = UINT32_MAX;
             CTypeId member_type = C_TYPE_ID_INVALID;
             bool ambiguous = false;
-            if (!c_parse_promoted_member_type(machine, result, current, c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous))
+            if (!c_parse_promoted_member_type(machine, result, current, preprocess.tokens[cursor + 1].symbol,
+                                              c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous))
             {
                 if (ambiguous)
                 {
@@ -10762,6 +10909,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     result->members[result->member_count++] = (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_location(&preprocess, name),
+        .symbol = name.symbol,
         .type = declarator_type,
         .alignment_start = alignment_start,
         .alignment_count = alignment_count,
@@ -12684,12 +12832,13 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
             if (valid)
             {
                 String8 member_name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
+                u32 member_symbol = preprocess.tokens[index + 1].symbol;
                 bool found_member = false;
                 for (u32 member_index = record->member_start; member_index < record->member_start + record->member_count && !found_member;
                      member_index += 1)
                 {
                     CMember* member = &result->members[member_index];
-                    if (string_equal(member->name, member_name) && !member->is_bit_field)
+                    if (c_parse_member_named(member, member_symbol, member_name) && !member->is_bit_field)
                     {
                         type = member->type;
                         found_member = true;
@@ -12889,7 +13038,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             // shadows a file-scope `typedef char T` names the local.
             CEntityId scoped_entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, frame->scope, &preprocess.tokens[aggregate_index]);
             bool names_ordinary = scoped_entity.value < result->entity_count && result->entities[scoped_entity.value].kind != C_ENTITY_TYPEDEF;
-            CEntityId typedef_entity = names_ordinary ? C_ENTITY_ID_INVALID : c_parse_lookup_typedef_name_fallback(result, spelling);
+            CEntityId typedef_entity =
+                names_ordinary ? C_ENTITY_ID_INVALID : c_parse_lookup_typedef_name_fallback_symbol(result, preprocess.tokens[aggregate_index].symbol, spelling);
             if (typedef_entity.value < result->entity_count)
             {
                 CEntity* entity = &result->entities[typedef_entity.value];
@@ -13593,7 +13743,7 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
         if (entity.value == C_ID_UNDERLYING_INVALID)
         {
-            entity = c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, token), true);
+            entity = c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, token, true);
         }
         bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
         // GCC and Clang accept these floating-point spellings as builtin type
@@ -14410,7 +14560,112 @@ struct CTypePair
     bool ignore_qualifiers;
 };
 
-BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
+typedef enum CTypeSelfVerdict
+{
+    C_TYPE_SELF_INCOMPATIBLE,
+    C_TYPE_SELF_COMPATIBLE,
+    C_TYPE_SELF_UNDECIDED,
+} CTypeSelfVerdict;
+
+// The pair walk of c_parse_types_compatible_core, specialized to a type
+// compared with itself (C11 6.2.7p1). Such a walk only ever pushes one type
+// twice again, so while each type has at most one child it is a chain and
+// needs no pair stack. Each step keeps the walk's exact verdict -- an id out
+// of range or an array without its bound record is still incompatible -- and
+// its one side effect: an aggregate step asks c_parse_unqualified_type for
+// both halves, which appends a row for a qualified aggregate lacking its
+// unqualified link. A function type, the one kind with several children, and
+// an enum whose underlying type is not a leaf are left UNDECIDED for the
+// stack walk, before any step with a side effect has run.
+BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* result, CTypeId type)
+{
+    CTypeSelfVerdict verdict = C_TYPE_SELF_UNDECIDED;
+    bool walking = true;
+    for (u32 steps = 0; walking && steps <= result->type_count; steps += 1)
+    {
+        walking = false;
+        if (type.value >= result->type_count)
+        {
+            verdict = C_TYPE_SELF_INCOMPATIBLE;
+            continue;
+        }
+        CType value = result->types[type.value];
+        switch (value.kind)
+        {
+        case C_TYPE_POINTER:
+        case C_TYPE_VECTOR:
+        {
+            type = value.element_type;
+            walking = true;
+            break;
+        }
+        case C_TYPE_ARRAY:
+        {
+            verdict = value.array_bound < result->array_bound_count ? verdict : C_TYPE_SELF_INCOMPATIBLE;
+            type = value.element_type;
+            walking = verdict == C_TYPE_SELF_UNDECIDED;
+            break;
+        }
+        case C_TYPE_FUNCTION:
+        {
+            break;
+        }
+        case C_TYPE_STRUCT:
+        case C_TYPE_UNION:
+        case C_TYPE_ENUM:
+        {
+            bool has_element = value.kind == C_TYPE_ENUM && value.element_type.value != C_ID_UNDERLYING_INVALID;
+            bool element_in_range = has_element && value.element_type.value < result->type_count;
+            CTypeKind element_kind = element_in_range ? result->types[value.element_type.value].kind : C_TYPE_INVALID;
+            bool element_leaf = element_kind != C_TYPE_POINTER && element_kind != C_TYPE_ARRAY && element_kind != C_TYPE_VECTOR &&
+                                element_kind != C_TYPE_FUNCTION && element_kind != C_TYPE_STRUCT && element_kind != C_TYPE_UNION &&
+                                element_kind != C_TYPE_ENUM;
+            if (!element_in_range || element_leaf)
+            {
+                c_parse_unqualified_type(result, type);
+                c_parse_unqualified_type(result, type);
+                verdict = has_element && !element_in_range ? C_TYPE_SELF_INCOMPATIBLE : C_TYPE_SELF_COMPATIBLE;
+            }
+            break;
+        }
+        case C_TYPE_INVALID:
+        case C_TYPE_VOID:
+        case C_TYPE_BOOL:
+        case C_TYPE_CHAR:
+        case C_TYPE_SIGNED_CHAR:
+        case C_TYPE_UNSIGNED_CHAR:
+        case C_TYPE_SHORT:
+        case C_TYPE_UNSIGNED_SHORT:
+        case C_TYPE_INT:
+        case C_TYPE_UNSIGNED_INT:
+        case C_TYPE_LONG:
+        case C_TYPE_UNSIGNED_LONG:
+        case C_TYPE_LONG_LONG:
+        case C_TYPE_UNSIGNED_LONG_LONG:
+        case C_TYPE_INT128:
+        case C_TYPE_UNSIGNED_INT128:
+        case C_TYPE_FLOAT16:
+        case C_TYPE_BFLOAT16:
+        case C_TYPE_FLOAT:
+        case C_TYPE_DOUBLE:
+        case C_TYPE_LONG_DOUBLE:
+        case C_TYPE_FLOAT16_COMPLEX:
+        case C_TYPE_FLOAT_COMPLEX:
+        case C_TYPE_DOUBLE_COMPLEX:
+        case C_TYPE_LONG_DOUBLE_COMPLEX:
+        case C_TYPE_VA_LIST:
+        case C_TYPE_NULLPTR:
+        case C_TYPE_COUNT:
+        {
+            verdict = C_TYPE_SELF_COMPATIBLE;
+            break;
+        }
+        }
+    }
+    return verdict;
+}
+
+BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
                                                        CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
 {
     Arena* conflicts[] = {
@@ -14682,6 +14937,39 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParse
     scratch_end(temporary);
     return compatible;
 }
+
+// 96,8% of the calls a stage-1 self-compile makes compare one type id with
+// itself; the self chain settles those without the pair stack, which is
+// sized by the whole type table, and without walking the structure the
+// shared id already identifies. The walk decides everything else.
+BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
+                                                       CTypeId left, CTypeId right, bool ignore_nested_qualifiers)
+{
+    CTypeSelfVerdict self = left.value == right.value ? c_parse_types_self_compatible(result, left) : C_TYPE_SELF_UNDECIDED;
+    bool compatible = self == C_TYPE_SELF_COMPATIBLE;
+    if (self == C_TYPE_SELF_UNDECIDED)
+    {
+        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right, ignore_nested_qualifiers);
+    }
+    return compatible;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
+{
+    return c_parse_types_compatible_core(arena, result, preprocess, left, right, false);
+}
+
+bool c_test_types_compatible_walk(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
+{
+    return c_parse_types_compatible_walk(arena, result, preprocess, left, right, false);
+}
+
+bool c_test_parse_reserve_types(CParseResult* result, u32 additional)
+{
+    return c_parse_result_reserve_types(result, additional);
+}
+#endif
 
 BUSTER_C_SHARED bool c_parse_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
@@ -15175,6 +15463,12 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
 
     BUSTER_CHECK(result->entity_lookup_bucket_count != 0);
     CEntity* added = &result->entities[entity.value];
+#if !BUSTER_OPTIMIZE
+    // The token-kind gate of c_parse_lookup_entity_token relies on this: a
+    // name is an identifier's spelling, never a punctuator's or a literal's.
+    BUSTER_CHECK(!added->name.length || added->name.pointer[0] == '_' || added->name.pointer[0] == '$' ||
+                 (u32)((added->name.pointer[0] | 0x20) - 'a') < 26 || (u8)added->name.pointer[0] >= 0x80);
+#endif
     added->symbol = c_parse_symbol_or_intern(result, symbol, added->name);
     u64 name_hash = c_parse_name_hash(added->symbol, added->name);
     u64 hash = c_parse_entity_lookup_hash(added->symbol, added->name, scope);
@@ -15310,6 +15604,20 @@ CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult prepr
     return c_parse_lookup_entity_at_symbol(result, preprocess, scope, c_parse_name_symbol(result, name), name, token_index);
 }
 
+// The name is the identifier at `token_index` itself, so its carried id is
+// the lookup key; see c_parse_lookup_entity_token for the kind gate.
+CEntityId c_parse_lookup_entity_at_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
+{
+    CEntityId found = C_ENTITY_ID_INVALID;
+    if (token_index < preprocess.token_count && c_token_may_spell_word(preprocess.tokens[token_index]))
+    {
+        CToken token = preprocess.tokens[token_index];
+        String8 name = c_token_spelling(preprocess.spelling_base, token);
+        found = c_parse_lookup_entity_at_symbol(result, preprocess, scope, c_parse_symbol_or_intern(result, token.symbol, name), name, token_index);
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_at_symbol(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 symbol, String8 name,
                                                              u32 token_index)
 {
@@ -15340,10 +15648,16 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, Stri
     return c_parse_lookup_typedef_name_symbol(result, c_parse_name_symbol(result, name), name, oldest);
 }
 
+// A typedef name is an identifier; see c_parse_lookup_entity_token.
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_token(CParseResult* result, char8 const* spelling_base, CToken token, bool oldest)
 {
-    String8 name = c_token_spelling(spelling_base, token);
-    return c_parse_lookup_typedef_name_symbol(result, c_parse_symbol_or_intern(result, token.symbol, name), name, oldest);
+    CEntityId found = C_ENTITY_ID_INVALID;
+    if (c_token_may_spell_word(token))
+    {
+        String8 name = c_token_spelling(spelling_base, token);
+        found = c_parse_lookup_typedef_name_symbol(result, c_parse_symbol_or_intern(result, token.symbol, name), name, oldest);
+    }
+    return found;
 }
 
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_symbol(CParseResult* result, u32 symbol, String8 name, bool oldest)
@@ -15353,7 +15667,8 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_symbol(CParseResult* res
     for (CEntityId entity = result->typedef_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
          entity = result->entities[entity.value].next_typedef_in_lookup)
     {
-        if (string_equal(result->entities[entity.value].name, name))
+        CEntity const* candidate = &result->entities[entity.value];
+        if (symbol && candidate->symbol ? candidate->symbol == symbol : string_equal(candidate->name, name))
         {
             found = entity;
             if (!oldest)
@@ -15365,7 +15680,8 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_symbol(CParseResult* res
     return found;
 }
 
-BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name)
+// `symbol` is the id the name's token carries, 0 when it carries none.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_fallback_symbol(CParseResult* result, u32 symbol, String8 name)
 {
     if (result)
     {
@@ -15377,7 +15693,8 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
                                   (result->entity_lookup_bucket_count & (result->entity_lookup_bucket_count - 1)) == 0;
         if (bucket_chain_valid)
         {
-            u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
+            symbol = c_parse_symbol_or_intern(result, symbol, name);
+            u32 bucket = (u32)c_parse_name_hash(symbol, name) & (result->entity_lookup_bucket_count - 1);
             CEntityId entity = result->typedef_lookup_buckets[bucket];
             u32 steps = 0;
             while (entity.value != C_ID_UNDERLYING_INVALID)
@@ -15401,7 +15718,7 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
                 // Keep the canonical newest-first lookup as the source of the
                 // result after validation; oldest=true preserves the historical
                 // ascending entity scan's first exact typedef.
-                return c_parse_lookup_typedef_name(result, name, true);
+                return c_parse_lookup_typedef_name_symbol(result, symbol, name, true);
             }
         }
 
@@ -15421,6 +15738,11 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
     }
 
     return C_ENTITY_ID_INVALID;
+}
+
+BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name)
+{
+    return c_parse_lookup_typedef_name_fallback_symbol(result, 0, name);
 }
 
 BUSTER_C_INTERNAL CEntity* c_parse_first_constant_entity_symbol(CParseResult* result, u32 symbol, String8 name);
@@ -19902,7 +20224,7 @@ struct CParseMemberOffsetWork
 };
 
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                        CParseResult* result, CTypeId aggregate, String8 name, CTypeId* member_out,
+                                                        CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
                                                         u64* offset_out)
 {
     bool found = false;
@@ -19926,7 +20248,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
             for (u32 member_index = 0; !found && member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
-                bool matches = string_equal(name, member.name);
+                bool matches = c_parse_member_named(&member, symbol, name);
                 bool promoted = !member.name.length && !member.is_bit_field;
                 if ((matches || promoted) && !member.is_bit_field)
                 {
@@ -19974,7 +20296,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             u64 offset = 0;
-            value.valid = c_parse_constant_member_offset(machine, arena, preprocess, result, type,
+            value.valid = c_parse_constant_member_offset(machine, arena, preprocess, result, type, token.symbol,
                                                          c_token_spelling(preprocess.spelling_base, token), &type, &offset);
             value.integer += offset;
             cursor += 1;
@@ -21169,7 +21491,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                     (value.kind == C_TYPE_STRUCT || value.kind == C_TYPE_UNION))
                 {
                     query_mark = machine->scratch_arena->position;
-                    CTypeId field = c_parse_member_type(machine->scratch_arena, result, operand_type,
+                    CTypeId field = c_parse_member_type(machine->scratch_arena, result, operand_type, preprocess.tokens[index + 1].symbol,
                                                         c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0);
                     arena_set_position(machine->scratch_arena, query_mark);
                     if (field.value >= result->type_count)
@@ -22201,7 +22523,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                 CType value = result->types[current.value];
                 if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_DOT) && cursor + 1 < end)
                 {
-                    current = c_parse_member_type(machine->scratch_arena, result, current,
+                    current = c_parse_member_type(machine->scratch_arena, result, current, preprocess.tokens[cursor + 1].symbol,
                         c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), 0);
                     if (current.value >= result->type_count) diagnostic.message = S8("aggregate designator names an unknown field");
                     cursor += 2;
@@ -25063,12 +25385,26 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         u32 candidate_ids[64];
         u32 candidate_count = 0;
         bool candidates_overflowed = false;
-        u32 name_bucket = (u32)c_parse_name_hash(c_parse_name_symbol(&result, declaration->name), declaration->name) & (result.entity_lookup_bucket_count - 1);
+        // A function filed from a type name has no function-name token; its
+        // name is the object declarator's. Either way the declaration's name
+        // is that token's spelling, so the token's interned id is the name's
+        // identity and the candidate filter compares ids.
+        u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
+                                         ? syntax_declaration->function_name_token
+                                         : syntax_declaration->name_token;
+        u32 declaration_symbol = c_parse_symbol_or_intern(&result, declaration_name_token < token_count ? preprocess.tokens[declaration_name_token].symbol : 0,
+                                                          declaration->name);
+#if !BUSTER_OPTIMIZE
+        BUSTER_CHECK(declaration_name_token >= token_count ||
+                     string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
+#endif
+        u32 name_bucket = (u32)c_parse_name_hash(declaration_symbol, declaration->name) & (result.entity_lookup_bucket_count - 1);
         for (CEntityId chain = result.name_lookup_buckets[name_bucket]; chain.value != C_ID_UNDERLYING_INVALID;
              chain = result.entities[chain.value].next_by_name)
         {
             CEntity* candidate = &result.entities[chain.value];
-            if (candidate->scope.value != 0 || !string_equal(candidate->name, declaration->name))
+            if (candidate->scope.value != 0 ||
+                !(declaration_symbol && candidate->symbol ? candidate->symbol == declaration_symbol : string_equal(candidate->name, declaration->name)))
             {
                 continue;
             }
@@ -25174,12 +25510,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         CEntityId entity = {
             .value = result.entity_count,
         };
-        // A function filed from a type name has no function-name token; its
-        // name is the object declarator's, which is the token the entity has
-        // to point at.
-        u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
-                                         ? syntax_declaration->function_name_token
-                                         : syntax_declaration->name_token;
         bool is_static_storage = false;
         bool is_thread_local = false;
         if (kind == C_DECLARATION_OBJECT &&
@@ -25219,14 +25549,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_constexpr = declaration->is_constexpr,
             .definition_is_gnu_inline_only = declaration->is_gnu_inline_only,
         };
-        // The name is that token's spelling, so its interned id is the
-        // entity's; a declaration without a name token interns the empty
-        // name as before.
+        // The name is that token's spelling, so the id the candidate search
+        // already settled is the entity's.
         c_parse_scope_add_entity(&result,
                                  (CScopeId){
                                      .value = 0,
                                  },
-                                 entity, declaration_name_token < token_count ? preprocess.tokens[declaration_name_token].symbol : 0);
+                                 entity, declaration_symbol);
     }
     if (result.enum_member_count)
     {
