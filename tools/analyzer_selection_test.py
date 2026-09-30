@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import copy
 import json
 import os
 from pathlib import Path
@@ -140,7 +141,14 @@ for argument in "$@"; do
 done
 printf '%s: build.c src/buster/lib/base.h src/buster/lib/driver.h src/buster/lib/transitive.h tools/clang_analyze.c\\n' "$output" > "$depfile"
 printf 'cwd=%s header=%s\\n' "$PWD" "$(cat src/buster/lib/transitive.h)" >> "$CLANG_LOG"
-printf '#!/bin/sh\\nexit 0\\n' > "$output"
+cat > "$output" <<'DRIVER'
+#!/bin/sh
+if [ -n "${DRIVER_LOG-}" ]; then printf '%s\\n' "$*" >> "$DRIVER_LOG"; fi
+case "${FAIL_MODE-}:$*" in
+    candidate:*) exit 32 ;;
+    reference:*--baseline-driver*) exit 31 ;;
+esac
+DRIVER
 chmod +x "$output"
 """
         )
@@ -401,11 +409,12 @@ esac
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(driver_log.exists())
 
-    def materialization(self, repository, event, requested, candidate, reference):
+    def materialization(self, repository, event, requested, candidate, reference, manifest=None):
+        evidence = ["--candidate-manifest", manifest] if manifest is not None else []
         return self.command(
             [sys.executable, HELPER, "materialization",
              "--repository", repository, "--event", event, "--requested", requested,
-             "--candidate-revision", candidate, "--reference-revision", reference],
+             "--candidate-revision", candidate, "--reference-revision", reference, *evidence],
             check=False,
         )
 
@@ -517,6 +526,165 @@ esac
             calls = driver_log.read_text().splitlines()
             self.assertEqual(len(calls), 2)
             self.assertNotIn("--baseline-driver", calls[0])
+
+    def merge_group_fixture(self, temporary, event="merge_group", requested="false"):
+        root = Path(temporary) / "repository"
+        head = self.fixture_repository(root)
+        fake_bin = Path(temporary) / "fake-bin"
+        self.fake_clang(fake_bin)
+        runner = Path(temporary) / "runner"
+        runner.mkdir()
+        environment = dict(
+            os.environ, BASELINE_REVISION=head, EVENT_NAME=event,
+            COMPARISON_REQUESTED=requested, RUNNER_TEMP=str(runner),
+            GITHUB_WORKSPACE=str(root), GITHUB_ENV=str(runner / "environment"),
+            GITHUB_STEP_SUMMARY=str(runner / "summary"),
+            CLANG_LOG=str(Path(temporary) / "clang.log"),
+            DRIVER_LOG=str(Path(temporary) / "driver.log"),
+            PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+        )
+        bootstrap = self.analyzer_step("Bootstrap candidate and select reference build driver")
+        result = self.command(["bash", "--noprofile", "--norc", "-c", bootstrap],
+                              cwd=root, env=environment, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        environment.update(self.parse_exports(runner / "environment"))
+        return root, head, runner / "buster-analyzer", environment
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_same_driver_merge_group_materialization_and_campaign(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, head, evidence, environment = self.merge_group_fixture(temporary)
+            candidate = evidence / "candidate-driver-provenance.json"
+            manifest = json.loads(candidate.read_text())
+            self.assertTrue(manifest["complete"])
+            self.assertIsNotNone(manifest["execution_context"])
+            self.assertEqual(candidate.read_bytes(), (evidence / "reference-driver-provenance.json").read_bytes())
+            self.assertEqual(environment["ANALYZER_REFERENCE_MATERIALIZED"], "false")
+            self.assertEqual(environment["ANALYZER_COMPARISON_REASON"], "same-driver-merge-group")
+            self.assertEqual(len(Path(environment["CLANG_LOG"]).read_text().splitlines()), 1)
+            self.assertFalse((evidence / "reference-tree").exists())
+            self.assertFalse((root / "build/analyzer-baseline").exists())
+            self.assertEqual(self.materialization(root, "merge_group", "false", head, head, candidate).stdout, "false\n")
+            # Without proof, equality of revision strings is insufficient.
+            self.assertEqual(self.materialization(root, "merge_group", "false", head, head).stdout, "true\n")
+            campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+            result = self.command(["bash", "--noprofile", "--norc", "-c", campaign],
+                                  cwd=root, env=environment, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = Path(environment["DRIVER_LOG"]).read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn("--baseline-driver", calls[0])
+            self.assertIn("--shards 8 --jobs 2", calls[0])
+            self.assertIn("--aggregate", calls[1])
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_merge_group_unknown_or_mismatched_proof_compares(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, head, evidence, _ = self.merge_group_fixture(temporary)
+            candidate = evidence / "candidate-driver-provenance.json"
+            original = json.loads(candidate.read_text())
+            reference = evidence / "reference-driver-provenance.json"
+            output = evidence / "test-selection.txt"
+            for field in ("driver_sha256", "compiler_sha256", "compiler_version_sha256",
+                          "environment_sha256", "root", "driver", "compiler", "compile_command"):
+                with self.subTest(mismatch=field):
+                    changed = copy.deepcopy(original)
+                    context = changed["execution_context"]
+                    if field.endswith("sha256"):
+                        context[field] = "0" * 64
+                    elif field == "compile_command":
+                        context[field].append("-DCHANGED")
+                    else:
+                        context[field] += "-different"
+                    provenance.write_manifest(reference, changed)
+                    fields = self.select(root, "merge_group", False, head, head, candidate, reference, output)
+                    self.assertEqual(fields["selection"], "compare")
+            for state in ("incomplete", "unknown-context", "changed-command"):
+                with self.subTest(state=state):
+                    changed = copy.deepcopy(original)
+                    if state == "incomplete":
+                        changed["complete"] = False
+                        changed["issues"] = ["fixture uncertainty"]
+                    elif state == "unknown-context":
+                        changed["execution_context"] = None
+                    else:
+                        changed["execution_context"]["compile_command"].append("-DCHANGED")
+                    provenance.write_manifest(candidate, changed)
+                    provenance.write_manifest(reference, changed)
+                    fields = self.select(root, "merge_group", False, head, head, candidate, reference, output)
+                    self.assertEqual(fields["selection"], "compare")
+                    self.assertEqual(self.materialization(root, "merge_group", "false", head, head, candidate).stdout, "true\n")
+            provenance.write_manifest(candidate, original)
+            provenance.write_manifest(reference, original)
+            for event in ("pull_request", "schedule"):
+                fields = self.select(root, event, False, head, head, candidate, reference, output)
+                self.assertEqual(fields["selection"], "compare")
+            fields = self.select(root, "workflow_dispatch", True, head, head, candidate, reference, output)
+            self.assertEqual(fields["reason"], "requested")
+            (root / "README.md").write_text("distinct revision, identical driver closure\n")
+            distinct = self.commit(root, "unrelated")
+            with self.assertRaises(provenance.ProvenanceError):
+                self.select(root, "merge_group", False, distinct, head, candidate, reference, output)
+            changed = copy.deepcopy(original)
+            changed["revision"] = distinct
+            changed["tree"] = self.git(root, "rev-parse", "HEAD^{tree}")
+            provenance.write_manifest(candidate, changed)
+            fields = self.select(root, "merge_group", False, distinct, head, candidate, reference, output)
+            self.assertEqual(fields["selection"], "compare")
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_merge_group_recomputation_rejects_stale_or_tampered_evidence(self):
+        campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+        for mutation in ("driver", "clang", "environment", "manifest", "depfile", "selection", "revision", "event", "export", "symlink"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root, _, evidence, environment = self.merge_group_fixture(temporary)
+                if mutation in ("driver", "clang"):
+                    path = root / "build/analyzer-driver" if mutation == "driver" else Path(temporary) / "fake-bin/clang"
+                    path.write_text(path.read_text() + "# changed bytes\n")
+                elif mutation == "environment":
+                    environment["CPATH"] = "/different/include"
+                elif mutation == "manifest":
+                    path = evidence / "candidate-driver-provenance.json"
+                    value = json.loads(path.read_text())
+                    value["execution_context"]["compiler_sha256"] = "0" * 64
+                    provenance.write_manifest(path, value)
+                elif mutation == "depfile":
+                    (evidence / "candidate-driver.d").write_text("bad dependencies\n")
+                elif mutation == "selection":
+                    path = evidence / "comparison-selection.txt"
+                    path.write_text(path.read_text().replace("selection=skip", "selection=compare"))
+                elif mutation == "revision":
+                    (root / "README.md").write_text("stale revision\n")
+                    self.commit(root, "advance head")
+                elif mutation == "event":
+                    environment["EVENT_NAME"] = "pull_request"
+                elif mutation == "export":
+                    environment["ANALYZER_REFERENCE_MATERIALIZED"] = "true"
+                else:
+                    (root / "build/analyzer-baseline").symlink_to("absent")
+                result = self.command(["bash", "--noprofile", "--norc", "-c", campaign],
+                                      cwd=root, env=environment, check=False)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(Path(environment["DRIVER_LOG"]).exists())
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_forced_comparison_and_candidate_failures_remain_fatal(self):
+        campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+        for event, requested, failure in (("merge_group", "false", "candidate"),
+                                           ("workflow_dispatch", "true", "candidate"),
+                                           ("workflow_dispatch", "true", "reference")):
+            with self.subTest(event=event, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root, _, _, environment = self.merge_group_fixture(temporary, event, requested)
+                forced = requested == "true"
+                self.assertEqual(environment["ANALYZER_REFERENCE_MATERIALIZED"], "true" if forced else "false")
+                self.assertEqual(len(Path(environment["CLANG_LOG"]).read_text().splitlines()), 2 if forced else 1)
+                environment["FAIL_MODE"] = failure
+                result = self.command(["bash", "--noprofile", "--norc", "-c", campaign],
+                                      cwd=root, env=environment, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                calls = Path(environment["DRIVER_LOG"]).read_text().splitlines()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual("--baseline-driver" in calls[0], forced)
 
 
 if __name__ == "__main__":
