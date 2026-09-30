@@ -85,6 +85,7 @@
     X(STRING_COUNT_BYTES, string_count_bytes) \
     X(STRING_COUNT_DISTINCT, string_count_distinct) \
     X(STRING_COUNT_UNTRACKED, string_count_untracked) \
+    X(STRING_COUNT_MEMO_HITS, string_count_memo_hits) \
     X(STRING_RANGE_DECODES, string_range_decodes) \
     X(STRING_RANGE_COUNTS, string_range_counts) \
     X(TEMP_SPACES, temp_spaces) \

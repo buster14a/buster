@@ -29,6 +29,7 @@ BUSTER_F_DECL bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelli
 BUSTER_F_DECL bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, bool* accepted_out);
 BUSTER_F_DECL bool c_test_number_facts_agree(Arena* arena, CPreprocessResult preprocess, u32* number_count_out);
 BUSTER_F_DECL u64 c_test_number_facts_bytes(CNumberFacts const* facts);
+BUSTER_F_DECL bool c_test_string_count_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out);
 BUSTER_F_DECL u64 c_test_lex_punctuator_nfa_mismatches(void);
 BUSTER_F_DECL u64 c_test_lex_mask_below_mismatches(void);
 BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
