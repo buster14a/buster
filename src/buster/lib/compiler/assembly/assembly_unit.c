@@ -573,7 +573,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
         return false;
     }
     AssemblyUnitSymbol* record = builder->result.symbols + symbol;
-    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")))
+    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")))
     {
         record->global = true;
         return part_count == 1;
@@ -732,9 +732,16 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
     bool valid = count != UINT32_MAX && count && assembly_unit_section_current(builder);
     valid = valid && builder->result.sections[builder->current_section].kind != ASSEMBLY_UNIT_SECTION_ZERO &&
             count <= builder->integer_capacity - builder->integer_count;
+    // Refuse malformed expressions before reserving any bytes. Symbols and
+    // bindings are evaluated again after parsing to resolve forward differences.
+    u64 base = valid ? builder->section_offsets[builder->current_section] : 0;
+    for (u32 index = 0; index < count && valid; index += 1)
+    {
+        AssemblyUnitValue value = {0};
+        valid = assembly_unit_evaluate(builder, parts[index], base + (u64)index * width, &value);
+    }
     if (valid)
     {
-        u64 base = builder->section_offsets[builder->current_section];
         for (u32 index = 0; index < count; index += 1)
         {
             builder->integers[builder->integer_count++] = (AssemblyUnitInteger){
@@ -931,8 +938,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return assembly_unit_directive_section(builder, operands);
     }
-    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".weak")) ||
-        string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
+    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
+        string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
     {
         return assembly_unit_directive_symbol(builder, directive, operands);
     }

@@ -13940,7 +13940,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         }
         if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
-            if ((source->offset & 3) || object->sections[source->section].alignment < 4)
+            if (format != OBJECT_FORMAT_ELF64 && ((source->offset & 3) || object->sections[source->section].alignment < 4))
             {
                 return result;
             }
