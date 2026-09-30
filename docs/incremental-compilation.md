@@ -2,23 +2,50 @@
 
 ## Status and scope
 
-This is a research prototype. It is **off by default**, and it must not be
-enabled by default or merged without explicit authorization. It answers one
-question: can Buster reuse compilation work at function granularity, safely and
-deterministically, without a daemon, hidden global state, an external database
-or a second permanent IR? The answer comes with evidence.
+This is the research record for a prototype that is **not part of the
+compiler**. It answers one question: can Buster reuse compilation work at
+function granularity, safely and deterministically, without a daemon, hidden
+global state, an external database or a second permanent IR? The answer comes
+with evidence.
 
+The prototype's code was not merged. Its own measurements (see
+[Work avoided and cost](#work-avoided-and-cost)) show that it does not make
+edited rebuilds faster and makes cold builds about 20% slower, so it changes no
+compiler behavior on `main`. The flags, module, tests, harness and hosted
+workflow described below exist only at the prototype commit, which stays
+recoverable:
+
+- Prototype commit: `d5616c6be64e2693afb88e103d5b6c971e998b4e` (branch
+  `claude/vibrant-sagan-sgz32i` of
+  [#1471](https://github.com/buster14a/buster/pull/1471), before the code was
+  stripped). It is based on the source pin below.
 - Tracking issue: [#1470](https://github.com/buster14a/buster/issues/1470).
-- Source pin: `main` at `ade6ac4b6ecb21f30b61b656439bac476c145e2f`, tree
-  `4c5306221fdb22fccc929b55e333163742de17d0`.
-- Code: `src/buster/lib/compiler/incremental/` holds the records, artifact,
-  pack and session. A seam in `codegen.c` captures and replays artifacts, the
-  driver owns the flags, and `ide.c` prints the records.
-- Oracle harness: `tools/incremental_edit_matrix.py`. Hosted workflow:
-  `.github/workflows/incremental-codegen-research.yml`. Unit tests:
-  `src/buster/tests/compiler/incremental/`.
+- Source pin (the measured revision): `main` at
+  `ade6ac4b6ecb21f30b61b656439bac476c145e2f`, tree
+  `4c5306221fdb22fccc929b55e333163742de17d0`. No result below was rerun on a
+  later `main`.
+- Code at the prototype commit: `src/buster/lib/compiler/incremental/` held the
+  records, artifact, pack and session. A seam in `codegen.c` captured and
+  replayed artifacts, the driver owned the flags, and `ide.c` printed the
+  records.
+- Oracle harness at the prototype commit: `tools/incremental_edit_matrix.py`.
+  Hosted workflow: `.github/workflows/incremental-codegen-research.yml`. Unit
+  tests: `src/buster/tests/compiler/incremental/`.
 - Out of scope: #36/#880/#881 retirement, service, admission, deployment and
-  generated bindings. None of those files is touched.
+  generated bindings. None of those files was touched.
+
+To rerun the evidence, check out the prototype commit in a separate worktree
+and run, from its root:
+
+```sh
+./build.sh generate
+./build.sh build --config Release -t ide
+python3 tools/incremental_edit_matrix.py --compiler build/Release/ide --work DIR --matrix --random 6:30 --real-code --self-host --audit
+```
+
+Any oracle mismatch, verify mismatch, audit violation or non-identical
+self-host stage falsifies soundness. Porting the prototype to a later `main`
+is new work under #1470, not a rerun.
 
 **Answer.** Yes, for native code generation. A function's machine-code
 contribution to a `CodegenModule` can be reused under a complete, canonical,
@@ -37,6 +64,8 @@ records and rewriting the pack cost about as much as the code generation they
 save (see [Work avoided and cost](#work-avoided-and-cost)).
 
 ## Using it
+
+These flags existed only at the prototype commit; `main` does not accept them.
 
 | Flag | Effect |
 | --- | --- |
@@ -605,8 +634,8 @@ the feature off, which is its default.
 The dependency audit table in [Measured, not guessed](#measured-not-guessed-the-access-audit)
 covers 33,918 audited function compilations: the self-host unit, plus every
 `tests/*.c` fixture on four targets under three allocators. None read a type or
-symbol outside its key. The hosted workflow repeats the self-host unit and the
-fixture sweep on each runner.
+symbol outside its key. The prototype's hosted workflow repeated the self-host
+unit and the fixture sweep on each runner.
 
 ## Work avoided and cost
 
@@ -677,8 +706,8 @@ matrix was running concurrently for part of this run.
 In short: an unchanged warm rebuild saves about 13%. An edited rebuild is
 within noise of a clean build, because the pack rewrite and record building
 absorb the code-generation savings. A cold build costs about 20% extra. The
-hosted workflow reports the same wall times on each runner, also as
-supplementary data. The result of this work is the counts, not the times.
+prototype's hosted workflow reported the same wall times on each runner, also
+as supplementary data. The result of this work is the counts, not the times.
 
 ## Limitations
 
