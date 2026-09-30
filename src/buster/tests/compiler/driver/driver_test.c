@@ -10571,6 +10571,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_declarator_trailing_toke
     return result;
 }
 
+// #1230: static scalar, aggregate and local-static addresses must retain the
+// cast's scaling and the subscript's signed count. Inspect serialized ELF
+// relocations as well as running every frontend/allocator combination.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stddef.h>\n"
+        "int x;\n"
+        "int arr[8];\n"
+        "_Alignas(long) short sh[4];\n"
+        "double dv[4];\n"
+        "_Alignas(int) char buf[64];\n"
+        "struct O { int a; long b; char tail[8]; } o;\n"
+        "int m[4][3];\n"
+        "char *S1 = (char *)&x + 1;\n"
+        "char *S2 = (char *)arr + sizeof arr;\n"
+        "struct O *S3 = (struct O *)((char *)&o.b - offsetof(struct O, b));\n"
+        "long *S4 = (long *)sh + 1;\n"
+        "char *S5 = (char *)(&x + 1) - 1;\n"
+        "const unsigned char *S6 = (const unsigned char *)&o + offsetof(struct O, tail);\n"
+        "char *const S7 = (char *)dv + 3;\n"
+        "int *S9 = (int *)buf + 2;\n"
+        "char *S10 = (char *)&arr[2] + 1;\n"
+        "int *negative_int = &(arr + 3)[-1];\n"
+        "int *negative_long = &(arr + 3)[-1L];\n"
+        "int *negative_long_long = &(arr + 3)[-1LL];\n"
+        "int *negative_row = &(m + 2)[-1][1];\n"
+        "int *negative_narrow = &(arr + 3)[(signed char)-1];\n"
+        "enum Index { MINUS_ONE = -1 };\n"
+        "int *negative_enum = &(arr + 3)[MINUS_ONE];\n"
+        "int *positive_unsigned = &(arr + 3)[1U];\n"
+        "int *negative_aggregate[3] = { &(arr + 3)[-1], &(arr + 3)[-1L], &(m + 2)[-1][1] };\n"
+        "char *cast_only = (char *)&x;\n"
+        "int *typed_control = &x + 1;\n"
+        "char *parenthesized = ((char *)&x) + 1;\n"
+        "char *plain_array = buf + 5;\n"
+        "void *outer_void = (void *)((char *)buf + 10);\n"
+        "struct Addresses { char *byte; char *end; struct O *base; } aggregate = {\n"
+        "    (char *)&x + 1, (char *)arr + sizeof arr,\n"
+        "    (struct O *)((char *)&o.b - offsetof(struct O, b))\n"
+        "};\n"
+        "#define BYTE_ADDRESS(object, count) ((unsigned char *)&(object) + (count))\n"
+        "const unsigned char *macro_address = BYTE_ADDRESS(o, offsetof(struct O, tail));\n"
+        "int *raw_size = (int *)sizeof x;\n"
+        "int *raw_group = (int *)(16 + 1);\n"
+        "int *raw_unary = (int *)+16;\n"
+        "int *raw_prefixed_size = (int *)+sizeof x;\n"
+        "int *raw_nested_size = (int *)(size_t)sizeof x;\n"
+        "#ifndef __STRICT_ANSI__\n"
+        "void *gnu_void = (void *)&x + 1;\n"
+        "#endif\n"
+        "int main(void)\n"
+        "{\n"
+        "    static char *L1 = (char *)&x + 1;\n"
+        "    static long *L2 = (long *)sh + 1;\n"
+        "    static int *local_negative = &(arr + 3)[-1L];\n"
+        "    char *runtime = (char *)&x + 1;\n"
+        "    int failed = 0;\n"
+        "    /* Compare pointers; never subtract or dereference a wrong folded address. */\n"
+        "    failed += S1 != &((char *)&x)[1];\n"
+        "    failed += S2 != (char *)&arr[8];\n"
+        "    failed += S3 != &o;\n"
+        "    failed += S4 != (long *)&((unsigned char *)sh)[sizeof(long)];\n"
+        "    failed += S5 != &((char *)&x)[sizeof(int) - 1];\n"
+        "    failed += S6 != (const unsigned char *)&o.tail;\n"
+        "    failed += S7 != &((char *)dv)[3];\n"
+        "    failed += S9 != (int *)&buf[2 * sizeof(int)];\n"
+        "    failed += S10 != &((char *)arr)[2 * sizeof(int) + 1];\n"
+        "    failed += L1 != &((char *)&x)[1];\n"
+        "    failed += L2 != (long *)&((unsigned char *)sh)[sizeof(long)];\n"
+        "    failed += negative_int != &arr[2];\n"
+        "    failed += negative_long != &arr[2];\n"
+        "    failed += negative_long_long != &arr[2];\n"
+        "    failed += negative_row != &m[1][1];\n"
+        "    failed += negative_narrow != &arr[2];\n"
+        "    failed += negative_enum != &arr[2];\n"
+        "    failed += positive_unsigned != &arr[4];\n"
+        "    failed += local_negative != &arr[2];\n"
+        "    failed += negative_aggregate[0] != &arr[2];\n"
+        "    failed += negative_aggregate[1] != &arr[2];\n"
+        "    failed += negative_aggregate[2] != &m[1][1];\n"
+        "    failed += cast_only != (char *)&x;\n"
+        "    failed += typed_control != &x + 1;\n"
+        "    failed += parenthesized != &((char *)&x)[1];\n"
+        "    failed += plain_array != &buf[5];\n"
+        "    failed += outer_void != (void *)&buf[10];\n"
+        "    failed += aggregate.byte != &((char *)&x)[1];\n"
+        "    failed += aggregate.end != (char *)&arr[8];\n"
+        "    failed += aggregate.base != &o;\n"
+        "    failed += runtime != &((char *)&x)[1];\n"
+        "    failed += macro_address != (const unsigned char *)&o.tail;\n"
+        "    failed += (size_t)raw_size != sizeof(int);\n"
+        "    failed += (size_t)raw_group != 17;\n"
+        "    failed += (size_t)raw_unary != 16;\n"
+        "    failed += (size_t)raw_prefixed_size != sizeof(int);\n"
+        "    failed += (size_t)raw_nested_size != sizeof(int);\n"
+        "#ifndef __STRICT_ANSI__\n"
+        "    failed += gnu_void != (void *)&((char *)&x)[1];\n"
+        "#endif\n"
+        "    return failed;\n"
+        "}\n");
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    struct { String8 pointer; String8 target; s64 addend; } expected[] = {
+        {S8("S1"), S8("x"), 1}, {S8("S2"), S8("arr"), 32}, {S8("S3"), S8("o"), 0},
+        {S8("negative_int"), S8("arr"), 8}, {S8("negative_long"), S8("arr"), 8},
+        {S8("negative_row"), S8("m"), 16},
+    };
+    String8 dialects[] = {S8("-std=c11"), S8("-std=gnu17")};
+    for (u32 configuration = 0; configuration < BUSTER_ARRAY_LENGTH(forms) * BUSTER_ARRAY_LENGTH(dialects); configuration += 1)
+    {
+        u32 form = configuration % BUSTER_ARRAY_LENGTH(forms);
+        String8 dialect = dialects[configuration / BUSTER_ARRAY_LENGTH(forms)];
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-static-pointer-{u32}-{u32}"), configuration, mode);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), dialect, S8("-target"), S8("x86_64-linux"),
+                    forms[form], modes[mode], S8("-fverify-codegen"), mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                    S8("-o"), output, input};
+                CompilerDriverResult built = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
+                if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+                {
+                    FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
+                    if (BUSTER_REQUIRE(arguments, map.bytes.length != 0))
+                    {
+                        ObjectFile serialized = object_read(arena, map.bytes, built.object.target);
+                        BUSTER_TEST(arguments, serialized.error == OBJECT_ERROR_NONE);
+                        if (serialized.error == OBJECT_ERROR_NONE)
+                        {
+                            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(expected); row += 1)
+                            {
+                                ObjectSymbol* pointer = compiler_driver_test_symbol_by_name(&serialized, expected[row].pointer);
+                                bool found = false;
+                                for (u32 relocation_index = 0; pointer && relocation_index < serialized.relocation_count; relocation_index += 1)
+                                {
+                                    ObjectRelocation relocation = serialized.relocations[relocation_index];
+                                    if (relocation.section == pointer->section && relocation.offset == pointer->value &&
+                                        relocation.symbol < serialized.symbol_count)
+                                    {
+                                        ObjectSymbol* target = serialized.symbols + relocation.symbol;
+                                        found = string_equal(target->name, expected[row].target) && relocation.addend == expected[row].addend;
+                                    }
+                                }
+                                BUSTER_TEST_RAW(arguments, found, expected[row].pointer);
+                            }
+                        }
+                        file_map_unmap(map);
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+#if (BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                String8 executable = buster_test_temporary_path(arena, name,
+#if BUSTER_WINDOWS
+                                                               S8(".exe")
+#else
+                                                               S8(".out")
+#endif
+                                                               );
+                String8 run_command[] = {dialect, forms[form], modes[mode], S8("-fverify-codegen"),
+                    mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), executable, input};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, executable), name);
+                    BUSTER_TEST(arguments, os_file_delete(executable));
+                }
+#endif
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Unsupported non-null pointer arithmetic must not be re-associated into
+    // an integer cast, and unrepresentable indices must fail before scaling.
+    String8 rejected[] = {
+        S8("int *p = (int *)16 + 1;\n"),
+        S8("struct A { int *p; } a = { (int *)16 + 1 };\n"),
+        S8("int arr[8]; int *p = &(arr + 3)[18446744073709551615ULL];\n"),
+        S8("int arr[8]; int *p = &(arr + 3)[(-9223372036854775807LL - 1)];\n"),
+        S8("int arr[8]; int *p = &(arr + 3)[9223372036854775807LL];\n"),
+    };
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-static-pointer-refusal"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-static-pointer-refusal"), S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(rejected[row]))))
+            {
+                String8 command[] = {S8("-c"), forms[form], S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, rejected[row]);
+                BUSTER_TEST_RAW(arguments, refused.diagnostic.length != 0, rejected[row]);
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -12674,6 +12890,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
