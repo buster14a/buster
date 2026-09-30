@@ -213,6 +213,7 @@ struct CompilerDriverResult
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     String8 diagnostic;
     String8 warning;
     // Published in input/stage order, owned by the result arena. Empty on a

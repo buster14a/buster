@@ -10652,6 +10652,71 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_hea
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_leb(ByteSlice image, u64* cursor, u64 end, u64* value)
+{
+    u64 result = 0;
+    u32 shift = 0;
+    bool done = false;
+    while (*cursor < end && !done && shift < 64)
+    {
+        u8 byte = image.pointer[*cursor];
+        *cursor += 1;
+        result |= (u64)(byte & 0x7f) << shift;
+        shift += 7;
+        done = !(byte & 0x80);
+    }
+    *value = result;
+    return done;
+}
+
+// Whether a WebAssembly module's name section gives some data segment `name`
+// (data-segment subsection 9 of the extended name section).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_data_segment_named(ByteSlice image, String8 name)
+{
+    bool result = false;
+    u64 cursor = image.length >= 8 && memcmp(image.pointer, "\0asm", 4) == 0 ? 8 : image.length;
+    bool valid = true;
+    while (cursor < image.length && valid && !result)
+    {
+        u8 id = image.pointer[cursor];
+        cursor += 1;
+        u64 size = 0;
+        valid = compiler_driver_test_wasm_leb(image, &cursor, image.length, &size) && size <= image.length - cursor;
+        u64 section_end = valid ? cursor + size : cursor;
+        u64 section_name_length = 0;
+        if (valid && id == 0 && compiler_driver_test_wasm_leb(image, &cursor, section_end, &section_name_length) && section_name_length == 4 &&
+            section_end - cursor >= 4 && memcmp(image.pointer + cursor, "name", 4) == 0)
+        {
+            cursor += 4;
+            while (cursor < section_end && !result)
+            {
+                u8 subsection = image.pointer[cursor];
+                cursor += 1;
+                u64 subsection_size = 0;
+                bool subsection_valid = compiler_driver_test_wasm_leb(image, &cursor, section_end, &subsection_size) && subsection_size <= section_end - cursor;
+                u64 subsection_end = subsection_valid ? cursor + subsection_size : section_end;
+                u64 count = 0;
+                if (subsection_valid && subsection == 9 && compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &count))
+                {
+                    for (u64 entry = 0; entry < count && !result; entry += 1)
+                    {
+                        u64 index = 0;
+                        u64 length = 0;
+                        bool entry_valid = compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &index) &&
+                                           compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &length) && length <= subsection_end - cursor;
+                        result = entry_valid && length == name.length && memcmp(image.pointer + cursor, name.pointer, name.length) == 0;
+                        cursor = entry_valid ? cursor + length : subsection_end;
+                    }
+                }
+                cursor = subsection_end;
+            }
+        }
+        cursor = section_end;
+    }
+
+    return result;
+}
+
 // `__attribute__((section("...")))` (issue 1276). Every native output either
 // places the definition in the named section or refuses it naming the
 // declaration: COFF and Mach-O refuse, as does thread-local storage. On a
@@ -10696,6 +10761,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                             compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object &&
                                 string_first_sequence(compiled.diagnostic, refusals[index].expected) < compiled.diagnostic.length,
                             compiled.diagnostic);
+        }
+    }
+    // WebAssembly (issue 1717) names a placed data definition's segment, as
+    // Clang does. A function's section has no Wasm counterpart and, as with
+    // Clang, is accepted without effect, still rooting the definition.
+    String8 wasm_source = S8("int wasm_placed __attribute__((section(\"wasm_named\"))) = 7;\n"
+                             "const int wasm_constant __attribute__((section(\"wasm_constants\"))) = 8;\n"
+                             "int wasm_zero __attribute__((section(\"wasm_zero\")));\n"
+                             "int wasm_ordinary = 9;\n"
+                             "__attribute__((section(\".text.wasm_kept\"))) static int wasm_kept(void) { return 1; }\n"
+                             "int wasm_local(void) { static int wasm_member __attribute__((section(\"wasm_set\"))) = 2; return wasm_member; }\n"
+                             "int main(void) { return wasm_placed + wasm_constant + wasm_zero + wasm_ordinary + wasm_local() == 26 ? 0 : 1; }\n");
+    String8 wasm_targets[] = {S8("wasm32-unknown-wasi"), S8("wasm64-unknown-freestanding")};
+    String8 wasm_segments[] = {S8("wasm_named"), S8("wasm_constants"), S8("wasm_zero"), S8("wasm_set")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(wasm_targets); index += 1)
+    {
+        String8 input = buster_test_temporary_path(arena, S8("buster-section-wasm"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-section-wasm"), S8(".wasm"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(wasm_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-target"), wasm_targets[index], input, S8("-o"), output};
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && (compiled.has_wasm || compiled.has_wasm64), compiled.diagnostic);
+            ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+            for (u32 segment = 0; segment < BUSTER_ARRAY_LENGTH(wasm_segments); segment += 1)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_wasm_data_segment_named(image, wasm_segments[segment]),
+                                string_format(arena, S8("{S8}: no data segment named {S8}"), wasm_targets[index], wasm_segments[segment]));
+            }
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_data_segment_named(image, S8(".text.wasm_kept")));
         }
     }
 #if BUSTER_LINUX && !BUSTER_ANDROID && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
