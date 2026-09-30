@@ -43,7 +43,7 @@ jobs:
           git cat-file blob "$link_blob" > "$evidence/link.pinned.c"
           {
             printf 'head='; git rev-parse HEAD
-            printf 'tree='; git rev-parse HEAD^{tree}
+            printf 'tree='; git rev-parse 'HEAD^{tree}'
             printf 'base=%s\n' "$base"
             printf 'runner=%s os=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
             clang --version
