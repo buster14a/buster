@@ -340,16 +340,29 @@ struct ObjectFile
     u32* initializer_priorities[2];
 };
 
+// A section payload that an artifact names in place instead of copying. The
+// payload's bytes belong at file offset `offset` and stay owned by the
+// ObjectFile section they came from.
+typedef struct ObjectBorrowedPayload ObjectBorrowedPayload;
+struct ObjectBorrowedPayload
+{
+    u64 offset;
+    ByteSlice bytes;
+};
+
 // The work one object_write call did, counted where it happened rather than
 // estimated. "Visits" are reads of an input record by any loop, validation
 // included, so visits over count is the number of passes. Image bytes are
 // counted at every store, and `image_bytes_patched` counts stores over bytes
 // already stored, so a result with no patched bytes and as many stored bytes
-// as `output_bytes` wrote every byte of the file once. `scratch_bytes` is
-// every other arena byte the writer requested, released or not: tables,
-// copies, formatted names. `retained_bytes` is what the call left allocated
-// in the caller's arena, image included. object_write_statistics_add sums
-// them over the translation units of one invocation.
+// as `output_bytes` wrote every byte of the file once. A borrowing write
+// (object_write_borrowing) stores no bytes for the payloads it names in
+// place; `payload_bytes_borrowed` counts them, so its stored and borrowed
+// bytes together are the output. `scratch_bytes` is every other arena byte
+// the writer requested, released or not: tables, copies, formatted names.
+// `retained_bytes` is what the call left allocated in the caller's arena,
+// image included. object_write_statistics_add sums them over the
+// translation units of one invocation.
 typedef struct ObjectWriteStatistics ObjectWriteStatistics;
 struct ObjectWriteStatistics
 {
@@ -361,6 +374,7 @@ struct ObjectWriteStatistics
     u64 image_bytes_zeroed;
     u64 image_bytes_patched;
     u64 payload_bytes_copied;
+    u64 payload_bytes_borrowed;
     u64 scratch_bytes;
     u64 retained_bytes;
     u64 output_bytes;
@@ -370,6 +384,11 @@ typedef struct ObjectArtifact ObjectArtifact;
 struct ObjectArtifact
 {
     ByteSlice bytes;
+    // Nonzero only for object_write_borrowing. `bytes` then spans the whole
+    // file but leaves each borrowed range unwritten; object_artifact_slices
+    // yields the file in order, and the ObjectFile must outlive the artifact.
+    ObjectBorrowedPayload const* borrowed_payloads;
+    u32 borrowed_payload_count;
     ObjectError error;
     ObjectFormat format;
     ObjectWriteStatistics statistics;
@@ -399,6 +418,8 @@ BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, Obj
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out);
 BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
