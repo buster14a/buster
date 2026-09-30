@@ -366,6 +366,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## `_Alignof` over an object
+
+GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
+answer the object's alignment rather than its type's: GCC and Clang fold
+`_Alignas(32) int g; _Alignof(g)` to 32 and accept it as an integer constant
+expression (issue #1704). Both layout engines raise the type's answer by the
+same runs, which `c_alignof_object_next_run` names: the entity's own and those
+of every object declaration of it that is complete before the operand, so
+`extern int g; _Alignas(32) int g;` answers 32 after the second declaration.
+`c_parse_alignof_object_alignment` serves the parse-time folds; a file-scope
+static assertion over such an operand is deferred to canonical-IR constant
+evaluation, where `c_ir_alignof_object_alignment` serves both that and the
+lowered value. An enum initializer runs inside the type machine and must not
+mutate it, so there only runs of integer expressions and builtin types fold;
+`_Alignas(struct S)` there is refused as not constant. A run may itself spell
+`_Alignof(object)`, so each engine counts nested evaluations and refuses past
+`C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
+operand, because a record's evaluator otherwise falls back to another fold and
+answers the type's alignment. Member operands (`_Alignof(s.x)` with an
+`_Alignas` member, or a `packed` one) still answer the member type's alignment
+where Clang answers the member's (issue #1249).
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their

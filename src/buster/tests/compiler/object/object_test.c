@@ -2764,8 +2764,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // lets a -fPIC object -- this compiler's or clang's -- be linked here at
     // all: the relaxable spellings also say how many bytes of the instruction
     // precede the field, and the linker rewrites a different instruction
-    // without that.  Every kind writes its own type back out.  Local dynamic
-    // is the one thread-local model with no kind, and the refusal names it.
+    // without that.  Every kind writes its own type back out.
     u32 gotpc_rel_types[] = {9, 41, 42, 43};
     ObjectRelocationKind gotpc_rel_kinds[] = {OBJECT_RELOCATION_X86_64_GOTPCREL, OBJECT_RELOCATION_X86_64_GOTPCRELX,
                                               OBJECT_RELOCATION_X86_64_REX_GOTPCRELX, OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX};
@@ -2800,20 +2799,50 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, gotpc_rel_written_valid && gotpc_rel_written_type == gotpc_rel_types[type_index]);
     }
-    ObjectArtifact tls_local_dynamic_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
-    u64 tls_local_dynamic_section = 0;
-    u64 tls_local_dynamic_target_data = 0;
-    bool tls_local_dynamic_offsets_valid =
-        object_test_elf_relocation_offsets(tls_local_dynamic_elf.bytes, &tls_local_dynamic_section, &tls_local_dynamic_target_data);
-    u64 tls_local_dynamic_data = 0;
-    if (tls_local_dynamic_offsets_valid)
+    // Local dynamic's two 32-bit fields (issue 1711) read as their own kinds
+    // and write their own types back out, as the GOT spellings above do; a
+    // type outside the vocabulary is still refused by number.
+    u32 tls_local_dynamic_types[] = {20, 21, 24};
+    ObjectRelocationKind tls_local_dynamic_kinds[] = {OBJECT_RELOCATION_X86_64_TLSLD, OBJECT_RELOCATION_X86_64_DTPOFF32, OBJECT_RELOCATION_COUNT};
+    for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(tls_local_dynamic_types); type_index += 1)
     {
-        memcpy(&tls_local_dynamic_data, tls_local_dynamic_elf.bytes.pointer + tls_local_dynamic_section + 24, sizeof(tls_local_dynamic_data));
-        object_test_write_u32(tls_local_dynamic_elf.bytes, tls_local_dynamic_data + 8, 20);
+        ObjectArtifact tls_local_dynamic_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
+        u64 tls_local_dynamic_section = 0;
+        u64 tls_local_dynamic_target_data = 0;
+        bool tls_local_dynamic_offsets_valid =
+            object_test_elf_relocation_offsets(tls_local_dynamic_elf.bytes, &tls_local_dynamic_section, &tls_local_dynamic_target_data);
+        u64 tls_local_dynamic_data = 0;
+        if (tls_local_dynamic_offsets_valid)
+        {
+            memcpy(&tls_local_dynamic_data, tls_local_dynamic_elf.bytes.pointer + tls_local_dynamic_section + 24, sizeof(tls_local_dynamic_data));
+            object_test_write_u32(tls_local_dynamic_elf.bytes, tls_local_dynamic_data + 8, tls_local_dynamic_types[type_index]);
+        }
+        ObjectFile tls_local_dynamic_roundtrip = object_read(arguments->arena, tls_local_dynamic_elf.bytes, absolute32s_object.target);
+        if (tls_local_dynamic_kinds[type_index] == OBJECT_RELOCATION_COUNT)
+        {
+            BUSTER_TEST(arguments, tls_local_dynamic_offsets_valid && tls_local_dynamic_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                                       object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(tls_local_dynamic_roundtrip.diagnostic),
+                                                            S8("unsupported ELF x86-64 relocation type 24")));
+        }
+        else
+        {
+            BUSTER_TEST(arguments, tls_local_dynamic_offsets_valid && tls_local_dynamic_roundtrip.error == OBJECT_ERROR_NONE &&
+                                       tls_local_dynamic_roundtrip.relocation_count == 1 &&
+                                       tls_local_dynamic_roundtrip.relocations[0].kind == tls_local_dynamic_kinds[type_index]);
+            ObjectArtifact tls_local_dynamic_written = object_write(arguments->arena, &tls_local_dynamic_roundtrip, OBJECT_FORMAT_ELF64);
+            u64 written_section = 0;
+            u64 written_target = 0;
+            u64 written_data = 0;
+            u32 written_type = 0;
+            bool written_valid = object_test_elf_relocation_offsets(tls_local_dynamic_written.bytes, &written_section, &written_target);
+            if (written_valid)
+            {
+                memcpy(&written_data, tls_local_dynamic_written.bytes.pointer + written_section + 24, sizeof(written_data));
+                memcpy(&written_type, tls_local_dynamic_written.bytes.pointer + written_data + 8, sizeof(written_type));
+            }
+            BUSTER_TEST(arguments, written_valid && written_type == tls_local_dynamic_types[type_index]);
+        }
     }
-    ObjectFile tls_local_dynamic_roundtrip = object_read(arguments->arena, tls_local_dynamic_elf.bytes, absolute32s_object.target);
-    BUSTER_TEST(arguments, tls_local_dynamic_offsets_valid && tls_local_dynamic_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
-                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(tls_local_dynamic_roundtrip.diagnostic), S8("R_X86_64_TLSLD")));
     ObjectArtifact coff = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     ObjectFile coff_roundtrip = object_read(arguments->arena, coff.bytes,
                                             (Target){

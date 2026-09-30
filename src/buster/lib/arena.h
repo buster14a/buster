@@ -155,6 +155,7 @@ BUSTER_F_DECL void arena_test_fail_next_commit(void);
 // because a unit's phases can run on a compile lane; tests toggle it serially.
 BUSTER_F_DECL void arena_test_fill_releases(bool enabled);
 #define ARENA_TEST_RELEASE_FILL 0xa5
+BUSTER_F_DECL u64 arena_test_pool_count(u64 reserved_size);
 #endif
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 

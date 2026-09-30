@@ -1,0 +1,36 @@
+diff --git a/src/buster/lib/compiler/codegen/machine_x86_64.c b/src/buster/lib/compiler/codegen/machine_x86_64.c
+index 258124a2..7083f044 100644
+--- a/src/buster/lib/compiler/codegen/machine_x86_64.c
++++ b/src/buster/lib/compiler/codegen/machine_x86_64.c
+@@ -30,0 +31,13 @@
++#include <stdio.h>
++
++static unsigned long long issue58_counts[12];
++
++static void __attribute__((destructor)) issue58_report(void)
++{
++    fprintf(stderr,
++            "ISSUE58_CENSUS calls=%llu register=%llu scalar=%llu vector=%llu promoted=%llu frame=%llu pointer=%llu invalid=%llu alias=%llu aggregate=%llu selected=%llu atomic=%llu\n",
++            issue58_counts[0], issue58_counts[1], issue58_counts[2], issue58_counts[3], issue58_counts[4], issue58_counts[5],
++            issue58_counts[6], issue58_counts[7], issue58_counts[8], issue58_counts[9], issue58_counts[10], issue58_counts[11]);
++}
++
++#define ISSUE58_COUNT(index) ((void)__atomic_fetch_add(&issue58_counts[index], 1, __ATOMIC_RELAXED))
+@@ -4676,0 +4690,2 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
++    ISSUE58_COUNT(0);
++    if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD) ISSUE58_COUNT(11);
+@@ -4703,0 +4719,3 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
++                ISSUE58_COUNT(1);
++                if (is_vector_load) ISSUE58_COUNT(3);
++                else ISSUE58_COUNT(2);
+@@ -4720,0 +4739,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
++                if (promoted_valid) ISSUE58_COUNT(4);
++                else if (local_slot_valid) ISSUE58_COUNT(5);
++                else if (pointer_valid) ISSUE58_COUNT(6);
++                else ISSUE58_COUNT(7);
++                if (promoted_valid && !select_and_define) ISSUE58_COUNT(8);
++
+@@ -4774,0 +4799 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
++                ISSUE58_COUNT(9);
+@@ -4868,0 +4894 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
++    if (selected) ISSUE58_COUNT(10);
