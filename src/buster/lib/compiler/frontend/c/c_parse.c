@@ -13281,7 +13281,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
     completed->member_count = machine->result_type.value;
     completed->is_complete = true;
     c_parse_validate_flexible_array_members(result, completed);
-    c_parse_complete_aggregate_alignment_values(machine, result, preprocess, completed_id);
+    c_parse_complete_aggregate_alignment_values(machine, result, *frame->preprocess, completed_id);
     while (frame->pending_index < result->type_count)
     {
         CTypeId pending_id = {.value = frame->pending_index++};
