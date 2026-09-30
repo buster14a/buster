@@ -16270,9 +16270,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
     {
         TemporalArena temporary = scratch_begin(0, 0);
         CTestTypeConstantCase test = cases[case_index];
-        String8 source = string_format(temporary.arena,
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"),
             S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
-               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = {S8}; return probe; }"), test.expression);
+               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = "),
+            test.expression, S8("; return probe; }"));
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
         CParseResult parse = c_parse(temporary.arena, preprocess);
