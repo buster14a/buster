@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/half-fixed"
-          build/Release/ide test --module=c_tests,compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/half-evidence/registered-tests.log"
+          build/Release/ide test --module=c_frontend_tests,compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/half-evidence/registered-tests.log"
           git diff --exit-code
       - name: Retain raw observations
         if: ${{ !cancelled() }}
