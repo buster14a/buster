@@ -314,6 +314,7 @@ jobs:
           run_suite tools/ci_native_observation_test.py native-observation-test.log
           run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
           run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
+          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
           if [[ '${{ matrix.os }}' == macos ]]; then
             run_suite tools/ci_runner_resources_test.py runner-resources-test.log
           fi
@@ -497,32 +498,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
-          # The result step independently re-probes the exact compiler
-          # executables recorded by the driver. Preserve this step's selected
-          # Visual Studio/LLVM search path and target architecture for it.
-          $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
-          foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          # Export the shell's PATH and target for the result step's re-probe.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -GithubEnv $env:GITHUB_ENV `
+            -Require cl, clang, gcc, zig -ClangArch $env:CLANG_ARCH
           New-Item -ItemType Directory -Force -Path 'build' | Out-Null
           $Driver = Join-Path (Get-Location) 'build\build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
@@ -727,24 +706,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
-          foreach ($Compiler in @('cl', 'clang')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang -ClangArch $env:CLANG_ARCH
           & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py toolchain `
             --root $env:BUSTER_CI_OBSERVATION_ROOT --compiler clang --cmake cmake --ninja ninja
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -780,10 +743,8 @@ jobs:
           VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'MSVC toolchain missing' }
-          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          # cl.exe only: no installed LLVM and no clang probe in this step.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
           $Root = Join-Path $env:RUNNER_TEMP 'buster-ci'
           $Sources = Join-Path $Root 'msvc source with spaces'
@@ -1209,12 +1170,11 @@ jobs:
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
 
-          reference_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            reference_materialized=false
-          fi
+          reference_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1295,12 +1255,11 @@ jobs:
               exit 1
             fi
           done
-          expected_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            expected_materialized=false
-          fi
+          expected_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1

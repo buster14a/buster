@@ -222,7 +222,10 @@ shell's arm64 import libraries — every link then fails on `strlen` and
 [`tools/ci_llvm.py`](ci-llvm.md) (`BUSTER_CI_LLVM_BIN`) is therefore prepended
 after the shell is entered, and the step asserts clang's default target
 matches the runner rather than letting a wall of unresolved externals explain
-it a minute later.
+it a minute later. Every Windows step enters the shell through
+`tools/ci_vs_dev_shell.ps1` (tested by `tools/ci_vs_dev_shell_test.py`); its
+options keep each step's own scope, so the MSVC reference differential still
+skips the LLVM prepend and the clang probe.
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different

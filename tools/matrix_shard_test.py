@@ -355,7 +355,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_configure_evidence_test.py",
             "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
             "tools/ci_native_observation_test.py", "tools/ci_sanitize_logs_test.py",
-            "tools/github_ci_time_test.py",
+            "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
         }
         suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
