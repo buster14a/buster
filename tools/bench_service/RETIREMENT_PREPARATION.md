@@ -1108,9 +1108,9 @@ is only a denial of service: the writer and the replay both compare every
 file with a digest, and the replay also requires the `0500` mode, so a
 changed file or mode fails the record rather than changing what it binds.
 
-It returns the record digest. The coordinator must receive that digest over
-an authenticated channel, as it does the other record digests; the channel
-itself belongs to the #923 integrator.
+It returns the record digest. The coordinator receives that digest over the
+authenticated phase channel, in the `BQPHASE2` RETIREMENT_READY packet (see
+[the coordinator side](#coordinator-side-881-pr-4)).
 
 ### The record
 
@@ -1256,11 +1256,12 @@ second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
 return each refuse. `bq_worker_unit` passes the compiled
 profile (`bq_retirement_worker_unit_installed`), which is blocked. A
 production retirement job is therefore still refused with `BQ_BAD_REQUEST`
-before the lease handoff, the keeper, any directory or any child. The other
-recipe gates (`bq_recipe_admitted`, `bq_recipe_service`, `bq_request_valid`,
-`bq_worker_run`'s recipe-name check and `bq_worker_finalization_recipe`) are
-unchanged and still refuse the recipe. Only the test seam admits it, with a
-complete fixture profile.
+before the lease handoff, the keeper, any directory or any child. The
+coordinator's gates use the same completeness gate (see
+[the coordinator side](#coordinator-side-881-pr-4)); the portable queue's
+`bq_recipe_admitted`, `bq_recipe_service` and `bq_request_valid` still refuse
+the recipe in every build. Only the test seams admit it, with a complete
+fixture profile.
 
 **The unit process.** After the pause and the pre-exec lease recheck,
 `bq_retirement_worker_unit_run` performs these steps in order:
@@ -1306,10 +1307,11 @@ mapped status:
    descriptor.
 4. It requires that it has no child yet.
 
-`bq_retirement_worker_unit_produce` then runs store open, prepare, build
-(which sends PREPARING), project, oracle, gate and ready through their
-profile seams. The projection holds the pinned census files itself. The
-stop reason is rechecked between steps.
+`bq_retirement_worker_unit_produce` opens its channel as `BQPHASE2` and runs
+store open, prepare, build (which sends PREPARING), project, oracle, gate and
+ready through their profile seams. It then sends RETIREMENT_READY carrying
+the record's digest and waits for its acknowledgement. The projection holds
+the pinned census files itself. The stop reason is rechecked between steps.
 
 Everything is released in reverse on every path. The subreaper makes an
 escaped descendant (a `setsid` and double-fork grandchild of a stage) the
@@ -1317,11 +1319,11 @@ producer's child, so the gate's no-children check refuses it instead of
 passing while it runs under init. A descendant surviving at the end turns
 the result into `BQ_CLEANUP_FAILED` and is killed and reaped
 (`bq_retirement_check_sweep`), so nothing is reparented past the producer.
-A failure sends no
-phase message after PREPARING. Its partial evidence stays in the attempt,
-and the ready record is never written.
+A failure before the
+ready record sends no phase message after PREPARING. Its partial evidence
+stays in the attempt, and the ready record is never written.
 
-**The campaign (PR 2).** After the ready record,
+**The campaign (PR 2).** After RETIREMENT_READY is acknowledged,
 `bq_retirement_worker_campaign_run` (`retirement_worker_campaign.c`) builds
 lane D's caller data from pinned and sealed inputs only and sequences lane
 D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
@@ -1348,9 +1350,10 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    declaration (A/A transcript, sample, batch and metrics shard groups,
    reserved, plus lane D's two constant entries
    `bq_retirement_unit_handoff_declared`), D's five documents as prior
-   entries at their measured sizes, and the result root's
-   `BQ_WORKER_BUNDLE_CONTROL_ENTRIES` (3) control entries as external
-   entries, so store files plus control entries stay within
+   entries at their measured sizes, and the result root's worker-written
+   entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
+   three control files and the five `BQPHASE2` `worker-phase-N` receipts,
+   `worker-phase-5` included), so store files plus those entries stay within
    `BQ_WORKER_BUNDLE_ENTRY_CAP`. The untimed streams are published, then
    attach, the documents (their written sizes must equal the measured ones,
    else `BQ_CORRUPT`), A/A, admission, the post-A/A document, freeze, A/B and
@@ -1381,10 +1384,9 @@ stand-in.
 
 **Not composed yet.** A READY campaign stops with
 `BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED` (`BQ_UNSUPPORTED`) and sends no
-MEASURED, so the job fails closed. The ready record's digest appears only in
-the producer's stderr diagnostic. Decision 1 of the design moves it to a
-versioned phase packet (PR 4), never through files, so no `ready-sha256=`
-failure-bundle line is written.
+MEASURED, so the job fails closed. No `ready-sha256=` failure-bundle line is
+written: the digest reaches the coordinator only in the RETIREMENT_READY
+packet (decision 1), never through files.
 
 **Blocker: READY is unreachable.** Lane B's runtime template is
 `./{{output}}` (`retirement_row_plan.c`), but lane D's canonical launch
@@ -1395,11 +1397,15 @@ compiler launch). The admission, post-A/A document, freeze, A/B and READY
 steps are wired but no fixture reaches them until lane B's runtime row and
 lane D's layout agree.
 
-The remaining work is split across two PRs:
+The remaining work:
 
-- **PR 3:** composition, the authority and MEASURED.
-- **PR 4:** the coordinator's phase packet, the replay at finalization and
-  the coordinator-side gates.
+- **PR 3:** composition, the authority and MEASURED, which it must send with
+  `bq_phase_exchange_digest_until(phases, BQ_PHASE_MEASURED,
+  authority.authority_sha256, deadline_ns)` after publishing the receipt
+  authority into `job-<id>-attempt-<token>/retirement-authority/` over the
+  attempt's result directory as the store root. A digest-less MEASURED is
+  refused on the `BQPHASE2` channel.
+- **PR 4:** the coordinator side below.
 
 **Fixture.** `retirement_worker_unit_tests.h` drives real launches through
 stand-in compilers (`retirement_stand_in_compiler.h`, dash scripts the
@@ -1411,6 +1417,107 @@ keeper stopped and nothing left running. `bq_prep_test_worker_store_plan`
 covers the declaration, the retained-entry equality and the control-entry
 reservation at the exact store boundary, and `bq_prep_campaign_documents`
 checks sized bytes against written bytes.
+
+### Coordinator side (#881 PR 4)
+
+`retirement_coordinator.c` holds the coordinator's retirement steps. It is
+compiled into the service translation unit after `retirement_worker_unit.c`.
+`bq_worker_run` is `bq_worker_run_pinned` with the installed seams
+(`bq_retirement_worker_unit_installed`), so every step below refuses a
+production retirement job. Only a test seam passes a complete fixture profile.
+
+**The phase packet.** A retirement channel is `BQPHASE2`
+(`phase_channel.h`). The recipe fixes the version at `bq_phase_init_version`;
+a packet never selects it. The smoke recipe keeps `BQPHASE1` byte for byte.
+
+| Bytes | `BQPHASE1` (48) | `BQPHASE2` (80) |
+|---|---|---|
+| 0–7 | `BQPHASE1` | `BQPHASE2` |
+| 8–47 | job, attempt, phase, monotonic time, ack (little-endian u64) | the same |
+| 48–79 | none | SHA-256 digest (raw bytes) |
+
+The version-2 sequence is PREPARING, RETIREMENT_READY (5), SETTLING,
+MEASURING, MEASURED. `bq_phase_next` gives the only successor. The
+RETIREMENT_READY packet carries the ready record's digest and the MEASURED
+packet carries the receipt authority's digest. Each must be nonzero, and
+every other phase carries 32 zero bytes. Parsing is strict: a packet of any
+other size, the other version's magic, an unknown or out-of-order phase, a
+missing, zero or unwanted digest, or an ancillary descriptor is a protocol
+failure (`BQ_WORKER_MISMATCH`). Digests travel as 64 lowercase hex digits
+(`bq_phase_digest_parse`) on the producer side.
+
+RETIREMENT_READY is a separate phase, not a digest attached to SETTLING,
+for three reasons:
+
+- It is sent the moment the record is published, so the coordinator holds
+  the authenticated digest even when a later step fails.
+- It does not tie the in-unit campaign's SETTLING boundary (PR 2), which is
+  a quiescence proof, to the ready record.
+- The four-phase queue journal is unchanged, because RETIREMENT_READY keeps
+  the job in PREPARING.
+
+Its receipt is `worker-phase-5`, with `protocol=BQPHASE2` and a
+`digest-sha256=` line. `bq_worker_phases_validate` follows the channel's
+own sequence, so a retirement job's final validation also requires it.
+
+**The authority handoff before MEASURED.** Before acknowledging a version-2
+MEASURED, `bq_worker_phase_accept` calls `bq_retirement_coordinator_handoff`.
+The handoff reads `authority-job-<id>-<token>.txt` from the attempt's
+`retirement-authority/`. It must be a single-link, owner-read-only file
+whose bytes hash to the packet's digest and re-format byte for byte as the
+canonical `BQ-RETIREMENT-AUTHORITY-V3` record. The handoff then calls
+`tp_retirement_store_authority_handoff` with the attempt's result directory
+as the store root and the queue directory's `retirement-authority/` (created
+`0700` on first use) as the queue-private root. A refused handoff sends no
+acknowledgement. An execution deadline reached before the handoff (which is
+then skipped) or during it also withholds the acknowledgement
+(`BQ_WORKER_TIMEOUT`).
+
+On the producer side, the version-2 MEASURED acknowledgement window
+(`bq_phase_ack_deadline`) is the job's remaining execution deadline, not the
+5-second cap. Every other phase and the smoke recipe keep the cap.
+
+**The replay at finalization.** `bq_worker_run_pinned` keeps its own A
+digest, and `bq_worker_phase_accept` keeps the RETIREMENT_READY digest. For a
+retirement job, `bq_worker_finish` accepts success only if
+`bq_worker_retirement_replay` succeeds. That function runs
+`bq_retirement_coordinator_replay`, which calls
+`bq_retirement_unit_replay_pinned` over the attempt workspace with the
+seams' profile and roots. A missing digest, a failed replay or a changed
+record turns the job into a failure.
+
+**The budget loader.** When `BqWorkerConfig.retirement_budget` is empty, as
+in production, `bq_retirement_coordinator_budget_load` reads
+`recipes/native-retirement-performance-v1.campaign-budget` under the
+installed root. It requires:
+
+- an immutable `recipes/` directory;
+- a single-link, non-writable, service- or root-owned regular file of at
+  most 4095 bytes (`bq_retirement_reference_read_installed`);
+- bytes that hash to the profile's `campaign-budget-sha256=` pin.
+
+A missing or unsafe file is `BQ_CONFIGURATION_MISMATCH`. A missing pin or a
+digest mismatch is `BQ_RECIPE_MISMATCH`. The loaded bytes then go through
+`bq_worker_retirement_runtime` against the same pin.
+
+**The gates.** Three coordinator gates admit the retirement recipe only when
+`bq_retirement_profile_complete` accepts the seams' profile:
+
+- `bq_retirement_request_valid_pinned`, applied by `bq_worker_run_pinned` to
+  the reserved job;
+- `bq_worker_recipe_service`, inside `bq_worker_finalization_recipe`;
+- `bq_worker_recipe_launchable`, which replaces the recipe-name check.
+
+With the compiled profile, a blocked status or no seams, each refuses. The
+portable queue's `bq_request_valid` (submission, journal replay, transport,
+exclusive admission) is `bq_request_valid_admitting(request, false)`. That
+queue is also built without the Linux retirement units, so it cannot
+evaluate the gate, and a retirement request still cannot be submitted.
+Opening submission needs a queue seam that carries the gate's verdict. That
+seam is left to the integration, together with restart classification
+(`tp_retirement_store_authority_state` in `bq_worker_recover`) and
+`bq_worker_result_binding_validate`, which still accepts only the service
+recipe.
 
 ## Capacity derivation
 
@@ -1798,7 +1905,8 @@ commands are logical, so only the job and token differ.
 1. It hands the lease and the phase channel to a forked `worker-unit`
    through `bq_worker_lease_handoff_send`.
 2. It resumes the paused unit.
-3. It acknowledges every phase message and reads the channel to EOF.
+3. It acknowledges every `BQPHASE2` message, keeps the RETIREMENT_READY
+   digest and reads the channel to EOF.
 
 The unit reports its `BqError` as its exit status. It reports 200 instead if
 a child was left over (an unstopped keeper or an unreaped producer) or its
@@ -1815,11 +1923,24 @@ descriptor count changed.
   a copy without the row-plan pin each return `BQ_BAD_REQUEST`. No keeper
   directory, no `retirement-build/` and no child exists afterwards.
 - **Success.** The producer runs through the ready record and exits with the
-  not-yet-wired `BQ_UNSUPPORTED` after exactly one PREPARING message and EOF.
-  `retirement-ready/` holds one `ready-<digest>` that
-  `bq_retirement_unit_replay_pinned` accepts. The gate's no-children check
+  not-yet-wired `BQ_UNSUPPORTED` after exactly one PREPARING and one
+  RETIREMENT_READY message and EOF. `retirement-ready/` holds one
+  `ready-<digest>` whose digest is the one the packet carried, and
+  `bq_retirement_unit_replay_pinned` accepts it. The gate's no-children check
   passed, so the keeper was not the producer's child, and the keeper was
   stopped.
+- **Coordinator (#881 PR 4).** With the channel's digest,
+  `bq_retirement_coordinator_replay` accepts, and it refuses a changed
+  digest, a flipped record byte (accepting again once restored) and the
+  compiled profile. `bq_worker_retirement_replay` refuses without the ready
+  digest or with a changed one, accepts with the channel's, and passes a
+  smoke job. The request, finalization and launch gates refuse the recipe
+  with no seams, the compiled profile or a blocked status, and admit it with
+  the complete seams. A malformed request is refused either way, and the
+  queue's `bq_request_valid` still refuses the recipe. On a `BQPHASE2`
+  channel, `bq_retirement_unit_campaign_begin` is refused right after
+  PREPARING without touching the channel, and it starts SETTLING after
+  RETIREMENT_READY.
 - **SIGTERM.** A SIGTERM to the unit during job 63's hanging generate is
   forwarded to the self-pipe. The unit returns `BQ_WORKER_CANCEL_SIGNAL`, the
   stage's pid is gone and no ready record exists.
@@ -1850,7 +1971,24 @@ In every case the keeper's socket is gone and no descriptor or child leaks.
 - not stopping the keeper;
 - mapping a signalled producer by its exit code;
 - not becoming a subreaper, or not sweeping a surviving descendant;
-- not consuming a SIGTERM held in the teardown window.
+- not consuming a SIGTERM held in the teardown window;
+- (PR 4) opening a `BQPHASE1` channel, or not sending RETIREMENT_READY;
+- (PR 4) ignoring the completeness gate in the request, finalization or
+  launch gate;
+- (PR 4) skipping the replay in the finish hook, ignoring its result, or not
+  requiring the ready digest;
+- (PR 4) letting the campaign begin require PREPARING instead of SETTLING as
+  the next phase.
+
+The service suite (`phase_channel_tests.h`, `worker_deadline_tests.c`) fails
+when the version-2 check or make ignores the digest rule, when the order skips
+RETIREMENT_READY, when a truncated packet or the other magic is accepted, when
+the digest codec accepts upper case or zero, when a version-2 MEASURED keeps
+the 5-second cap, when `BQPHASE1`'s magic changes, when the coordinator skips
+the handoff, either deadline check, keeping the ready digest, the
+version-aware receipt validation or keeping the job in PREPARING at
+RETIREMENT_READY, and when the budget loader skips the pin or accepts a
+writable `recipes/`.
 
 A stop budget that drifts from `BQ_WORKER_STOP_MILLISECONDS` does not
 compile.

@@ -57,7 +57,7 @@
  * written concurrently cannot all be pending store files);
  * bq_retirement_worker_store_plan (lane E's plan with the retained
  * declaration, D's documents as prior entries and the result root's control
- * entries reserved); BqRetirementWorkerCampaign.
+ * files and phase receipts reserved); BqRetirementWorkerCampaign.
  */
 #include "worker_linux.h"
 
@@ -103,13 +103,18 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_directories[BQ_RETIRE
 #define BQ_RETIREMENT_WORKER_ARENA_BYTES (UINT64_C(1) << 32)
 /* Staged streams of one attempt: never more than the store holds. */
 #define BQ_RETIREMENT_WORKER_STREAMS_MAX TP_RETIREMENT_STORE_FILES
-/* The result root's control entries (the manifest, the bundle and the
- * outcome) are inventoried beside the store's files, so the store plan
+/* The result root's worker-written entries (the control files: manifest,
+ * bundle and outcome; and the coordinator's five BQPHASE2 worker-phase-N
+ * receipts) are inventoried beside the store's files, so the store plan
  * reserves them as external entries, each at the bundle's per-file cap: the
- * store then keeps files plus control entries within the bundle's entry cap. */
-#define BQ_RETIREMENT_WORKER_CONTROL_BYTES ((u64)BQ_WORKER_BUNDLE_CONTROL_ENTRIES * BQ_WORKER_BUNDLE_FILE_CAP)
+ * store then keeps its files plus those entries within the bundle's entry
+ * cap. */
+#define BQ_RETIREMENT_WORKER_RESULT_ENTRIES (BQ_WORKER_BUNDLE_CONTROL_ENTRIES + BQ_WORKER_RETIREMENT_PHASE_RECEIPTS)
+#define BQ_RETIREMENT_WORKER_CONTROL_BYTES ((u64)BQ_RETIREMENT_WORKER_RESULT_ENTRIES * BQ_WORKER_BUNDLE_FILE_CAP)
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_FILES <= BQ_WORKER_BUNDLE_ENTRY_CAP);
-BUSTER_CT_CHECK(BQ_WORKER_BUNDLE_CONTROL_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
+BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
+/* One receipt per BQPHASE2 phase, RETIREMENT_READY the last-numbered. */
+BUSTER_CT_CHECK(BQ_WORKER_RETIREMENT_PHASE_RECEIPTS == BQ_PHASE_RETIREMENT_READY);
 /* The untimed records stream's store path. */
 #define BQ_RETIREMENT_WORKER_UNTIMED_PATH "retirement-untimed-batches.jsonl"
 /* A/A and A/B writer tags and sample-shard prefixes: A/A's are retained
@@ -717,9 +722,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_streams_publish(TpRetirementStore*
  * transcript, sample and metrics shards, which the capacity reserves, and
  * D's two constant entries, bq_retirement_unit_handoff_declared), D's five
  * documents as prior entries at their measured sizes, and the result root's
- * control entries (BQ_WORKER_BUNDLE_CONTROL_ENTRIES) as external entries, so
- * every store file plus every control entry stays within
- * BQ_WORKER_BUNDLE_ENTRY_CAP; any excess refuses. */
+ * worker-written entries (BQ_RETIREMENT_WORKER_RESULT_ENTRIES: the control
+ * files and the phase receipts) as external entries, so every store file
+ * plus every such entry stays within BQ_WORKER_BUNDLE_ENTRY_CAP; any excess
+ * refuses. */
 #define BQ_RETIREMENT_WORKER_RETAINED (4u + BQ_RETIREMENT_UNIT_HANDOFF_RETAINED)
 typedef struct BqRetirementWorkerDeclaration
 {
@@ -771,8 +777,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_store_plan(TpRetirementStore* stor
     TpRetirementComposeBounds bounds = {0};
     bool ok = tp_retirement_compose_bounds(&shape, &bounds) &&
               tp_retirement_compose_plan(store, capacity, &shape, &declared->declaration,
-                  BQ_WORKER_BUNDLE_CONTROL_ENTRIES, BQ_RETIREMENT_WORKER_CONTROL_BYTES, plan) &&
-              plan->external_entries >= BQ_WORKER_BUNDLE_CONTROL_ENTRIES && plan->entries <= BQ_WORKER_BUNDLE_ENTRY_CAP;
+                  BQ_RETIREMENT_WORKER_RESULT_ENTRIES, BQ_RETIREMENT_WORKER_CONTROL_BYTES, plan) &&
+              plan->external_entries >= BQ_RETIREMENT_WORKER_RESULT_ENTRIES &&
+              plan->entries <= BQ_WORKER_BUNDLE_ENTRY_CAP;
     *family = ok ? (TpRetirementFamilyCounts){bounds.bootstrap_members, bounds.cell_members} :
                    (TpRetirementFamilyCounts){0};
     return ok;

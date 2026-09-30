@@ -267,7 +267,11 @@ an exclusive durable queue record and a read-only `worker-phase-N` result
 receipt, and advances the settling/measuring journal boundary before replying.
 Final validation compares the exported receipts with the queue's authoritative
 copies. Unknown, duplicate, oversized, stale, descriptor-bearing or partial
-messages cannot advance the protocol.
+messages cannot advance the protocol. The smoke recipe's messages are the
+48-byte `BQPHASE1` packets. The retirement recipe's channel is the 80-byte
+`BQPHASE2`, which also carries the ready record's and the receipt authority's
+digests (see
+[the coordinator side](RETIREMENT_PREPARATION.md#coordinator-side-881-pr-4)).
 
 While waiting between phase messages, the production supervisor blocks on the
 private channel and the launcher's Linux pidfd. It performs no periodic waitpid

@@ -27,7 +27,10 @@
  * which it admits only with a complete profile; the compiled profile is
  * blocked, so the job is still rejected before any directory or child. The
  * producer's in-unit campaign (retirement_worker_campaign.c) runs lane D's
- * driver through READY; its A/A admission stays compiled out here. */
+ * driver through READY; its A/A admission stays compiled out here. The
+ * coordinator's side (retirement_coordinator.c: request gate, budget loader,
+ * authority handoff before MEASURED, replay at finalization) is refused the
+ * same way. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
@@ -45,6 +48,7 @@
 #include "retirement_campaign_service.h"
 #include "retirement_worker_campaign.c"
 #include "retirement_worker_unit.c"
+#include "retirement_coordinator.c"
 #endif
 #include "worker_linux.c"
 #include "export.c"

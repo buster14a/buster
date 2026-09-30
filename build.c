@@ -40322,6 +40322,9 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_json.c"));
             }
+            /* The preparation and eligibility fixtures include the service,
+             * whose coordinator hands the retirement authority off through
+             * the store (#881). */
             if (index == 0 || index == 2 || index == 3 || index == 5)
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
             if (sanitize)

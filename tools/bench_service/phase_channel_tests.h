@@ -1,5 +1,16 @@
 /* Real socketpair/pidfd tests of the production phase protocol. Fixture
- * processes exercise ordering and durability, not performance qualification. */
+ * processes exercise ordering and durability, not performance qualification.
+ *
+ * #881 PR 4 (BQPHASE2): bq_test_phase_v2_packets covers the digest codec,
+ * every version-2 phase in its only order, each wrong size, the other
+ * version, an unknown or out-of-order phase, a missing, zero or unwanted
+ * digest, and the BQPHASE1 layout byte for byte. bq_test_phase_ack_window
+ * covers the acknowledgement window. bq_test_phase_retirement runs a stub
+ * producer through the coordinator's bq_worker_phase_join: it keeps the
+ * ready digest, hands off a real receipt authority before acknowledging
+ * MEASURED, and refuses a digest naming no authority, an execution deadline
+ * reached before or during the handoff, a BQPHASE1 packet and a zero ready
+ * digest. */
 #ifndef BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 #include <signal.h>
@@ -8,6 +19,11 @@
 BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_finalization_deadline(void);
+BUSTER_GLOBAL_LOCAL void bq_test_phase_v2_packets(void);
+BUSTER_GLOBAL_LOCAL void bq_test_phase_ack_window(void);
+BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect);
+BUSTER_GLOBAL_LOCAL u32 bq_test_phase_deadline_clock_calls;
+BUSTER_GLOBAL_LOCAL u64 bq_test_phase_expired_clock(BqWorkerBackend* backend);
 
 BUSTER_GLOBAL_LOCAL int bq_test_phase_ack_child(int descriptor)
 {
@@ -174,6 +190,374 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
     bq_test_phase_finalization_deadline();
     bq_test_phase_exchange_until_success();
     bq_test_phase_exchange_until_failures();
+    bq_test_phase_v2_packets();
+    bq_test_phase_ack_window();
+    for (unsigned defect = 0; defect <= 5; ++defect) bq_test_phase_retirement(defect);
+}
+
+#define BQ_TEST_PHASE_READY_HEX "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define BQ_TEST_PHASE_OTHER_HEX "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+/* Every other phase value (0 to 6) is refused by make on this channel. */
+BUSTER_GLOBAL_LOCAL bool bq_test_phase_only_next(BqPhaseChannel const* channel, unsigned next,
+                                                 unsigned char const* digest)
+{
+    unsigned char scratch[BQ_PHASE_MESSAGE_CAP];
+    bool only = true;
+    for (unsigned other = 0; other <= BQ_PHASE_RETIREMENT_READY + 1; ++other)
+        if (other != next)
+            only = only && !bq_phase_make_digest(channel, other,
+                                                 bq_phase_digest_carried(channel->version, other) ? digest : NULL, scratch);
+    return only;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_phase_v2_packets(void)
+{
+    unsigned char ready[BQ_PHASE_DIGEST_BYTES], other[BQ_PHASE_DIGEST_BYTES], scratch[BQ_PHASE_DIGEST_BYTES];
+    char formatted[2 * BQ_PHASE_DIGEST_BYTES + 1];
+    BQ_CHECK(bq_phase_digest_parse(BQ_TEST_PHASE_READY_HEX, ready) &&
+             bq_phase_digest_parse(BQ_TEST_PHASE_OTHER_HEX, other) && ready[0] == 0x01 && ready[31] == 0xef);
+    bq_phase_digest_format(ready, formatted);
+    BQ_CHECK(!strcmp(formatted, BQ_TEST_PHASE_READY_HEX));
+    /* Upper case, a short or long spelling, a non-digit and the zero digest. */
+    char const* refused[] = {"", "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+                             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+                             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+                             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+                             "0000000000000000000000000000000000000000000000000000000000000000"};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        memset(scratch, 0x5a, sizeof(scratch));
+        bool parsed = bq_phase_digest_parse(refused[index], scratch);
+        unsigned char any = 0;
+        for (u32 byte = 0; byte < sizeof(scratch); byte += 1) any |= scratch[byte];
+        BQ_CHECK(!parsed && !any);
+    }
+    BQ_CHECK(!bq_phase_digest_parse(NULL, scratch));
+
+    int pair[2] = {-1, -1};
+    BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    BqPhaseChannel sender, receiver, smoke, invalid;
+    BQ_CHECK(bq_phase_init_version(&sender, pair[0], 7, 9, BQ_PHASE_VERSION_2) && sender.version == 2 &&
+             bq_phase_init_version(&receiver, pair[1], 7, 9, BQ_PHASE_VERSION_2) &&
+             bq_phase_init(&smoke, pair[1], 7, 9) && smoke.version == BQ_PHASE_VERSION_1);
+    BQ_CHECK(!bq_phase_init_version(&invalid, pair[0], 7, 9, 0) && invalid.failed &&
+             !bq_phase_init_version(&invalid, pair[0], 7, 9, 3) && invalid.failed);
+    unsigned const order[] = {BQ_PHASE_PREPARING, BQ_PHASE_RETIREMENT_READY, BQ_PHASE_SETTLING, BQ_PHASE_MEASURING,
+                              BQ_PHASE_MEASURED};
+    unsigned char message[BQ_PHASE_MESSAGE_CAP], copy[BQ_PHASE_MESSAGE_CAP + 1];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(order); index += 1)
+    {
+        unsigned phase = order[index];
+        bool carried = phase == BQ_PHASE_RETIREMENT_READY || phase == BQ_PHASE_MEASURED;
+        unsigned char const* digest = phase == BQ_PHASE_RETIREMENT_READY ? ready : phase == BQ_PHASE_MEASURED ? other : NULL;
+        BQ_CHECK(bq_phase_next(BQ_PHASE_VERSION_2, sender.sequence) == phase &&
+                 bq_phase_digest_carried(BQ_PHASE_VERSION_2, phase) == carried &&
+                 !bq_phase_digest_carried(BQ_PHASE_VERSION_1, phase));
+        /* Out of order, a missing digest, an unwanted one or a zero one. */
+        memset(scratch, 0, sizeof(scratch));
+        BQ_CHECK(bq_test_phase_only_next(&sender, phase, ready) &&
+                 !bq_phase_make_digest(&sender, phase, carried ? NULL : ready, message) &&
+                 (!carried || !bq_phase_make_digest(&sender, phase, scratch, message)));
+        memset(message, 0xa5, sizeof(message));
+        BQ_CHECK(bq_phase_make_digest(&sender, phase, digest, message) && bq_phase_check(&receiver, message));
+        BQ_CHECK(!memcmp(message, "BQPHASE2", 8) && bq_phase_get(message + 8) == 7 &&
+                 bq_phase_get(message + 16) == 9 && bq_phase_get(message + 24) == phase &&
+                 bq_phase_get(message + 40) == 0);
+        memset(scratch, 0, sizeof(scratch));
+        BQ_CHECK(!memcmp(message + BQ_PHASE_DIGEST_OFFSET, digest ? digest : scratch, BQ_PHASE_DIGEST_BYTES));
+        /* Every byte but the timestamp has one encoding; a carried digest
+         * may be any nonzero value, but never zero. */
+        for (unsigned byte = 0; byte < BQ_PHASE_V2_MESSAGE_BYTES; ++byte)
+        {
+            memcpy(copy, message, BQ_PHASE_V2_MESSAGE_BYTES);
+            copy[byte] ^= 0x80;
+            if ((byte < 32 || byte >= 40) && (!carried || byte < BQ_PHASE_DIGEST_OFFSET))
+                BQ_CHECK(!bq_phase_check(&receiver, copy));
+        }
+        memcpy(copy, message, BQ_PHASE_V2_MESSAGE_BYTES);
+        memset(copy + BQ_PHASE_DIGEST_OFFSET, 0, BQ_PHASE_DIGEST_BYTES);
+        if (carried) BQ_CHECK(!bq_phase_check(&receiver, copy));
+        /* Unknown phases and the other version's magic. */
+        memcpy(copy, message, BQ_PHASE_V2_MESSAGE_BYTES);
+        bq_phase_put(copy + 24, BQ_PHASE_RETIREMENT_READY + 1);
+        BQ_CHECK(!bq_phase_check(&receiver, copy));
+        bq_phase_put(copy + 24, 0);
+        BQ_CHECK(!bq_phase_check(&receiver, copy));
+        memcpy(copy, message, BQ_PHASE_V2_MESSAGE_BYTES);
+        memcpy(copy, "BQPHASE1", 8);
+        BQ_CHECK(!bq_phase_check(&receiver, copy));
+        /* On the wire, only exactly 80 bytes are received. */
+        for (unsigned length = BQ_PHASE_V2_MESSAGE_BYTES - 1; length <= BQ_PHASE_V2_MESSAGE_BYTES + 1; ++length)
+        {
+            memcpy(copy, message, BQ_PHASE_V2_MESSAGE_BYTES);
+            copy[BQ_PHASE_V2_MESSAGE_BYTES] = 0;
+            BQ_CHECK(send(pair[0], copy, length, MSG_NOSIGNAL) == (ssize_t)length);
+            BQ_CHECK(bq_phase_receive_sized(pair[1], copy, BQ_PHASE_V2_MESSAGE_BYTES) ==
+                     (length == BQ_PHASE_V2_MESSAGE_BYTES));
+        }
+        BQ_CHECK(send(pair[0], message, BQ_PHASE_MESSAGE_BYTES, MSG_NOSIGNAL) == BQ_PHASE_MESSAGE_BYTES &&
+                 !bq_phase_receive_sized(pair[1], copy, BQ_PHASE_V2_MESSAGE_BYTES));
+        BQ_CHECK(send(pair[0], message, BQ_PHASE_V2_MESSAGE_BYTES, MSG_NOSIGNAL) == BQ_PHASE_V2_MESSAGE_BYTES &&
+                 !bq_phase_receive(pair[1], copy));
+        /* As if acknowledged: both ends advance. */
+        sender.sequence = receiver.sequence = phase;
+        sender.last_time = receiver.last_time = bq_phase_get(message + 32);
+    }
+    /* After MEASURED nothing follows, and a replay is refused. */
+    BQ_CHECK(bq_phase_next(BQ_PHASE_VERSION_2, BQ_PHASE_MEASURED) == 0 && bq_test_phase_only_next(&sender, 0, ready) &&
+             !bq_phase_check(&receiver, message));
+    /* The v2 packet is refused by a BQPHASE1 channel, and v1 knows no
+     * RETIREMENT_READY and no digest. */
+    BqPhaseChannel fresh;
+    BQ_CHECK(bq_phase_init_version(&fresh, pair[0], 7, 9, BQ_PHASE_VERSION_2) &&
+             bq_phase_make_digest(&fresh, BQ_PHASE_PREPARING, NULL, message) && !bq_phase_check(&smoke, message));
+    BQ_CHECK(!bq_phase_make_digest(&smoke, BQ_PHASE_PREPARING, ready, message) &&
+             bq_phase_next(BQ_PHASE_VERSION_1, BQ_PHASE_PREPARING) == BQ_PHASE_SETTLING &&
+             bq_phase_next(BQ_PHASE_VERSION_2, BQ_PHASE_PREPARING) == BQ_PHASE_RETIREMENT_READY &&
+             bq_phase_next(0, 0) == 0 && bq_phase_bytes(0) == 0 && bq_phase_bytes(3) == 0);
+    /* BQPHASE1 is unchanged: 48 bytes, nothing written past them, the same
+     * layout, and a v2 channel refuses it. */
+    memset(message, 0xa5, sizeof(message));
+    BQ_CHECK(bq_phase_make(&smoke, BQ_PHASE_PREPARING, message) && bq_phase_bytes(BQ_PHASE_VERSION_1) == 48);
+    unsigned char expected[BQ_PHASE_MESSAGE_BYTES];
+    memcpy(expected, "BQPHASE1", 8);
+    bq_phase_put(expected + 8, 7);
+    bq_phase_put(expected + 16, 9);
+    bq_phase_put(expected + 24, BQ_PHASE_PREPARING);
+    bq_phase_put(expected + 32, bq_phase_get(message + 32));
+    bq_phase_put(expected + 40, 0);
+    bool untouched = true;
+    for (unsigned byte = BQ_PHASE_MESSAGE_BYTES; byte < sizeof(message); ++byte) untouched = untouched && message[byte] == 0xa5;
+    BQ_CHECK(!memcmp(message, expected, sizeof(expected)) && untouched);
+    BQ_CHECK(bq_phase_init_version(&fresh, pair[1], 7, 9, BQ_PHASE_VERSION_2) && !bq_phase_check(&fresh, message));
+    BqPhaseChannel smoke_receiver;
+    BQ_CHECK(bq_phase_init(&smoke_receiver, pair[1], 7, 9) && bq_phase_check(&smoke_receiver, message));
+    close(pair[0]);
+    close(pair[1]);
+}
+
+/* The acknowledgement window: the 5 s cap under the caller's deadline, except
+ * a version-2 MEASURED, bounded by the deadline alone; and a v2 MEASURED that
+ * is never acknowledged fails at that deadline. */
+BUSTER_GLOBAL_LOCAL void bq_test_phase_ack_window(void)
+{
+    uint64_t const second = UINT64_C(1000000000), start = UINT64_C(100) * second;
+    BqPhaseChannel smoke = {.version = BQ_PHASE_VERSION_1}, retirement = {.version = BQ_PHASE_VERSION_2};
+    BQ_CHECK(bq_phase_ack_deadline(&smoke, BQ_PHASE_MEASURED, start, start + 3600 * second) == start + 5 * second &&
+             bq_phase_ack_deadline(&smoke, BQ_PHASE_MEASURED, start, start + second) == start + second &&
+             bq_phase_ack_deadline(&retirement, BQ_PHASE_MEASURED, start, start + 3600 * second) ==
+                 start + 3600 * second &&
+             bq_phase_ack_deadline(&retirement, BQ_PHASE_RETIREMENT_READY, start, start + 3600 * second) ==
+                 start + 5 * second &&
+             bq_phase_ack_deadline(&retirement, BQ_PHASE_SETTLING, start, start + second) == start + second &&
+             bq_phase_ack_deadline(NULL, BQ_PHASE_MEASURED, start, start + 3600 * second) == start + 5 * second);
+    int pair[2] = {-1, -1};
+    BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    BqPhaseChannel channel;
+    BQ_CHECK(bq_phase_init_version(&channel, pair[0], 7, 9, BQ_PHASE_VERSION_2));
+    channel.sequence = BQ_PHASE_MEASURING;
+    unsigned char packet[BQ_PHASE_MESSAGE_CAP] = {0};
+    /* A missing or malformed digest sends nothing. */
+    uint64_t now = bq_phase_clock();
+    BQ_CHECK(!bq_phase_exchange_until(&channel, BQ_PHASE_MEASURED, now + second) && channel.failed);
+    channel.failed = 0;
+    BQ_CHECK(!bq_phase_exchange_digest_until(&channel, BQ_PHASE_MEASURED, "not-a-digest", now + second) &&
+             channel.failed);
+    errno = 0;
+    BQ_CHECK(recv(pair[1], packet, sizeof(packet), MSG_DONTWAIT) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+    channel.failed = 0;
+    uint64_t begin = bq_phase_clock();
+    BQ_CHECK(!bq_phase_exchange_digest_until(&channel, BQ_PHASE_MEASURED, BQ_TEST_PHASE_OTHER_HEX,
+                                             begin + UINT64_C(300000000)) && channel.failed &&
+             channel.sequence == BQ_PHASE_MEASURING);
+    uint64_t elapsed = bq_phase_clock() - begin;
+    unsigned char digest[BQ_PHASE_DIGEST_BYTES];
+    BQ_CHECK(elapsed >= UINT64_C(250000000) && elapsed < 2 * second &&
+             recv(pair[1], packet, sizeof(packet) + 1, MSG_DONTWAIT) == BQ_PHASE_V2_MESSAGE_BYTES &&
+             bq_phase_get(packet + 24) == BQ_PHASE_MEASURED && bq_phase_digest_parse(BQ_TEST_PHASE_OTHER_HEX, digest) &&
+             !memcmp(packet + BQ_PHASE_DIGEST_OFFSET, digest, sizeof(digest)));
+    close(pair[0]);
+    close(pair[1]);
+}
+
+/* A receipt authority for job/token issued into the attempt's
+ * retirement-authority/ over a one-shard receipt in the result directory, as
+ * the producer's tp_retirement_store_receipt_authority will (#881 PR 3). */
+BUSTER_GLOBAL_LOCAL bool bq_test_phase_authority(int result_directory, int attempt, u64 job, u64 token,
+                                                 char authority_sha256[SHA256_HEX_CAPACITY])
+{
+    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY], shard_digest[SHA256_HEX_CAPACITY], receipt_digest[SHA256_HEX_CAPACITY];
+    char receipt[1024];
+    TpRetirementStore store;
+    TpRetirementStoredFile files[4];
+    TpRetirementReceiptAuthority issued = {0};
+    bool ok = tp_retirement_store_job_label(label, job) &&
+              mkdirat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, 0700) == 0;
+    int authority = ok ? openat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    bool opened = authority >= 0 && tp_retirement_store_open(&store, result_directory, files, 4);
+    ok = opened && tp_retirement_store_plan(&store, 2, 2048, 3, 1024);
+    char const* bodies[2] = {"{}\n", receipt};
+    char const* paths[2] = {"shard.jsonl", TP_RETIREMENT_EXECUTION_RECEIPT_PATH};
+    for (u32 index = 0; ok && index < 2; index += 1)
+    {
+        if (index == 1)
+        {
+            int length = snprintf(receipt, sizeof(receipt),
+                "{\"attempt\":%" PRIu64 ",\"boot_id\":\"boot-1\",\"bound_at_ns\":1000,\"completed_at_ns\":2000,"
+                "\"context_sha256\":\"%s\",\"execution_plan_sha256\":\"%s\",\"invocations\":1,"
+                "\"job_id\":\"%s\",\"schema\":\"buster-native-retirement-execution-receipt-v1\","
+                "\"shards\":[{\"bytes\":3,\"path\":\"shard.jsonl\",\"records\":1,\"sha256\":\"%s\"}],\"version\":1}\n",
+                (uint64_t)token, BQ_TEST_PHASE_OTHER_HEX, BQ_TEST_PHASE_READY_HEX, label, shard_digest);
+            ok = length > 0 && (size_t)length < sizeof(receipt);
+        }
+        TpRetirementPending pending = {0};
+        size_t length = strlen(bodies[index]);
+        char* digest = index ? receipt_digest : shard_digest;
+        ok = ok && tp_retirement_store_begin(&store, paths[index], 1024, &pending) &&
+             fwrite(bodies[index], 1, length, pending.stream) == length;
+        if (ok) bq_digest(bodies[index], (u32)length, (char8*)digest);
+        if (ok) ok = tp_retirement_store_publish(&store, &pending, length, digest);
+        else if (pending.stream) tp_retirement_store_abort(&store, &pending);
+    }
+    ok = ok && tp_retirement_store_receipt_authority(&store, authority, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, label,
+                                                     token, BQ_TEST_PHASE_READY_HEX, BQ_TEST_PHASE_OTHER_HEX, &issued);
+    if (opened) tp_retirement_store_close(&store);
+    if (authority >= 0) close(authority);
+    if (ok) memcpy(authority_sha256, issued.authority_sha256, SHA256_HEX_CAPACITY);
+    return ok;
+}
+
+/* The number of authority copies and journals in the queue-private root, which
+ * this also removes. */
+BUSTER_GLOBAL_LOCAL u32 bq_test_phase_queue_authority_drain(int queue_directory)
+{
+    int root = openat(queue_directory, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR* stream = root >= 0 ? fdopendir(dup(root)) : NULL;
+    u32 found = 0;
+    for (struct dirent* entry = stream ? readdir(stream) : NULL; entry; entry = readdir(stream))
+    {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            found += !strncmp(entry->d_name, "authority-", 10);
+            unlinkat(root, entry->d_name, 0);
+        }
+    }
+    if (stream) closedir(stream);
+    if (root >= 0)
+    {
+        close(root);
+        unlinkat(queue_directory, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY, AT_REMOVEDIR);
+    }
+    return found;
+}
+
+/* A stub retirement producer on a BQPHASE2 channel against the coordinator's
+ * bq_worker_phase_join. defect: 0 success; 1 a MEASURED digest naming no
+ * authority; 2 the execution deadline already reached at MEASURED; 3 reached
+ * during the handoff; 4 a BQPHASE1 packet; 5 a zero ready digest. */
+BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(230 + defect);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1,
+                                             .execution_deadline = 1000, .phase_version = BQ_PHASE_VERSION_2};
+        BQ_CHECK(bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
+        char name[64], authority_sha256[SHA256_HEX_CAPACITY] = {0};
+        int workspaces = open(fixture.material.workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int attempt = workspaces >= 0 && bq_workspace_name(name, id, token) ?
+                      openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+        BQ_CHECK(attempt >= 0 && bq_test_phase_authority(finalization.result_directory, attempt, id, token,
+                                                         authority_sha256));
+        int pair[2] = {-1, -1};
+        BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+        BqPhaseChannel phases;
+        BQ_CHECK(bq_phase_init_version(&phases, pair[0], id, token, BQ_PHASE_VERSION_2));
+        pid_t child = fork();
+        if (child == 0)
+        {
+            close(pair[0]);
+            BqPhaseChannel client;
+            bool ok = bq_phase_init_version(&client, pair[1], id, token, BQ_PHASE_VERSION_2);
+            unsigned const order[] = {BQ_PHASE_PREPARING, BQ_PHASE_RETIREMENT_READY, BQ_PHASE_SETTLING,
+                                      BQ_PHASE_MEASURING, BQ_PHASE_MEASURED};
+            for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(order); index += 1)
+            {
+                unsigned phase = order[index];
+                char const* digest = phase == BQ_PHASE_RETIREMENT_READY ? BQ_TEST_PHASE_READY_HEX :
+                                     phase == BQ_PHASE_MEASURED ? (defect == 1 ? BQ_TEST_PHASE_OTHER_HEX : authority_sha256) :
+                                     NULL;
+                if ((defect == 4 && phase == BQ_PHASE_PREPARING) || (defect == 5 && phase == BQ_PHASE_RETIREMENT_READY))
+                {
+                    /* A BQPHASE1 packet, or a READY whose digest is zero. */
+                    unsigned char bad[BQ_PHASE_MESSAGE_CAP] = {0}, nonzero[BQ_PHASE_DIGEST_BYTES] = {1};
+                    BqPhaseChannel smoke = client;
+                    smoke.version = BQ_PHASE_VERSION_1;
+                    ok = defect == 4 ? bq_phase_make(&smoke, phase, bad) : bq_phase_make_digest(&client, phase, nonzero, bad);
+                    if (defect == 5) memset(bad + BQ_PHASE_DIGEST_OFFSET, 0, BQ_PHASE_DIGEST_BYTES);
+                    unsigned size = defect == 4 ? BQ_PHASE_MESSAGE_BYTES : BQ_PHASE_V2_MESSAGE_BYTES;
+                    ok = ok && send(pair[1], bad, size, MSG_NOSIGNAL) == (ssize_t)size;
+                    break;
+                }
+                ok = bq_phase_exchange_digest_until(&client, phase, digest, bq_phase_clock() + UINT64_C(3000000000));
+            }
+            close(pair[1]);
+            _exit(ok ? 0 : 1);
+        }
+        BQ_CHECK(child > 0);
+        close(pair[1]);
+        if (defect == 2) fixture.fake.elapsed = 1000;
+        bq_test_phase_deadline_clock_calls = 0;
+        if (defect == 3) fixture.backend.clock = bq_test_phase_expired_clock;
+        BqSystemdContext context = {.pid = child};
+        int status = 0;
+        BqError result = bq_worker_phase_join(queue, &context, &phases, &status,
+                                              bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000), &finalization);
+        BqError expected = defect == 0 ? BQ_OK : defect == 2 || defect == 3 ? BQ_WORKER_TIMEOUT : BQ_WORKER_MISMATCH;
+        if (result != expected) fprintf(stderr, "BQ_TEST phase retirement defect %u: %d\n", defect, (int)result);
+        BQ_CHECK(result == expected);
+        if (context.pid > 0)
+        {
+            kill(child, SIGKILL);
+            BQ_CHECK(waitpid(child, &status, 0) == child);
+        }
+        else BQ_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        close(pair[0]);
+        job = bq_job(&queue->state, id);
+        /* The ready digest is kept once acknowledged; the authority only after
+         * its handoff and within the deadline. */
+        bool ready_kept = !strcmp(finalization.retirement_ready_sha256, BQ_TEST_PHASE_READY_HEX);
+        BQ_CHECK(ready_kept == (defect != 4 && defect != 5) &&
+                 (finalization.retirement_authority_sha256[0] != 0) == (defect == 0) &&
+                 (defect != 0 || !strcmp(finalization.retirement_authority_sha256, authority_sha256)));
+        if (defect == 0)
+        {
+            char body[512] = {0};
+            u32 size = 0;
+            BQ_CHECK(job && job->phase == BQ_MEASURING && bq_worker_phases_validate(queue, job, &finalization) == BQ_OK &&
+                     bq_worker_result_control_read(finalization.result_directory, "worker-phase-5", body,
+                                                   sizeof(body) - 1, &size) &&
+                     strstr(body, "protocol=BQPHASE2\n") &&
+                     strstr(body, "digest-sha256=" BQ_TEST_PHASE_READY_HEX "\n"));
+            BQ_CHECK(unlinkat(finalization.result_directory, "worker-phase-5", 0) == 0 &&
+                     bq_worker_phases_validate(queue, job, &finalization) != BQ_OK);
+        }
+        /* The copy and its journal exist only when the handoff ran. */
+        u32 copies = bq_test_phase_queue_authority_drain(queue->directory_fd);
+        BQ_CHECK(copies == (defect == 0 || defect == 3 ? 2u : 0u));
+        if (attempt >= 0) close(attempt);
+        if (workspaces >= 0) close(workspaces);
+        close(finalization.result_directory);
+        bq_worker_cancel_signal = 0;
+        bq_test_worker_end(&fixture);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL u32 bq_test_phase_deadline_clock_calls;
