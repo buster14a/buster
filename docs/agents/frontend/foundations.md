@@ -259,7 +259,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   its rows survive frame rewinds until stable integer facts have been extracted.
   Ordinary and pending enumerator bindings precede typedef cast detection.
   The returned signed magnitude, rank and target width survive the query;
-  temporary type IDs do not. Existing enumerator folding retains the
+  temporary type IDs do not. Qualified enum aliases read integer facts through
+  their original tag even when the alias was created before its completion.
+  Existing enumerator folding retains the
   `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
   including its machineless `sizeof` path. Migrating that consumer requires
   declaration-owned preparation of source-ordered operand facts; this stage

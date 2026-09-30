@@ -21875,6 +21875,13 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
     if (value.type.value < result->type_count)
     {
         CType type = result->types[value.type.value];
+        if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE && type.kind == C_TYPE_ENUM &&
+            type.has_unqualified_type && type.unqualified_type.value < result->type_count)
+        {
+            // A qualifier copy made before completion still carries the
+            // forward enum's underlying type. Read its completed tag instead.
+            type = result->types[type.unqualified_type.value];
+        }
         if (type.kind == C_TYPE_ENUM && type.element_type.value < result->type_count)
         {
             type = result->types[type.element_type.value];
