@@ -1,0 +1,65 @@
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_fast.c b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+index b67d9c9..aa5a6bb 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+@@ -3107,56 +3107,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // the second object wrote, so a function that is not certified free of
+         // returns-twice calls keeps one object per storage.
+         bool reuse_frame_storage = layout_linear && function->returns_twice_absence_certified;
+-        // A withdrawn home is one the colorer never selects, so each of them
+-        // gets storage of its own below. Every remaining home is closed over
+-        // the machine CFG from the allocator's own reload/spill memory program;
+-        // this includes values that enter before their first lexical spill and
+-        // values whose home lifetime crosses the block where they were defined.
+-        // The closure is enabled only for a direct acyclic block chain. A
+-        // branch, join, loop, indirect edge, or inline-assembly landing has
+-        // path-specific edge repairs whose equal-point edits cannot be
+-        // represented by one linear range without a dedicated proof. Keep the
+-        // older per-home guard for those shapes until that proof exists.
+-        bool linear_cfg = true;
+-        u32* outgoing_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1u);
+-        memset(outgoing_counts, 0, (u64)(function->block_count ? function->block_count : 1u) * sizeof(*outgoing_counts));
+-        for (u32 destination = 0; destination < function->block_count; destination += 1)
+-        {
+-            u32 first = prepass->predecessor_offsets ? prepass->predecessor_offsets[destination] : 0;
+-            u32 limit = prepass->predecessor_offsets ? prepass->predecessor_offsets[destination + 1u] : 0;
+-            linear_cfg &= limit - first <= 1u;
+-            for (u32 entry = first; entry < limit; entry += 1)
+-            {
+-                u32 source = prepass->predecessor_list[entry];
+-                bool direct = source < function->block_count && source + 1u == destination;
+-                linear_cfg &= direct;
+-                if (source < function->block_count)
+-                {
+-                    outgoing_counts[source] += 1;
+-                    linear_cfg &= outgoing_counts[source] <= 1u;
+-                }
+-            }
+-        }
++        // EXPERIMENT: close every non-opaque home over the machine CFG.
+         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+         {
+-            // A home the edit rows bound is one this function both fills and
+-            // empties: its value stays inside its defining block, the stream
+-            // fills the home before it reads it, and every edit that names it
+-            // sits in that block's rows. Then a read of the home is an edit
+-            // between those rows, an iteration of a loop around the block
+-            // refills it before reading it, and the range needs no closure
+-            // over the loops around it.
+-            u32 definition_block = prepass->definition_blocks[register_index];
+-            MachineBlock const* home_block = definition_block < function->block_count ? function->blocks + definition_block : 0;
+-            bool inside_block = home_block && home_starts[register_index] >= home_block->first_instruction &&
+-                                home_ends[register_index] < home_block->first_instruction + home_block->instruction_count;
+-            bool cross_block_colorable = reuse_frame_storage && linear_cfg && slot_needed[register_index] && !home_opaque[register_index];
+-            bool local_colorable = reuse_frame_storage && !linear_cfg && slot_needed[register_index] && !home_opaque[register_index] &&
+-                                   !home_read_first[register_index] && !prepass->escapes[register_index] && inside_block;
+-            bool colorable = cross_block_colorable || local_colorable;
++            bool colorable = reuse_frame_storage && slot_needed[register_index] && !home_opaque[register_index];
+             home_starts[register_index] = colorable ? home_starts[register_index] : UINT32_MAX;
+         }
+-        if (reuse_frame_storage && linear_cfg)
++        (void)home_read_first;
++        if (reuse_frame_storage)
+         {
+             machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed, home_opaque, home_starts, home_ends);
+         }

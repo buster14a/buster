@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import ci_native_observation as observation
 import check_action_pins as action_pins
@@ -66,7 +67,7 @@ class NativeObservationTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def initialize(self):
+    def initialize(self, compiler=sys.executable):
         args = observation.parser().parse_args(
             [
                 "init",
@@ -93,13 +94,16 @@ class NativeObservationTest(unittest.TestCase):
                 self.assertEqual(0, args.function(args))
             finally:
                 os.chdir(previous)
+        self.record_toolchain(compiler)
+
+    def record_toolchain(self, compiler=sys.executable):
         tool_args = observation.parser().parse_args(
             [
                 "toolchain",
                 "--root",
                 str(self.evidence),
                 "--compiler",
-                sys.executable,
+                compiler,
                 "--cmake",
                 sys.executable,
                 "--ninja",
@@ -218,6 +222,58 @@ class NativeObservationTest(unittest.TestCase):
         self.assertFalse(artifact_document["complete"])
         self.assertIn("upload_handoff", artifact_document["unsuccessful_phases"])
         self.assertTrue(artifact_document["upload_handoff"]["error"])
+
+    def initialize_with_timed_out_probe(self):
+        if os.name == "nt":
+            self.skipTest("the slow probe fixture is a POSIX shell script")
+        slow_compiler = self.root / "slow-clang"
+        slow_compiler.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+        slow_compiler.chmod(0o755)
+        with mock.patch.object(observation, "IDENTITY_PROBE_TIMEOUT_SECONDS", 0.2):
+            self.initialize(compiler=str(slow_compiler))
+        self.assertFalse((self.evidence / "toolchain.json").exists())
+        degraded = json.loads((self.evidence / "toolchain-degraded.json").read_text(encoding="utf-8"))
+        self.assertEqual(observation.TOOLCHAIN_DEGRADED_SCHEMA, degraded["schema"])
+        self.assertEqual(["compiler"], list(degraded["attempts"][0]["errors"]))
+        self.assertIn("timed out", degraded["attempts"][0]["errors"]["compiler"])
+        return degraded
+
+    def test_timed_out_identity_probe_is_degraded_without_failing(self):
+        degraded = self.initialize_with_timed_out_probe()
+        self.run_phase("configuration", 10)
+        self.prepare_artifact()
+        self.assertEqual(0, self.finalize(["configuration", "upload_handoff"], complete="1"))
+        document = json.loads((self.artifact / "native-observation.json").read_text(encoding="utf-8"))
+        self.assertTrue(document["complete"])
+        self.assertEqual("success", document["correctness_outcome"])
+        self.assertIsNone(document["toolchain"])
+        self.assertEqual(degraded, document["toolchain_degraded"])
+        self.assertFalse(document["comparison_eligible"])
+        self.assertTrue(
+            any("identity probe degraded" in reason and "timed out" in reason
+                for reason in document["comparison_ineligible_reasons"])
+        )
+
+
+    def test_later_identity_probe_success_keeps_degraded_attempt(self):
+        degraded = self.initialize_with_timed_out_probe()
+        self.record_toolchain()
+        self.assertTrue((self.evidence / "toolchain.json").exists())
+        self.run_phase("configuration", 10)
+        self.prepare_artifact()
+        self.assertEqual(0, self.finalize(["configuration", "upload_handoff"], complete="1"))
+        document = json.loads((self.artifact / "native-observation.json").read_text(encoding="utf-8"))
+        self.assertIsInstance(document["toolchain"], dict)
+        self.assertEqual("", document["toolchain_error"])
+        self.assertEqual(degraded, document["toolchain_degraded"])
+
+    def test_missing_toolchain_without_degraded_record_fails_closed(self):
+        self.initialize()
+        (self.evidence / "toolchain.json").unlink()
+        self.run_phase("configuration", 10)
+        self.prepare_artifact()
+        with self.assertRaisesRegex(observation.ObservationError, "cannot read"):
+            self.finalize(["configuration", "upload_handoff"], complete="1")
 
     def test_successful_job_fails_closed_on_missing_phase(self):
         self.initialize()

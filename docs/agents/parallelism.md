@@ -54,7 +54,8 @@
   per-invocation floor of every `ide cc`, not an optional extra. Its per-form
   caches — the normalized row, the parsed pattern, the operand views, the
   derived facts and each record's validity — fill on the first *serial* touch
-  of each form, so a caller about to hand the tables to a gang must call
+  of each form, as do each string-pool offset's NUL distance and the coverage
+  rows, so a caller about to hand the tables to a gang must call
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
   them. A new lazily built global adds both the check and a line in its
   module's prewarm.
