@@ -16288,16 +16288,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
     {
         TemporalArena temporary = scratch_begin(0, 0);
         CTestTypeConstantCase test = cases[case_index];
-        String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"),
-            S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
+        String8 prefix = S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
                " typedef int V16 __attribute__((vector_size(16)));"
                " enum E; typedef const enum E CE; enum E { N = -1 };"
                " typedef char UnsafeArray[sizeof(int __attribute__((vector_size(4 * sizeof(int)))) *)];"
-               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = "),
-            test.expression, S8("; return probe; }"));
+               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = ");
+        String8 suffix = S8("; return probe; }");
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), prefix, test.expression, suffix);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
-        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CPreprocessResult model_preprocess = preprocess;
+        if (string_equal(test.expression, S8("(unsigned float)1")))
+        {
+            // The malformed queried type must not prevent construction of
+            // its owner's model. This valid stand-in keeps every token index
+            // and delimiter position, while the query sees the original type.
+            String8 model_source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), prefix, S8("(unsigned int)1"), suffix);
+            model_preprocess = c_preprocess(temporary.arena, model_source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+            BUSTER_TEST(arguments, model_preprocess.token_count == preprocess.token_count);
+        }
+        CParseResult parse = c_parse(temporary.arena, model_preprocess);
         u32 start = UINT32_MAX;
         u32 end = UINT32_MAX;
         CScopeId scope = C_SCOPE_ID_INVALID;
@@ -16332,13 +16343,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
             {
                 if (parse.scopes[index].token_start <= start && start < parse.scopes[index].token_end) scope = (CScopeId){.value = index};
             }
-            // A malformed type in the fixture can stop the owner's body
-            // binding. Its root model still permits a refused query without
-            // inventing a function scope that was never published.
-            if (scope.value >= parse.scope_count && parse.scope_count) scope = (CScopeId){.value = 0};
         }
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-        BUSTER_TEST(arguments, start < end && scope.value < parse.scope_count);
+        BUSTER_TEST_RAW(arguments, start < end && scope.value < parse.scope_count,
+            string_format(temporary.arena, S8("protected query setup {S8}"), test.expression));
         if (start < end && scope.value < parse.scope_count)
         {
             CParseResult checkpoint = parse;
