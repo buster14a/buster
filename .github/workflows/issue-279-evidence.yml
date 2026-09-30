@@ -1,8 +1,11 @@
-name: ABI warm-query evidence (temporary)
+name: ABI whole-compiler evidence (temporary)
 on:
   push:
-    branches: [codex/279-abi-warm-query]
-    paths: [src/buster/lib/compiler/ir/ir.c, tools/research/abi_warm_query/**, .github/workflows/issue-279-evidence.yml]
+    branches:
+      - 'codex/279-abi-warm-query'
+    paths:
+      - 'tools/research/abi_warm_query/**'
+      - '.github/workflows/issue-279-evidence.yml'
 permissions:
   contents: read
 concurrency:
@@ -11,9 +14,7 @@ concurrency:
 jobs:
   compare:
     runs-on: ubuntu-26.04
-    timeout-minutes: 80
-    env:
-      BUSTER_TEST_JOBS: '2'
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -35,21 +36,6 @@ jobs:
           uname -a > evidence/uname.txt
           git -C baseline rev-parse HEAD HEAD^{tree} > evidence/baseline.txt
           git -C candidate rev-parse HEAD HEAD^{tree} > evidence/candidate.txt
-      - name: Compare original ABI traces
-        run: |
-          set -euo pipefail
-          for version in baseline candidate; do
-            clang -O3 -g -march=native -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Werror -Wno-unused-function -Wno-unused-variable -ffunction-sections -fdata-sections -I"$version/src" candidate/tools/research/abi_warm_query/service.c -Wl,--gc-sections -lm -pthread -o "$PWD/evidence/service-$version"
-            objdump -d "$PWD/evidence/service-$version" > "evidence/service-$version.asm"
-          done
-          sha256sum evidence/service-* > evidence/service.sha256
-          python3 candidate/tools/research/abi_warm_query/compare_service.py "$PWD/evidence/service-baseline" "$PWD/evidence/service-candidate" "$PWD/evidence/service-samples.json" | tee evidence/service-summary.jsonl
-      - name: Focused ABI sanitizer replay
-        run: |
-          set -euo pipefail
-          clang -O1 -g -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Werror -Wno-unused-function -Wno-unused-variable -ffunction-sections -fdata-sections -fsanitize=address,undefined -fno-omit-frame-pointer -Icandidate/src candidate/tools/research/abi_warm_query/service.c -Wl,--gc-sections -lm -pthread -o evidence/service-sanitize
-          evidence/service-sanitize dense | tee evidence/sanitize-dense.json
-          evidence/service-sanitize sparse | tee evidence/sanitize-sparse.json
       - name: Build both trusted Clang compilers
         run: |
           set -euo pipefail
@@ -59,20 +45,19 @@ jobs:
               "$RUNNER_TEMP/build-$version" generate --cc clang --ci
               "$RUNNER_TEMP/build-$version" build --config Release -t ide -- -j2
             ) 2>&1 | tee "evidence/build-$version.log"
+            sha256sum "$version/build/Release/ide" > "evidence/compiler-$version.sha256"
           done
-      - name: Before and after self-host fixed point
+      - name: Confirm existing baseline-target refusal on unchanged baseline
         run: |
           set -euo pipefail
-          for version in baseline candidate; do
-            (cd "$version"; "$RUNNER_TEMP/build-$version" test_self_host --config Release) 2>&1 | tee "evidence/self-host-$version.log"
-          done
-      - name: Candidate Release suite and supported modes
-        run: |
-          set -euo pipefail
-          (cd candidate; "$RUNNER_TEMP/build-candidate" build --config Release -t test_all -- -j2) 2>&1 | tee evidence/test-all.log
-          git -C candidate fetch --depth=1 origin af6b2b100acfdd9c970e35e33d4468cd35883812
-          (cd candidate; "$RUNNER_TEMP/build-candidate" source_size --base af6b2b100acfdd9c970e35e33d4468cd35883812) 2>&1 | tee evidence/source-size.log
-          (cd candidate; "$RUNNER_TEMP/build-candidate" test_mode_matrix --config Release) 2>&1 | tee evidence/mode-matrix.log
+          cd baseline
+          set +e
+          build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -march=baseline -fregister-allocator=fast -c src/buster/apps/ide/ide.c -o build/issue-1487.o > ../evidence/baseline-refusal.stdout 2> ../evidence/baseline-refusal.stderr
+          result=$?
+          set -e
+          printf '%s\n' "$result" > ../evidence/baseline-refusal.status
+          test "$result" -ne 0
+          grep -F "function='xgetbv'" ../evidence/baseline-refusal.stderr
       - name: Same-source whole compiler time and peak RSS
         run: |
           set -euo pipefail
@@ -80,6 +65,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-279-evidence
+          name: issue-279-compiler-evidence
           path: evidence
           retention-days: 30

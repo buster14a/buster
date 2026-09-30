@@ -13,7 +13,7 @@ before, after, source, output = map(lambda p: pathlib.Path(p).resolve(), sys.arg
 cpus = sorted(os.sched_getaffinity(0))
 os.sched_setaffinity(0, {cpus[0]})
 common = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
-          "-DBUSTER_INCLUDE_TESTS=0", "-g0", "-march=baseline",
+          "-DBUSTER_INCLUDE_TESTS=0", "-g0", "-march=native",
           "-fregister-allocator=fast", "-c", "src/buster/apps/ide/ide.c"]
 report = {"platform": platform.platform(), "cpu": cpus[0], "pairs": 6,
           "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
