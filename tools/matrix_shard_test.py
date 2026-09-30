@@ -357,17 +357,21 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
             "tools/ci_native_observation_test.py", "tools/ci_sanitize_logs_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
+            "tools/ci_workflow_tools_test.py",
         }
-        suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
+        suites = re.findall(r'^            ([^ =]+\.py)=[^ =]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
         self.assertEqual(len(suites), len(expected))
-        self.assertIn('if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee', block)
-        self.assertIn('return "$status"', block)
-        self.assertIn('WORKFLOW_TOOLS_END result=success', block)
+        self.assertIn("suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)", block)
+        self.assertIn('"$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"', block)
+        self.assertNotIn("|| true", block)
 
-    def test_workflow_tools_record_all_suites_and_stop_on_failure(self):
-        expected = re.findall(r'^          run_suite ([^ ]+) ([^ ]+\.log)$',
+    def test_workflow_tools_record_all_suites_and_report_failure(self):
+        expected = re.findall(r'^            ([^ =]+\.py)=([^ =]+\.log)$',
                               self.steps["Workflow tool regression tests"], re.M)
+        runner = self.root / "tools/ci_workflow_tools.py"
+        runner.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "tools/ci_workflow_tools.py", runner)
         for suite, _ in expected:
             path = self.root / suite
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,13 +384,16 @@ class WorkflowSetupTests(unittest.TestCase):
                 self.environment["FIXTURE_EXIT"] = str(code)
                 result = self.run_step("Workflow tool regression tests")
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                completed = expected if code == 0 else expected[:2]
-                self.assertEqual(re.findall(r'SUITE_START path=([^ ]+)', result.stdout),
-                                 [suite for suite, _ in completed])
-                for suite, log in completed:
-                    self.assertIn(f"SUITE_END path={suite} result=", result.stdout)
+                # A failure no longer hides the remaining suites' evidence.
+                self.assertEqual(sorted(re.findall(r'SUITE_START path=([^ ]+)', result.stdout)),
+                                 sorted(suite for suite, _ in expected))
+                for suite, log in expected:
+                    status = "failure status=7" if code and suite.endswith("ci_admission_test.py") else "success"
+                    self.assertIn(f"SUITE_END path={suite} result={status} ", result.stdout)
                     self.assertIn("SUITE fixture", (self.root / "buster-ci" / log).read_text())
                 self.assertEqual("WORKFLOW_TOOLS_END result=success" in result.stdout, code == 0)
+                self.assertEqual("WORKFLOW_TOOLS_END result=failure failed=tools/ci_admission_test.py " in result.stdout,
+                                 code != 0)
 
     def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
         tools = self.root / "tools"

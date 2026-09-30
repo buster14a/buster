@@ -16,8 +16,35 @@ A missing, skipped, cancelled, timed-out, or failed wrapper suite cannot be
 replaced by a successful compiler matrix. `CI complete` still requires every
 desktop lane. No test, runner, or existing compiler gate is removed.
 
-The thirteen workflow-tool suites share a five-minute Windows budget and retain
-the two-minute Unix budget. In run `35733354799`, Windows AArch64 job
+The workflow-tool suites share a five-minute Windows and macOS budget and
+retain the two-minute Linux budget.
+[`tools/ci_workflow_tools.py`](../tools/ci_workflow_tools.py) runs them in
+three concurrent lanes, slowest first. Each suite is still its own
+`python SUITE -v` process with every assertion. Its log goes to
+`$RUNNER_TEMP/buster-ci/<log>` and is echoed as one block before `SUITE_END`.
+A failure no longer stops the remaining suites. The step fails with the first
+failing suite's status, and `WORKFLOW_TOOLS_END result=failure` names every
+failed suite. While suites are still running, `SUITE_RUNNING` lines name them,
+so a timeout shows what was in flight. At the end, `SUITE_DURATION` lines list
+every suite's time, slowest first. The suites are independent: each builds
+fixtures under its own temporary directory, and none writes to the checkout.
+Most of their Windows time is spent waiting on child processes: three clang
+builds of `build.c` and the Windows PowerShell starts in
+`ci_vs_dev_shell_test.py`.
+
+[#2021](https://github.com/buster14a/buster/issues/2021) measured the serial
+step on hosted Windows AArch64 after #2024. Eight passing jobs took 143–187 s
+of the 300 s budget. `ci_vs_dev_shell_test.py` took about 50 s,
+`coverage_manifest_test.py` 32 s, `matrix_shard_test.py` 26 s,
+`ci_tools_test.py` 16–25 s, `ci_matrix_phases_test.py` 15 s and
+`ci_native_observation_test.py` 12 s. In main run `36771768551`
+(job `110083316078`), the whole runner was slow: the same suites took up to
+5.5× longer (`ci_matrix_phases_test.py` 82 s, `coverage_manifest_test.py`
+59 s), and the step timed out. The budget is unchanged. Overlapping the
+suites is what restores headroom; see #2021 for the before/after step
+durations.
+
+In run `35733354799`, Windows AArch64 job
 `106764232727` reached the final passing suite before the two-minute step
 deadline cancelled it. The bounded Windows allowance covers native fixture
 compilation and process startup without removing suites or suppressing errors.
