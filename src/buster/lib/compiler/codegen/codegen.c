@@ -11957,10 +11957,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             .symbol = function->symbol,
             .offset = (u32)buffer.count,
         };
-        if (function->source.source.value != IR_ID_UNDERLYING_INVALID)
+        if (result.line_entries && function->source.source.value != IR_ID_UNDERLYING_INVALID)
         {
             // A row at the function start makes the prologue map to the
             // declaration line instead of falling outside the line table.
+            // Without a line table (no debug information) nothing records
+            // it, so its line and column are not recovered.
             IrSourcePosition declaration = ir_source_position(program, function->source);
             codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
                                     function->source.source.value, line_source_limit, declaration.line, declaration.column);
@@ -13472,21 +13474,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                     continue;
                 }
-                IrSourceRange canonical_source = ir_instruction_canonical_source(function, instruction_id);
                 // The line table is one of the four consumers that pay for a
                 // line and a column, and the only one that asks per
                 // instruction. Consecutive instructions overwhelmingly carry
                 // the same range — every instruction of one expression comes
                 // from one token — so the repeat is rejected on the offset the
                 // range already holds, and a position is recovered only for an
-                // offset that can still produce a row.
-                if (result.line_entries && canonical_source.source.value != IR_ID_UNDERLYING_INVALID &&
-                    (canonical_source.offset != recorded_source.offset || canonical_source.source.value != recorded_source.source.value))
+                // offset that can still produce a row. Without a line table the
+                // range is not even read.
+                if (result.line_entries)
                 {
-                    recorded_source = canonical_source;
-                    IrSourcePosition position = ir_source_position(program, canonical_source);
-                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                            canonical_source.source.value, line_source_limit, position.line, position.column);
+                    IrSourceRange canonical_source = ir_instruction_canonical_source(function, instruction_id);
+                    if (canonical_source.source.value != IR_ID_UNDERLYING_INVALID &&
+                        (canonical_source.offset != recorded_source.offset || canonical_source.source.value != recorded_source.source.value))
+                    {
+                        recorded_source = canonical_source;
+                        IrSourcePosition position = ir_source_position(program, canonical_source);
+                        codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
+                                                canonical_source.source.value, line_source_limit, position.line, position.column);
+                    }
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))

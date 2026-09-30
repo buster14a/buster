@@ -223,6 +223,93 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("upload_handoff", artifact_document["unsuccessful_phases"])
         self.assertTrue(artifact_document["upload_handoff"]["error"])
 
+    def package(self, platform, complete="1", source=None):
+        if source is None:
+            source = self.root / "buster-ci"
+            source.mkdir(exist_ok=True)
+            (source / "modes.log").write_text("modes\n", encoding="utf-8")
+            (source / "result.json").write_text("{}\n", encoding="utf-8")
+            (source / "summary.md").write_text("summary\n", encoding="utf-8")
+        args = observation.parser().parse_args(
+            [
+                "package",
+                "--root",
+                str(self.evidence),
+                "--python",
+                sys.executable,
+                "--source",
+                str(source),
+                "--output",
+                str(self.artifact),
+                "--platform",
+                platform,
+                "--expect-complete",
+                complete,
+            ]
+        )
+        previous = Path.cwd()
+        # The packing command names the helper relative to the checkout.
+        os.chdir(Path(__file__).resolve().parents[1])
+        try:
+            return args.function(args)
+        finally:
+            os.chdir(previous)
+
+    def test_package_requires_each_platform_phase_set(self):
+        payload = {
+            "windows": ("bootstrap_driver", "configuration", "producer_build", "mode_payload"),
+            "unix": (
+                "bootstrap_driver",
+                "configuration",
+                "producer_build",
+                "mode_payload",
+                "differential_driver_refresh",
+                "differential_preparation",
+                "differential_producer_check",
+                "differential_corpus",
+            ),
+        }
+        for platform, phases in payload.items():
+            with self.subTest(platform=platform):
+                import shutil
+
+                shutil.rmtree(self.evidence, ignore_errors=True)
+                shutil.rmtree(self.artifact, ignore_errors=True)
+                self.initialize()
+                for index, phase in enumerate(phases):
+                    self.run_phase(phase, 10 * (index + 1))
+                self.assertEqual(0, self.package(platform))
+                document = json.loads((self.artifact / "native-observation.json").read_text(encoding="utf-8"))
+                self.assertTrue(document["complete"])
+                self.assertEqual(sorted(observation.PACKAGE_REQUIRED_PHASES[platform]), document["required_phases"])
+                self.assertTrue((self.artifact / "native-ci-logs.tar.gz").is_file())
+        # Windows lanes never own the differential corpus; Unix lanes do.
+        self.assertNotIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["windows"])
+        self.assertIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["unix"])
+
+    def test_package_with_root_requires_platform_and_completion(self):
+        self.initialize()
+        for platform, complete in (("", "1"), ("unix", ""), ("macos", "1"), ("windows", "2")):
+            with self.subTest(platform=platform, complete=complete):
+                with self.assertRaisesRegex(observation.ObservationError, "requires --platform"):
+                    self.package(platform, complete=complete)
+
+    def test_package_missing_phase_fails_closed(self):
+        self.initialize()
+        self.run_phase("configuration", 10)
+        self.assertEqual(1, self.package("windows"))
+
+    def test_package_failure_still_publishes_incomplete_observation(self):
+        self.initialize()
+        self.run_phase("configuration", 10)
+        status = self.package("unix", source=self.root / "missing")
+        self.assertNotEqual(0, status)
+        document = json.loads((self.artifact / "native-observation.json").read_text(encoding="utf-8"))
+        root_document = json.loads((self.evidence / "native-observation.json").read_text(encoding="utf-8"))
+        self.assertEqual(document, root_document)
+        self.assertFalse(document["complete"])
+        self.assertIn("evidence_packing", document["unsuccessful_phases"])
+
     def initialize_with_timed_out_probe(self):
         if os.name == "nt":
             self.skipTest("the slow probe fixture is a POSIX shell script")
@@ -619,7 +706,7 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("steps.msvc_reference.outcome == 'success' && '1'", workflow)
         self.assertIn("id: msvc_reference", workflow)
         self.assertIn("tools/ci_native_observation.py init", workflow)
-        self.assertIn("tools/ci_native_observation.py finalize", workflow)
+        self.assertIn("tools/ci_native_observation.py package", workflow)
         self.assertIn(
             'observation_root="$RUNNER_TEMP/buster-ci/native-observation"',
             workflow,
@@ -645,7 +732,7 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIsNotNone(lanes)
         self.assertIsNotNone(shards)
         self.assertEqual(lanes.group(1).split(", "), [
-            "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64",
+            "linux-x86_64", "linux-aarch64", "macos-aarch64",
             "windows-x86_64", "windows-aarch64",
         ])
         self.assertEqual(shards.group(1).split(", "), ["release", "checks"])
@@ -702,7 +789,6 @@ class NativeObservationTest(unittest.TestCase):
         )
         self.assertEqual(entries, [
             ("Android x86-64", "ubuntu-26.04", "android", "x86_64"),
-            ("iOS x86-64", "macos-26-intel", "ios", "x86_64"),
             ("iOS AArch64", "macos-26", "ios", "aarch64"),
         ])
         steps = dict(re.findall(

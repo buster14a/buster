@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -399,6 +400,123 @@ esac
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(driver_log.exists())
+
+    def materialization(self, repository, event, requested, candidate, reference):
+        return self.command(
+            [sys.executable, HELPER, "materialization",
+             "--repository", repository, "--event", event, "--requested", requested,
+             "--candidate-revision", candidate, "--reference-revision", reference],
+            check=False,
+        )
+
+    @unittest.skipIf(os.name == "nt", "The analyzer policy uses the Unix hosted runner")
+    def test_materialization_matches_selection_policy_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            baseline = self.fixture_repository(root)
+            (root / "README.md").write_text("unrelated\n")
+            candidate = self.commit(root, "unrelated candidate")
+            depfile = Path(temporary) / "driver.d"
+            self.write_depfile(depfile)
+            manifests = {}
+            for revision in (baseline, candidate):
+                path = Path(temporary) / f"{revision}.json"
+                self.write_manifest(root, revision, root, depfile, path)
+                manifests[revision] = path
+            for event in ("push", "workflow_dispatch", "pull_request", "merge_group", "schedule"):
+                for requested in (False, True):
+                    if requested and event != "workflow_dispatch":
+                        continue
+                    for reference in (candidate, baseline):
+                        with self.subTest(event=event, requested=requested, same=reference == candidate):
+                            result = self.materialization(
+                                root, event, "true" if requested else "false", "HEAD", reference
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            fields = self.select(
+                                root, event, requested, candidate, reference,
+                                manifests[candidate], manifests[reference],
+                                Path(temporary) / "selection.txt",
+                            )
+                            expected = "false" if fields["reason"] == "same-revision" else "true"
+                            self.assertEqual(result.stdout, expected + "\n")
+            self.assertEqual(
+                self.materialization(root, "push", "false", candidate, candidate).stdout, "false\n"
+            )
+            for event, requested, reference in (
+                ("push", "true", candidate),
+                ("push", "maybe", candidate),
+                ("push;", "false", candidate),
+                ("push", "false", "0" * 40),
+            ):
+                with self.subTest(invalid=(event, requested, reference)):
+                    result = self.materialization(root, event, requested, candidate, reference)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("error:", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_same_revision_push_skips_reference_and_rejects_stale_materialization(self):
+        bootstrap = self.analyzer_step("Bootstrap candidate and select reference build driver")
+        campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+        for step in (bootstrap, campaign):
+            self.assertIn("python3 tools/analyzer_reference.py materialization", step)
+            self.assertNotIn('"$EVENT_NAME" == push', step)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            head = self.fixture_repository(root)
+            fake_bin = Path(temporary) / "fake-bin"
+            self.fake_clang(fake_bin)
+            clang_log = Path(temporary) / "clang.log"
+            runner = Path(temporary) / "runner"
+            runner.mkdir()
+            common = dict(
+                os.environ,
+                BASELINE_REVISION=head,
+                EVENT_NAME="push",
+                COMPARISON_REQUESTED="false",
+                RUNNER_TEMP=str(runner),
+                GITHUB_WORKSPACE=str(root),
+                GITHUB_ENV=str(runner / "environment"),
+                GITHUB_STEP_SUMMARY=str(runner / "summary"),
+                CLANG_LOG=str(clang_log),
+                PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", bootstrap], cwd=root, env=common, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(len(clang_log.read_text().splitlines()), 1)
+            exports = self.parse_exports(runner / "environment")
+            self.assertEqual(exports["ANALYZER_REFERENCE_MATERIALIZED"], "false")
+            self.assertEqual(exports["ANALYZER_COMPARISON_SELECTION"], "skip")
+            self.assertEqual(exports["ANALYZER_COMPARISON_REASON"], "same-revision")
+            self.assertFalse((runner / "buster-analyzer/reference-tree").exists())
+            self.assertFalse((root / "build/analyzer-baseline").exists())
+
+            driver_log = Path(temporary) / "driver.log"
+            driver = root / "build/analyzer-driver"
+            driver.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DRIVER_LOG\"\n")
+            driver.chmod(0o755)
+            campaign_environment = dict(common, DRIVER_LOG=str(driver_log), **exports)
+            campaign_environment["ANALYZER_REFERENCE_MATERIALIZED"] = "true"
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", campaign],
+                cwd=root, env=campaign_environment, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("materialization evidence is missing or stale", result.stdout + result.stderr)
+            self.assertFalse(driver_log.exists())
+
+            campaign_environment["ANALYZER_REFERENCE_MATERIALIZED"] = "false"
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", campaign],
+                cwd=root, env=campaign_environment, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = driver_log.read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn("--baseline-driver", calls[0])
 
 
 if __name__ == "__main__":

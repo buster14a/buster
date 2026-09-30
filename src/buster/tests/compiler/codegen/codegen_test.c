@@ -2105,6 +2105,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
     result.succeeded_test_count += local_aggregates.succeeded_test_count;
     result.test_count += local_aggregates.test_count;
+    UnitTestResult kernel_regressions = codegen_test_ebpf_kernel_regressions(arguments);
+    result.succeeded_test_count += kernel_regressions.succeeded_test_count;
+    result.test_count += kernel_regressions.test_count;
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;
