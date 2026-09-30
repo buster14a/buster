@@ -11079,7 +11079,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         }
         else
         {
-            u32 padded_index = index - BUSTER_ARRAY_LENGTH(literal_cases);
+            u32 padded_index = index - (u32)BUSTER_ARRAY_LENGTH(literal_cases);
             u32 padding = padded_index % FLOAT16_LITERAL_PADDING_COUNT;
             u32 family = padded_index / FLOAT16_LITERAL_PADDING_COUNT % FLOAT16_LITERAL_FAMILY_COUNT;
             bool negative = padded_index / (FLOAT16_LITERAL_PADDING_COUNT * FLOAT16_LITERAL_FAMILY_COUNT) != 0;
@@ -11106,14 +11106,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
            "    _Float16 literal_locals[{u32}];\n"
            "    float16_literal_store(literal_locals);\n"
            "    for (int index = 0; !status && index < {u32}; index += 1)\n"
-           "    {\n"
+           "    {{\n"
            "        unsigned short global_bits;\n"
            "        unsigned short local_bits;\n"
            "        __builtin_memcpy(&global_bits, &float16_literal_values[index], sizeof(global_bits));\n"
            "        __builtin_memcpy(&local_bits, &literal_locals[index], sizeof(local_bits));\n"
            "        if (global_bits != literal_expected[index]) status = 29;\n"
            "        else if (local_bits != literal_expected[index]) status = 30;\n"
-           "    }\n"),
+           "    }}\n"),
         string_join_arena(arguments->arena, (SliceString8){.pointer = expected_parts, .length = literal_count + 2}, false),
         literal_count, literal_count);
     String8 float16_caller_body = S8(
