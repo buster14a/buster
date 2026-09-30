@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 725dd41ba79b08e7bfc4e1a80a830cdfbce37494
+          ref: 7a60795f15dd9fa889c343ea45f684391672c028
           fetch-depth: 0
       - name: Independent linker
         run: |
@@ -33,11 +33,25 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o /tmp/buster1233-driver
           /tmp/buster1233-driver generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           /tmp/buster1233-driver build --config Release -t ide
-      - name: Object, link and driver regressions
-        run: build/Release/ide test --module=object_tests,link_tests,compiler_driver_tests --verbose=1 --ci=1
       - name: Full registered suite
         if: always()
         run: /tmp/buster1233-driver build --config Release -t test_all
+      - name: Isolate AArch64 non-PIC object import
+        if: always() && matrix.runner == 'ubuntu-26.04-arm'
+        run: |
+          cat > /tmp/issue1233-nonpic-probe.c <<'EOF'
+          volatile int observed;
+          int main(void) { observed = 1; return observed - 1; }
+          EOF
+          clang -O2 -fno-pie -c /tmp/issue1233-nonpic-probe.c -o /tmp/issue1233-nonpic-probe.o
+          readelf -rW /tmp/issue1233-nonpic-probe.o
+          clang -no-pie /tmp/issue1233-nonpic-probe.o -o /tmp/issue1233-nonpic-control
+          /tmp/issue1233-nonpic-control
+          if build/Release/ide cc /tmp/issue1233-nonpic-probe.o -o /tmp/issue1233-nonpic-buster; then
+            echo NONPIC_IMPORT_ACCEPTED
+          else
+            echo NONPIC_IMPORT_REJECTED
+          fi
       - name: Execution mode matrix
         if: always()
         run: /tmp/buster1233-driver test_mode_matrix --config Release

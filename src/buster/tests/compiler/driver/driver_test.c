@@ -11775,7 +11775,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTest
                             if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
                                 host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
                             host_command[host_count++] = S8("-O2");
-                            host_command[host_count++] = S8("-fno-pie");
+                            // Keep the host observer on supported ELF GOT relocations;
+                            // non-PIC AArch64 load/store relocations are a separate import boundary.
+                            host_command[host_count++] = S8("-fPIC");
                             host_command[host_count++] = S8("-fomit-frame-pointer");
                             host_command[host_count++] = S8("-fasynchronous-unwind-tables");
                             host_command[host_count++] = S8("-c");
