@@ -44,14 +44,14 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
-- CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
-  opt-in GitHub-hosted desktop capacity uses the source-free broker template in
-  `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
-  runs the same coverage as the Forgejo matrix — combination matrix, execution-mode
-  matrix, Android and iOS — on GitHub's standard runners for the migration
-  described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
-  desktop OS at both x86-64 and AArch64; three independent mobile shards retain
-  the Android and iOS suites without repeating desktop work. The independent
+- Active CI is defined under `.github/workflows/`; the current tree has no
+  Forgejo workflow definitions. The historical source-free broker contract is
+  documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
+  runs the combination matrix, execution-mode matrix, Android and iOS on
+  GitHub standard runners. Its five desktop lanes cover Linux and Windows at
+  x86-64 and AArch64, plus macOS AArch64; two independent mobile shards retain
+  Android x86-64 and iOS AArch64. Apple x86-64 is best-effort source/target
+  compatibility, outside routine CI; see [Apple CI policy](../apple-ci-policy.md). The independent
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
   Require the
@@ -88,7 +88,7 @@
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
   supported-platform coverage when changing build orchestration or the
-  compiler pipeline. The GitHub workflow keeps the six existing platform check
+  compiler pipeline. The GitHub workflow keeps the five retained platform check
   names, runs full PR/main/tag/merge-group coverage without duplicate feature
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
