@@ -114,8 +114,9 @@ unavailable gates; never call an unrun check green. Follow the existing
 
 Native-retirement generated source identities and the aggregate binding are
 integration-owned. Ordinary feature PRs must not refresh or commit them;
-the read-only gate reconstructs them ephemerally and the serialized trusted
-writer publishes the exact integrated tree. Read
+the read-only gate reconstructs them ephemerally, ordinary PRs land through
+the native queue, and an automatic catch-up publishes the pair afterwards.
+Trust transitions still go through the trusted writer first. Read
 [native-retirement rebinding](docs/native-retirement-rebinding.md) before
 changing its policy, authority code, schema, consumers, or workflows.
 
@@ -132,6 +133,16 @@ not just a proxy or generated-program runtime.
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
 index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
+
+## Project license reporting
+
+When scanning, researching, auditing, or comparing projects, include each
+project's license in the report and any resulting GitHub issue or PR. Verify
+it from license files or authoritative repository metadata at the inspected
+revision, and cite the source; include the SPDX identifier when available.
+Distinguish dual/multiple licenses and relevant component-specific licenses
+rather than presenting one license as covering everything. Explicitly mark
+missing, ambiguous, or unverified licenses; do not guess from public access.
 
 ## Forge, issues, and pull requests
 

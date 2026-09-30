@@ -196,7 +196,48 @@ A PR readiness success is not combined-head authorization. Neither a reused
 artifact nor a manually posted status may authorize another SHA/tree. A newer
 main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
-the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
+nothing chooses `ours`, `theirs` or a union merge. GitHub does not build a
+group for a conflicting entry, but it does not remove one either: see
+[queued PRs that start conflicting](#queued-prs-that-start-conflicting).
+
+## Queued PRs that start conflicting
+
+When `main` moves under a queued PR and the PR starts to conflict, GitHub skips
+the entry while it builds groups and later entries still get groups, but the
+entry stays queued. Every push to a queued PR's branch is refused with `GH006`
+("Branches that are queued for merging cannot be updated"), so the author
+cannot push the resolving merge until the PR is dequeued. This was observed
+live on 2026-09-29 for #1521 and #1523 (#1865; acceptance item 5). Neither
+entry was removed during the roughly 40 minutes observed. It is unverified
+whether GitHub removes such an entry later, for example on a timeout or once
+the entries ahead of it drain, and whether the build limit affects the skip.
+
+The trusted `merge-conflict-preflight` job reports this state. The
+default-branch sweep reads merge-queue membership once through GraphQL
+`isInMergeQueue` with its existing `pull-requests: read` token; the
+PR-regression route reads only its own PR. Membership binds the exact head
+the preflight analyzed. For a queued head the status description gains a
+trailing token, `v1 m=<main> h=<head> o=<n> c=<state> q=queued`. When that
+head also conflicts, the report's `merge_queue` record sets
+`dequeue_required_before_push` and carries the dequeue instruction. The job
+summary lists every such PR. A failed read, or a PR the read did not cover at
+its analyzed head, is reported as `unknown` membership with a conditional
+instruction. Membership never changes the outcome, the status state or the
+sweep's coverage result. The token is omitted unless the read found the head
+queued.
+
+To recover a queued PR that conflicts:
+
+1. Dequeue it with **Remove from queue** on the PR or the GraphQL
+   `dequeuePullRequest` mutation.
+2. Resolve the named paths as the preflight classification prescribes
+   ([workflow guide](agents/workflow.md#merge-conflict-preflight)) and
+   validate the result.
+3. Push the resolution. Enqueue the new head again after its PR checks pass.
+
+Nothing dequeues such a PR automatically. That needs write authority the
+read-only preflight does not hold, and it must keep the admission and
+authorization policy above, so it is a separate policy decision.
 
 ## Build-limit rollout and acceptance
 
@@ -252,6 +293,16 @@ do not close #867 based on settings or offline fixtures alone:
 5. Inject a controlled combined-candidate check failure despite green PR heads;
    prove no merge. Exercise cancellation/rerun, main advance during preparation,
    fork approval, and genuine conflict removal with exact path diagnostics.
+   Live case, 2026-09-29 (#1865): `main` advanced under queued #1521
+   (`68e7655` from #1703 on `c_internal.h`, then `9d96fb9` from #1538 on
+   `c_parse.c`) and queued #1523 (`f75c091` from #1587 on
+   `c_parse_internal.h`). The preflight posted `c=conflicted` on #1521's head
+   for each new main. PRs enqueued after both received groups. GitHub
+   recorded no `removed_from_merge_queue` event for either in about 40
+   minutes and refused both validated resolution pushes with `GH006`. The
+   path diagnostics held, but GitHub did not remove the entries; recovery is
+   the manual dequeue above. Still to retain: the first live sweep report
+   that shows `q=queued` on a conflicted head.
 6. Verify UI merge, API merge, squash/rebase and every automation are subject to
    the effective queue/retirement controls. No live production rejection or
    queue experiment is claimed by the offline fixtures.

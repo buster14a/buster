@@ -5,6 +5,8 @@ Ownership: GitHub Actions observations only; tools/ci_time.py owns Forgejo's
 very different timestamps/retention repair. No inferred or imputed durations.
 Entry points: collect reads the GitHub REST API; summarize is entirely offline.
 Each workflow-blob/runner-label cohort has its own median and exclusion counts.
+require-jobs also retains controller-visible interruption evidence (see
+interruption_evidence) for failed jobs whose runner stopped reporting.
 queue-collect/queue-summarize measure runner scheduling across every workflow
 (#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
@@ -54,6 +56,8 @@ STEP_FIELDS = ("name", "status", "conclusion", "started_at", "completed_at")
 API_TIMEOUT_SECONDS = 30.0
 JOB_METADATA_REFRESH_BUDGET_SECONDS = 30.0
 JOB_METADATA_REFRESH_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+INTERRUPTION_EVIDENCE_BUDGET_SECONDS = 30.0
+RUNNER_LOST_MESSAGE = "The hosted runner lost communication with the server."
 # The run search API returns at most 1000 results for one query.
 RUN_SEARCH_RESULT_LIMIT = 1000
 QUEUE_RUN_FIELDS = ("id", "name", "path", "event", "head_sha", "head_branch", "status", "conclusion",
@@ -267,7 +271,96 @@ def _metadata_can_refresh(errors):
     return bool(errors) and all(error.startswith("metadata pending:") for error in errors)
 
 
-def _job_evidence(jobs):
+def _job_steps(job):
+    steps = job.get("steps", [])
+    return [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+
+
+def _unterminated_steps(job):
+    return [step for step in _job_steps(job) if step.get("status") == "in_progress"]
+
+
+def _seconds_between(start, end):
+    try:
+        first, last = timestamp(start), timestamp(end)
+    except (TypeError, ValueError):
+        first = last = None
+    return (last - first).total_seconds() if first is not None and last is not None else None
+
+
+def _latest_timestamp(values):
+    latest = None
+    for value in values:
+        try:
+            moment = timestamp(value)
+        except ValueError:
+            moment = None
+        if moment is not None and (latest is None or moment > latest[0]):
+            latest = (moment, value)
+    return latest[1] if latest else None
+
+
+def interruption_evidence(job, annotations, annotation_error=None):
+    """Classify a failed job that GitHub finalized while a step was still active.
+
+    Only API-visible facts are recorded. `silent_seconds` is the interval from
+    the last step transition the runner reported to job finalization; it bounds
+    the runner's unobserved tail, not useful work. Missing annotations remain
+    `annotation-unavailable`, never an inferred runner loss.
+    """
+    active = _unterminated_steps(job)
+    result = None
+    if job.get("conclusion") == "failure" and active:
+        steps = _job_steps(job)
+        transitions = [step.get(key) for step in steps for key in ("started_at", "completed_at")
+                       if isinstance(step.get(key), str) and step.get(key)]
+        last_progress = _latest_timestamp(transitions)
+        messages = None if annotations is None else \
+            [item.get("message") for item in annotations if isinstance(item, dict)]
+        if messages is None:
+            classification = "annotation-unavailable"
+        elif any(isinstance(message, str) and message.startswith(RUNNER_LOST_MESSAGE) for message in messages):
+            classification = "runner-communication-lost"
+        else:
+            classification = "unterminated-step"
+        result = {"classification": classification,
+                  "active_steps": [{"name": step.get("name"), "started_at": step.get("started_at")} for step in active],
+                  "pending_steps": sum(1 for step in steps if step.get("status") in ("pending", "queued", "waiting")),
+                  "job_started_at": job.get("started_at"), "last_progress_at": last_progress,
+                  "finalized_at": job.get("completed_at"),
+                  "silent_seconds": _seconds_between(last_progress, job.get("completed_at")),
+                  "runner_name": job.get("runner_name"), "labels": job.get("labels"),
+                  "annotations": messages, "annotation_error": annotation_error}
+    return result
+
+
+def _interruptions(repository, jobs, token):
+    """Read annotations only for jobs with the unterminated-step signature."""
+    candidates = [job for job in jobs
+                  if isinstance(job, dict) and job.get("conclusion") == "failure" and _unterminated_steps(job)]
+    deadline = time.monotonic() + INTERRUPTION_EVIDENCE_BUDGET_SECONDS if candidates else None
+    result = {}
+    for job in candidates:
+        annotations = None
+        error = None
+        remaining = deadline - time.monotonic()
+        if not isinstance(job.get("id"), int) or isinstance(job.get("id"), bool):
+            error = "job has no numeric check-run identity"
+        elif remaining <= 0:
+            error = "interruption evidence budget exhausted"
+        else:
+            try:
+                annotations = api_get(repository, f"check-runs/{job['id']}/annotations?per_page=100", token,
+                                      timeout=min(API_TIMEOUT_SECONDS, remaining))
+            except (OSError, ValueError) as failure:
+                error = f"annotation read failed: {failure}"
+            if annotations is not None and not isinstance(annotations, list):
+                annotations, error = None, "annotation response is not a list"
+        result[job["id"]] = interruption_evidence(job, annotations, error)
+    return result
+
+
+def _job_evidence(jobs, interruptions=None):
     evidence = []
     for job in jobs:
         required_steps = []
@@ -285,6 +378,8 @@ def _job_evidence(jobs):
         record = {key: job.get(key) for key in
                   ("id", "name", "run_id", "head_sha", "run_attempt", "status", "conclusion")}
         record["required_steps"] = required_steps
+        if interruptions and job.get("id") in interruptions:
+            record["interruption"] = interruptions[job.get("id")]
         evidence.append(record)
     return evidence
 
@@ -444,6 +539,12 @@ def require_jobs(args):
     if _metadata_can_refresh(errors):
         errors = [f"{error}; exact run/head proof unresolved after {snapshot_attempts} snapshots "
                   f"(run {args.run_id}, head {head_sha})" for error in errors]
+    interruptions = _interruptions(args.repository, jobs, token)
+    for job_id, record in sorted(interruptions.items()):
+        print(f"CI_RUNNER_INTERRUPTION job={job_id} classification={record['classification']} "
+              f"active={','.join(str(step['name']) for step in record['active_steps'])!r} "
+              f"last_progress_at={record['last_progress_at']} finalized_at={record['finalized_at']} "
+              f"silent_seconds={record['silent_seconds']}", file=sys.stderr)
     deferred = sorted(base for base in (deferred_base_name(job.get("name")) for job in jobs) if base)
     return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
             "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
@@ -452,7 +553,7 @@ def require_jobs(args):
             "job_metadata": {"snapshot_attempts": snapshot_attempts,
                              "refreshes": max(0, snapshot_attempts - 1),
                              "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS},
-            "jobs": _job_evidence(jobs)}
+            "jobs": _job_evidence(jobs, interruptions)}
 
 
 def report_deferrals(data, summary_path, notice):
