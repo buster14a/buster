@@ -677,8 +677,9 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     if (pid == 0)
     {
         close(ready[1]);
-        int go = ready[0], report = -1, parked_ends = 1;
+        int go = ready[0], parked_ends = 1;
 #ifdef __linux__
+        int report = -1;
         /* Under a layout both handshake ends are parked above the slots
          * first, so placing the slots cannot overwrite them. An end that
          * cannot be parked stays where it is and the child places nothing:
