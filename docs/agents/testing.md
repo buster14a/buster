@@ -212,13 +212,26 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. A process-state query that loses the PID after
-  an initial `kill -0` is reconciled with one more liveness probe: confirmed
-  disappearance is stopped while persistent ambiguity remains fail-closed.
-  Once teardown observes a terminal state it is monotonic for that ownership
-  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
-  bounded stop verification; sending SIGKILL alone is not a failure, but an
-  owned process that remains live after it is.
+  this path deterministically. The numeric PID marker stays compatible with
+  existing callers; its `.identity` sidecar records the launch identity before
+  the PID marker is published. The Linux Android lane compares boot ID and
+  kernel start ticks from `/proc/<pid>/stat`, reading state and identity in one
+  snapshot. The portable/macOS fake-tool path uses `LC_ALL=C ps` start time
+  (one-second resolution) and state. These are checked at start reuse, wait,
+  shutdown and immediately before signals; an identity mismatch is a retired
+  owned process, not a new cleanup target. This is a shell snapshot check, not
+  an atomic pidfd signal operation; the portable timestamp also cannot resolve
+  reuse within the same second. Missing/malformed ownership or an unverifiable
+  live PID fails cleanup without targeting that PID, and retains the record
+  for retry. Once cleanup proves the owned process stopped it removes both
+  records, preventing another invocation from resurrecting the ownership.
+  SIGTERM and SIGKILL retain bounded stop verification; sending SIGKILL alone
+  is not a failure, but a surviving owned process is. `android/run_tests_test.sh`
+  also runs `android/emulator_identity_test.py` for independent identity,
+  malformed-record, unavailable-probe and surviving-process controls. Its real
+  workflow-body fixture simulates PID reuse after the payload observes the
+  original emulator terminal, and requires successful structured cleanup with
+  no adb shutdown or signal to the unrelated replacement.
 
 The private OS resource-failure, flood and process-tree child modes dispatch at
 the start of `library_tests`, before compiler prewarming and other test modules.
