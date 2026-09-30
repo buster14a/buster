@@ -1,0 +1,22 @@
+name: Issue 1226 baseline
+on:
+  push:
+    branches: [codex/1226-half-baseline]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
+          persist-credentials: false
+      - name: Bootstrap hosted build driver
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Configure unchanged baseline
+        run: '"$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT'
+      - name: Reproduce baseline fixed point
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
