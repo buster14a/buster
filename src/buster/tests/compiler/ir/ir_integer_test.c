@@ -378,6 +378,28 @@ BUSTER_GLOBAL_LOCAL IrIntegerTestSignedWide ir_integer_test_signed_wide(IrIntege
     return (IrIntegerTestSignedWide)bits;
 }
 
+// The oracle never divides at 128 bits: that lowers to __udivti3 and its
+// siblings, which the -nostdlib Windows links do not provide. Remainders by a
+// small divisor and the wrap of a full product are rebuilt from 64-bit limbs.
+BUSTER_GLOBAL_LOCAL u64 ir_integer_test_wide_remainder(IrIntegerTestWide value, u64 divisor)
+{
+    u64 limb_weight = (UINT64_MAX % divisor + 1) % divisor;
+    return ((u64)(value >> 64) % divisor * limb_weight + (u64)value % divisor) % divisor;
+}
+
+// A 128 x 128-bit product wraps when its upper 128 bits are nonzero. At most
+// one cross product survives the first test, so the middle sum cannot wrap.
+BUSTER_GLOBAL_LOCAL bool ir_integer_test_wide_multiply_wraps(IrIntegerTestWide left, IrIntegerTestWide right)
+{
+    u64 left_low = (u64)left;
+    u64 left_high = (u64)(left >> 64);
+    u64 right_low = (u64)right;
+    u64 right_high = (u64)(right >> 64);
+    IrIntegerTestWide middle = (IrIntegerTestWide)left_high * right_low + (IrIntegerTestWide)left_low * right_high +
+                               (((IrIntegerTestWide)left_low * right_low) >> 64);
+    return (left_high != 0 && right_high != 0) || (middle >> 64) != 0;
+}
+
 // 16/32/64 bits: every exact sum, difference and product fits 128 bits.
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_random_widths(UnitTestArguments* arguments)
 {
@@ -416,12 +438,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_random_widths(UnitTestArgumen
                 IrIntegerResult quotient = ir_integer_binary(IR_BINARY_SIGNED_DIVIDE, left, right, width, width);
                 IrIntegerResult remainder = ir_integer_binary(IR_BINARY_SIGNED_REMAINDER, left, right, width, width);
                 bool overflow = sl == minimum && sr == -1;
-                IrIntegerTestSignedWide q = overflow ? minimum : sl / sr;
-                IrIntegerTestSignedWide r = overflow ? 0 : sl % sr;
+                // Both operands fit 64 bits; the one 64-bit overflow is excluded.
+                IrIntegerTestSignedWide q = overflow ? minimum : (s64)sl / (s64)sr;
+                IrIntegerTestSignedWide r = overflow ? 0 : (s64)sl % (s64)sr;
                 mismatches += ir_integer_test_signed_wide(quotient.bits, width) != q || ir_integer_test_signed_wide(remainder.bits, width) != r ||
                               ((quotient.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW) != 0) != overflow;
             }
-            u32 count = (u32)(ur % (IrIntegerTestWide)(width + 8));
+            u32 count = (u32)ir_integer_test_wide_remainder(ur, width + 8);
             IrIntegerResult shifted = ir_integer_binary(IR_BINARY_SHIFT_LEFT, left, (IrInteger){.low = count}, width, 32);
             bool count_fault = count >= width;
             mismatches += ((shifted.faults & IR_INTEGER_FAULT_SHIFT_COUNT) != 0) != count_fault;
@@ -465,11 +488,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_random_wide(UnitTestArguments
         IrIntegerResult product = ir_integer_binary(IR_BINARY_INTEGER_MULTIPLY, left, right, 128, 128);
         bool sum_wrap = ul + ur < ul;
         bool sum_overflow = (sl < 0) == (sr < 0) && ((IrIntegerTestSignedWide)(ul + ur) < 0) != (sl < 0);
-        bool product_wrap = ul != 0 && (ul * ur) / ul != ur;
+        bool product_wrap = ir_integer_test_wide_multiply_wraps(ul, ur);
         IrIntegerTestWide magnitude_left = sl < 0 ? (IrIntegerTestWide)0 - ul : ul;
         IrIntegerTestWide magnitude_right = sr < 0 ? (IrIntegerTestWide)0 - ur : ur;
         IrIntegerTestWide magnitude = magnitude_left * magnitude_right;
-        bool magnitude_wrap = magnitude_left != 0 && magnitude / magnitude_left != magnitude_right;
+        bool magnitude_wrap = ir_integer_test_wide_multiply_wraps(magnitude_left, magnitude_right);
         bool negative = (sl < 0) != (sr < 0) && magnitude != 0;
         bool product_overflow = magnitude_wrap || (negative ? magnitude > ((IrIntegerTestWide)1 << 127) : magnitude >= ((IrIntegerTestWide)1 << 127));
         mismatches += ir_integer_test_wide(sum.bits) != ul + ur || ir_integer_test_wide(product.bits) != ul * ur;
@@ -495,7 +518,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_random_wide(UnitTestArguments
                           (sremainder != 0 && (sremainder < 0) != (sl < 0)) ||
                           ((signed_quotient.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW) != 0) != overflow;
         }
-        u32 count = (u32)(ur % 136);
+        u32 count = (u32)ir_integer_test_wide_remainder(ur, 136);
         IrIntegerResult shifted = ir_integer_binary(IR_BINARY_SHIFT_LEFT, left, (IrInteger){.low = count}, 128, 32);
         IrIntegerResult logical = ir_integer_binary(IR_BINARY_UNSIGNED_SHIFT_RIGHT, left, (IrInteger){.low = count}, 128, 32);
         IrIntegerResult arithmetic = ir_integer_binary(IR_BINARY_SIGNED_SHIFT_RIGHT, left, (IrInteger){.low = count}, 128, 32);
