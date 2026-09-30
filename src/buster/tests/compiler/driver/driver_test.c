@@ -3606,6 +3606,102 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_count_signatures(Uni
     return result;
 }
 
+// Addresses of address-taken locals stay live across calls, a loop and both
+// arms of a branch while more pointers than registers are in flight; FAST and
+// QUALITY recreate such an address instead of spilling it. The large array puts
+// member addresses past AArch64's twelve-bit add immediate. Every target must
+// select without fallback, and the host runs the program under every
+// allocator and both frontend forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frame_address_rematerialization(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static int sink;\n"
+        "static void touch(int* p, int n)\n"
+        "{\n"
+        "    for (int i = 0; i < n; i += 1) p[i] += i;\n"
+        "    sink += n;\n"
+        "}\n"
+        "static long gather(int* a, int* b, int* c, int* d, int* e, int* f, int* g, int* h, int* k)\n"
+        "{\n"
+        "    return a[1] + b[2] + c[3] + d[4] + e[5] + f[6] + g[7] + h[1] + k[2];\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int a[8] = {0}, b[8] = {0}, c[8] = {0}, d[8] = {0}, e[8] = {0};\n"
+        "    int f[8] = {0}, g[8] = {0}, h[8] = {0}, k[8] = {0};\n"
+        "    char big[6000];\n"
+        "    for (int round = 0; round < 5; round += 1)\n"
+        "    {\n"
+        "        touch(a, 8);\n"
+        "        touch(b, 8);\n"
+        "        if (round & 1) touch(c, 8); else touch(d, 8);\n"
+        "        touch(e, 8); touch(f, 8); touch(g, 8); touch(h, 8); touch(k, 8);\n"
+        "        big[round * 1200] = (char)round;\n"
+        "    }\n"
+        "    int bad = gather(a, b, c, d, e, f, g, h, k) != 5 + 10 + 6 + 12 + 25 + 30 + 35 + 5 + 10;\n"
+        "    for (int i = 0; i < 8; i += 1)\n"
+        "    {\n"
+        "        bad |= a[i] != 5 * i || b[i] != 5 * i || c[i] != 2 * i || d[i] != 3 * i || k[i] != 5 * i;\n"
+        "    }\n"
+        "    for (int round = 0; round < 5; round += 1) bad |= big[round * 1200] != round;\n"
+        "    return bad | (sink != 5 * 8 * 8);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-frame-address-rematerialization"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 2; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-frame-address-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("frame address object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-frame-address-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("frame address native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vector_casts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11191,6 +11287,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);

@@ -152,6 +152,13 @@
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- FAST/QUALITY never store a recreatable value. A single-definition constant
+  reloads as `MACHINE_EDIT_REMATERIALIZE` of its immediate, and a non-mutable
+  value whose only definition is the target's `frame_address_opcode` row reloads
+  as `MACHINE_EDIT_REMATERIALIZE_FRAME`, naming the value; both encoders replay
+  the defining row's slot address (`machine_x64_emit_exact_frame_address`,
+  `machine_a64_emit_frame_address`). This is sound because a slot whose address
+  a row takes keeps its own storage for the whole function.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
