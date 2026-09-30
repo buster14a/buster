@@ -53,6 +53,11 @@
 BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_USE_SHIFT);
 BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_DEFINE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_DEFINE_SHIFT);
 BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT);
+// Rematerialization recipe of a value whose whole definition is one frame
+// address row: the edit names the value itself and the encoder replays that
+// row's address. Immediate pool indices never reach it.
+#define MACHINE_FAST_REMATERIALIZE_FRAME (UINT32_MAX - 1u)
+BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
 // Contract-held, contract-dirty, out-held and out-dirty: the four per-block
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
@@ -113,8 +118,9 @@ struct MachineFastState
     // the call and is worth a callee-saved binding.
     u32* next_call;
     // Immediate index per vreg whose entire definition is one constant
-    // materialization, or UINT32_MAX. Such a value is never stored and
-    // never occupies a slot: any reload of it re-materializes instead.
+    // materialization, MACHINE_FAST_REMATERIALIZE_FRAME for one frame
+    // address, or UINT32_MAX. Such a value is never stored and never
+    // occupies a slot: any reload of it re-materializes instead.
     u32* rematerialize_immediates;
     // Pinned registers, owned by the QUALITY pass and invisible to the
     // local scan. `pin_active_masks` holds one register mask per
@@ -201,6 +207,21 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_scratch(MachineFastState* state, Machi
                                                                                     : state->description->slot_scratch[slot];
 }
 
+// The reload of a recreatable value: its constant, or its frame address
+// recomputed from the defining row. Counted as a rematerialization either way.
+BUSTER_GLOBAL_LOCAL MachineEdit machine_fast_rematerialize_edit(MachineFastState* state, MachinePoint point, u32 value, u32 location)
+{
+    u32 recipe = state->rematerialize_immediates[value];
+    bool frame = recipe == MACHINE_FAST_REMATERIALIZE_FRAME;
+    state->placement->rematerialize_count += 1;
+    return (MachineEdit){
+        .point = point,
+        .kind = (u16)(frame ? MACHINE_EDIT_REMATERIALIZE_FRAME : MACHINE_EDIT_REMATERIALIZE),
+        .subject = frame ? value : recipe,
+        .location = location,
+    };
+}
+
 // Materialize a tied source in the destination's register without stealing a
 // live source binding.  A normal ensure is deliberately not used here: it
 // moves the source's ownership, which is only sound when the source dies at
@@ -220,13 +241,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
         MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
         if (state->rematerialize_immediates[source] != UINT32_MAX)
         {
-            *edit = (MachineEdit){
-                .point = state->current_point,
-                .kind = MACHINE_EDIT_REMATERIALIZE,
-                .subject = state->rematerialize_immediates[source],
-                .location = target,
-            };
-            state->placement->rematerialize_count += 1;
+            *edit = machine_fast_rematerialize_edit(state, state->current_point, source, target);
         }
         else
         {
@@ -269,13 +284,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
     MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
     if (state->rematerialize_immediates[source] != UINT32_MAX)
     {
-        *edit = (MachineEdit){
-            .point = state->current_point,
-            .kind = MACHINE_EDIT_REMATERIALIZE,
-            .subject = state->rematerialize_immediates[source],
-            .location = target,
-        };
-        state->placement->rematerialize_count += 1;
+        *edit = machine_fast_rematerialize_edit(state, state->current_point, source, target);
     }
     else
     {
@@ -576,8 +585,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             }
             else if (state->rematerialize_immediates[value] != UINT32_MAX)
             {
-                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_REMATERIALIZE, state->rematerialize_immediates[value], contract_register);
-                state->placement->rematerialize_count += 1;
+                MachineEdit rematerialize = machine_fast_rematerialize_edit(state, point, value, contract_register);
+                machine_fast_conform_append(state, stream, point, rematerialize.kind, rematerialize.subject, contract_register);
                 *dirty &= ~machine_fast_lane(contract_register);
             }
             else
@@ -745,9 +754,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
             u32 scratch = vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0];
             if (state->rematerialize_immediates[source_value] != UINT32_MAX)
             {
-                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_REMATERIALIZE,
-                                            state->rematerialize_immediates[source_value], scratch);
-                state->placement->rematerialize_count += 1;
+                MachineEdit rematerialize = machine_fast_rematerialize_edit(state, point, source_value, scratch);
+                machine_fast_conform_append(state, stream, point, rematerialize.kind, rematerialize.subject, scratch);
             }
             else
             {
@@ -1009,13 +1017,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
     }
     else if (state->rematerialize_immediates[virtual_register] != UINT32_MAX)
     {
-        *edit = (MachineEdit){
-            .point = state->current_point,
-            .kind = MACHINE_EDIT_REMATERIALIZE,
-            .subject = state->rematerialize_immediates[virtual_register],
-            .location = target,
-        };
-        state->placement->rematerialize_count += 1;
+        *edit = machine_fast_rematerialize_edit(state, state->current_point, virtual_register, target);
         state->dirty_mask &= ~machine_fast_lane(target);
     }
     else
@@ -1392,8 +1394,23 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         // current would then depend on the path.
                         bool constant_definition = opcode == description->constant_opcode && slot == 0 &&
                                                    machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
+                        // A frame address is equally recreatable: a slot whose
+                        // address a row takes keeps its own storage for the
+                        // whole function, so the address is invariant. Only
+                        // an SSA value whose recorded definition is this row
+                        // qualifies; a mutable value may also be written by a
+                        // block parameter the loop above does not mark seen.
+                        MachineVirtualRegister const* defined = function->virtual_registers + virtual_register;
+                        bool frame_address_definition =
+                            opcode == description->frame_address_opcode && description->frame_address_opcode != 0 && slot == 0 &&
+                            machine_ref_kind(instruction->operands[1]) == MACHINE_REF_STACK_SLOT &&
+                            !(defined->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) && defined->definition_point != MACHINE_POINT_INVALID &&
+                            machine_point_instruction(defined->definition_point) == instruction_index;
                         prepass.rematerialize_immediates[virtual_register] =
-                            constant_definition && !definition_seen[virtual_register] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
+                            definition_seen[virtual_register] ? UINT32_MAX
+                            : constant_definition            ? machine_ref_payload(instruction->operands[1])
+                            : frame_address_definition       ? MACHINE_FAST_REMATERIALIZE_FRAME
+                                                             : UINT32_MAX;
                         definition_seen[virtual_register] = 1;
                     }
                     if ((role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u)

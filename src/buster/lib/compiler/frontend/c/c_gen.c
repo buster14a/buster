@@ -2,6 +2,9 @@
 // point is c_lower_to_ir at the bottom of the file: it sizes and fills one
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
+// c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
+// the program arena is touched. The remaining phase/state graph is in
+// docs/agents/compiler-phase-state.md.
 // There is no AST — lowering re-walks token ranges directly, resolving
 // identifiers through the parse result's scopes and answering structure
 // questions from a prebuilt matching-delimiter index
@@ -99,6 +102,8 @@
 //   CIrRowStreams, c_ir_row_streams_trim          dense, line-aligned
 //                                                 construction rows shared by
 //                                                 the functions of one module
+//   c_ir_lower_capacity_plan                      non-mutating count and
+//                                                 overflow validation
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
@@ -10668,6 +10673,30 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 }
 #endif
 
+// Round a typed-half token before widening its result into the f64 carrier.
+// A binary64 intermediate can erase the side of a binary16 midpoint, and
+// decimal accumulation can move an exact midpoint according to host FMA.
+BUSTER_C_INTERNAL bool c_ir_float16_literal_bits(String8 spelling, u64* bits_out)
+{
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
+    s32 binary_exponent = 0;
+    u8 status = C_IR_ROUND_FAILED;
+    if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+    {
+        status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, 10, -14, 15, 5, bits_out);
+        if (status == C_IR_ROUND_OVERFLOW)
+        {
+            *bits_out = UINT64_C(0x7c00);
+        }
+        else if (status == C_IR_ROUND_UNDERFLOW)
+        {
+            *bits_out = 0;
+        }
+    }
+    return status != C_IR_ROUND_FAILED;
+}
+
 // The value a float literal denotes, for the static-initializer paths that
 // need it as one f64: constant-expression evaluation and the two global
 // initializer writers.  A literal has to decode identically wherever it
@@ -10677,9 +10706,8 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 // leaves its small exact window, and flushes subnormals to zero, which is
 // what made a global disagree with a local.
 //
-// The rational path answers only for finite nonzero results, so the
-// accumulation stays as the fallback that turns an overflowing or
-// underflowing spelling into the infinity or zero it must become.
+// Typed halves use the exact path for zero, subnormal, and special results
+// too. Other widths retain their existing accumulation fallback.
 //
 // An f suffix rounds to float first and widens the result: the literal's own
 // type is float, so `double d = 1.1f;` must hold that float, and the
@@ -10687,24 +10715,26 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 // with the same bits.
 BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out, char8* suffix_out)
 {
-    bool result = c_ir_float_parse(spelling, value_out, suffix_out);
-    if (result)
+    c_ir_float_suffix(spelling, suffix_out);
+    bool result;
+    if (*suffix_out == 'h')
     {
+        u64 bits;
+        result = c_ir_float16_literal_bits(spelling, &bits);
+        if (result)
+        {
+            *value_out = c_ir_float16_to_f64(bits);
+        }
+    }
+    else
+    {
+        result = c_ir_float_parse(spelling, value_out, suffix_out);
         bool single = *suffix_out == 'f' || *suffix_out == 'F';
-        bool half = *suffix_out == 'h';
         CIrExt80Big numerator;
         CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
-        if (half)
-        {
-            // The half literal rounds through the shared binary16 encoder
-            // rather than the rational one: its range is narrow enough that
-            // overflow and subnormals are the common cases, and the encoder
-            // already answers both from the exactly-decoded binary64 value.
-            *value_out = c_ir_float16_round(*value_out);
-        }
-        else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
+        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
             c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
                                     single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
         {
@@ -11896,20 +11926,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     // exponent leaves its small exact-power window (for example 123e+127),
     // which changes the observable `%g` rendering in cJSON's print tests.
     // The bounded integer path is shared with x87 literals and implements
-    // round-to-nearest-even for both IEEE widths.
+    // round-to-nearest-even at the literal's declared IEEE width.
     CIrExt80Big numerator;
     CIrExt80Big denominator;
     s32 binary_exponent = 0;
     bool converted = false;
     if (type_value->bit_width == 16)
     {
-        // A `f16` literal rounds through the shared binary16 encoder, which
-        // is the same step the static-initializer writer takes for the same
-        // spelling; the exactly-decoded binary64 it reads is a value the
-        // rational path would have produced unchanged.
-        f64 value = 0.0;
-        converted = c_ir_float_literal_value(spelling, &value, &suffix);
-        bits = converted ? c_ir_float16_bits_from_f64(value) : 0;
+        converted = c_ir_float16_literal_bits(spelling, &bits);
     }
     else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
     {
@@ -13217,32 +13241,47 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* buil
     return result;
 }
 
+// __func__ and its GNU forms: an ordinary narrow literal holding the
+// function's name. The lexer admits no backslash in an identifier, and the
+// narrow decoder copies every other byte through unchanged, so a
+// backslash-free name already is the decoded contents: describe it in place
+// and let c_ir_emit_string_contents_typed copy it into the owned global, with
+// no quoted copy and no decode buffer. A name that does hold a backslash
+// keeps the quoted round-trip and its escape grammar.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, CToken token)
 {
-    // The quoted name lives outside the spelling space, so decode it through
-    // a detached one-token view; the original token keeps carrying the
-    // source range.
-    String8 quoted = string_format(builder->arena, S8("\"{S8}\""), builder->function->name);
-    CToken quoted_token = {
-        .length = c_token_length_field(quoted.length),
-        .kind = C_TOKEN_STRING_LITERAL,
+    String8 name = builder->function->name;
+    CIrDecodedString decoded = {
+        .bytes =
+            {
+                .pointer = (u8*)name.pointer,
+                .length = name.length,
+            },
+        .element_count = name.length,
+        .element_width = 1,
+        .element_kind = C_TYPE_CHAR,
+        .encoding = C_IR_STRING_ENCODING_ORDINARY,
     };
-    CPreprocessResult quoted_preprocess = {
-        .tokens = &quoted_token,
-        .spelling_base = quoted.pointer,
-        .token_count = 1,
-        .dialect = builder->preprocess.dialect,
-    };
-    CIrDecodedString decoded = {0};
-    IrValueId result;
-    if (!c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, &decoded))
+    bool described = true;
+    if (string_first_code_unit(name, '\\') != BUSTER_STRING_NO_MATCH)
     {
-        result = IR_VALUE_ID_INVALID;
+        // The quoted name lives outside the spelling space, so decode it
+        // through a detached one-token view; the original token keeps
+        // carrying the source range.
+        String8 quoted = string_format(builder->arena, S8("\"{S8}\""), name);
+        CToken quoted_token = {
+            .length = c_token_length_field(quoted.length),
+            .kind = C_TOKEN_STRING_LITERAL,
+        };
+        CPreprocessResult quoted_preprocess = {
+            .tokens = &quoted_token,
+            .spelling_base = quoted.pointer,
+            .token_count = 1,
+            .dialect = builder->preprocess.dialect,
+        };
+        described = c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, &decoded);
     }
-    else
-    {
-        result = c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID);
-    }
+    IrValueId result = described ? c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID) : IR_VALUE_ID_INVALID;
 
     return result;
 }
@@ -41070,7 +41109,20 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
         return false;
     }
     u32 close = c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if (close <= expression_start + 1 || close + 1 >= expression_end)
+    u32 operand_end = close;
+    if (close > expression_start + 1 && close < expression_end - 1)
+    {
+        operand_end = c_ir_unary_expression_end(builder, close + 1, expression_end);
+        CToken operand = builder->preprocess.tokens[operand_end - 1];
+        // Keep an unevaluated operand's postfix operators inside sizeof.
+        // The boundary may follow prefixes or nested casts before that word.
+        if (operand.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, operand, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            operand_end = c_ir_unevaluated_operand_end(builder, operand_end, expression_end);
+        }
+    }
+    if (close <= expression_start + 1 || close >= expression_end - 1 || operand_end != expression_end)
     {
         return false;
     }
@@ -45704,32 +45756,45 @@ BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CI
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConstantValue* value, u64 index)
+BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConstantValue* value, CIrConstantValue index)
 {
+    bool valid = true;
     if (value->kind != C_IR_CONSTANT_UNKNOWN)
     {
         IrType* type = ir_type_from_id(&builder->program->types, value->type);
-        if (!type || (value->kind != C_IR_CONSTANT_LVALUE && value->kind != C_IR_CONSTANT_POINTER) ||
-            (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_POINTER))
+        IrType* index_type = ir_type_from_id(&builder->program->types, index.type);
+        valid = type && (value->kind == C_IR_CONSTANT_LVALUE || value->kind == C_IR_CONSTANT_POINTER) &&
+                (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_POINTER) && c_ir_constant_type_is_integer(index_type);
+        if (valid)
         {
-            return false;
+            // The masked low limb of signed int -1 is UINT32_MAX, not its
+            // element count. Preserve the index's type before scaling, and
+            // refuse unsigned/wide counts that cannot fit the signed addend.
+            s64 count = c_ir_integer_signed_value(index.integer, index_type);
+            valid = (index_type->is_signed || index.integer <= INT64_MAX) &&
+                    (index_type->bit_width <= 64 || index.integer_high == (index_type->is_signed && count < 0 ? UINT64_MAX : 0));
+            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+            valid = valid && element && element->layout.resolved && element->layout.size <= INT64_MAX;
+            if (valid)
+            {
+                s64 scale = (s64)BUSTER_MAX((u64)1, element->layout.size);
+                valid = count <= INT64_MAX / scale && count >= INT64_MIN / scale;
+                if (valid)
+                {
+                    s64 offset = count * (s64)element->layout.size;
+                    valid = !((offset > 0 && value->addend > INT64_MAX - offset) ||
+                              (offset < 0 && value->addend < INT64_MIN - offset));
+                    if (valid)
+                    {
+                        value->type = type->element_type;
+                        value->addend += offset;
+                        value->kind = C_IR_CONSTANT_LVALUE;
+                    }
+                }
+            }
         }
-        IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-        if (!element || !element->layout.resolved || element->layout.size > INT64_MAX || index > (u64)INT64_MAX / BUSTER_MAX((u64)1, element->layout.size))
-        {
-            return false;
-        }
-        s64 offset = (s64)(index * element->layout.size);
-        if (value->addend > INT64_MAX - offset)
-        {
-            return false;
-        }
-        value->type = type->element_type;
-        value->addend += offset;
-        value->kind = C_IR_CONSTANT_LVALUE;
     }
-
-    return true;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value)
@@ -48491,7 +48556,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             builder->queries->value_count = value_start + value_count;
             builder->queries->operator_count = operator_start + operator_count;
             if (!value_count || close >= end || !c_ir_query_constant(builder, index + 1, close, &index_value) ||
-                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value.integer))
+                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value))
             {
                 return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
             }
@@ -49298,8 +49363,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         // `(&_kwtuple.ob_base.ob_base)`, `(PyObject *)&_Py_ID(data)` -- and
         // the shapes below read bare tokens, so the wrappers come off first:
         // parens enclosing the whole range, then a leading group that names
-        // a type.  A cast between pointer types moves no bits, which is all
-        // a symbol-address initializer stores.
+        // a type whose operand covers the whole remaining range. A leading
+        // cast in `(char *)&object + 1` governs the addition's scale: leave
+        // that expression intact for the general constant evaluator.
         for (bool stripped = true; stripped && end > start + 1;)
         {
             stripped = false;
@@ -49316,7 +49382,8 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                 // literal, not a cast: `(int *){0}` keeps its type.
                 else if (group_close + 1 < end && group_close > start + 1 &&
                          !c_token_is_punctuator(&preprocess.tokens[group_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
-                         c_ir_type_name(builder, start + 1, group_close).value != IR_ID_UNDERLYING_INVALID)
+                         c_ir_type_name(builder, start + 1, group_close).value != IR_ID_UNDERLYING_INVALID &&
+                         c_ir_unary_expression_end(builder, group_close + 1, end) == end)
                 {
                     start = group_close + 1;
                     stripped = true;
@@ -50084,49 +50151,70 @@ BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunctio
     }
 }
 
+bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out)
+{
+    bool valid = plan_out && !parse.diagnostic_count && preprocess.token_count <= UINT32_MAX;
+    u32 token_capacity = valid ? (u32)preprocess.token_count : 0;
+    u32 identifier_token_count = 0;
+    u32 string_literal_count = 0;
+    u64 type_capacity = 0;
+    u64 symbol_capacity = 0;
+    u64 function_capacity = 0;
+    u64 query_frame_capacity = 16;
+    if (valid)
+    {
+        for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
+        {
+            CTokenKind kind = preprocess.tokens[token_index].kind;
+            identifier_token_count += kind == C_TOKEN_IDENTIFIER;
+            string_literal_count += kind == C_TOKEN_STRING_LITERAL;
+        }
+        type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
+        symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
+        function_capacity = parse.declaration_count;
+        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+        {
+            function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
+        }
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.token_count + 16);
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.body_token_count + 16);
+        }
+        for (u32 bound_index = 0; bound_index < parse.array_bound_count; bound_index += 1)
+        {
+            query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)parse.array_bounds[bound_index].token_count + 16);
+        }
+    }
+    valid = valid && type_capacity <= UINT32_MAX && symbol_capacity <= UINT32_MAX && function_capacity <= UINT32_MAX &&
+            query_frame_capacity <= UINT32_MAX;
+    if (valid)
+    {
+        *plan_out = (CIrLowerCapacityPlan){
+            .token_capacity = token_capacity,
+            .type_capacity = (u32)type_capacity,
+            .symbol_capacity = (u32)symbol_capacity,
+            .function_capacity = (u32)function_capacity,
+            .query_frame_capacity = (u32)query_frame_capacity,
+        };
+    }
+    return valid;
+}
+
 CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                          CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
-    if (!arena || parse.diagnostic_count)
+    CIrLowerCapacityPlan plan = {0};
+    if (!arena || !c_ir_lower_capacity_plan(preprocess, parse, &plan))
     {
         return result;
     }
-    if (preprocess.token_count > UINT32_MAX)
-    {
-        return result;
-    }
-    u32 token_capacity = (u32)preprocess.token_count;
-    u32 identifier_token_count = 0;
-    u32 string_literal_count = 0;
-    for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
-    {
-        CTokenKind kind = preprocess.tokens[token_index].kind;
-        identifier_token_count += kind == C_TOKEN_IDENTIFIER;
-        string_literal_count += kind == C_TOKEN_STRING_LITERAL;
-    }
-    u64 type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
-    u64 symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
-    u64 function_capacity = parse.declaration_count;
-    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-    {
-        function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
-    }
-    u64 query_frame_capacity = 16;
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration declaration = parse.declarations[declaration_index];
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.token_count + 16);
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)declaration.body_token_count + 16);
-    }
-    for (u32 bound_index = 0; bound_index < parse.array_bound_count; bound_index += 1)
-    {
-        query_frame_capacity = BUSTER_MAX(query_frame_capacity, (u64)parse.array_bounds[bound_index].token_count + 16);
-    }
-    if (type_capacity > UINT32_MAX || symbol_capacity > UINT32_MAX || function_capacity > UINT32_MAX || query_frame_capacity > UINT32_MAX)
-    {
-        return result;
-    }
+    u32 type_capacity = plan.type_capacity;
+    u32 symbol_capacity = plan.symbol_capacity;
+    u32 function_capacity = plan.function_capacity;
+    u32 query_frame_capacity = plan.query_frame_capacity;
     Arena* temporary_conflicts[] = {
         arena,
     };
