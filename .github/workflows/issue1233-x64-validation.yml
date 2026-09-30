@@ -1,0 +1,40 @@
+name: Issue 1233 x86-64 hosted correctness
+on:
+  push:
+    branches: [codex/1233-unwind-x64-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7a60795f15dd9fa889c343ea45f684391672c028
+          fetch-depth: 0
+      - name: Independent linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lld
+          ld.lld --version
+      - name: Configure and build
+        run: |
+          git rev-parse HEAD
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o /tmp/buster1233-driver
+          /tmp/buster1233-driver generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          /tmp/buster1233-driver build --config Release -t ide
+      - name: Full registered suite
+        if: always()
+        run: /tmp/buster1233-driver build --config Release -t test_all
+      - name: Execution mode matrix
+        if: always()
+        run: /tmp/buster1233-driver test_mode_matrix --config Release
+      - name: Release self-host fixed point
+        if: always()
+        run: /tmp/buster1233-driver test_self_host --config Release
+      - name: Source-size check
+        if: always()
+        run: /tmp/buster1233-driver source_size --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
