@@ -7,6 +7,8 @@
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 
+BUSTER_F_DECL String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type);
+
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_diagnostic_test_compile(Arena* arena, String8 path, bool suppress)
 {
     String8 command[] = {S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux"), path};
@@ -169,6 +171,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTe
 UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    IrType signed_integer = {.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true};
+    IrType unsigned_integer = {.kind = IR_TYPE_INTEGER, .bit_width = 64};
+    IrType floating = {.kind = IR_TYPE_FLOAT, .bit_width = 80};
+    IrType array = {.kind = IR_TYPE_ARRAY, .element_count = 7};
+    IrType named_structure = {.name = S8("struct widget"), .kind = IR_TYPE_STRUCT};
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, 0), S8("unresolved type"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &signed_integer), S8("32-bit signed integer"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &unsigned_integer), S8("64-bit unsigned integer"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &floating), S8("80-bit floating-point"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &array), S8("7-element array"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &named_structure), S8("struct widget"));
+
+    // #1725 was reported through this expression. Its lowering has since been
+    // repaired, so preserve that success while the direct renderer assertions
+    // above cover diagnostics reachable only after internal recovery failures.
+    String8 comma_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-comma-expression"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(comma_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return (1, 2); }\n"))));
+    CompilerDriverResult comma = compiler_diagnostic_test_compile(arguments->arena, comma_path, false);
+    BUSTER_TEST_RAW(arguments, comma.error == COMPILER_DRIVER_ERROR_NONE, comma.diagnostic);
+    BUSTER_TEST(arguments, comma.diagnostic_count == 0);
+    BUSTER_TEST(arguments, os_file_delete(comma_path));
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_null_device_output);

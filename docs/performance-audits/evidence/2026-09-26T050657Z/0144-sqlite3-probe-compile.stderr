@@ -1,0 +1,1 @@
+cc: error: /home/runner/work/buster/buster/external/initializer-roots-sqlite/sqlite-amalgamation-3530400/sqlite3.c:137217:3: in function 'sqlite3RegisterBuiltinFunctions': could not lower initializer expression for local 'aBuiltinFunc'

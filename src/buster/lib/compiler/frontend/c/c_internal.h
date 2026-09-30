@@ -293,7 +293,7 @@ BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
 #define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
 #endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
-                                             CParseResult checkpoint, u32 mutation_mark);
+                                             CParseResult const* checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
 BUSTER_C_EXTERN bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end);
 BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess,
@@ -964,8 +964,13 @@ struct CParseExpressionTypeTask
 struct CTypeParseFrame
 {
     CParseResult* result;
-    CParseResult checkpoint;
-    CPreprocessResult preprocess;
+    // The token stream of the root query that pushed this frame, shared by
+    // every frame of one machine run: the root outlives the run, which pops
+    // its frames before returning or failing, so no frame holds a copy. A
+    // frame that saves a rollback snapshot keeps it in the machine's
+    // frame_checkpoints row of the same slot, not in the frame, because few
+    // frames ever take one and every push copies the whole row.
+    CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
     CType qualifiers;
@@ -1088,6 +1093,11 @@ struct CTypeParseMachine
     u32 expression_query_start;
     u32 expression_query_end;
     CTypeParseFrame* frames;
+    // One rollback snapshot per frame slot, written only by the frame kinds
+    // that can abandon a partial parse (aggregate segments and typeof/_Atomic
+    // operands) and read back only by that frame; see
+    // c_type_parse_frame_checkpoint.
+    CParseResult* frame_checkpoints;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
     CTypeId* incomplete_array_chain;

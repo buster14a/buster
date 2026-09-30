@@ -502,6 +502,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
         compiler_driver_argument_error(arena, invocation, S8("the native C dialect option is not used by GPU target: {S8}"),
                                        gpu_target_to_string(arena, invocation->gpu_target));
     }
+    else if (invocation->plain_char_policy_explicit)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("plain-char signedness options are not supported for external GPU target: {S8}"),
+                                       gpu_target_to_string(arena, invocation->gpu_target));
+    }
     else if (invocation->source_metrics_path.length)
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
@@ -1594,6 +1599,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verify_codegen = true;
             continue;
         }
+        if (string_equal(argument, S8("-funsigned-char")) || string_equal(argument, S8("-fsigned-char")))
+        {
+            invocation.plain_char_policy = string_equal(argument, S8("-funsigned-char")) ?
+                                               TARGET_PLAIN_CHAR_POLICY_UNSIGNED : TARGET_PLAIN_CHAR_POLICY_SIGNED;
+            invocation.plain_char_policy_explicit = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-fsysv-unnamed-bitfields=")))
         {
             value = compiler_driver_option_value(argument, S8("-fsysv-unnamed-bitfields="));
@@ -1947,6 +1959,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action == COMPILER_DRIVER_ACTION_LINK)
     {
         invocation.position_independent = true;
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
+    {
+        invocation.target.plain_char_policy = invocation.plain_char_policy;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -2557,13 +2573,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
 // The ELF counterpart of compiler_driver_pe_library_exports.  A shared library
 // is looked up where the loader would look for it, and a file whose machine
 // disagrees with the target is skipped rather than believed, so a cross link
-// does not read the host's own libc.
+// does not read the host's own libc.  Without a sysroot, `/usr/<triple>/lib`
+// is also searched: it is where Debian's cross libc packages (for example
+// libc6-arm64-cross) install and where the GNU cross toolchains look.
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
                                                              NativeDynamicLibrary* library, FileMapRead* export_map)
 {
     String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
-    String8 roots[6] = {0};
+    String8 roots[7] = {0};
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -2578,6 +2596,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     {
         roots[root_count++] = string_format(arena, S8("/lib/{S8}"), multiarch);
         roots[root_count++] = string_format(arena, S8("/usr/lib/{S8}"), multiarch);
+        roots[root_count++] = string_format(arena, S8("/usr/{S8}/lib"), multiarch);
         roots[root_count++] = S8("/lib64");
         roots[root_count++] = S8("/usr/lib64");
         roots[root_count++] = S8("/lib");

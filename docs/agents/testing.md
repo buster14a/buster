@@ -44,14 +44,14 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
-- CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
-  opt-in GitHub-hosted desktop capacity uses the source-free broker template in
-  `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
-  runs the same coverage as the Forgejo matrix — combination matrix, execution-mode
-  matrix, Android and iOS — on GitHub's standard runners for the migration
-  described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
-  desktop OS at both x86-64 and AArch64; three independent mobile shards retain
-  the Android and iOS suites without repeating desktop work. The independent
+- Active CI is defined under `.github/workflows/`; the current tree has no
+  Forgejo workflow definitions. The historical source-free broker contract is
+  documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
+  runs the combination matrix, execution-mode matrix, Android and iOS on
+  GitHub standard runners. Its five desktop lanes cover Linux and Windows at
+  x86-64 and AArch64, plus macOS AArch64; two independent mobile shards retain
+  Android x86-64 and iOS AArch64. Apple x86-64 is best-effort source/target
+  compatibility, outside routine CI; see [Apple CI policy](../apple-ci-policy.md). The independent
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
   Require the
@@ -63,9 +63,11 @@
   The aggregate's independent desktop inventory checks exact-run job attempts
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
-  a 30-second total metadata budget. A later exact snapshot may recover a
-  transient omission; a persistent empty, stale or ambiguous record fails
-  closed. It never borrows step proof from an older attempt when a newer attempt
+  a 30-second total metadata budget. Transient 5xx/429/transport reads retry
+  in that budget, falling back to smaller jobs pages after a 5xx; a 4xx fails
+  immediately. A later exact snapshot may recover a transient omission; a
+  persistent empty, stale or ambiguous record fails closed, and its errors are
+  printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
@@ -88,7 +90,7 @@
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
   supported-platform coverage when changing build orchestration or the
-  compiler pipeline. The GitHub workflow keeps the six existing platform check
+  compiler pipeline. The GitHub workflow keeps the five retained platform check
   names, runs full PR/main/tag/merge-group coverage without duplicate feature
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
@@ -421,6 +423,86 @@ streams, and `/dev/full` on Linux, must still terminate normally with status 1
 within the existing deadline. Fatal reporters use recoverable output attempts
 so an output failure cannot recursively report itself. These are unsuccessful
 process controls, not successful compiler or missing-evidence observations.
+
+## Fixture start records and the hang watchdog
+
+Verbose and CI runs print a start record when each arena scope opens, before
+anything the scope itself reports, so the last start line of a hung or crashed
+serial run names its fixture (`body` is the module scope):
+
+```text
+TEST_FIXTURE_START_V1 kind=fixture module=c_frontend_tests fixture=c_test_enum_runtime index=17
+```
+
+This line is a **format example**. Parallel lanes keep their fixture, arena,
+failure and timing rows buffered so successful replay remains deterministic.
+Verbose and CI runs bracket each non-empty parallel gang with live serial rows:
+
+```text
+TEST_PARALLEL_GANG_V1 status=started module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+TEST_PARALLEL_GANG_V1 status=completed module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+```
+
+The `started` row is complete before `lane_run` begins. The matching
+`completed` row appears only after every lane buffer has replayed in descriptor
+order. A crash in any lane therefore leaves a started row without its
+completion and names the exact eligible module set, while the buffered payload
+between the boundaries is unchanged. The watchdog below still names the exact
+lane and innermost scope when execution hangs instead of exiting.
+
+Every registered module also runs under a wall-clock watchdog on desktop
+Linux, macOS and Windows. Each scope begin or end publishes the module's
+innermost open scope. When one position stays current longer than
+`BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS`, the runner prints one record per
+expired module and ends the process with status 124:
+
+```text
+TEST_FIXTURE_TIMEOUT_V1 kind=fixture module=c_frontend_tests fixture=c_test_enum_runtime index=17 elapsed_ms=1800012 deadline_seconds=1800 last_completed=c_test_volatile_split_bit_fields
+```
+
+This is also a format example; the index and elapsed time are illustrative.
+`elapsed_ms` counts from when that scope last became innermost: its begin or
+the end of its most recent nested scope. `last_completed` names the module's
+most recently closed scope, which localizes a hang in a `body` between
+fixtures. The deadline therefore bounds the longest stretch between scope transitions, not a
+whole module. The default is 1800 seconds. The slowest recorded module,
+`compiler_driver_tests` under sanitized Clang Debug on hosted Windows x86-64,
+took 414 seconds across 39 scopes (see
+[driver test timing](../driver-test-timing.md)). The default is still far below
+the 300-minute desktop job timeout that such a hang used to exhaust.
+Set a whole number of seconds to override it, or `0` to disable it. An invalid
+value keeps the default and fails the run with a
+`TEST_FIXTURE_WATCHDOG_V1 status=invalid-deadline` record. Verbose and CI runs
+state the deadline in force with `TEST_FIXTURE_WATCHDOG_V1 status=...`:
+
+| Status | Meaning |
+|---|---|
+| `armed` | The watchdog thread is running |
+| `disabled` | The deadline is `0` |
+| `debugger` | A debugger was attached at startup, and a breakpoint would look like a hang |
+| `unsupported` | Android, iOS or `BUSTER_SINGLE_THREADED` builds; the mobile launchers keep their own deadlines |
+| `thread-failed` | The thread could not start; the run fails |
+
+The watchdog thread is created with `ThreadCreateOptions.untracked`. It reads
+only its slots, and `os_is_only_live_thread()` must stay true for modules
+that check serial initialization. On expiry it terminates the process without
+running exit handlers, because the stuck thread may hold any lock.
+`test_fixture_watchdog_self_test` covers deadline parsing, start records,
+nested transitions, expiry and the record text without a thread or a sleep.
+`os_tests` also runs a real `ide test` child through the private
+`BUSTER_TEST_WATCHDOG_CHILD_MODE` payload. That payload spins in one fixture
+under a one-second override. The child must exit with status 124, print the
+timeout record after the fixture's start record, write no stderr, and take at
+least the deadline. This check adds about one second to `os_tests`.
+
+`test_parallel_gang_report_self_test` verifies the exact boundary text, module
+order, quiet-mode suppression and an unchanged replay payload without adding
+registered assertions. Desktop `os_tests` also launches a selected parallel
+module through the private `BUSTER_TEST_PARALLEL_CRASH_CHILD_MODE` seam. The
+child opens its buffered module scope and exits with status 1. The parent
+requires the live started row, forbids the completed row, and checks the fatal
+stderr message. This harness regression changes neither assertion totals nor
+`TEST_MODULE_TIMING` rows.
 
 ## Node-backed Wasm oracle deadlines
 

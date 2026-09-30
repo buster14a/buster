@@ -196,6 +196,76 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_export_rva(ByteSlice image, Str
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_store(u8* bytes, u64 offset, u64 value, u32 size)
+{
+    for (u32 index = 0; index < size; index += 1)
+    {
+        bytes[offset + index] = (u8)(value >> (index * 8));
+    }
+}
+
+// A minimal ELF shared object for `machine` whose .dynsym defines each name in
+// `names` as a global function: enough for the driver's export scan to treat
+// it as a readable libc without a target sysroot on the host.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_shared_library(Arena* arena, u16 machine, String8 const* names, u32 name_count)
+{
+    enum
+    {
+        HEADER_SIZE = 64,
+        SYMBOL_SIZE = 24,
+        SECTION_HEADER_SIZE = 64,
+        SECTION_COUNT = 3,
+    };
+    u64 string_size = 1;
+    for (u32 index = 0; index < name_count; index += 1)
+    {
+        string_size += names[index].length + 1;
+    }
+    u64 string_offset = HEADER_SIZE;
+    u64 symbol_offset = align_forward(string_offset + string_size, 8);
+    u64 symbol_size = (u64)(name_count + 1) * SYMBOL_SIZE;
+    u64 section_table = symbol_offset + symbol_size;
+    u64 length = section_table + SECTION_COUNT * SECTION_HEADER_SIZE;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    memcpy(bytes, "\x7f" "ELF", 4);
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    compiler_driver_test_store(bytes, 16, 3, 2);
+    compiler_driver_test_store(bytes, 18, machine, 2);
+    compiler_driver_test_store(bytes, 20, 1, 4);
+    compiler_driver_test_store(bytes, 40, section_table, 8);
+    compiler_driver_test_store(bytes, 52, HEADER_SIZE, 2);
+    compiler_driver_test_store(bytes, 58, SECTION_HEADER_SIZE, 2);
+    compiler_driver_test_store(bytes, 60, SECTION_COUNT, 2);
+    u64 name_offset = 1;
+    for (u32 index = 0; index < name_count; index += 1)
+    {
+        u64 symbol = symbol_offset + (u64)(index + 1) * SYMBOL_SIZE;
+        memcpy(bytes + string_offset + name_offset, names[index].pointer, names[index].length);
+        compiler_driver_test_store(bytes, symbol, name_offset, 4);
+        bytes[symbol + 4] = 0x12;
+        compiler_driver_test_store(bytes, symbol + 6, 1, 2);
+        compiler_driver_test_store(bytes, symbol + 8, 0x1000 + (u64)index * 16, 8);
+        name_offset += names[index].length + 1;
+    }
+    u64 dynamic_symbols = section_table + SECTION_HEADER_SIZE;
+    compiler_driver_test_store(bytes, dynamic_symbols + 4, 11, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 24, symbol_offset, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 32, symbol_size, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 40, 2, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 44, 1, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 48, 8, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 56, SYMBOL_SIZE, 8);
+    u64 dynamic_strings = dynamic_symbols + SECTION_HEADER_SIZE;
+    compiler_driver_test_store(bytes, dynamic_strings + 4, 3, 4);
+    compiler_driver_test_store(bytes, dynamic_strings + 24, string_offset, 8);
+    compiler_driver_test_store(bytes, dynamic_strings + 32, string_size, 8);
+    compiler_driver_test_store(bytes, dynamic_strings + 48, 1, 8);
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
 {
     u64 offset = 0;
@@ -2935,6 +3005,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu_option_arguments));
     BUSTER_TEST(arguments, gpu_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
                                string_starts_with_sequence(gpu_option.diagnostic, S8("GPU option requires a GPU target")));
+
+    String8 gpu_plain_char_arguments[] = {
+        S8("-target"), S8("nvptx64-nvidia-cuda"), S8("-funsigned-char"), invalid_input,
+    };
+    CompilerDriverInvocation gpu_plain_char_option =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu_plain_char_arguments));
+    BUSTER_TEST(arguments, gpu_plain_char_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                               string_starts_with_sequence(gpu_plain_char_option.diagnostic,
+                                                           S8("plain-char signedness options are not supported")));
 
     String8 input = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".input"));
     String8 output = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".o"));
@@ -10033,6 +10112,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// Issue 1613: an unreferenced declaration or unneeded definition still
+// reached non-native output. LLVM bitcode carried `declare internal`, which
+// the verifier rejects, and the eBPF object wrote an undefined symbol for it.
+// Declarations a data relocation names must remain in both outputs.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unreferenced_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int unused_proto(void);\n"
+                        "static int unused_definition(void) { return 1; }\n"
+                        "extern int unused_extern_data;\n"
+                        "static int referenced_static(void);\n"
+                        "extern int referenced_extern(void);\n"
+                        "int (*referenced_pointers[])(void) = {referenced_static, referenced_extern};\n"
+                        "int main(void) { return 0; }\n");
+    String8 absent[] = {S8("unused_proto"), S8("unused_definition"), S8("unused_extern_data")};
+    String8 present[] = {S8("referenced_static"), S8("referenced_extern")};
+    // The first target is compiled with -emit-llvm; the other selects the
+    // eBPF emitter by target alone.
+    String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), S8("-target"), target_names[target_index], S8("-o"), output, input};
+            u32 skipped = target_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                if (target_index == 0)
+                {
+                    // Bitcode spells names as 6-bit fields, so count the
+                    // module's entities instead: main, both referenced
+                    // declarations, and the pointer table.
+                    LlvmBitcodeStats stats = compiled.llvm_bitcode.stats;
+                    BUSTER_TEST(arguments, compiled.has_llvm_bitcode && compiled.llvm_bitcode.success);
+                    BUSTER_TEST(arguments, stats.function_count == 3 && stats.defined_function_count == 1 && stats.global_count == 1);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, compiled.has_ebpf);
+                    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                    String8 contents = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(absent); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, absent[name_index]) == BUSTER_STRING_NO_MATCH, absent[name_index]);
+                    }
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(present); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, present[name_index]) != BUSTER_STRING_NO_MATCH, present[name_index]);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -11010,6 +11153,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
@@ -11677,6 +11821,27 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !register_allocator_default.register_allocator_explicit);
     BUSTER_TEST(arguments, !register_allocator_default.verify_codegen);
     BUSTER_TEST(arguments, !register_allocator_default.record_codegen_fallbacks);
+    String8 signed_char_wins[] = {S8("-funsigned-char"), S8("-fsigned-char"), S8("source.c")};
+    CompilerDriverInvocation signed_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(signed_char_wins));
+    BUSTER_TEST(arguments, signed_char_policy.error == COMPILER_DRIVER_ERROR_NONE && signed_char_policy.plain_char_policy_explicit &&
+                             signed_char_policy.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
+                             signed_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED);
+    String8 unsigned_char_wins[] = {S8("-fsigned-char"), S8("-funsigned-char"), S8("source.c")};
+    CompilerDriverInvocation unsigned_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsigned_char_wins));
+    BUSTER_TEST(arguments, unsigned_char_policy.error == COMPILER_DRIVER_ERROR_NONE && unsigned_char_policy.plain_char_policy_explicit &&
+                             unsigned_char_policy.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_UNSIGNED &&
+                             unsigned_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_UNSIGNED);
+    String8 target_char_policy_arguments[] = {
+        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fsigned-char"), S8("source.c"),
+    };
+    CompilerDriverInvocation target_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_char_policy_arguments));
+    BUSTER_TEST(arguments, target_char_policy.error == COMPILER_DRIVER_ERROR_NONE &&
+                             target_char_policy.target.cpu_arch == CPU_ARCH_AARCH64 &&
+                             target_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
+                             target_data_layout(target_char_policy.target).plain_char_is_signed);
     String8 census_command[] = {S8("-fcodegen-fallback-census"), S8("source.c")};
     CompilerDriverInvocation census_enabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command));
     BUSTER_TEST(arguments, census_enabled.error == COMPILER_DRIVER_ERROR_NONE && census_enabled.record_codegen_fallbacks);
@@ -14505,6 +14670,67 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_STRING_TEST(arguments, c_undefined_reference.diagnostics[0].symbol, S8("buster_no_such_function"));
         BUSTER_TEST(arguments, !c_undefined_reference.diagnostics[0].primary.has_range && c_undefined_reference.diagnostics[0].primary.position.line == 0);
     }
+    // The same refusal holds for every hosted ELF architecture once the
+    // target's libc is readable: an AArch64 link used to emit the missing
+    // name as a .dynsym import because no aarch64 libc.so.6 was found, and
+    // the program died at load with "symbol lookup error" (GitHub #1729).
+    // Each target reads a synthetic libc through -L, so the check needs no
+    // cross sysroot on the host.  A weak undefined reference still links.
+    {
+        static String8 const libc_names[] = {S8_INITIALIZER("exit"), S8_INITIALIZER("__cxa_atexit"), S8_INITIALIZER("puts")};
+        static String8 const cross_targets[] = {S8_INITIALIZER("x86_64-linux"), S8_INITIALIZER("aarch64-linux")};
+        static u16 const cross_machines[] = {62, 183};
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(cross_targets); target_index += 1)
+        {
+            buster_test_arena_end(arguments, driver_fixture, true);
+            driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_cross_undefined_reference"), false);
+            String8 library_directory = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-libc"), S8(""));
+            BUSTER_TEST(arguments, os_make_directory_attempt(library_directory));
+            ByteSlice libc_image = compiler_driver_test_elf_shared_library(arguments->arena, cross_machines[target_index], libc_names,
+                                                                            BUSTER_ARRAY_LENGTH(libc_names));
+            BUSTER_TEST(arguments, file_write(string_format_z(arguments->arena, S8("{S8}/libc.so.6"), library_directory), libc_image));
+            String8 missing_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-undefined"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(missing_source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                                                                       "void definitely_missing_symbol(void);\n"
+                                                                       "int main(void) { definitely_missing_symbol(); return 0; }\n"))));
+            String8 missing_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-undefined"), S8(""));
+            String8 missing_command_line[] = {
+                S8("-target"), cross_targets[target_index], S8("-L"), library_directory, S8("-o"), missing_output_path, missing_source_path,
+            };
+            CompilerDriverResult missing = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_command_line)));
+            BUSTER_TEST(arguments, missing.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_TEST(arguments, string_ends_with_sequence(missing.diagnostic, S8("unresolved symbol: definitely_missing_symbol")));
+            // Where the host carries a Debian cross libc, the default search
+            // finds it without -L, as the GNU cross toolchains do.
+            static String8 const cross_libc_paths[] = {S8_INITIALIZER("/usr/x86_64-linux-gnu/lib/libc.so.6"),
+                                                       S8_INITIALIZER("/usr/aarch64-linux-gnu/lib/libc.so.6")};
+            FileMapRead cross_libc = file_map_read(arguments->arena, cross_libc_paths[target_index], (FileReadOptions){0});
+            if (cross_libc.bytes.pointer)
+            {
+                String8 default_command_line[] = {
+                    S8("-target"), cross_targets[target_index], S8("-o"), missing_output_path, missing_source_path,
+                };
+                CompilerDriverResult default_search = compiler_driver_execute_invocation(
+                    arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command_line)));
+                BUSTER_TEST(arguments, default_search.error == COMPILER_DRIVER_ERROR_LINK);
+                BUSTER_TEST(arguments, string_ends_with_sequence(default_search.diagnostic, S8("unresolved symbol: definitely_missing_symbol")));
+            }
+            file_map_unmap(cross_libc);
+            String8 weak_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-weak"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(weak_source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                                                                    "int puts(const char*);\n"
+                                                                    "__attribute__((weak)) void maybe_missing_symbol(void);\n"
+                                                                    "int main(void) { if (maybe_missing_symbol) maybe_missing_symbol(); return puts(\"x\") < 0; }\n"))));
+            String8 weak_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-weak"), S8(""));
+            String8 weak_command_line[] = {
+                S8("-target"), cross_targets[target_index], S8("-L"), library_directory, S8("-o"), weak_output_path, weak_source_path,
+            };
+            CompilerDriverResult weak = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command_line)));
+            BUSTER_TEST(arguments, weak.error == COMPILER_DRIVER_ERROR_NONE);
+        }
+    }
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its
     // global allocator hooks (R_X86_64_64 -> the generated PLT entry).
@@ -14898,6 +15124,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         scratch_end(c_shape_temporary);
+    }
+    String8 plain_char_policies[] = {S8("-funsigned-char"), S8("-fsigned-char")};
+    String8 plain_char_allocators[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    String8 plain_char_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 policy = 0; policy < BUSTER_ARRAY_LENGTH(plain_char_policies); policy += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(plain_char_allocators); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(plain_char_frontends); frontend += 1)
+            {
+                TemporalArena plain_char_temporary = scratch_begin(&arguments->arena, 1);
+                String8 output_suffix;
+#if BUSTER_ANDROID || BUSTER_IOS
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}.o"), policy, mode, frontend);
+#elif BUSTER_WINDOWS
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}.exe"), policy, mode, frontend);
+#else
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}"), policy, mode, frontend);
+#endif
+                String8 output = buster_test_temporary_path(plain_char_temporary.arena, S8("buster-c-plain-char"), output_suffix);
+                String8 plain_char_command_line[12];
+                u32 command_count = 0;
+                plain_char_command_line[command_count++] = plain_char_policies[policy];
+                plain_char_command_line[command_count++] = plain_char_allocators[mode];
+                plain_char_command_line[command_count++] = plain_char_frontends[frontend];
+                if (mode != 0)
+                {
+                    plain_char_command_line[command_count++] = S8("-fverify-codegen");
+                    plain_char_command_line[command_count++] = S8("-fno-machine-fallback");
+                }
+#if BUSTER_ANDROID || BUSTER_IOS
+                plain_char_command_line[command_count++] = S8("-c");
+#endif
+                plain_char_command_line[command_count++] = S8("-o");
+                plain_char_command_line[command_count++] = output;
+                plain_char_command_line[command_count++] = S8("tests/basic_c_plain_char_literal_sign.c");
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    plain_char_temporary.arena,
+                    compiler_driver_parse_arguments(plain_char_temporary.arena,
+                        (SliceString8){.pointer = plain_char_command_line, .length = command_count}));
+                if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("plain-char fixture {S8} mode={u32} frontend={u32} failed: {S8}\n"),
+                                    plain_char_policies[policy], mode, frontend, compiled.diagnostic);
+                }
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(plain_char_temporary.arena, output));
+                }
+#endif
+                scratch_end(plain_char_temporary);
+            }
+        }
     }
     // asm-goto behavior is a strict MIR acceptance gate, not merely one
     // default-allocator smoke run. Every successor (including fallthrough and

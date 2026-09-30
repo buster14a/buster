@@ -95,7 +95,11 @@
 //                                                 evaluator (128-bit integers)
 //   c_ir_constant_float_* ..                     source-format-preserving
 //   c_ir_constant_wide_float_*                    x87/binary128 constants
-//   c_ir_global_initializer, c_lower_to_ir        globals and the driver
+//   c_ir_global_initializer                       globals
+//   CIrRowStreams, c_ir_row_streams_trim          dense, line-aligned
+//                                                 construction rows shared by
+//                                                 the functions of one module
+//   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -427,6 +431,64 @@ struct CIrTypeContext
     // literal-fit queries take the type-table path instead.
     u64 literal_limits[C_TYPE_COUNT];
 };
+
+BUSTER_C_INTERNAL String8 c_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    if (!type)
+    {
+        return S8("unresolved type");
+    }
+    if (type->name.length)
+    {
+        return type->name;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_VOID:
+        return S8("void");
+    case IR_TYPE_BOOLEAN:
+        return S8("boolean");
+    case IR_TYPE_INTEGER:
+    {
+        return type->is_signed ? string_format(arena, S8("{u32}-bit signed integer"), type->bit_width)
+                               : string_format(arena, S8("{u32}-bit unsigned integer"), type->bit_width);
+    }
+    case IR_TYPE_FLOAT:
+    {
+        return type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? S8("bfloat16") : string_format(arena, S8("{u32}-bit floating-point"), type->bit_width);
+    }
+    case IR_TYPE_VA_LIST:
+        return S8("variadic argument list");
+    case IR_TYPE_POINTER:
+        return S8("pointer");
+    case IR_TYPE_SLICE:
+        return S8("slice");
+    case IR_TYPE_ARRAY:
+        return string_format(arena, S8("{u64}-element array"), type->element_count);
+    case IR_TYPE_VECTOR:
+        return string_format(arena, S8("{u64}-element vector"), type->element_count);
+    case IR_TYPE_FUNCTION:
+        return S8("function");
+    case IR_TYPE_RANGE:
+        return S8("range");
+    case IR_TYPE_STRUCT:
+        return S8("structure");
+    case IR_TYPE_UNION:
+        return S8("union");
+    case IR_TYPE_ENUM:
+        return S8("enumeration");
+    case IR_TYPE_COUNT:
+        break;
+    }
+    return S8("unknown type");
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    return c_ir_diagnostic_type_name(arena, type);
+}
+#endif
 
 BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
 {
@@ -5906,7 +5968,9 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                     // dead block. Counting it would keep a merge of every
                     // variable read after that label -- and of everything
                     // downstream -- alive. With no runnable edge carrying a
-                    // value, only the dead ones decide, as they always did.
+                    // value, only the dead ones decide, as they always did:
+                    // every dead root must agree, so the first mismatch is
+                    // final and a later repeat cannot restore triviality.
                     u32 same = UINT32_MAX;
                     bool trivial = true;
                     u32 dead_same = UINT32_MAX;
@@ -5923,7 +5987,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         }
                         else if (value != parameter->value.value)
                         {
-                            dead_trivial = dead_same == UINT32_MAX || value == dead_same;
+                            dead_trivial = dead_trivial && (dead_same == UINT32_MAX || value == dead_same);
                             dead_same = value;
                         }
                     }
@@ -7978,8 +8042,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     if (operation == IR_CONVERSION_COUNT)
     {
-        builder->failure_message = string_format(builder->arena, S8("cannot convert IR type {u32} (kind {u32}) to IR type {u32} (kind {u32})"),
-                                                 source_type.value, (u32)source_value->kind, target_type.value, (u32)target_value->kind);
+        builder->failure_message =
+            string_format(builder->arena, S8("cannot convert type '{S8}' to type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, source_value),
+                          c_ir_diagnostic_type_name(builder->arena, target_value));
         return IR_VALUE_ID_INVALID;
     }
     return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
@@ -25018,7 +25083,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
         IrType* type = ir_type_from_id(&builder->program->types, task.type);
         if (!type)
         {
-            builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize unresolved IR type {u32}"), task.type.value);
+            builder->failure_message = S8("cannot zero-initialize an unresolved type");
             return IR_VALUE_ID_INVALID;
         }
         if (task.kind == C_IR_ZERO_TASK_COMPLETE)
@@ -25077,7 +25142,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
             }
             if (zero.value == IR_ID_UNDERLYING_INVALID)
             {
-                builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize IR type kind {u32}"), (u32)type->kind);
+                builder->failure_message =
+                    string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
                 return zero;
             }
             *task.output = zero;
@@ -32909,10 +32975,9 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
         if (result_type.value == IR_ID_UNDERLYING_INVALID)
         {
-            builder->failure_message = string_format(
-                builder->arena, S8("conditional expression predicted incompatible branch types {u32} (kind {u32}) and {u32} (kind {u32})"),
-                true_type.value, true_type_value ? (u32)true_type_value->kind : UINT32_MAX, false_type.value,
-                false_type_value ? (u32)false_type_value->kind : UINT32_MAX);
+            builder->failure_message =
+                string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
+                              c_ir_diagnostic_type_name(builder->arena, true_type_value), c_ir_diagnostic_type_name(builder->arena, false_type_value));
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -42221,7 +42286,7 @@ bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool*
         .mutation_count = 1,
         .mutation_capacity = 1,
     };
-    c_type_parse_rollback(&machine, &result, checkpoint, 0);
+    c_type_parse_rollback(&machine, &result, &checkpoint, 0);
     bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
     bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 && string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
     bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 && string_equal(grown_types[0].tag, S8("RollbackTag"));
@@ -49525,6 +49590,62 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
     return false;
 }
 
+// A function's construction rows are sized before its body is lowered, from
+// its body tokens: three instruction, source and value slots per token and one
+// block slot per token. Most of that capacity is never written -- the
+// self-host unit writes about a quarter of its instruction and value slots and
+// a tenth of its block slots -- and when every function took its own
+// capacity-sized arrays, each function's unwritten tail sat between its rows
+// and the next function's. Those tails still cost pages: the used prefix of
+// one array and the start of the next share partly written 4 KiB pages, and a
+// transparent huge page is cleared in full as soon as any byte of it is
+// written. Instead, one stream per row kind is reserved for the whole module
+// from the sum of those capacities, each function starts at the streams'
+// cursors, and once it is lowered the cursors advance by the rows it actually
+// kept. The next function starts there, so every stream is written as one
+// dense run and its unwritten remainder is a single untouched suffix. The
+// instruction stream starts on a cache line, and its rows are exactly one line
+// each, so no row straddles two lines in the passes that sweep them. A trimmed
+// function's capacity becomes its count: any later append takes ir.c's
+// ordinary growth path, which moves that array out of the stream, and an
+// array that already moved during lowering leaves its cursor where it was.
+#define C_IR_ROW_STREAM_ALIGNMENT 64
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == C_IR_ROW_STREAM_ALIGNMENT);
+
+typedef struct CIrRowStreams CIrRowStreams;
+struct CIrRowStreams
+{
+    IrBlock* blocks;
+    IrInstruction* instructions;
+    IrSourceRange* sources;
+    IrValue* values;
+    u64 block_slots;
+    u64 instruction_slots;
+    u64 block_cursor;
+    u64 instruction_cursor;
+    u64 value_cursor;
+};
+
+BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunction* function)
+{
+    if (function->blocks == streams->blocks + streams->block_cursor)
+    {
+        streams->block_cursor += function->block_count;
+        function->block_capacity = function->block_count;
+    }
+    if (function->instructions == streams->instructions + streams->instruction_cursor &&
+        function->instruction_canonical_sources == streams->sources + streams->instruction_cursor)
+    {
+        streams->instruction_cursor += function->instruction_count;
+        function->instruction_capacity = function->instruction_count;
+    }
+    if (function->values == streams->values + streams->value_cursor)
+    {
+        streams->value_cursor += function->value_count;
+        function->value_capacity = function->value_count;
+    }
+}
+
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                     CIRLowerOptions options)
 {
@@ -50391,8 +50512,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                         definition_rejection = member_rejection;
                         definition_rejection_member = field_index;
                     }
+                    // The semantic parse evaluated the width where the member
+                    // was declared (CMember.bit_width); the IR layout takes
+                    // that number, so a folded sizeof and the object it sizes
+                    // cannot disagree about it. Only a width the parse could
+                    // not fold still reaches the lowering evaluator: a
+                    // temporary bridge that keeps every accepted program
+                    // accepted until the semantic phase owns the rejection.
                     u32 member_bit_width = member->bit_width;
-                    if (member->is_bit_field && member->bit_width_token_count)
+                    if (member->is_bit_field && !member->bit_width_resolved && member->bit_width_token_count)
                     {
                         u64 evaluated_width = 0;
                         if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
@@ -50413,10 +50541,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     // but the request to move the next member to a boundary
                     // that the layout below performs. Accepted, the named
                     // spelling laid out a member occupying no bits that could
-                    // still be assigned and read back. The check sits here,
-                    // where the constant expression has just been folded, so
-                    // `int b : 1 - 1;` is refused with the literal `int b : 0;`
-                    // rather than only the spelling the parse fast path folds.
+                    // still be assigned and read back. The check reads the
+                    // evaluated width the layout uses, so `int b : 1 - 1;` is
+                    // refused with the literal `int b : 0;`.
                     // The layout below still runs, the same way a rejected
                     // alignment specifier still hands back an alignment: the
                     // definition finishes and the program hears about the
@@ -51310,9 +51437,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         if (!type_value || !type_value->layout.resolved)
         {
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                .message = string_format(arena, S8("C IR lowering cannot resolve definition '{S8}' with C type {u32} (kind {u32}) and IR type {u32}"),
-                                         entity->name, entity->type.value,
-                                         entity->type.value < parse.type_count ? (u32)parse.types[entity->type.value].kind : UINT32_MAX, type.value),
+                .message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
+                                         c_ir_diagnostic_type_name(arena, type_value)),
                 .location = entity->location,
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
@@ -51791,6 +51917,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             declaration_local_counts[entity->declaration_index] += 1;
         }
     }
+    // Reserve the module's row streams from the same per-function capacities
+    // the loop below assigns (c_ir_row_streams_trim). Every definition that
+    // could reach lowering is counted, so the streams bound every placement;
+    // bodies the loop skips or rejects before placing rows only leave part of
+    // the untouched suffix unused.
+    CIrRowStreams row_streams = {0};
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        u64 capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
+        if (declaration_functions[declaration_index] && declaration.is_definition && capacity <= UINT32_MAX)
+        {
+            row_streams.instruction_slots += capacity;
+            row_streams.block_slots += (u64)declaration.body_token_count + 8;
+        }
+    }
+    row_streams.blocks = arena_allocate(arena, IrBlock, row_streams.block_slots);
+    row_streams.instructions = (IrInstruction*)arena_allocate_bytes(
+        arena, arena_array_size(sizeof(IrInstruction), row_streams.instruction_slots), C_IR_ROW_STREAM_ALIGNMENT);
+    row_streams.sources = arena_allocate(arena, IrSourceRange, row_streams.instruction_slots);
+    row_streams.values = arena_allocate(arena, IrValue, row_streams.instruction_slots);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -51902,17 +52049,20 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             continue;
         }
         function->block_capacity = declaration.body_token_count + 8;
-        function->blocks = arena_allocate(arena, IrBlock, function->block_capacity);
         function->instruction_capacity = (u32)lowering_capacity;
-        function->instructions = arena_allocate(arena, IrInstruction, function->instruction_capacity);
+        function->value_capacity = (u32)lowering_capacity;
+        BUSTER_CHECK(function->block_capacity <= row_streams.block_slots - row_streams.block_cursor &&
+                     function->instruction_capacity <= row_streams.instruction_slots - row_streams.instruction_cursor &&
+                     function->value_capacity <= row_streams.instruction_slots - row_streams.value_cursor);
+        function->blocks = row_streams.blocks + row_streams.block_cursor;
+        function->instructions = row_streams.instructions + row_streams.instruction_cursor;
         // Sized with the instructions, because ir_function_add_instruction
         // stores a canonical source only into an array that already exists:
         // preallocating the instructions without this one silently dropped
         // every range lowering built, and with it every line row below the
         // function's own.
-        function->instruction_canonical_sources = arena_allocate(arena, IrSourceRange, function->instruction_capacity);
-        function->value_capacity = (u32)lowering_capacity;
-        function->values = arena_allocate(arena, IrValue, function->value_capacity);
+        function->instruction_canonical_sources = row_streams.sources + row_streams.instruction_cursor;
+        function->values = row_streams.values + row_streams.value_cursor;
         IR_CONSTRUCTION_RECORD(FUNCTION_STARTS, 1);
         IR_CONSTRUCTION_RECORD(BODY_TOKENS, declaration.body_token_count);
         IR_CONSTRUCTION_RECORD(PARAMETERS, signatures[declaration_index].parameter_count);
@@ -52161,6 +52311,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             };
             module->rejected_function_count += 1;
             program->rejected_function_count += 1;
+            c_ir_row_streams_trim(&row_streams, function);
             scratch_end(lowering_temporary);
             continue;
         }
@@ -52181,6 +52332,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;
+        c_ir_row_streams_trim(&row_streams, function);
         scratch_end(lowering_temporary);
     }
     // The alias pairs go in last, because only now is it settled which
