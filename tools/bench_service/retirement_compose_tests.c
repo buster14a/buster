@@ -123,6 +123,7 @@ typedef struct Driver
     /* The external closure (the worker unit's evidence); closure_null
      * passes a NULL array with the count. */
     TpRetirementComposeClosure closure[DRIVER_CLOSURE];
+    char const* closure_stored[DRIVER_CLOSURE];
     unsigned closure_count;
     int closure_null;
     TpRetirementComposeDeclaration declaration;
@@ -579,7 +580,8 @@ BUSTER_GLOBAL_LOCAL void driver_request(Driver* driver)
         .aa_metrics_tag = driver->aa_tag[0] ? driver->aa_tag : NULL,
         .code = driver->code, .code_count = driver->code_count, .prior = driver->prior,
         .prior_count = driver->prior_count, .closure = driver->closure_null ? NULL : driver->closure,
-        .closure_count = driver->closure_count, .sealed_path = driver->sealed};
+        .closure_stored = driver->closure_stored, .closure_count = driver->closure_count,
+        .sealed_path = driver->sealed};
 }
 
 BUSTER_GLOBAL_LOCAL int driver_compose(Driver* driver)
@@ -1588,16 +1590,18 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusals(void)
 }
 
 /* The external closure (#881 P4): one evidence file beside the store is
- * rehashed and sealed under its name; refused at the prior stage, with no
- * sealed result, are a digest mismatch, a missing file, a symbolic link, a
- * path leaving the root, a store file's path, a prior entry's path or name,
- * a workflow phase's name, a repeated entry, a NULL array and more than
+ * rehashed and sealed under its name, also when it is stored under another
+ * name than the path it is sealed under (lane F's layout); refused at the
+ * prior stage, with no sealed result, are a digest mismatch, a missing file,
+ * a symbolic link, a path leaving the root (stored or sealed), a store
+ * file's path, a prior entry's path or name (stored or sealed), a workflow
+ * phase's name, a repeated entry, a NULL array and more than
  * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES entries. */
 typedef enum ClosureCase
 {
     CLOSURE_ACCEPTED, CLOSURE_DIGEST, CLOSURE_MISSING, CLOSURE_SYMLINK, CLOSURE_ESCAPE, CLOSURE_STORE_PATH,
     CLOSURE_PRIOR_PATH, CLOSURE_PRIOR_NAME, CLOSURE_PHASE, CLOSURE_REPEATED, CLOSURE_NULL, CLOSURE_OVER_CAP,
-    CLOSURE_CASES
+    CLOSURE_MAPPED, CLOSURE_STORED_PRIOR, CLOSURE_MAPPED_ESCAPE, CLOSURE_CASES
 } ClosureCase;
 
 BUSTER_GLOBAL_LOCAL void test_compose_closure_case(ClosureCase which)
@@ -1639,16 +1643,30 @@ BUSTER_GLOBAL_LOCAL void test_compose_closure_case(ClosureCase which)
                                                  contract_digest};
         if (which == CLOSURE_PRIOR_NAME) entry.name = "contract.source";
         if (which == CLOSURE_PHASE) entry.name = "workflow.phases.independent_replay";
+        char const* stored = NULL;
+        if (which == CLOSURE_MAPPED || which == CLOSURE_STORED_PRIOR || which == CLOSURE_MAPPED_ESCAPE)
+        {
+            stored = which == CLOSURE_STORED_PRIOR ? "contract.md" : "retirement-evidence-harness";
+            entry.path = which == CLOSURE_MAPPED_ESCAPE ? "measurement/../harness" : "measurement/harness";
+            if (which == CLOSURE_STORED_PRIOR)
+            {
+                entry.bytes = strlen(contract);
+                entry.sha256 = contract_digest;
+            }
+        }
         driver->closure[0] = driver->closure[1] = entry;
+        driver->closure_stored[0] = driver->closure_stored[1] = stored;
         driver->closure_count = which == CLOSURE_REPEATED ? 2u :
                                 which == CLOSURE_OVER_CAP ? TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES + 1u : 1u;
         driver->closure_null = which == CLOSURE_NULL;
         int composed = driver_compose(driver);
         struct stat info;
         int sealed = fstatat(driver->store_fd, "retirement-sealed-result.json", &info, AT_SYMLINK_NOFOLLOW) == 0;
-        if (which == CLOSURE_ACCEPTED)
+        if (which == CLOSURE_ACCEPTED || which == CLOSURE_MAPPED)
             CHECK(composed && sealed &&
                   file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
+                                which == CLOSURE_MAPPED ?
+                                "\"name\":\"measurement.harness_binary\",\"path\":\"measurement/harness\"" :
                                 "\"name\":\"measurement.harness_binary\",\"path\":\"retirement-evidence-harness\""));
         else
         {

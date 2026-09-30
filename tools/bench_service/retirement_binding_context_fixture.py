@@ -14,9 +14,13 @@ requested_work, rules, subjects, support) plus the workflow's admission record
 descriptor. It then publishes every file the context names into the result
 root (bq_retirement_worker_evidence_publish): the subjects' binaries from its
 held descriptors, everything else from the installed evidence directory
-(``native-retirement-performance-v1.evidence`` under recipes/), each at the
-flat result-root name the context gives it (``retirement-evidence-*``) and
-only at the size and digest the context binds.
+(``native-retirement-performance-v1.evidence`` under recipes/), each under the
+result-root name lane F's replay maps its binding path to (``result_name``:
+``retirement-evidence-`` and the path with each ``/`` as ``--``) and only at
+the size and digest the context binds. The context names the record's own
+paths (``docs/native-retirement-support-v1.tsv``,
+``tools/throughput/retirement_stats.h``, ...), which the replay lays out
+again.
 
 This emits such a context for the preparation fixture and writes the
 evidence directory EVIDENCE (which must not exist yet): the structurally
@@ -50,6 +54,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -109,24 +114,50 @@ def git_blob(commit, path):
                           capture_output=True).stdout
 
 
+RESERVED = ("retirement-", "worker-phase-", "unit-campaign-", "native-retirement-performance-v1.")
+SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def result_name(path):
+    """The result-root name a binding path is published under (lane F's
+    replay layout; #1995's rule in tools/bench_service/retirement_lane_f.py,
+    and bq_retirement_worker_evidence_map, must match): PREFIX, then the path
+    with each `/` written as `--`. Refused like the producer refuses it: an
+    empty, `.` or `..` segment, a segment containing `--` or a byte outside
+    [A-Za-z0-9._-], a single-segment path that could name a result-root
+    entry, and a name longer than 128 bytes."""
+    segments = path.split("/")
+    if any(segment in ("", ".", "..") or "--" in segment or not SEGMENT_RE.fullmatch(segment)
+           for segment in segments) or (len(segments) == 1 and path.startswith(RESERVED)):
+        raise ValueError(f"binding path {path!r} has no unambiguous result-root name")
+    name = PREFIX + "--".join(segments)
+    if len(name) > 128 or len(path) > 128:
+        raise ValueError(f"binding path {path!r} is too long")
+    return name
+
+
 class Evidence:
-    """The installed evidence files, by flat result-root name."""
+    """The installed evidence files, by result-root name."""
 
     def __init__(self):
         self.files = {}
+        self.paths = set()
 
-    def put(self, name, data, installed=True):
+    def put(self, path, data, installed=True):
+        """The descriptor of `data` at binding path `path`; installed under
+        its result-root name unless the producer supplies it (held)."""
         if isinstance(data, str):
             data = data.encode("utf-8")
-        path = PREFIX + name
-        if path in self.files:
-            raise ValueError(f"evidence name {path} is repeated")
+        name = result_name(path)
+        if path in self.paths or name in self.files:
+            raise ValueError(f"evidence path {path} is repeated")
+        self.paths.add(path)
         if installed:
-            self.files[path] = data
+            self.files[name] = data
         return descriptor(path, data)
 
-    def json(self, name, value):
-        return self.put(name, canonical(value) + "\n")
+    def json(self, path, value):
+        return self.put(path, canonical(value) + "\n")
 
 
 def admission_records(census_rows, parsed, manifest_sha256, rows_sha256):
@@ -176,7 +207,7 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
             data = contents[item["path"]]
         else:
             continue
-        files[role] = evidence.put("census-" + role.replace("_", "-") + Path(item["path"]).suffix, data)
+        files[role] = evidence.put(item["path"], data)
     declaration = {
         "schema": binding.PERFORMANCE_DECLARATION_SCHEMA,
         "version": binding.PERFORMANCE_DECLARATION_VERSION,
@@ -187,14 +218,15 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
         "runtime_eligibility": "independent-native-executable-oracle-only",
         "code_section_eligibility": "deterministic-code-section-payload-only",
     }
-    files["performance_declaration"] = evidence.json("performance-declaration.json", declaration)
+    files["performance_declaration"] = evidence.json(
+        support["files"][binding.SUPPORT_FILE_ROLES.index("performance_declaration")]["path"], declaration)
     for item in support["files"]:
         item.update(files[item["name"]])
     validator = support["validator"]
-    validator["source"] = evidence.put("native_retirement_contract.py", contents[validator["source"]["path"]])
+    validator["source"] = evidence.put(validator["source"]["path"], contents[validator["source"]["path"]])
     items = record["requested_work"]["items"]
     for item in items:
-        artifact = evidence.put(f"closure-{item['kind']}", contents[item["artifact"]["path"]])
+        artifact = evidence.put(item["artifact"]["path"], contents[item["artifact"]["path"]])
         item["artifact"] = artifact
         support["closure"][item["kind"]]["artifact"] = artifact
         record["requested_work"]["closure"][item["kind"]].update(
@@ -213,23 +245,23 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
     contract_data = CONTRACT_PATH.read_bytes()
     if hashlib.sha256(contract_data).hexdigest() != contract:
         raise ValueError("the profile's contract pin is not the repository contract's digest")
-    record["contract"]["source"] = evidence.put("contract.md", contract_data)
+    record["contract"]["source"] = evidence.put(record["contract"]["source"]["path"], contract_data)
     measurement = record["measurement"]
     harness = git("rev-parse", "HEAD")
     measurement.update({
         "harness_source_commit": harness,
         "harness_source_tree": git("rev-parse", f"{harness}^{{tree}}"),
-        "harness_binary": evidence.put("harness", contents[measurement["harness_binary"]["path"]]),
-        "statistics_implementation": evidence.put("retirement_stats.h", git_blob(harness, STATISTICS_PATH)),
+        "harness_binary": evidence.put(measurement["harness_binary"]["path"],
+                                       contents[measurement["harness_binary"]["path"]]),
+        "statistics_implementation": evidence.put(STATISTICS_PATH, git_blob(harness, STATISTICS_PATH)),
     })
 
     # Producer toolchain.
     producer = record["producer"]
-    for group, name, leaf in (("toolchain", "compiler_binary", "producer-clang"),
-                              ("toolchain", "resource_directory", "producer-resource.tar"),
-                              ("build", "configuration", "producer-build-config.json"),
-                              ("build", "flags", "producer-build-flags.txt")):
-        producer[group][name] = evidence.put(leaf, contents[producer[group][name]["path"]])
+    for group, name in (("toolchain", "compiler_binary"), ("toolchain", "resource_directory"),
+                        ("build", "configuration"), ("build", "flags")):
+        path = producer[group][name]["path"]
+        producer[group][name] = evidence.put(path, contents[path])
     toolchain = {
         "compiler_binary_sha256": producer["toolchain"]["compiler_binary"]["sha256"],
         "resource_directory_sha256": producer["toolchain"]["resource_directory"]["sha256"],
@@ -247,11 +279,11 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
             raise ValueError(f"{role} binary {path} is not the held binary {digest}")
         subject = record["subjects"][role]
         subject["source_commit"], subject["source_tree"] = commit, tree
-        subject["binary"] = evidence.put(f"{role}-ide", data, installed=False)
-        subject["source_snapshot"] = evidence.json(f"{role}-source.json", {
+        subject["binary"] = evidence.put(subject["binary"]["path"], data, installed=False)
+        subject["source_snapshot"] = evidence.json(subject["source_snapshot"]["path"], {
             "schema": binding.SOURCE_SNAPSHOT_SCHEMA, "version": 1, "source_commit": commit,
             "source_tree": tree, "snapshot_kind": "git-tree-with-submodules-and-generated-inputs"})
-        subject["build_receipt"] = evidence.json(f"{role}-build.json", {
+        subject["build_receipt"] = evidence.json(subject["build_receipt"]["path"], {
             "schema": binding.BUILD_RECEIPT_SCHEMA, "version": 1, "source_commit": commit,
             "source_tree": tree, "source_snapshot_sha256": subject["source_snapshot"]["sha256"],
             "binary_sha256": digest, **toolchain,
@@ -261,13 +293,13 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
     # Execution: the service, host-profile, qualification and lease receipts.
     execution = record["execution"]
     execution["service"] = {"id": SERVICE_ID, "version": SERVICE_VERSION, "recipe": evidence.json(
-        "service-receipt.json", {
+        execution["service"]["recipe"]["path"], {
             "schema": binding.SERVICE_RECEIPT_SCHEMA, "version": 1, "service_id": SERVICE_ID,
             "service_version": SERVICE_VERSION, "whole_job": True,
             "phases": ["preparation", "build", "tests", "measurement", "finalization", "cleanup"],
             "supervisor_authoritative": True, "lease_protocol": binding.LEASE_PROTOCOL,
             "cgroup_cleanup": True, "descendant_cleanup": True})}
-    profile = evidence.json("host-profile.json", {
+    profile = evidence.json(execution["profile"]["descriptor"]["path"], {
         "schema": binding.PROFILE_SCHEMA, "version": 1, "profile_id": PROFILE_ID,
         "profile_version": PROFILE_VERSION, "machine_id": MACHINE_ID, "logical_cpu": cpu,
         "native_target": binding.NATIVE_TIMED_TARGET, "native_only": True,
@@ -276,14 +308,14 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
                             "descriptor": profile, "digest": profile["sha256"]}
     execution["host"] = {
         "machine_id": MACHINE_ID,
-        "qualification_receipt": evidence.json("host-qualification.json", {
+        "qualification_receipt": evidence.json(execution["host"]["qualification_receipt"]["path"], {
             "schema": binding.QUALIFICATION_SCHEMA, "version": 1, "machine_id": MACHINE_ID,
             "profile_id": PROFILE_ID, "profile_version": PROFILE_VERSION, "qualified": True,
             "logical_cpu": cpu, "native_target": binding.NATIVE_TIMED_TARGET,
             "whole_host_isolation": True, "lease_protocol": binding.LEASE_PROTOCOL}),
         "aa_admission_receipt": {"path": ADMISSION_PATH, "bytes": 1, "sha256": PENDING},
     }
-    execution["lease"]["receipt"] = evidence.json("lease-receipt.json", {
+    execution["lease"]["receipt"] = evidence.json(execution["lease"]["receipt"]["path"], {
         "schema": binding.LEASE_RECEIPT_SCHEMA, "version": 1, "authority": binding.LEASE_AUTHORITY,
         "access": binding.LEASE_ACCESS, "cleanup": binding.LEASE_CLEANUP, "owner": "server-supervisor",
         "candidate_can_access": False, "cloexec_before_candidate": True, "cgroup_cleanup": True,
@@ -291,7 +323,7 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
 
     # Provenance: the #510 receipts over these subjects, toolchain and harness.
     provenance = record["provenance"]
-    provenance["relation_receipt"] = evidence.json("provenance-relations.json", {
+    provenance["relation_receipt"] = evidence.json(provenance["relation_receipt"]["path"], {
         "schema": binding.PROVENANCE_SCHEMA, "version": binding.PROVENANCE_VERSION,
         **{role: {"source_commit": subjects[role]["source_commit"],
                   "source_tree": subjects[role]["source_tree"],
@@ -304,8 +336,8 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
                     "source_tree": measurement["harness_source_tree"],
                     "binary_sha256": measurement["harness_binary"]["sha256"],
                     "statistics_sha256": measurement["statistics_implementation"]["sha256"]}})
-    provenance["replay_bundle"] = evidence.put("provenance-replay-bundle.tar", "#510 bundle\n")
-    provenance["census_receipt"] = evidence.json("provenance-census-replay.json", {
+    provenance["replay_bundle"] = evidence.put(provenance["replay_bundle"]["path"], "#510 bundle\n")
+    provenance["census_receipt"] = evidence.json(provenance["census_receipt"]["path"], {
         "schema": "buster-native-retirement-census-replay-v1", "success": True,
         "release": "retirement-v1", "github_run_id": "123",
         "rows_validated": binding.SUPPORT_OBJECT_ROW_COUNT,
@@ -313,12 +345,12 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
         "joined_tree_sha256": "d" * 64, "candidate_binary_sha256": digests[1],
         "archived_direct_oracle_sha256": "e" * 64, "rebuilt_direct_oracle_sha256": "e" * 64,
         "rebuilt_matches_archived": True, "validator_report_sha256": files["validator_report"]["sha256"]})
-    provenance["strict_receipt"] = evidence.json("provenance-strict-replay.json", {
+    provenance["strict_receipt"] = evidence.json(provenance["strict_receipt"]["path"], {
         "schema": "buster-native-retirement-strict-replay-v1", "success": True,
         "release": "retirement-v1", "github_run_id": "123", "archive_sha256": "f" * 64,
         "archive_size": 1, "candidate_binary_sha256": digests[1], "recorded_summary": "pass",
         "replayed_summary": "pass", "cases": 1, "configurations": 432})
-    provenance["replay_receipt"] = evidence.json("provenance-replay.json", {
+    provenance["replay_receipt"] = evidence.json(provenance["replay_receipt"]["path"], {
         "schema": binding.REPLAY_SCHEMA, "version": binding.REPLAY_VERSION,
         "publisher": "native-retirement-evidence-v1",
         "bundle_sha256": provenance["replay_bundle"]["sha256"],
@@ -342,7 +374,7 @@ def context(census, binaries, digests, contract, seed, pairs, resamples, cpu):
 
     # The admission record over the census rows.
     census_rows = binding._tsv((census / CENSUS_FILES["rows"]).read_bytes(), binding.ROW_FIELDS, "census rows")
-    admission = evidence.json("admission-records.json", admission_records(
+    admission = evidence.json(record["workflow"]["records"]["admission"]["path"], admission_records(
         census_rows, parsed, files["manifest"]["sha256"], files["rows"]["sha256"]))
 
     lines = [HEADER]

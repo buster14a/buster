@@ -157,10 +157,12 @@ the composer's and lane F's workflow phases, is a result-root entry too: the
 producer publishes the binding context's evidence (support files, closures,
 subjects' snapshots, binaries and build receipts, producer toolchain, harness
 and statistics implementation, service, host-profile, qualification and lease
-receipts, provenance receipts, contract source and admission record) as flat
-`retirement-evidence-*` files beside `retirement-aa-admission.json`, each at
-the size and digest the record binds, and the composer seals them; they are
-ordinary regular files of the bundle index and the export. That record carries its sealed-result and
+receipts, provenance receipts, contract source and admission record) beside
+`retirement-aa-admission.json`, each at the size and digest the record binds
+and under the name the replay's layout maps its binding path to
+(`retirement-evidence-` and the path with each `/` as `--`), and the composer
+seals them under their binding paths; they are ordinary regular files of
+the bundle index and the export. That record carries its sealed-result and
 independent-replay phases as pending descriptors (the sealed result binds the
 record's digest), so it never passes a replay itself. Lane F's final binding
 is produced after the export, so it lives outside the service result: the

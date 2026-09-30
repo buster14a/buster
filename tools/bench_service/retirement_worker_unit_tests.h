@@ -1451,13 +1451,13 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_copy(int installed, BqReti
     for (u32 index = 0; ok && index < list->count; index += 1)
     {
         BqRetirementWorkerEvidence const* item = &list->items[index];
-        if (item->held || (dropped && !strcmp(item->path, dropped))) continue;
+        if (item->held || (dropped && !strcmp(item->stored, dropped))) continue;
         u32 length = 0;
-        char* bytes = bq_prep_worker_unit_slurp(installed, item->path, &length);
+        char* bytes = bq_prep_worker_unit_slurp(installed, item->stored, &length);
         char path[512];
-        int named = snprintf(path, sizeof(path), "%s/%s", directory, item->path);
+        int named = snprintf(path, sizeof(path), "%s/%s", directory, item->stored);
         ok = bytes && length && named > 0 && (size_t)named < sizeof(path);
-        if (ok && changed && !strcmp(item->path, changed)) bytes[length - 1u] ^= 1;
+        if (ok && changed && !strcmp(item->stored, changed)) bytes[length - 1u] ^= 1;
         ok = ok && bq_prep_test_write_bytes(path, bytes, length) && chmod(path, 0444) == 0;
         free(bytes);
     }
@@ -1486,7 +1486,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_evidence_run(BqRetirementWorkerE
     for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
     {
         char path[512], digest[SHA256_HEX_CAPACITY] = {0};
-        int named = snprintf(path, sizeof(path), "%s/%s", root, list->items[index].path);
+        int named = snprintf(path, sizeof(path), "%s/%s", root, list->items[index].stored);
         if (!(named > 0 && (size_t)named < sizeof(path) && bq_prep_test_file_sha(path, digest) &&
               !strcmp(digest, list->items[index].sha256)))
             result = BQ_CORRUPT;
@@ -1499,7 +1499,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_evidence_run(BqRetirementWorkerE
 
 /* The installed context with `count` more requested-work items (canonical:
  * each item's keys and its artifact's keys in sorted order), each a distinct
- * evidence path, inserted at the head of requested_work.items. */
+ * binding path, inserted at the head of requested_work.items. */
 BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed, u32 length, u32 count,
     BqRetirementWorkerBindingContext* grown)
 {
@@ -1518,7 +1518,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed
     for (u32 index = 0; ok && index < count; index += 1)
     {
         int written = snprintf(item, sizeof(item), "{\"artifact\":{\"bytes\":1,\"path\":\""
-                               BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "extra-%02u\",\"sha256\":\"%064u\"},"
+                               "work/extra-%02u.closure\",\"sha256\":\"%064u\"},"
                                "\"kind\":\"workloads\",\"name\":\"extra-%02u\"},", index, 0u, index);
         ok = written > 0 && (size_t)written < sizeof(item);
         item_length = ok ? (size_t)written : 0;
@@ -1540,9 +1540,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_evidence_grow(char const* installed
  * writes each at its listed digest. Refused, with no evidence file written
  * at all: swapped held binaries (BQ_SOURCE_MISMATCH), an installed file with
  * one byte changed and a missing one (BQ_RECIPE_MISMATCH). Refused at
- * listing: a context naming a path outside the evidence prefix or with a
- * slash, a byte count with a leading zero, and requested-work items beyond
- * BQ_RETIREMENT_WORKER_EVIDENCE_CAP (the cap itself lists). */
+ * listing: binding paths without an unambiguous result-root name
+ * (bq_retirement_worker_evidence_map) and requested-work items beyond
+ * BQ_RETIREMENT_WORKER_EVIDENCE_CAP (the cap itself lists). Each listed
+ * file's result-root name is its binding path mapped by lane F's rule. */
 BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixture* fixture,
     BqRetirementWorkerUnitSeams const* seams, BqJob const* reference)
 {
@@ -1561,6 +1562,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
                   bq_retirement_worker_evidence_list(&context, list);
     BQ_PREP_CHECK(listed && list->count == BQ_PREP_WORKER_UNIT_EVIDENCE && list->items[0].held == 0 &&
                   !strcmp(list->items[0].name, "contract.source") &&
+                  !strcmp(list->items[0].path, "docs/native-retirement-performance-contract.md") &&
+                  !strcmp(list->items[0].stored, BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX
+                          "docs--native-retirement-performance-contract.md") &&
                   !strcmp(list->items[1].name, "support.files[0]") &&
                   !strcmp(list->items[list->count - 1u].name, "workflow.records.admission"));
     BQ_PREP_CHECK(arena && bq_retirement_worker_evidence_measure(arena, fixture->installed_fd, seams->profile, &entries,
@@ -1596,7 +1600,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
     /* An installed receipt changed by one byte, then one missing. */
     char const* receipt = NULL;
     for (u32 index = 0; ready && index < list->count; index += 1)
-        if (!strcmp(list->items[index].name, "execution.service.recipe")) receipt = list->items[index].path;
+        if (!strcmp(list->items[index].name, "execution.service.recipe")) receipt = list->items[index].stored;
     int installed_evidence = ready ? open(evidence, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
     for (u32 mode = 0; receipt && installed_evidence >= 0 && mode < 2; mode += 1)
     {
@@ -1612,11 +1616,16 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
     }
     BQ_PREP_CHECK(receipt && installed_evidence >= 0);
     if (installed_evidence >= 0) close(installed_evidence);
-    /* A path outside the prefix and one with a slash refuse at listing. (A
-     * leading zero never parses: canonical JSON has none.) */
-    static char const* const finds[] = {"\"" BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "harness\"",
-                                        "\"" BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "harness\""};
-    static char const* const replacements[] = {"\"retirement-evidencx-harness\"", "\"retirement-evidence-harnes/\""};
+    /* Binding paths without an unambiguous result-root name refuse at
+     * listing: a segment containing `--`, an empty or `..` segment, a byte
+     * outside the mapped set, and a single segment that could name a result
+     * entry. (A leading zero never parses: canonical JSON has none.) */
+    static char const* const finds[] = {"\"measurement/harness\"", "\"measurement/harness\"",
+                                        "\"measurement/harness\"", "\"measurement/harness\"",
+                                        "\"measurement/harness\""};
+    static char const* const replacements[] = {"\"measurement/har--ss\"", "\"measurement//arness\"",
+                                               "\"measurement/../ness\"", "\"measurement/harn$ss\"",
+                                               "\"retirement-harness1\""};
     for (u32 index = 0; installed && index < BUSTER_ARRAY_LENGTH(finds); index += 1)
     {
         Arena* scratch_arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30,

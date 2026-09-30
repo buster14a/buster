@@ -1464,6 +1464,14 @@ BUSTER_GLOBAL_LOCAL int tp_compose_evidence_file(int root, char const* path, uin
     return valid;
 }
 
+/* Where closure entry `index` is stored below the root. */
+BUSTER_GLOBAL_LOCAL char const* tp_compose_closure_stored(TpRetirementComposeRequest const* request, unsigned index)
+{
+    char const* stored = request->closure_stored && request->closure_stored[index] ?
+                         request->closure_stored[index] : request->closure[index].path;
+    return stored;
+}
+
 /* Rehash the pre-sample closure below the store root (none is a store file;
  * the declared entry count and bytes are exact) and join its plan, post-A/A
  * and result-input plan entries to the identities the receipt, bundle and
@@ -1502,15 +1510,18 @@ BUSTER_GLOBAL_LOCAL int tp_compose_prior(TpComposeState* state)
     for (unsigned i = 0; valid && i < request->closure_count; ++i)
     {
         TpRetirementComposeClosure const* entry = request->closure + i;
+        char const* stored = tp_compose_closure_stored(request, i);
         valid = tp_compose_printable(entry->name, TP_RETIREMENT_COMPOSE_NAME_BYTES) && entry->bytes &&
                 strncmp(entry->name, "workflow.phases.", strlen("workflow.phases.")) &&
-                tp_compose_find(state, entry->path) == TP_COMPOSE_NONE &&
-                tp_compose_evidence_file(state->store->root, entry->path, entry->bytes, 0, entry->sha256, NULL, NULL,
-                                         NULL);
+                tp_compose_relative_path(entry->path) && tp_compose_find(state, entry->path) == TP_COMPOSE_NONE &&
+                tp_compose_find(state, stored) == TP_COMPOSE_NONE &&
+                tp_compose_evidence_file(state->store->root, stored, entry->bytes, 0, entry->sha256, NULL, NULL, NULL);
         for (unsigned j = 0; valid && j < request->prior_count; ++j)
-            valid = strcmp(entry->name, request->prior[j].name) && strcmp(entry->path, request->prior[j].path);
+            valid = strcmp(entry->name, request->prior[j].name) && strcmp(entry->path, request->prior[j].path) &&
+                    strcmp(stored, request->prior[j].path);
         for (unsigned j = 0; valid && j < i; ++j)
-            valid = strcmp(entry->name, request->closure[j].name) && strcmp(entry->path, request->closure[j].path);
+            valid = strcmp(entry->name, request->closure[j].name) && strcmp(entry->path, request->closure[j].path) &&
+                    strcmp(stored, tp_compose_closure_stored(request, j));
     }
     return valid;
 }

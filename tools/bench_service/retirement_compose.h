@@ -238,6 +238,10 @@ typedef struct TpRetirementComposeRequest
      * a prior or earlier closure name or path. At most
      * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES; may be empty. */
     TpRetirementComposeClosure const* closure;
+    /* Where each closure file is stored below the root when that differs
+     * from the path it is sealed under (lane F's replay layout moves it
+     * back); NULL, or a NULL entry, means the path itself. */
+    char const* const* closure_stored;
     unsigned closure_count;
     char const* sealed_path;
 } TpRetirementComposeRequest;

@@ -78,7 +78,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import random
 import re
 import shutil
@@ -899,12 +899,33 @@ WORKER_UNIT_PENDING = {"bytes": 1, "sha256": "0" * 64}
 # (retirement_binding_context_fixture.py).
 WORKER_UNIT_CENSUS_ROLES = ("support_declaration", "manifest", "inputs", "rows", "performance_rows",
                             "validator_report")
-# Every evidence file the binding context names is published at a flat
-# result-root name with this prefix (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX);
-# the fixture's context names all 39 of the #511 record.
+# Every evidence file the binding context names is published under a
+# result-root name with this prefix (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX,
+# _lane_f_name); the fixture's context names all 39 of the #511 record.
 WORKER_UNIT_EVIDENCE_PREFIX = "retirement-evidence-"
 WORKER_UNIT_EVIDENCE = 39
 WORKER_UNIT_ADMISSION = "retirement-aa-admission.json"
+
+
+def _lane_f_name(path):
+    """The result-root entry holding binding path `path` when the result has
+    no such path: lane F's replay layout, #1995's rule in
+    tools/bench_service/retirement_lane_f.py (the producer's
+    bq_retirement_worker_evidence_map must match): the prefix, then the path
+    with each `/` written as `--`. The one place these tests apply it."""
+    return WORKER_UNIT_EVIDENCE_PREFIX + path.replace("/", "--")
+
+
+def _lane_f_layout(root, record):
+    """Lay out `root` as lane F's replay does: every binding path the root
+    lacks moves back from its result-root entry."""
+    artifacts = binding._all_artifacts(record) + [("contract.source", record["contract"]["source"])]
+    for _name, artifact in artifacts:
+        target = root.joinpath(*PurePosixPath(artifact["path"]).parts)
+        source = root / _lane_f_name(artifact["path"])
+        if not target.exists() and source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
 
 
 def _sha256_file(path):
@@ -980,8 +1001,9 @@ class WorkerUnitResultTests(unittest.TestCase):
         files = record["support"]["files"]
         for role in WORKER_UNIT_CENSUS_ROLES:
             artifact = files[binding.SUPPORT_FILE_ROLES.index(role)]
-            self.assertTrue(artifact["path"].startswith(WORKER_UNIT_EVIDENCE_PREFIX))
-            binding._check_evidence(self.result, artifact, f"support.files.{role}")
+            binding._check_evidence(self.result, dict(artifact, path=_lane_f_name(artifact["path"])),
+                                    f"support.files.{role}")
+        self.assertEqual(files[0]["path"], binding.SUPPORT_DECLARATION_PATH)
         # The subjects are the sealed result's pinned binaries.
         sealed = json.loads((self.result / "retirement-sealed-result.json").read_bytes())
         self.assertEqual(sealed["post_aa_binding_sha256"], workflow["phases"]["post_aa_binding"]["sha256"])
@@ -1177,16 +1199,6 @@ def _gap_runtime_executable(frame, _context):
             and value["command_sha256"] == frame["expected_command"])
 
 
-def _gap_statistics_path(frame, _context):
-    """The validator pins measurement.statistics_implementation to
-    tools/throughput/retirement_stats.h, which the flat result root
-    (BQ-BUNDLE-V1) cannot hold; the context names the flat evidence entry of
-    the same bytes (lane F's replay maps it, #1995)."""
-    artifact = frame["binding"]["measurement"]["statistics_implementation"]
-    return (artifact["path"] == WORKER_UNIT_EVIDENCE_PREFIX + "retirement_stats.h"
-            and artifact["sha256"] == _sha256_file(frame["trusted_statistics_source"]))
-
-
 def _gap_adapter(frame, context):
     """The fixture's composer adapter is the preparation runner's structural
     stand-in (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
@@ -1208,8 +1220,6 @@ WORKER_UNIT_KNOWN_GAPS = (
      _gap_header, 576),
     ("runtime executable", r"execution invocation binary, command, or oracle output is mismatched",
      _gap_runtime_executable, 488),
-    ("statistics path", r"independent replay must bind the reviewed retirement_stats\.h source",
-     _gap_statistics_path, 1),
     ("stand-in adapter", r"#619 C statistics adapter replay differs from independently downloaded output",
      _gap_adapter, 1),
 )
@@ -1241,7 +1251,8 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
     the service, host-profile, qualification and lease receipts, the
     provenance receipts, the contract source and the admission record.
 
-    Over a copy of the exported result root, with lane F's two phases stubbed
+    Over a copy of the exported result root laid out as lane F's replay does
+    (_lane_f_layout), with lane F's two phases stubbed
     (the sealed-result phase naming the composed sealed result, and
     _independent_replay's publication and replay) and the authority's receipt
     digest as the out-of-band trust root, the unchanged
@@ -1282,12 +1293,15 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
         for path in self.evidence.iterdir():
             path.chmod(0o600)
         self.record = json.loads((self.evidence / WORKER_UNIT_BINDING).read_bytes())
+        _lane_f_layout(self.evidence, self.record)
 
     def artifacts(self):
-        """The binding's evidence files the producer published: path to name."""
+        """The binding's evidence files the producer published (under their
+        lane F result-root names): binding path to validator name."""
+        result = self.export / "result"
         return {artifact["path"]: name for name, artifact in binding._all_artifacts(self.record) + [
                 ("contract.source", self.record["contract"]["source"])]
-                if artifact["path"].startswith(WORKER_UNIT_EVIDENCE_PREFIX)}
+                if (result / _lane_f_name(artifact["path"])).is_file()}
 
     def final(self):
         """Lane F's stub over the copy: both late phases, then the final
@@ -1312,17 +1326,23 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
     def test_published_evidence_is_what_the_binding_names(self):
         artifacts = self.artifacts()
         self.assertEqual(len(artifacts), WORKER_UNIT_EVIDENCE)
-        published = sorted(path.name for path in self.evidence.iterdir()
+        result = self.export / "result"
+        published = sorted(path.name for path in result.iterdir()
                            if path.name.startswith(WORKER_UNIT_EVIDENCE_PREFIX))
-        self.assertEqual(published, sorted(artifacts))
+        self.assertEqual(published, sorted(_lane_f_name(path) for path in artifacts))
+        # The binding names the record's own paths, the validator's pinned
+        # ones included; each result entry holds the bound bytes.
+        self.assertIn(binding.SUPPORT_DECLARATION_PATH, artifacts)
+        self.assertIn("tools/throughput/retirement_stats.h", artifacts)
         for name, artifact in binding._all_artifacts(self.record) + [("contract.source",
                                                                      self.record["contract"]["source"])]:
             if artifact["path"] in artifacts:
+                binding._check_evidence(result, dict(artifact, path=_lane_f_name(artifact["path"])), name)
                 binding._check_evidence(self.evidence, artifact, name)
         # The subjects' binaries are the gate's held pair.
         subjects = self.record["subjects"]
-        self.assertEqual(subjects["baseline"]["binary"]["path"], WORKER_UNIT_EVIDENCE_PREFIX + "baseline-ide")
-        self.assertEqual(subjects["candidate"]["binary"]["path"], WORKER_UNIT_EVIDENCE_PREFIX + "candidate-ide")
+        self.assertEqual(artifacts[subjects["baseline"]["binary"]["path"]], "subjects.baseline.binary")
+        self.assertEqual(artifacts[subjects["candidate"]["binary"]["path"]], "subjects.candidate.binary")
         # The composer sealed them, and the admission receipt, with lane D's
         # documents: the validator's pre-replay closure.
         sealed = json.loads((self.evidence / "retirement-sealed-result.json").read_bytes())

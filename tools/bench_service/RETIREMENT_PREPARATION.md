@@ -1432,10 +1432,20 @@ stand-in.
    build files, the harness binary and statistics implementation, the
    service, host-profile, qualification and lease receipts, the five
    provenance receipts, the contract source and the admission record (39 in
-   the #511 record, `bq_retirement_worker_evidence_sites`). Each path must be
-   a flat name under `retirement-evidence-` (`[A-Za-z0-9._-]`, at most 128
-   bytes), so it cannot name a store file, composer output, control file or
-   phase receipt; a repeated path refuses. The subjects' binaries are copied
+   the #511 record, `bq_retirement_worker_evidence_sites`). The context
+   names the record's own paths (`docs/native-retirement-support-v1.tsv`,
+   `tools/throughput/retirement_stats.h`, ...), and each file is published
+   under the result-root name lane F's replay maps that path to
+   (`bq_retirement_worker_evidence_map`, #1995's rule: `retirement-evidence-`
+   and the path with each `/` written as `--`); the replay moves it back to
+   its path before validating. A path with an empty, `.` or `..` segment, a
+   segment containing `--`, a byte outside `[A-Za-z0-9._-]` and `/`, a mapped
+   name over 128 bytes, or a single segment beginning `retirement-`,
+   `worker-phase-`, `unit-campaign-` or `native-retirement-performance-v1.`
+   (which could name a result entry lane F would serve as-is) refuses, as
+   does a repeated path or mapped name. The composer seals each under its
+   binding path (`TpRetirementComposeRequest.closure_stored` names where it
+   is stored). The subjects' binaries are copied
    from the producer's held descriptors (the gate's pair, whose digests the
    context check already requires); every other file comes from the
    installed evidence directory `native-retirement-performance-v1.evidence`
@@ -1604,10 +1614,12 @@ three allocators and 576 untimed batches of the untimed contract's
 cross-target `aarch64-unknown-linux-gnu` groups, waived only when every other
 header field matches); lane D records a runtime launch's executable as the
 compiler binary (488, waived only for runtime invocations whose output and
-command match); the validator's nested `tools/throughput/retirement_stats.h`
-path, which the flat result root cannot hold (1); and the fixture's stand-in
-composer adapter (1). Unwaived, it stops at the first of them; a changed
-frozen compile command is refused even with the waivers.
+command match); and the fixture's stand-in composer adapter (1). The copy is
+laid out as lane F's replay lays out the result (`_lane_f_layout`), so the
+validator finds `docs/native-retirement-support-v1.tsv` and
+`tools/throughput/retirement_stats.h` at their pinned paths. Unwaived, it
+stops at the first gap; a changed frozen compile command is refused even
+with the waivers.
 Job 85 retains a failing untimed launch, job 86 a SIGTERM during A/A, job 87
 the deadline expiring during A/A, and job 88 a detached (`setsid`) sleeper
 left by its first second-label compile, found and killed right after that

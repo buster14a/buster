@@ -50,9 +50,12 @@
  * The evidence (bq_retirement_worker_evidence_sites): every {path, bytes,
  * sha256} descriptor the context's sections name, under the validator's
  * _all_artifacts names, except the admission receipt (the producer's own)
- * and the workflow phases (the composer's and lane F's). Each path is a flat
- * result-root name under BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, so it cannot
- * name a store file, composer output, control file or phase receipt. The
+ * and the workflow phases (the composer's and lane F's). Each is published
+ * under the result-root name lane F's replay maps its binding path to
+ * (bq_retirement_worker_evidence_map: BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX
+ * and the path with `/` as `--`), which cannot name a store file, composer
+ * output, control file or phase receipt; the composer seals it under its
+ * binding path (TpRetirementComposeRequest.closure_stored). The
  * store plan reserves their exact count and bytes before timing
  * (bq_retirement_worker_evidence_measure); a file whose bytes differ from
  * the context's descriptor is refused, never substituted.
@@ -63,7 +66,7 @@
  * bq_retirement_worker_binding_import, bq_retirement_worker_binding_check,
  * bq_retirement_worker_admission_write, bq_retirement_worker_binding_render
  * (also the coordinator's re-rendering), bq_retirement_worker_binding_write,
- * BqRetirementWorkerEvidenceSite, bq_retirement_worker_evidence_list,
+ * BqRetirementWorkerEvidenceSite, bq_retirement_worker_evidence_map, bq_retirement_worker_evidence_list,
  * bq_retirement_worker_evidence_measure, bq_retirement_worker_evidence_open,
  * bq_retirement_worker_evidence_publish, BqRetirementWorkerCompose,
  * bq_retirement_worker_compose_request,
@@ -91,7 +94,7 @@
 #define BQ_RETIREMENT_WORKER_BINDING_CONTEXT_HEADER "BQ-RETIREMENT-BINDING-CONTEXT-V1"
 /* The installed evidence directory under recipes/: every file the binding
  * context names except the subjects' binaries (held) and the producer's own
- * admission receipt, under the flat result-root name the context gives it.
+ * admission receipt, under its result-root name (bq_retirement_worker_evidence_map).
  * The context's pin covers each file's digest. */
 #define BQ_RETIREMENT_WORKER_EVIDENCE_NAME "native-retirement-performance-v1.evidence"
 #define BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "retirement-evidence-"
@@ -585,11 +588,14 @@ BUSTER_GLOBAL_LOCAL BqRetirementWorkerEvidenceSite const bq_retirement_worker_ev
     {BQ_RETIREMENT_WORKER_BINDING_ADMISSION, 0, 0, 0, {NULL, NULL}, "workflow.records.admission", NULL},
 };
 
-/* One evidence file: its flat result-root path, size, SHA-256 and source. */
+/* One evidence file: its validator name, binding path, result-root name,
+ * size, SHA-256 and source. */
 typedef struct BqRetirementWorkerEvidence
 {
     char name[TP_RETIREMENT_COMPOSE_NAME_BYTES];
+    /* The binding path, and the result-root name it is published under. */
     char path[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1];
+    char stored[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1];
     char sha256[SHA256_HEX_CAPACITY];
     u64 bytes;
     u32 held;
@@ -602,12 +608,58 @@ typedef struct BqRetirementWorkerEvidenceList
     u32 count;
 } BqRetirementWorkerEvidenceList;
 
+/* The result-root name of a binding path (lane F's replay layout, #1995's
+ * rule in tools/bench_service/retirement_lane_f.py, which must match):
+ * BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, then the path with each `/` written
+ * as `--`. Refused, so the mapping stays unambiguous and names nothing else
+ * in the result root: an empty, `.` or `..` segment, a segment containing
+ * `--`, a byte outside [A-Za-z0-9._-] and `/`, a mapped name longer than
+ * BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP, and a single-segment path that
+ * could name a result-root entry (lane F serves a path the result holds
+ * as-is): one beginning `retirement-`, `worker-phase-`, `unit-campaign-` or
+ * `native-retirement-performance-v1.`. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_map(char const* path, u32 length,
+    char stored[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1])
+{
+    static char const* const reserved[] = {"retirement-", "worker-phase-", "unit-campaign-",
+                                           "native-retirement-performance-v1."};
+    size_t used = strlen(BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX);
+    bool ok = path && length && length <= BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP;
+    bool nested = ok && memchr(path, '/', length) != NULL;
+    for (u32 index = 0; ok && !nested && index < BUSTER_ARRAY_LENGTH(reserved); index += 1)
+        ok = length < strlen(reserved[index]) || memcmp(path, reserved[index], strlen(reserved[index]));
+    if (ok) memcpy(stored, BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, used);
+    u32 start = 0;
+    for (u32 index = 0; ok && index <= length; index += 1)
+    {
+        char c = index < length ? path[index] : '/';
+        if (c == '/')
+        {
+            u32 segment = index - start;
+            ok = segment && !(segment == 1 && path[start] == '.') &&
+                 !(segment == 2 && path[start] == '.' && path[start + 1] == '.');
+            start = index + 1u;
+        }
+        else
+            ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+                 c == '_' || (c == '-' && !(index > start && path[index - 1u] == '-'));
+        u32 width = c == '/' ? 2u : 1u;
+        ok = ok && (index == length || used + width <= BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP);
+        if (ok && index < length)
+        {
+            memcpy(stored + used, c == '/' ? "--" : &path[index], width);
+            used += width;
+        }
+    }
+    if (ok) stored[used] = 0;
+    return ok;
+}
+
 /* One {path, bytes, sha256} descriptor (other members, such as a support
- * file's name, are the validator's): a flat name under
- * BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX of [A-Za-z0-9._-], so it names no
- * store file, composer output, control file or phase receipt; 1 to
- * BQ_WORKER_BUNDLE_FILE_CAP bytes; a lowercase SHA-256. Appended unless the
- * path is already listed, which refuses. */
+ * file's name, are the validator's): a binding path with a result-root name
+ * (bq_retirement_worker_evidence_map); 1 to BQ_WORKER_BUNDLE_FILE_CAP bytes,
+ * without a leading zero; a lowercase SHA-256. Appended unless its path or
+ * its result-root name is already listed, which refuses. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* json, unsigned node,
     BqRetirementWorkerEvidenceSite const* site, u32 index_in_array, BqRetirementWorkerEvidenceList* list)
 {
@@ -617,21 +669,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* 
     unsigned path = bq_retirement_worker_json_node(json, node, path_key, 1);
     unsigned bytes = bq_retirement_worker_json_node(json, node, bytes_key, 1);
     unsigned sha = bq_retirement_worker_json_node(json, node, sha_key, 1);
-    size_t prefix = strlen(BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX);
     bool ok = list->count < BQ_RETIREMENT_WORKER_EVIDENCE_CAP && path != TP_COMPOSE_JSON_NONE &&
               bytes != TP_COMPOSE_JSON_NONE && sha != TP_COMPOSE_JSON_NONE &&
-              json->nodes[path].kind == TP_COMPOSE_JSON_STRING && json->nodes[path].length > prefix &&
-              json->nodes[path].length <= BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP &&
-              !memcmp(json->nodes[path].text, BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, prefix) &&
+              json->nodes[path].kind == TP_COMPOSE_JSON_STRING &&
               json->nodes[bytes].kind == TP_COMPOSE_JSON_INTEGER && json->nodes[bytes].length <= 19u &&
               json->nodes[sha].kind == TP_COMPOSE_JSON_STRING && json->nodes[sha].length == 64u;
     BqRetirementWorkerEvidence* item = ok ? &list->items[list->count] : NULL;
-    for (u32 index = 0; ok && index < json->nodes[path].length; index += 1)
-    {
-        char c = json->nodes[path].text[index];
-        ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-             c == '-';
-    }
+    char stored[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1] = {0};
+    ok = ok && bq_retirement_worker_evidence_map(json->nodes[path].text, json->nodes[path].length, stored);
     u64 size = 0;
     ok = ok && (json->nodes[bytes].length == 1u || json->nodes[bytes].text[0] != '0');
     for (u32 index = 0; ok && index < json->nodes[bytes].length; index += 1)
@@ -645,13 +690,15 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* 
     {
         *item = (BqRetirementWorkerEvidence){.bytes = size, .held = site->held};
         memcpy(item->path, json->nodes[path].text, json->nodes[path].length);
+        memcpy(item->stored, stored, sizeof(stored));
         memcpy(item->sha256, json->nodes[sha].text, 64u);
         int named = site->array ? snprintf(item->name, sizeof(item->name), "%s[%u]%s", site->name, index_in_array,
                                            site->suffix) :
                                   snprintf(item->name, sizeof(item->name), "%s", site->name);
         ok = named > 0 && (size_t)named < sizeof(item->name) && tp_retirement_digest(item->sha256);
     }
-    for (u32 index = 0; ok && index < list->count; index += 1) ok = strcmp(list->items[index].path, item->path) != 0;
+    for (u32 index = 0; ok && index < list->count; index += 1)
+        ok = strcmp(list->items[index].path, item->path) && strcmp(list->items[index].stored, item->stored);
     if (ok)
     {
         list->count += 1;
@@ -762,7 +809,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_read(BqRetirementWorke
     u8* bytes = NULL;
     u32 length = 0;
     bool read = item->held ? bq_retirement_worker_evidence_held(held[item->held - 1u], item->bytes, &bytes) :
-                bq_retirement_reference_read_installed(evidence, item->path, (u32)BQ_WORKER_BUNDLE_FILE_CAP, &bytes,
+                bq_retirement_reference_read_installed(evidence, item->stored, (u32)BQ_WORKER_BUNDLE_FILE_CAP, &bytes,
                                                        &length, digest, NULL);
     if (read && item->held)
     {
@@ -805,13 +852,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_publish(BqRetirementWo
         u8* bytes = NULL;
         result = bq_retirement_worker_evidence_read(item, evidence, held, &bytes);
         if (result == BQ_OK &&
-            !bq_retirement_worker_file_write(result_root, item->path, (char const*)bytes, item->bytes, NULL))
+            !bq_retirement_worker_file_write(result_root, item->stored, (char const*)bytes, item->bytes, NULL))
             result = BQ_IO;
         free(bytes);
         written += result == BQ_OK;
     }
     for (u32 index = 0; result != BQ_OK && list && result_root >= 0 && index < written; index += 1)
-        unlinkat(result_root, list->items[index].path, 0);
+        unlinkat(result_root, list->items[index].stored, 0);
     if (result != BQ_OK && written && result_root >= 0) fsync(result_root);
     return result;
 }
@@ -837,6 +884,7 @@ typedef struct BqRetirementWorkerCompose
     /* The binding's pre-replay closure beyond D's documents: the published
      * evidence and the A/A admission receipt. */
     TpRetirementComposeClosure closure[BQ_RETIREMENT_WORKER_EVIDENCE_CAP + 1u];
+    char const* closure_stored[BQ_RETIREMENT_WORKER_EVIDENCE_CAP + 1u];
     char binding_sha256[SHA256_HEX_CAPACITY], admission_sha256[SHA256_HEX_CAPACITY];
     char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY];
     u64 binding_bytes;
@@ -1191,13 +1239,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_compose(BqRetirementWorkerCampa
     if (evidence_directory >= 0 && close(evidence_directory) != 0 && result == BQ_OK) result = BQ_IO;
     /* The composer seals them with D's documents: the validator's closure. */
     for (u32 index = 0; result == BQ_OK && index < evidence->count; index += 1)
+    {
         compose->closure[index] = (TpRetirementComposeClosure){evidence->items[index].name,
             evidence->items[index].path, evidence->items[index].bytes, evidence->items[index].sha256};
+        compose->closure_stored[index] = evidence->items[index].stored;
+    }
     if (result == BQ_OK)
     {
         compose->closure[evidence->count] = (TpRetirementComposeClosure){"execution.host.aa_admission_receipt",
             BQ_RETIREMENT_WORKER_ADMISSION_PATH, campaign->aa_receipt_bytes, compose->admission_sha256};
+        compose->closure_stored[evidence->count] = BQ_RETIREMENT_WORKER_ADMISSION_PATH;
         compose->request.closure = compose->closure;
+        compose->request.closure_stored = compose->closure_stored;
         compose->request.closure_count = evidence->count + 1u;
     }
     if (result == BQ_OK) result = bq_retirement_unit_stop_reason(campaign->driver.cancellation_fd, deadline_ns, BQ_OK);
