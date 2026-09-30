@@ -7366,21 +7366,43 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
     return value;
 }
 
-// An assignment expression names the stored field value. Keep its promotion
-// fact without rereading memory (in particular, without a second volatile load).
+// Assignment, compound assignment and prefix updates yield the stored bits,
+// independently of integer promotion. Normalize the value already computed;
+// rereading the field would add an observable volatile access.
 BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* builder, IrValueId place, IrValueId value, IrSourceRange source)
 {
     IrField* field = c_ir_bit_field_from_place(builder, place);
+    IrType* field_type = field ? ir_type_from_id(&builder->program->types, field->type) : 0;
     IrValueId result = value;
-    if (c_ir_unsigned_bit_field_promotes_to_int(builder, field))
+    if (field_type && field->bit_width && field->bit_width <= field_type->bit_width &&
+        (field_type->kind == IR_TYPE_INTEGER || field_type->kind == IR_TYPE_BOOLEAN))
     {
-        result = c_ir_emit_cast(builder, value, field->type, source);
-        if (result.value != IR_ID_UNDERLYING_INVALID)
+        IrTypeId result_type = field_type->is_atomic || field_type->is_volatile ? field_type->unqualified_type : field->type;
+        result = c_ir_emit_cast(builder, value, result_type, source);
+        // _Bool converts by truth, so a nonzero value such as 2 must remain 1.
+        if (field_type->kind == IR_TYPE_INTEGER && field->bit_width < field_type->bit_width && result.value != IR_ID_UNDERLYING_INVALID)
         {
-            IrValueId mask = c_ir_emit_integer_value_typed(builder, ((u64)1 << field->bit_width) - 1, false, (CToken){0}, field->type);
-            result = c_ir_emit_binary_value(builder, result, mask, field->type, IR_BINARY_INTEGER_BITWISE_AND, source);
-            c_ir_mark_unsigned_bit_field_value(builder, result, field);
+            // Native shifts execute at 32 or 64 bits. Sign extension of a
+            // narrow declared type must therefore run in its promoted type.
+            IrTypeId normalize_type = field_type->bit_width < 32
+                                          ? (field_type->is_signed ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT])
+                                          : result_type;
+            result = c_ir_emit_cast(builder, result, normalize_type, source);
+            if (field_type->is_signed)
+            {
+                IrType* normalize = ir_type_from_id(&builder->program->types, normalize_type);
+                IrValueId shift = c_ir_emit_integer_value_typed(builder, normalize->bit_width - field->bit_width, false, (CToken){0}, normalize_type);
+                result = c_ir_emit_binary_value(builder, result, shift, normalize_type, IR_BINARY_SHIFT_LEFT, source);
+                result = c_ir_emit_binary_value(builder, result, shift, normalize_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+            }
+            else
+            {
+                IrValueId mask = c_ir_emit_integer_value_typed(builder, ((u64)1 << field->bit_width) - 1, false, (CToken){0}, normalize_type);
+                result = c_ir_emit_binary_value(builder, result, mask, normalize_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            }
+            result = c_ir_emit_cast(builder, result, result_type, source);
         }
+        c_ir_mark_unsigned_bit_field_value(builder, result, field);
     }
     return result;
 }

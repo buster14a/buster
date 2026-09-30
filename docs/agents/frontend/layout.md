@@ -237,6 +237,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).
+  Assignment, compound assignment and prefix update results normalize to the
+  stored field width for every integer bit-field, independently of promotion.
+  Signed results sign-extend from that width; narrow declared types normalize
+  at 32 bits before converting back. Boolean results use truth conversion.
+  The computed value supplies the result without a second volatile load.
+  `compiler_driver_test_bit_field_assignment_results` covers both frontend
+  forms and all four allocators, with ordinary, volatile and split packed
+  fields, postfix controls, full-width fields and terminating update loops.
   Automatic nested initializers select known fields by index, preserving the
   initializer expression's source range without inventing a token for an
   anonymous member. Positional cursors and brace-elided descent skip unnamed

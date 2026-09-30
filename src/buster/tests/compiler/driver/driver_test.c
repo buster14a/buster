@@ -1,6 +1,7 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks. compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
+// compiler_driver_test_bit_field_assignment_results checks stored-width results.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
@@ -5794,6 +5795,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_i128_divide(UnitT
             }
         }
     }
+    return result;
+}
+
+// Runtime assignment results must agree with fixed expectations and a later
+// field read. Both forms and every allocator cover ordinary, volatile and split
+// packed storage, boolean truth conversion, postfix controls and loop exit.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_assignment_results(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8(
+        "struct Fields\n"
+        "{\n"
+        "    unsigned char c : 3;\n"
+        "    unsigned short h : 5;\n"
+        "    unsigned long long w : 33;\n"
+        "    unsigned int u : 3;\n"
+        "    int x : 5;\n"
+        "    signed char y : 4;\n"
+        "    long long z : 40;\n"
+        "    _Bool b : 1;\n"
+        "    unsigned int full : 32;\n"
+        "    unsigned long long full64 : 64;\n"
+        "    signed int one : 1;\n"
+        "    signed char full8 : 8;\n"
+        "};\n"
+        "static struct Fields ordinary;\n"
+        "static volatile struct Fields observed;\n"
+        "static volatile int operand = 1;\n"
+        "static int accesses;\n"
+        "static volatile struct Fields *get_fields(void) { accesses++; return &observed; }\n"
+        "union __attribute__((packed)) Packed\n"
+        "{\n"
+        "    long long z : 40;\n"
+        "    unsigned long long w : 33;\n"
+        "};\n"
+        "static volatile union Packed packed;\n"
+        "#define CHECK_VALUE(field, expression, expected) do { \\\n"
+        "    long long actual = (expression); \\\n"
+        "    result |= actual != (expected); \\\n"
+        "    result |= actual != (long long)(field); \\\n"
+        "} while (0)\n"
+        "#define CHECK_FIELD(field, high, low, doubled) do { \\\n"
+        "    CHECK_VALUE(field, (field = (high) + operand), low); \\\n"
+        "    field = high; CHECK_VALUE(field, (field += operand), low); \\\n"
+        "    field = low; CHECK_VALUE(field, (field -= operand), high); \\\n"
+        "    field = high; CHECK_VALUE(field, (field *= 2), doubled); \\\n"
+        "    field = high; CHECK_VALUE(field, (field <<= 1), doubled); \\\n"
+        "    field = 0; CHECK_VALUE(field, (field |= (high) + operand), low); \\\n"
+        "    field = high; CHECK_VALUE(field, ++field, low); \\\n"
+        "    field = low; CHECK_VALUE(field, --field, high); \\\n"
+        "    field = high; result |= (long long)field++ != (high); result |= (long long)field != (low); \\\n"
+        "    field = low; result |= (long long)field-- != (low); result |= (long long)field != (high); \\\n"
+        "} while (0)\n"
+        "#define CHECK_FIELDS(object) do { \\\n"
+        "    CHECK_FIELD(object.c, 7, 0, 6); \\\n"
+        "    CHECK_FIELD(object.h, 31, 0, 30); \\\n"
+        "    CHECK_FIELD(object.w, 8589934591LL, 0, 8589934590LL); \\\n"
+        "    CHECK_FIELD(object.u, 7, 0, 6); \\\n"
+        "    CHECK_FIELD(object.x, 15, -16, -2); \\\n"
+        "    CHECK_FIELD(object.y, 7, -8, -2); \\\n"
+        "    CHECK_FIELD(object.z, 549755813887LL, -549755813888LL, -2); \\\n"
+        "    CHECK_VALUE(object.b, (object.b = 2), 1); \\\n"
+        "    CHECK_VALUE(object.b, (object.b += 1), 1); \\\n"
+        "    CHECK_VALUE(object.b, (object.b -= 1), 0); \\\n"
+        "    CHECK_VALUE(object.b, (object.b -= 1), 1); \\\n"
+        "    CHECK_VALUE(object.b, (object.b *= 2), 1); \\\n"
+        "    CHECK_VALUE(object.b, (object.b <<= 1), 1); \\\n"
+        "    CHECK_VALUE(object.b, (object.b |= 2), 1); \\\n"
+        "    CHECK_VALUE(object.b, ++object.b, 1); \\\n"
+        "    CHECK_VALUE(object.b, --object.b, 0); \\\n"
+        "    CHECK_VALUE(object.b, --object.b, 1); \\\n"
+        "    object.b = 0; result |= object.b++ != 0; result |= object.b != 1; \\\n"
+        "    result |= object.b-- != 1; result |= object.b != 0; \\\n"
+        "    CHECK_VALUE(object.full, (object.full = 4294967297ULL), 1); \\\n"
+        "    object.full = 4294967295U; CHECK_VALUE(object.full, ++object.full, 0); \\\n"
+        "    object.full64 = 0; result |= --object.full64 != 18446744073709551615ULL; \\\n"
+        "    result |= object.full64 != 18446744073709551615ULL; \\\n"
+        "    CHECK_VALUE(object.one, (object.one = 1), -1); \\\n"
+        "    CHECK_VALUE(object.full8, (object.full8 = 128), -128); \\\n"
+        "} while (0)\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    CHECK_FIELDS(ordinary);\n"
+        "    CHECK_FIELDS(observed);\n"
+        "    CHECK_FIELD(packed.z, 549755813887LL, -549755813888LL, -2);\n"
+        "    CHECK_FIELD(packed.w, 8589934591LL, 0, 8589934590LL);\n"
+        "    ordinary.c = 1;\n"
+        "    int iterations = 0;\n"
+        "    while (++ordinary.c) { if (++iterations > 7) break; }\n"
+        "    result |= iterations != 6 || ordinary.c != 0;\n"
+        "    observed.c = 1; iterations = 0;\n"
+        "    while (++observed.c && iterations < 20) iterations++;\n"
+        "    result |= iterations != 6 || observed.c != 0;\n"
+        "    int assigned = (get_fields()->c = 9);\n"
+        "    result |= assigned != 1 || accesses != 1;\n"
+        "    result |= (ordinary.u = 7) <= -1;\n"
+        "    result |= (observed.u += 0) <= -1;\n"
+        "    return result;\n"
+        "}\n");
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-bit-field-assignment-results"), S8(".c"));
+    bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 mode = 0; written && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-bit-field-assignment-run"), S8(".exe"));
+            String8 command[] = {modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, source_path};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 description = string_format(temporary.arena, S8("bit-field assignment {S8} {S8}: {S8}"), modes[mode], forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, output), description);
+            }
+            scratch_end(temporary);
+        }
+    }
+    if (written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+#endif
     return result;
 }
 
@@ -11710,6 +11838,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
