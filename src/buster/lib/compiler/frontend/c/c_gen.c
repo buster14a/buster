@@ -17512,6 +17512,22 @@ BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, 
     return false;
 }
 
+// A nested ?:, && or || group in a comma operand is prepared on its own, so a
+// comma group holding one must be owned whole like one holding an assignment.
+// Over-matching a label-address `&&` only routes the group through the full
+// expression machine.
+BUSTER_C_INTERNAL bool c_ir_has_control_operator_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    for (u32 index = start; index < end && !found; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        found = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE);
+    }
+    return found;
+}
+
 // A parenthesized comma expression may carry a nested assignment in its
 // right operand.  The control-expression prepass must own that whole group:
 // lowering the nested assignment group first would run the right operand
@@ -17708,7 +17724,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // `if ((p = get()) != 0)` and for assignment arms of `?:`.
         if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
             !c_ir_has_root_assignment(builder, index + 1, close) &&
-            !(c_ir_has_top_level_comma(builder, index + 1, close) && c_ir_has_assignment_anywhere(builder, index + 1, close)))
+            !(c_ir_has_top_level_comma(builder, index + 1, close) &&
+              (c_ir_has_assignment_anywhere(builder, index + 1, close) || c_ir_has_control_operator_anywhere(builder, index + 1, close))))
         {
             continue;
         }
