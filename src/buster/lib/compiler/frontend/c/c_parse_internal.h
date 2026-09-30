@@ -17,6 +17,10 @@ BUSTER_F_DECL CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind ki
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
+// Bytes one type-machine frame row copies on every push.
+BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
+// Whether nested frames' rollback snapshots stay independent; see c_parse.c.
+BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type);
