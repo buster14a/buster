@@ -1,4 +1,4 @@
-#include <buster/lib/compiler/llvm/bitcode.h>
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
 #include <buster/lib/hash.h>
 
 #include <buster/lib/string.h>
@@ -17,6 +17,8 @@
 // and llvm_bc_find_integer_count reads the integer_count_functions table. These
 // indexes only locate rows; pool and entity order, and therefore value IDs,
 // remain insertion order.
+// Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
+// normal builds omit that private boundary entirely.
 
 enum
 {
@@ -2051,6 +2053,13 @@ static u64 llvm_bc_encode_integer_bits(u64 bits, u32 width)
     u64 magnitude = ((~bits) + 1) & mask;
     return (magnitude << 1) | 1;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u64 llvm_bitcode_test_integer_operand(u64 bits, u32 width)
+{
+    return llvm_bc_encode_integer_bits(bits, width);
+}
+#endif
 
 static u32 llvm_bc_constant_hash(u32 type_id, u32 code, u64 const* operands, u32 operand_count)
 {
