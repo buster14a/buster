@@ -62,7 +62,9 @@ BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 // staging file; cleanup_error reports a failed close/delete without replacing
 // the primary failure.
 //
-// A directory, link/reparse point, or special destination is refused. Windows
+// A directory, link/reparse point, or other special destination is refused.
+// An existing POSIX character device or FIFO (for example /dev/null) is not
+// replaced: it is written in place, so these guarantees do not apply to it. Windows
 // also refuses the read-only attribute. A new file is created 0644 or 0755
 // before umask. On POSIX replacement preserves the old 0777 bits except that
 // all execute bits are set for an executable publication and cleared for an

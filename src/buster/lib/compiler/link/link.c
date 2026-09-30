@@ -4856,6 +4856,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -6148,6 +6149,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7284,6 +7286,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7609,6 +7612,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -8024,6 +8028,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -10161,10 +10166,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
         else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -11356,10 +11363,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
         else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -13211,6 +13220,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
     return result;
@@ -13292,6 +13302,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
 
