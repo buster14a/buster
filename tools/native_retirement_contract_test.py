@@ -410,7 +410,9 @@ class ContractTests(unittest.TestCase):
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
-                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256,
+                       contract.APPLE_CI_SUPPORT_CONTRACT_SHA256,
+                       contract.PROPOSED_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -446,7 +448,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(records), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(len(set(identities)), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(identities, sorted(identities))
-        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_APPLICABILITY_LEDGER_SHA256)
+        ledger_sha256 = sha(ledger_path.read_bytes())
+        self.assertIn(ledger_sha256, contract.ACCEPTED_APPLICABILITY_LEDGER_SHA256)
+        producer = (ledger_path.parents[1] / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        match = re.search(r'nrc_applicability_ledger_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);', producer)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), ledger_sha256)
         for record in records:
             self.assertIn(record["applicability"], contract.AUTHENTICATED_APPLICABILITY_CLASSES)
             fixture_path = ledger_path.parents[1] / record["fixture"]

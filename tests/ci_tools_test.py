@@ -67,7 +67,6 @@ class ZigTests(unittest.TestCase):
         expected_sizes = {
             "x86_64-linux": 55478392,
             "aarch64-linux": 51211944,
-            "x86_64-macos": 57396836,
             "aarch64-macos": 52238004,
             "x86_64-windows": 97217739,
             "aarch64-windows": 93109828,
@@ -853,7 +852,7 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
 
 
 class WorkflowPolicyTests(unittest.TestCase):
-    def test_all_six_platforms_and_commands_remain(self):
+    def test_all_five_ci_platforms_and_commands_remain(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         names = re.findall(r"^          - name: (.+)$", text, re.M)
         self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE + github_ci_time.NATIVE))
@@ -905,7 +904,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("differential-self-test.log", block)
         self.assertIn("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", block[control:])
 
-    def test_native_suites_are_independent_and_keep_all_four_unix_runners(self):
+    def test_native_suites_are_independent_and_keep_all_three_unix_runners(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
@@ -918,8 +917,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("actions/download-artifact", native)
         self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
-        self.assertEqual(entries, list(zip(github_ci_time.NATIVE, (
-            "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26-intel", "macos-26"))))
+        self.assertEqual(entries, list(zip(github_ci_time.UNIX_NATIVE, (
+            "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26"))))
         for suite in ("modes", "differential"):
             condition = re.search(r"id: " + suite + r"\n        if: (.+)", native).group(1)
             self.assertIn("!cancelled()", condition)
@@ -1044,7 +1043,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("if: ${{ !cancelled() }}", artifact)
         self.assertNotIn("always()", artifact)
 
-    def test_retirement_evidence_uses_the_exact_candidate_on_six_native_hosts(self):
+    def test_retirement_evidence_uses_the_exact_candidate_on_five_native_hosts(self):
         text = (ROOT / ".github/workflows/native-retirement-evidence.yml").read_text()
         self.assertIn("BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}", text)
         concurrency = text.split("concurrency:", 1)[1].split("permissions:", 1)[0]
@@ -1077,7 +1076,6 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(entries, [
             ("Linux x86-64 native", "ubuntu-26.04", "linux-x86_64", "unix"),
             ("Linux AArch64 native", "ubuntu-26.04-arm", "linux-aarch64", "unix"),
-            ("macOS x86-64 native", "macos-26-intel", "macos-x86_64", "unix"),
             ("macOS AArch64 native", "macos-26", "macos-aarch64", "unix"),
             ("Windows x86-64 native", "windows-2025", "windows-x86_64", "windows"),
             ("Windows AArch64 native", "windows-11-arm", "windows-aarch64", "windows"),
@@ -1275,7 +1273,7 @@ class TimingTests(unittest.TestCase):
         from datetime import datetime, timedelta, timezone
         start = datetime(2026, 9, 7, 12, 0, 10, tzinfo=timezone.utc)
         finish = start + timedelta(seconds=duration)
-        for name in github_ci_time.PLATFORMS:
+        for name in github_ci_time.HISTORICAL_PLATFORMS:
             steps = ["Combination matrix (Windows)" if name.startswith("Windows") else "Combination matrix (Linux, macOS)"]
             if not name.startswith("Windows"):
                 steps.append("Execution-mode matrix")
@@ -1292,7 +1290,7 @@ class TimingTests(unittest.TestCase):
         run = self.sample()
         for job in run["jobs"]:
             job["steps"] = [step for step in job["steps"] if not step["name"].startswith("Test (")]
-        for name in github_ci_time.MOBILE + ("Workflow lint", "CI complete"):
+        for name in github_ci_time.HISTORICAL_MOBILE + ("Workflow lint", "CI complete"):
             job = copy.deepcopy(run["jobs"][0])
             job["name"] = name
             step = ("Test (Android)" if name.startswith("Android") else
@@ -1320,7 +1318,7 @@ class TimingTests(unittest.TestCase):
         run = self.sharded_sample()
         for job in run["jobs"]:
             job["steps"] = [step for step in job["steps"] if step["name"] != "Execution-mode matrix"]
-        for name in github_ci_time.NATIVE:
+        for name in github_ci_time.HISTORICAL_NATIVE:
             job = copy.deepcopy(run["jobs"][0])
             job["name"] = name
             steps = (("Execution-mode matrix (Windows)",) if name.startswith("Windows") else

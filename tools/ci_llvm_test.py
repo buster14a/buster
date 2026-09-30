@@ -140,6 +140,32 @@ class DownloadTests(unittest.TestCase):
                 ci_llvm.download(asset("a", b"payload"), Path(temporary) / "a", None)
 
 
+class FetchReleasesTests(unittest.TestCase):
+    def response(self, payload):
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+        return Response(payload)
+
+    def test_retries_a_timed_out_listing(self):
+        outcomes = [TimeoutError("The read operation timed out"), self.response(b'[{"tag_name": "llvmorg-22.1.0"}]')]
+        with mock.patch.object(ci_llvm.urllib.request, "urlopen", side_effect=outcomes) as urlopen, \
+                mock.patch.object(ci_llvm.time, "sleep") as sleep:
+            self.assertEqual(ci_llvm.fetch_releases(None), [{"tag_name": "llvmorg-22.1.0"}])
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(5)
+
+    def test_gives_up_after_bounded_attempts(self):
+        with mock.patch.object(ci_llvm.urllib.request, "urlopen", side_effect=TimeoutError("stalled")) as urlopen, \
+                mock.patch.object(ci_llvm.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "could not list LLVM releases: stalled"):
+                ci_llvm.fetch_releases(None)
+        self.assertEqual(urlopen.call_count, ci_llvm.DOWNLOAD_ATTEMPTS)
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -159,7 +185,10 @@ class WorkflowTests(unittest.TestCase):
 
     def test_windows_prefers_installed_llvm_over_image_llvm(self):
         self.assertNotIn(r"$env:ProgramFiles\LLVM\bin", self.workflow)
-        self.assertEqual(self.workflow.count('$env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"'), 2)
+        self.assertEqual(self.workflow.count("-LlvmBin $env:BUSTER_CI_LLVM_BIN"), 2)
+        helper = (ROOT / "tools/ci_vs_dev_shell.ps1").read_text(encoding="utf-8")
+        launch = helper.index("Launch-VsDevShell.ps1') -Arch")
+        self.assertGreater(helper.index('$env:PATH = "$LlvmBin;$env:PATH"'), launch)
 
 
 if __name__ == "__main__":

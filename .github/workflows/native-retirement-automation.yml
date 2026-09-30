@@ -23,7 +23,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      pull-requests: read
+      # The ledger is a PR comment; the issues API refuses it with 403 on a
+      # pull request unless the token also has pull-requests: write.
+      pull-requests: write
       issues: write
       actions: write
       statuses: read
