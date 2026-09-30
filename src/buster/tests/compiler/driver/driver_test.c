@@ -4511,15 +4511,151 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArg
                     invocation.reject_machine_fallback = mode != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-                    // The two named-x87 variadic definitions exist only where long
-                    // double is x87; Android x86-64 long double is binary128.
-                    u32 expected_functions = target == 2 ? 9 : 11;
-                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == expected_functions &&
-                                           compiled.codegen_statistics.fallback_function_count == 0);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 9 && compiled.codegen_statistics.fallback_function_count == 0);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                     if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
                     {
                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-va-list-run"), S8(""));
+                        String8 link_command[10];
+                        u32 link_count = 0;
+                        link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+#if BUSTER_LINUX
+                        link_command[link_count++] = S8("-no-pie");
+#endif
+                        link_command[link_count++] = object;
+                        link_command[link_count++] = host_object;
+                        link_command[link_count++] = S8("-o");
+                        link_command[link_count++] = executable;
+                        ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST(arguments, link_ok);
+                        if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// System V x87 `long double` parameters named before `...` (#1732). The named
+// values take 16-byte-aligned stack slots, so `va_start` must step the overflow
+// cursor past them before the first unnamed stack argument. The precision
+// sentinel 2^63 + 1 is not representable in `double`, so lowering through
+// `double` fails the check. The same source is compiled by Buster and, with
+// SYSV_NAMED_F80_HOST, by the host compiler, and each side calls the other.
+// The native-retirement support contract freezes the tracked test inventory,
+// so this case is written from here instead of a file under tests/.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_named_f80_varargs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "#ifdef SYSV_NAMED_F80_HOST\n"
+        "#define NAMED_F80(name) host_##name\n"
+        "#else\n"
+        "#define NAMED_F80(name) name\n"
+        "#endif\n"
+        "typedef int NamedF80One(int, long double, ...);\n"
+        "typedef int NamedF80Two(long long, long long, long long, long long, long long, long long, long long,\n"
+        "                        long double, long double, ...);\n"
+        "int NAMED_F80(named_f80_one)(int marker, long double first, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, first);\n"
+        "    int bad = marker != 17 || first != 9223372036854775809.0L;\n"
+        "    bad |= va_arg(ap, long long) != 11ll;\n"
+        "    bad |= va_arg(ap, double) != 2.5;\n"
+        "    bad |= va_arg(ap, long double) != 0.5L;\n"
+        "    bad |= va_arg(ap, long long) != 22ll;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int NAMED_F80(named_f80_two)(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
+        "                             long double first, long double second, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, second);\n"
+        "    int bad = a != 1ll || b != 2ll || c != 3ll || d != 4ll || e != 5ll || f != 6ll || g != 7ll;\n"
+        "    bad |= first != 9223372036854775809.0L || second != -1.5L;\n"
+        "    bad |= va_arg(ap, long long) != 33ll;\n"
+        "    bad |= va_arg(ap, double) != 4.5;\n"
+        "    bad |= va_arg(ap, long double) != 0.5L;\n"
+        "    bad |= va_arg(ap, long long) != 44ll;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int NAMED_F80(named_f80_calls)(NamedF80One* one, NamedF80Two* two)\n"
+        "{\n"
+        "    int bad = one(17, 9223372036854775809.0L, 11ll, 2.5, 0.5L, 22ll);\n"
+        "    bad |= two(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll, 9223372036854775809.0L, -1.5L, 33ll, 4.5, 0.5L, 44ll) << 1;\n"
+        "    return bad;\n"
+        "}\n"
+        "#ifdef SYSV_NAMED_F80_HOST\n"
+        "int named_f80_one(int, long double, ...);\n"
+        "int named_f80_two(long long, long long, long long, long long, long long, long long, long long,\n"
+        "                  long double, long double, ...);\n"
+        "int named_f80_calls(NamedF80One*, NamedF80Two*);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = host_named_f80_calls(named_f80_one, named_f80_two);\n"
+        "    bad |= named_f80_calls(host_named_f80_one, host_named_f80_two) << 2;\n"
+        "    bad |= named_f80_calls(named_f80_one, named_f80_two) << 4;\n"
+        "    return bad;\n"
+        "}\n"
+        "#endif\n");
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-named-f80"), S8(".c"));
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    // Android x86-64 long double is binary128, so only the x87 targets apply.
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-ios")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-sysv-named-f80-host"), S8(".o"));
+    String8 host_command[12];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O0");
+    host_command[host_count++] = S8("-fno-inline");
+    host_command[host_count++] = S8("-DSYSV_NAMED_F80_HOST=1");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = source_path;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    bool host_compiled = source_written && host_spawn.handle &&
+                         os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; source_written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-named-f80"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode],
+                        frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), source_path, S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 3 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-named-f80-run"), S8(""));
                         String8 link_command[10];
                         u32 link_count = 0;
                         link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -11284,6 +11420,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);

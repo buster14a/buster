@@ -12,8 +12,6 @@
 #define sysv_va_read host_va_read
 #define sysv_va_copy_to host_va_copy_to
 #define sysv_va_external host_va_external
-#define sysv_va_named_f80_one host_va_named_f80_one
-#define sysv_va_named_f80_two host_va_named_f80_two
 #define sysv_va_call_external host_va_call_external
 #define sysv_va_produce host_va_produce
 #define sysv_va_named host_va_named
@@ -23,20 +21,11 @@
 #undef sysv_va_read
 #undef sysv_va_copy_to
 #undef sysv_va_external
-#undef sysv_va_named_f80_one
-#undef sysv_va_named_f80_two
 #undef sysv_va_suite
 int sysv_va_read(va_list, int);
 int sysv_va_copy_to(va_list*, va_list, int);
 int sysv_va_external(va_list*, int, ...);
-#if __LDBL_MANT_DIG__ == 64
-int sysv_va_named_f80_one(int, long double, ...);
-int sysv_va_named_f80_two(long long, long long, long long, long long, long long, long long, long long,
-                long double, long double, ...);
-int sysv_va_suite(SysvVaReader*, SysvVaCopier*, SysvVaExternal*, SysvVaNamedF80One*, SysvVaNamedF80Two*);
-#else
 int sysv_va_suite(SysvVaReader*, SysvVaCopier*, SysvVaExternal*);
-#endif
 
 // Put the 24-byte source directly against an inaccessible page. Guard bytes
 // detect destination overwrites; this independently detects a 32-byte read.
@@ -78,15 +67,8 @@ static int host_va_page_boundary(int marker, ...)
 
 int main(void)
 {
-#if __LDBL_MANT_DIG__ == 64
-    int bad = host_va_suite(sysv_va_read, sysv_va_copy_to, sysv_va_external,
-                  sysv_va_named_f80_one, sysv_va_named_f80_two);
-    bad |= sysv_va_suite(host_va_read, host_va_copy_to, host_va_external,
-               host_va_named_f80_one, host_va_named_f80_two);
-#else
     int bad = host_va_suite(sysv_va_read, sysv_va_copy_to, sysv_va_external);
     bad |= sysv_va_suite(host_va_read, host_va_copy_to, host_va_external);
-#endif
     bad |= host_va_page_boundary(23, SYSV_VA_VALUES);
     return bad;
 }

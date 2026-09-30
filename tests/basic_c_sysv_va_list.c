@@ -16,11 +16,6 @@ struct SysvVaArray
 typedef int SysvVaReader(va_list, int);
 typedef int SysvVaCopier(va_list*, va_list, int);
 typedef int SysvVaExternal(va_list*, int, ...);
-#if __LDBL_MANT_DIG__ == 64
-typedef int SysvVaNamedF80One(int, long double, ...);
-typedef int SysvVaNamedF80Two(long long, long long, long long, long long, long long, long long, long long,
-                    long double, long double, ...);
-#endif
 #define SYSV_VA_GUARD 0x736576656e747931ull
 #define SYSV_VA_VALUES 1ll, 1.5, 2ll, 2.5, 3ll, 3.5, 4ll, 4.5, 5ll, 5.5, 6ll, 6.5, \
                        7ll, 7.5, 8ll, 8.5, 9ll, 9.5, 10ll, 10.5, 11ll, 11.5, 12ll, 12.5, 99ll
@@ -149,49 +144,9 @@ int sysv_va_places(int marker, ...)
     return bad;
 }
 
-#if __LDBL_MANT_DIG__ == 64
-int sysv_va_named_f80_one(int marker, long double first, ...)
-{
-    va_list ap;
-    va_start(ap, first);
-    int bad = marker != 17 || first != 9223372036854775809.0L;
-    bad |= va_arg(ap, long long) != 11ll;
-    bad |= va_arg(ap, double) != 2.5;
-    bad |= va_arg(ap, long double) != 0.5L;
-    bad |= va_arg(ap, long long) != 22ll;
-    va_end(ap);
-    return bad;
-}
-
-int sysv_va_named_f80_two(long long a, long long b, long long c, long long d, long long e, long long f, long long g,
-                long double first, long double second, ...)
-{
-    va_list ap;
-    va_start(ap, second);
-    int bad = a != 1ll || b != 2ll || c != 3ll || d != 4ll || e != 5ll || f != 6ll || g != 7ll;
-    bad |= first != 9223372036854775809.0L || second != -1.5L;
-    bad |= va_arg(ap, long long) != 33ll;
-    bad |= va_arg(ap, double) != 4.5;
-    bad |= va_arg(ap, long double) != 0.5L;
-    bad |= va_arg(ap, long long) != 44ll;
-    va_end(ap);
-    return bad;
-}
-#endif
-
-#if __LDBL_MANT_DIG__ == 64
-int sysv_va_suite(SysvVaReader* reader, SysvVaCopier* copier, SysvVaExternal* external,
-        SysvVaNamedF80One* named_f80_one, SysvVaNamedF80Two* named_f80_two)
-#else
 int sysv_va_suite(SysvVaReader* reader, SysvVaCopier* copier, SysvVaExternal* external)
-#endif
 {
     int bad = sysv_va_layout();
-#if __LDBL_MANT_DIG__ == 64
-    bad |= named_f80_one(17, 9223372036854775809.0L, 11ll, 2.5, 0.5L, 22ll);
-    bad |= named_f80_two(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll, 9223372036854775809.0L, -1.5L,
-               33ll, 4.5, 0.5L, 44ll);
-#endif
     bad |= sysv_va_produce(reader, copier, 1, SYSV_VA_VALUES);
     bad |= sysv_va_produce(reader, copier, 10, SYSV_VA_VALUES);
     bad |= sysv_va_named(reader, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll,
@@ -207,12 +162,7 @@ int main(void)
 {
     int bad = 0;
 #if defined(__x86_64__) && !defined(_WIN32)
-#if __LDBL_MANT_DIG__ == 64
-    bad = sysv_va_suite(sysv_va_read, sysv_va_copy_to, sysv_va_external,
-              sysv_va_named_f80_one, sysv_va_named_f80_two);
-#else
     bad = sysv_va_suite(sysv_va_read, sysv_va_copy_to, sysv_va_external);
-#endif
 #endif
     return bad;
 }
