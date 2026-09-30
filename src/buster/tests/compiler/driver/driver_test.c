@@ -4502,40 +4502,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
                                   S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 host_cpus[] = {S8("-march=x86-64"), S8("-march=haswell"), S8("-march=x86-64-v4")};
         String8 half_defines[] = {S8("-DNON_POWER_VECTOR_PROVIDER_ONLY=1"), S8("-DNON_POWER_VECTOR_CONSUMER_ONLY=1")};
-        // The Zen 5 row compiles its Clang half with -march=znver5, which
-        // Clang accepts only from version 19. Like the AVX2 and AVX-512 host
-        // gates, the reference compiler's CPU vocabulary is a precondition of
-        // the row: probe it once, and report the row as not run when refused.
-        bool clang_accepts_znver5 = true;
-        if (clang.length && ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE))
-        {
-            TemporalArena probe_temporary = scratch_begin(&arguments->arena, 1);
-            String8 probe_command[] = {clang, host_cpus[2], S8("-fsyntax-only"), S8("-x"), S8("c"), S8("/dev/null")};
-            ProcessSpawnResult probe_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe_command),
-                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR,
-                    .use_process_environment = true, .search_path = true});
-            clang_accepts_znver5 = probe_spawn.handle &&
-                os_process_wait_deadline(probe_temporary.arena, probe_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
-            if (!clang_accepts_znver5)
-            {
-                String8 version_command[] = {clang, S8("--version")};
-                ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_command),
-                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT,
-                        .use_process_environment = true, .search_path = true});
-                ProcessWaitResult version_wait = {0};
-                if (version_spawn.handle) { version_wait = os_process_wait_deadline(probe_temporary.arena, version_spawn, 30000000); }
-                String8 version = BYTE_SLICE_TO_STRING(8, version_wait.streams[STANDARD_STREAM_OUTPUT]);
-                u64 line_end = string_first_code_unit(version, '\n');
-                version.length = line_end < version.length ? line_end : version.length;
-                arguments->show(arguments, S8("PADDED_VECTOR_ZNVER5_ROW status=not-run reason=reference-clang-rejects-march-znver5 "
-                    "clang={S8} version=\"{S8}\"\n"), clang, version.length ? version : S8("unknown"));
-            }
-            scratch_end(probe_temporary);
-        }
         for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
         {
             bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE) && clang_accepts_znver5);
+                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
             for (u32 host_provider = 0; runnable && host_provider < 2; host_provider += 1)
             {
                 TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
