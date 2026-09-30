@@ -320,6 +320,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   still sized by the whole type table (#1502), is allocated only for that
   walk. `c_test_type_self_compatibility` compares the two for every type of a
   type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+- Semantic records keep a `CSourceSite` (mapped offset plus one, and source),
+  never an eager `CSourceLocation`. Recover line, column and physical offset
+  with `c_preprocess_site_location` only where a diagnostic or
+  `c_parse_entity_visible_at` reads them, and build IR ranges from sites with
+  `c_ir_site_source_range`. A location resolved for a failure that has not
+  happened is gated on that failure, as `c_type_parse_root_finish` callers do.
+  See [diagnostics](../../diagnostics.md) for the recovery contract and its
+  frozen equivalence test.
 
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while

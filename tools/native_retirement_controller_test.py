@@ -418,12 +418,10 @@ class CatchUpAPI:
 
 class CatchUpOpenerTests(unittest.TestCase):
     def run_catch_up(self, api, stale):
-        mutations = []
         with mock.patch.object(i, "_commit", return_value=BASE), \
                 mock.patch.object(c, "snapshot_stale", return_value=stale):
-            report = c.catch_up(api, lambda query, variables: mutations.append((query, variables)),
-                                ROOT, BASE, 300)
-        return report, mutations
+            report = c.catch_up(api, ROOT, BASE, 300)
+        return report
 
     def catch_up_pr(self, number=1899):
         import native_retirement_merge_gate as gate
@@ -431,12 +429,12 @@ class CatchUpOpenerTests(unittest.TestCase):
                 "head": {"ref": gate.CATCH_UP_BRANCH, "sha": HEAD, "repo": {"full_name": REPOSITORY}},
                 "base": {"ref": "main", "repo": {"full_name": REPOSITORY}}}
 
-    def test_stale_main_opens_one_empty_request_with_auto_merge(self):
+    def test_stale_main_opens_one_empty_request_without_auto_merge(self):
         for exists in (False, True):
             with self.subTest(branch_exists=exists):
                 api = CatchUpAPI()
                 api.branch_exists = exists
-                report, mutations = self.run_catch_up(api, True)
+                report = self.run_catch_up(api, True)
                 self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": "f" * 40})
                 commit = [call for call in api.calls if call[:2] == ("POST", "git/commits")]
                 self.assertEqual(commit[0][2]["tree"], "e" * 40)
@@ -447,15 +445,16 @@ class CatchUpOpenerTests(unittest.TestCase):
                 else:
                     self.assertIn(("POST", "git/refs", {"ref": "refs/heads/native-retirement/catch-up",
                                                         "sha": "f" * 40}), api.calls)
-                self.assertEqual(mutations, [(c.AUTO_MERGE_MUTATION, {"id": "PR_node"})])
+                # A GITHUB_TOKEN enqueue would start no merge_group CI; the
+                # writer enables auto-merge with its publication credential.
+                self.assertFalse(hasattr(c, "AUTO_MERGE_MUTATION"))
 
     def test_open_request_is_reused_and_fresh_main_retires_it(self):
         api = CatchUpAPI([self.catch_up_pr()])
-        report, mutations = self.run_catch_up(api, True)
+        report = self.run_catch_up(api, True)
         self.assertEqual(report, {"status": "pending", "pull_requests": [1899]})
-        self.assertEqual(mutations, [])
         self.assertFalse([call for call in api.calls if call[0] != "GET"])
-        report, _ = self.run_catch_up(api, False)
+        report = self.run_catch_up(api, False)
         self.assertEqual(report, {"status": "current", "closed": [1899]})
         self.assertIn(("PATCH", "pulls/1899", {"state": "closed"}), api.calls)
 
@@ -463,13 +462,13 @@ class CatchUpOpenerTests(unittest.TestCase):
         human = self.catch_up_pr()
         human["user"] = {"login": "someone", "id": 5, "type": "User"}
         api = CatchUpAPI([human])
-        report, _ = self.run_catch_up(api, False)
+        report = self.run_catch_up(api, False)
         self.assertEqual(report, {"status": "current", "closed": []})
 
     def test_disabled_grant_moved_main_or_foreign_run_open_nothing(self):
         api = CatchUpAPI()
         api.policy["enabled"] = False
-        self.assertEqual(self.run_catch_up(api, True)[0], {"status": "disabled"})
+        self.assertEqual(self.run_catch_up(api, True), {"status": "disabled"})
         api = CatchUpAPI()
         api.run["path"] = a.CONTROLLER_PATH
         with self.assertRaises(a.AutomationError):
@@ -489,6 +488,118 @@ class CatchUpOpenerTests(unittest.TestCase):
         self.assertFalse([call for call in api.calls if call[0] == "POST"])
 
 
+MOVED = "e" * 40
+
+
+class SupersededAPI(CatchUpAPI):
+    """Catch-up fixture plus a push-run inventory for successor proofs (#2003)."""
+    def __init__(self):
+        super().__init__()
+        self.main = MOVED
+        self.workflow_runs = {name: [] for name in c.SUPERSEDABLE.values()}
+        self.inventory_error = None
+
+    def push_run(self, workflow, run_id, number, head):
+        self.workflow_runs[workflow].append({
+            "id": run_id, "run_number": number, "event": "push", "head_branch": "main",
+            "status": "queued", "head_sha": head})
+
+    def request(self, path, *, method="GET", body=None, **query):
+        for workflow, runs in self.workflow_runs.items():
+            if path == "actions/workflows/" + workflow + "/runs":
+                if self.inventory_error is not None:
+                    raise self.inventory_error
+                if query.get("event") != "push" or query.get("branch") != "main":
+                    raise AssertionError(query)
+                return {"workflow_runs": copy.deepcopy(runs)}
+        return super().request(path, method=method, body=body, **query)
+
+
+class SupersededPushTests(unittest.TestCase):
+    """Main-push catch-up/plan runs are green only when provably superseded."""
+
+    def run_main(self, api, command, *, event="push", raised=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            summary = Path(temporary) / "summary.md"
+            environment = {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "fixture",
+                           "GITHUB_WORKFLOW_SHA": BASE, "GITHUB_RUN_ID": "300",
+                           "GITHUB_RUN_NUMBER": "5", "GITHUB_EVENT_NAME": event,
+                           "GITHUB_STEP_SUMMARY": str(summary),
+                           "GITHUB_OUTPUT": str(Path(temporary) / "output")}
+
+            def failing(*_args):
+                if raised is not None:
+                    raise raised
+                # The production stale-main exit, not a synthetic one.
+                return a.read_policy(api, BASE)
+            argv = [command, "--repo-root", str(ROOT)]
+            if command == "plan":
+                argv += ["--request", str(Path(temporary) / "request.json")]
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch.object(i, "GitHub", return_value=api), \
+                    mock.patch.object(c, "catch_up", side_effect=failing), \
+                    mock.patch.object(c, "plan", side_effect=failing), \
+                    mock.patch("main_push_maintenance.SUCCESSOR_WAIT_SECONDS", 0), \
+                    mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                status = c.main(argv)
+            text = summary.read_text() if summary.exists() else ""
+        return status, text
+
+    def test_superseded_catch_up_and_plan_with_successor_are_green_no_ops(self):
+        for command in ("catch-up", "plan"):
+            with self.subTest(command=command):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE[command], 301, 6, MOVED)
+                status, summary = self.run_main(api, command)
+                self.assertEqual(status, 0)
+                self.assertIn('"status": "superseded"', summary)
+                self.assertIn('"current_main": "' + MOVED + '"', summary)
+                self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_failure_on_newest_main_stays_red(self):
+        api = SupersededAPI()
+        api.main = BASE
+        api.push_run(c.SUPERSEDABLE["catch-up"], 301, 6, BASE)
+        moved = a.AutomationMoved("main moved before automation authorization", 75)
+        self.assertEqual(self.run_main(api, "catch-up", raised=moved), (1, ""))
+
+    def test_moved_main_without_exact_successor_run_stays_red(self):
+        cases = {
+            "no successor": [],
+            "older run for live main": [("catch-up", 299, 4, MOVED)],
+            "successor for another sha": [("catch-up", 301, 6, "d" * 40)],
+            "successor in the other workflow": [("plan", 301, 6, MOVED)],
+        }
+        for label, runs in cases.items():
+            with self.subTest(label):
+                api = SupersededAPI()
+                for command, run_id, number, head in runs:
+                    api.push_run(c.SUPERSEDABLE[command], run_id, number, head)
+                self.assertEqual(self.run_main(api, "catch-up"), (1, ""))
+
+    def test_api_error_policy_violation_other_event_or_pr_movement_stay_red(self):
+        api = SupersededAPI()
+        api.push_run(c.SUPERSEDABLE["catch-up"], 301, 6, MOVED)
+        api.inventory_error = urllib.error.HTTPError("runs", 502, "Bad Gateway", {}, None)
+        self.assertEqual(self.run_main(api, "catch-up"), (1, ""))
+        for event in ("schedule", "workflow_dispatch", "workflow_run"):
+            with self.subTest(event=event):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE["plan"], 301, 6, MOVED)
+                self.assertEqual(self.run_main(api, "plan", event=event), (1, ""))
+        for error in (a.AutomationError("standing automation policy is disabled"),
+                      a.AutomationMoved("selected PR changed during reconciliation", 76)):
+            with self.subTest(error=str(error)):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE["plan"], 301, 6, MOVED)
+                self.assertEqual(self.run_main(api, "plan", raised=error), (1, ""))
+
+    def test_dispatch_is_never_superseded(self):
+        self.assertEqual(set(c.SUPERSEDABLE), {"catch-up", "plan"})
+        self.assertEqual(c.SUPERSEDABLE["catch-up"], Path(c.CATCH_UP_PATH).name)
+        self.assertEqual(c.SUPERSEDABLE["plan"], Path(a.CONTROLLER_PATH).name)
+
+
 class WorkflowTests(unittest.TestCase):
     def test_writer_keeps_one_privileged_publisher_and_no_dispatch_authority(self):
         text = (ROOT / a.WRITER_PATH).read_text()
@@ -501,11 +612,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("--automation-publication", text)
         self.assertIn("Automatic integration requires NATIVE_RETIREMENT_PUBLICATION_TOKEN", text)
 
+    def test_writer_queues_a_published_catch_up_with_the_publication_credential(self):
+        # A GITHUB_TOKEN enqueue starts no merge_group workflows, so only the
+        # publication credential may enable auto-merge, and only after the push.
+        text = (ROOT / a.WRITER_PATH).read_text()
+        publication = text.split("name: Publish and attest exact integration head", 1)[1]
+        publication = publication.split("\n      - name:", 1)[0]
+        self.assertIn("GITHUB_TOKEN: ${{ secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN || github.token }}",
+                      publication)
+        enable = publication.index("enablePullRequestAutoMerge")
+        self.assertLess(publication.index("--force-with-lease="), enable)
+        self.assertLess(publication.index("disablePullRequestAutoMerge"), enable)
+        self.assertIn('GH_TOKEN="$GITHUB_TOKEN" gh api graphql', publication)
+        self.assertIn("native-retirement/catch-up", publication)
+        self.assertEqual(text.count("enablePullRequestAutoMerge"), 1)
+        opener = (ROOT / c.CATCH_UP_PATH).read_text() + (ROOT / "tools/native_retirement_controller.py").read_text()
+        self.assertNotIn("enablePullRequestAutoMerge", opener)
+
     def test_controller_has_no_candidate_execution_or_publication_credentials(self):
         text = (ROOT / a.CONTROLLER_PATH).read_text()
         self.assertIn("ref: ${{ github.workflow_sha }}", text)
         self.assertNotIn("pull_request_target:", text)
         self.assertNotIn("contents: write", text)
+        # Its ledger comments land on pull requests, which need this scope.
+        self.assertIn("      pull-requests: write\n", text)
         self.assertNotIn("secrets.", text)
         self.assertNotIn("self-hosted", text)
         self.assertLess(text.index("Seal the trusted request"), text.index("Dispatch the existing single writer once"))
