@@ -58,4 +58,4 @@ for dialect in ["c11", "gnu17"]:
                 address=names[pointer][0]
                 matches=[line for line in relocs.stdout.splitlines() if re.match(r"\s*0*"+format(address,"x")+r"\s",line) and re.search(r"\b"+re.escape(target)+r"\s+\+\s+0*"+format(addend,"x")+r"\s*$",line)]
                 assert matches,(pointer,address,target,addend,relocs.stdout)
-print("ISSUE1230_PROBE_PASS candidate_family_cells=16 candidate_address_comparisons=568 relocation_checks=96 baseline_witness_cells=24 candidate_witness_cells=24 reference_cells=4")
+print("ISSUE1230_PROBE_PASS candidate_family_cells=16 candidate_address_comparisons=600 relocation_checks=96 baseline_witness_cells=24 candidate_witness_cells=24 reference_cells=4")

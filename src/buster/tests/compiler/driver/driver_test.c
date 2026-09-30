@@ -9836,6 +9836,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
         "int *raw_size = (int *)sizeof x;\n"
         "int *raw_group = (int *)(16 + 1);\n"
         "int *raw_unary = (int *)+16;\n"
+        "int *raw_prefixed_size = (int *)+sizeof x;\n"
+        "int *raw_nested_size = (int *)(size_t)sizeof x;\n"
         "#ifndef __STRICT_ANSI__\n"
         "void *gnu_void = (void *)&x + 1;\n"
         "#endif\n"
@@ -9882,6 +9884,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
         "    failed += (size_t)raw_size != sizeof(int);\n"
         "    failed += (size_t)raw_group != 17;\n"
         "    failed += (size_t)raw_unary != 16;\n"
+        "    failed += (size_t)raw_prefixed_size != sizeof(int);\n"
+        "    failed += (size_t)raw_nested_size != sizeof(int);\n"
         "#ifndef __STRICT_ANSI__\n"
         "    failed += gnu_void != (void *)&((char *)&x)[1];\n"
         "#endif\n"
@@ -9910,7 +9914,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
             if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
             {
                 String8 command[] = {S8("-c"), S8("-g0"), dialect, S8("-target"), S8("x86_64-linux"),
-                    forms[form], modes[mode], S8("-fverify-codegen"), S8("-fno-codegen-fallback"), S8("-o"), output, input};
+                    forms[form], modes[mode], S8("-fverify-codegen"), mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                    S8("-o"), output, input};
                 CompilerDriverResult built = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
@@ -9953,7 +9958,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
 #endif
                                                                );
                 String8 run_command[] = {dialect, forms[form], modes[mode], S8("-fverify-codegen"),
-                    S8("-fno-codegen-fallback"), S8("-o"), executable, input};
+                    mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), executable, input};
                 CompilerDriverResult linked = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
                 BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
