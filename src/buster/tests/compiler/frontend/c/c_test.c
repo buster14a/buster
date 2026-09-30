@@ -12,6 +12,45 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CToken tokens[] = {{.kind = C_TOKEN_IDENTIFIER}, {.kind = C_TOKEN_STRING_LITERAL}, {.kind = C_TOKEN_PUNCTUATOR}};
+    CDeclaration declarations[] = {{.token_count = 5, .body_token_count = 40}, {.token_count = 70, .body_token_count = 1}};
+    CArrayBound bounds[] = {{.token_count = 90}};
+    CEntity entities[] = {{.kind = C_ENTITY_LOCAL, .has_cleanup = true}, {.kind = C_ENTITY_LOCAL}};
+    CPreprocessResult preprocess = {.tokens = tokens, .token_count = BUSTER_ARRAY_LENGTH(tokens)};
+    CAnalysisResult parse = {
+        .type_count = 3,
+        .entity_count = BUSTER_ARRAY_LENGTH(entities),
+        .entities = entities,
+        .declaration_count = BUSTER_ARRAY_LENGTH(declarations),
+        .declarations = declarations,
+        .array_bound_count = BUSTER_ARRAY_LENGTH(bounds),
+        .array_bounds = bounds,
+    };
+    CIrLowerCapacityPlan plan = {0};
+    BUSTER_TEST(arguments, c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, plan.token_capacity == 3);
+    BUSTER_TEST(arguments, plan.type_capacity == C_TYPE_COUNT + 13);
+    BUSTER_TEST(arguments, plan.symbol_capacity == 7);
+    BUSTER_TEST(arguments, plan.function_capacity == 3);
+    BUSTER_TEST(arguments, plan.query_frame_capacity == 106);
+    CIrLowerCapacityPlan accepted = plan;
+    preprocess.token_count = (u64)UINT32_MAX + 1;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    preprocess.token_count = BUSTER_ARRAY_LENGTH(tokens);
+    parse.diagnostic_count = 1;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    parse.diagnostic_count = 0;
+    parse.type_count = UINT32_MAX;
+    BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
 {
     UnitTestResult result = {0};
@@ -2624,6 +2663,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_static_ir.program, module).error == IR_VALIDATION_NONE);
     }
     scratch_end(local_static_temporary);
+    return result;
+}
+
+// __func__, __FUNCTION__ and __PRETTY_FUNCTION__ each lower to a read-only
+// char array holding the enclosing function's name and a terminator. The
+// names straddle the narrow decoder's 64-byte window and include UTF-8, and
+// one function names itself twice to get two distinct owned globals.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_name_literals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 const boundary_lengths[] = {63, 64, 65};
+    String8 names[BUSTER_ARRAY_LENGTH(boundary_lengths) + 4];
+    u32 expected_counts[BUSTER_ARRAY_LENGTH(names)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(boundary_lengths); index += 1)
+    {
+        char8* pointer = arena_allocate(temporary.arena, char8, boundary_lengths[index]);
+        memset(pointer, 'n', boundary_lengths[index]);
+        pointer[0] = 'b';
+        names[index] = (String8){pointer, boundary_lengths[index]};
+        expected_counts[index] = 1;
+    }
+    u32 utf8_index = BUSTER_ARRAY_LENGTH(boundary_lengths);
+    names[utf8_index] = S8("caf\xC3\xA9");
+    names[utf8_index + 1] = S8("pretty");
+    names[utf8_index + 2] = S8("twice");
+    names[utf8_index + 3] = S8("s");
+    expected_counts[utf8_index] = 1;
+    expected_counts[utf8_index + 1] = 1;
+    expected_counts[utf8_index + 2] = 2;
+    expected_counts[utf8_index + 3] = 1;
+    String8 const bodies[] = {
+        S8("(void) { return __func__; }\n"),
+        S8("(void) { return __func__; }\n"),
+        S8("(void) { return __func__; }\n"),
+        S8("(void) { return __FUNCTION__; }\n"),
+        S8("(void) { return __PRETTY_FUNCTION__; }\n"),
+        S8("(void) { const char *first = __func__; return first[0] == __func__[0] ? first : 0; }\n"),
+        S8("(void) { return sizeof(__func__) + (unsigned long)__func__[1]; }\n"),
+    };
+    String8 pieces[3 * BUSTER_ARRAY_LENGTH(names)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        pieces[3 * index] = index + 1 == BUSTER_ARRAY_LENGTH(names) ? S8("unsigned long ") : S8("const char *");
+        pieces[3 * index + 1] = names[index];
+        pieces[3 * index + 2] = bodies[index];
+    }
+    String8 source = string_join_arena(temporary.arena, (SliceString8){pieces, BUSTER_ARRAY_LENGTH(pieces)}, false);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("function-name-literals.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        u32 found_counts[BUSTER_ARRAY_LENGTH(names)] = {0};
+        u32 unmatched = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+            if (!symbol || !string_starts_with_sequence(symbol->link_name, S8(".L.cstr.")))
+            {
+                continue;
+            }
+            IrType* type = ir_type_from_id(&ir.program->types, global->type);
+            IrType* element = type ? ir_type_from_id(&ir.program->types, type->element_type) : 0;
+            BUSTER_TEST(arguments, global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_ARRAY && element && element->kind == IR_TYPE_INTEGER && element->bit_width == 8);
+            BUSTER_TEST(arguments, symbol->linkage == IR_LINKAGE_INTERNAL);
+            // The global owns its bytes; it never borrows the name it copied.
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                BUSTER_TEST(arguments, global->bytes.pointer != (u8*)module->functions[function_index].name.pointer);
+            }
+            u32 match = BUSTER_ARRAY_LENGTH(names);
+            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+            {
+                String8 name = names[name_index];
+                if (global->bytes.pointer && global->bytes.length == name.length + 1 && !global->bytes.pointer[name.length] &&
+                    type && type->element_count == name.length + 1 && !memcmp(global->bytes.pointer, name.pointer, name.length))
+                {
+                    match = name_index;
+                }
+            }
+            if (match < BUSTER_ARRAY_LENGTH(names))
+            {
+                found_counts[match] += 1;
+            }
+            else
+            {
+                unmatched += 1;
+            }
+        }
+        BUSTER_TEST(arguments, unmatched == 0);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+        {
+            BUSTER_TEST(arguments, found_counts[name_index] >= expected_counts[name_index]);
+        }
+        BUSTER_TEST(arguments, ir.canonical_ir_certified);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -22775,8 +22920,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
 // `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
 // only real floating type narrower than `float` this frontend has. The three
 // groups below are the contract: the layout every supported target gives it,
-// the binary16 encoding of its constants -- every expected byte string here
-// was taken from clang 18 compiling the same source -- and the specifier
+// the binary16 encoding of its constants -- Clang 18 goldens below, with the
+// #1226 midpoint regressions derived from the exact binary16 grid -- and the specifier
 // combinations that are not a type at all.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* arguments)
 {
@@ -22865,6 +23010,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         // between the spelling and these bytes.
         {S8("_Float16 values[] = {1.5f16, 0.1f16, 65504.0F16, 65520.0f16, 1e-8f16, 0x1p-24f16};"),
          S8("\x00\x3e\x66\x2e\xff\x7b\x00\x7c\x00\x00\x01\x00")},
+        // Direct half tokens retain the side of a midpoint beyond binary64
+        // precision. Unsuffixed controls deliberately round to double first.
+        {S8("_Float16 values[] = {0x1.00200000000001p0F16, -0x1.00200000000001p0F16, 0x1.002p0F16,"
+            "0x1.005fffffffffffFp0F16, -0x1.005fffffffffffFp0F16, 0x1.006p0F16,"
+            "0x1.00200000000001p0, 0x1.005fffffffffffFp0};"),
+         S8("\x01\x3c\x01\xbc\x00\x3c\x01\x3c\x01\xbc\x02\x3c\x00\x3c\x02\x3c")},
+        {S8("_Float16 values[] = {0x80000000000001p-80F16, -0x80000000000001p-80F16, 0x1p-25F16, -0x1p-25F16,"
+            "0x17fffffffffffffp-80F16, -0x17fffffffffffffp-80F16, 0x3p-25F16,"
+            "0x80000000000001p-80, 0x17fffffffffffffp-80};"),
+         S8("\x01\x00\x01\x80\x00\x00\x00\x80\x01\x00\x01\x80\x02\x00\x00\x00\x02\x00")},
+        // Exact decimal ties of opposite parity, with padding beyond the
+        // approximate parser's small-mantissa path. 3487/2048 and 3497/2048
+        // both choose the even encoding, independently of host contraction.
+        {S8("_Float16 values[] = {1.70263671875f16, 1.7026367187500000f16, 1.702636718750000000000000000f16,"
+            "-1.7026367187500000F16, 1.70751953125f16, 1.7075195312500000f16, 1.707519531250000000000000000f16,"
+            "-1.7075195312500000F16, 1.7026367187500000, 1.7075195312500000};"),
+         S8("\xd0\x3e\xd0\x3e\xd0\x3e\xd0\xbe\xd4\x3e\xd4\x3e\xd4\x3e\xd4\xbe\xd0\x3e\xd4\x3e")},
         // An integer source rounds at the destination's precision, and one
         // past the largest finite half becomes an infinity.
         {S8("_Float16 values[] = {1, -1, 100, 65504, 65505, 100000, -100000};"),
@@ -22900,12 +23062,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 1.5;"), S8("float16-scalar.c"), constant_target.target,
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 0x1.00200000000001p0F16;"), S8("float16-scalar.c"), constant_target.target,
                                                      &preprocess, &parse);
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         IrGlobal* scalar = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("scalar")) : 0;
         BUSTER_TEST(arguments, scalar && scalar->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
-        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3e00);
+        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3c01);
         IrType* scalar_type = scalar && lowered.program ? ir_type_from_id(&lowered.program->types, scalar->type) : 0;
         BUSTER_TEST(arguments, scalar_type && scalar_type->kind == IR_TYPE_FLOAT && scalar_type->bit_width == 16 && scalar_type->layout.size == 2);
         scratch_end(temporary);
@@ -27820,6 +27982,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
@@ -27942,6 +28105,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_name_literals);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);

@@ -302,6 +302,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- Static pointer folding retains casts that precede trailing arithmetic:
+  `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
+  and local statics. Only a cast covering the entire operand range may be
+  removed by the bare-address shortcut. Constant subscripts retain their
+  signedness before checked scaling into the relocation's signed addend.
+  `compiler_driver_test_static_pointer_addresses` checks the address family
+  under both frontend forms and all four allocators, reads serialized ELF
+  addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
+  non-null integer-to-pointer static casts remains unsupported; it is refused
+  rather than folded as if the trailing operator belonged inside the cast.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -832,6 +842,9 @@ context, just as changing layout does; neither selection mutates `IrType`.
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument
 classification except on Windows AArch64, whose convention distinguishes them.
+Both public query entries validate before the shared resident-page lookup.
+Allocation and classification live in a separate cold helper; a hit copies its
+answer directly without allocating, reclassifying, or repeating public checks.
 Unresolved layouts are not cached. Adding a type under a fresh id is supported;
 changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
 every independent context), because dependent aggregate classifications change

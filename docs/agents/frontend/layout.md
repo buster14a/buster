@@ -395,7 +395,10 @@ object size to the next power of two. The x86-64 SysV and Win64 canonical
 emitters implement their call boundaries; optimized modes currently report
 canonical fallback for those new shapes. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
-cross-target, native mixed-compiler, and Wine checks. The approved retirement
+cross-target, native mixed-compiler, and Wine checks. In the native Linux
+mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
+compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
+and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
 

@@ -1,0 +1,44 @@
+Source size of f8c7ad49492ae210d6e43f5e69a372dbd970fa39
+  base af6b2b100acfdd9c970e35e33d4468cd35883812
+  baseline 8d027ca5c7a5f488326b758ab02ab61f1bfb98bb (docs/source-size-baseline.txt)
+
+category    ratchet   files       bytes  change vs base  since baseline
+production  yes         179    16336966           +1464          +46759
+build       yes         228     7118804          +27773         +163880
+tests       no          739    15538636           +3180         +248757
+generated   no           48    51984056               0               0
+docs        no         2003    55230178            +233        +3525390
+dormant     no           65       88893               0               0
+total                  3262   146297533          +32650        +3984786
+
+Largest ratcheted files:
+  production     2573618  src/buster/lib/compiler/frontend/c/c_gen.c
+  build          2073694  build.c
+  production     1460955  src/buster/lib/compiler/codegen/codegen.c
+  production     1351835  src/buster/lib/compiler/frontend/c/c_parse.c
+  production      989142  src/buster/lib/compiler/codegen/machine_x86_64.c
+  production      825448  src/buster/lib/compiler/assembly/x86_64_metadata.c
+  production      761257  src/buster/lib/compiler/assembly/assembly.c
+  production      666719  src/buster/lib/compiler/link/link.c
+  production      656214  src/buster/lib/compiler/object/object.c
+  production      599530  src/buster/lib/compiler/codegen/machine_aarch64.c
+
+Ratcheted files changed from base: 5
+  build           +17816  tools/research/abi_warm_query/service.c (added)
+  build            +4623  .github/workflows/issue-279-evidence.yml (added)
+  build            +3005  tools/research/abi_warm_query/compare_compiler.py (added)
+  build            +2329  tools/research/abi_warm_query/compare_service.py (added)
+  production       +1464  src/buster/lib/compiler/ir/ir.c
+
+production: +1464 bytes from base, within the 32768-byte change limit
+build: +27773 bytes from base, within the 32768-byte change limit
+
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=production ratcheted=1 files=179 bytes=16336966 base_files=179 base_bytes=16335502 baseline_files=179 baseline_bytes=16290207
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=build ratcheted=1 files=228 bytes=7118804 base_files=224 base_bytes=7091031 baseline_files=210 baseline_bytes=6954924
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=tests ratcheted=0 files=739 bytes=15538636 base_files=739 base_bytes=15535456 baseline_files=735 baseline_bytes=15289879
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=generated ratcheted=0 files=48 bytes=51984056 base_files=48 base_bytes=51984056 baseline_files=48 baseline_bytes=51984056
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=docs ratcheted=0 files=2003 bytes=55230178 base_files=2003 base_bytes=55229945 baseline_files=1921 baseline_bytes=51704788
+SOURCE_SIZE_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 category=dormant ratcheted=0 files=65 bytes=88893 base_files=65 base_bytes=88893 baseline_files=65 baseline_bytes=88893
+SOURCE_SIZE_RATCHET_V1 category=production growth=+1464 limit=32768 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=+27773 limit=32768 verdict=within-limit
+SOURCE_SIZE_RESULT_V1 revision=f8c7ad49492ae210d6e43f5e69a372dbd970fa39 base=af6b2b100acfdd9c970e35e33d4468cd35883812 baseline_commit=8d027ca5c7a5f488326b758ab02ab61f1bfb98bb status=pass

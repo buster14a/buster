@@ -1994,6 +1994,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
                 CodegenModule rejected = codegen_generate_canonical_module(arguments->arena, program, module, targets[target_index],
                     (CodegenModuleOptions){.assume_validated = true, .verify_invariants = true, .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
                 BUSTER_TEST(arguments, rejected.error == CODEGEN_ERROR_INVALID_IR);
+                BUSTER_TEST(arguments, rejected.failed_phase == CODEGEN_PHASE_VALIDATION);
                 BUSTER_TEST(arguments, rejected.code.length == 0);
                 operation->operands[0] = saved_operand;
             }
@@ -3473,6 +3474,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenModule zero_fill_layout_codegen = codegen_generate_canonical_module(arguments->arena, zero_fill_layout_program, zero_fill_layout_module,
                                                                                    target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, zero_fill_layout_codegen.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, zero_fill_layout_codegen.failed_phase == CODEGEN_PHASE_NONE);
         CodegenModuleGlobal* first_small = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("first_small"));
         CodegenModuleGlobal* first_large = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("first_large"));
         CodegenModuleGlobal* middle_small = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("middle_small"));

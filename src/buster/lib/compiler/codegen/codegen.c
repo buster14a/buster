@@ -12,13 +12,15 @@
 // retained in fallback_opcode_counts. codegen_statistics_add preserves the
 // full census across driver translation units.
 //
-// Nearly everything here sits under one function:
-// codegen_generate_canonical_module_attempt lays out global data (read-only
-// / writable / thread-local / zero-fill images plus initializer
-// relocations), then per function sizes the frame, tries the machine path,
+// codegen_layout_globals owns the per-attempt data images and global
+// descriptors; codegen_plan_module_capacity computes the reservation bound
+// without allocating. codegen_generate_canonical_module_attempt owns the
+// initializer relocations, then per function sizes the frame, tries the machine path,
 // and otherwise walks each block's instructions emitting native code
 // directly. codegen_generate_canonical_module wraps it in a retry loop that
-// grows the code-buffer capacity scale when an attempt runs out.
+// grows the code-buffer capacity scale when an attempt runs out. The current
+// state graph and remaining ownership boundaries are in
+// docs/agents/compiler-phase-state.md.
 //
 // The helper regions above it, in file order; anchors are definitions:
 //   codegen_inline_assembly_*                    GNU inline-assembly template
@@ -45,6 +47,10 @@
 //   codegen_slot_costs_build,                    the attempt's per-type frame
 //   codegen_record_machine_line_marks            slot table and the line rows
 //                                                of a machine-emitted function
+//   codegen_layout_globals                       per-attempt global images and
+//                                                descriptors
+//   codegen_plan_module_capacity                 pure code/debug reservation
+//                                                and value-slot bound
 //   codegen_machine_debug_index_build,           MIR debug values to native
 //   codegen_machine_debug_reference_timeline,    location ranges, event-driven:
 //   codegen_record_machine_locations             per-function indexes, one
@@ -9676,7 +9682,7 @@ BUSTER_GLOBAL_LOCAL DebugRegister codegen_machine_debug_register(MachineFunction
 BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_edit_writes_register(MachineEdit const* edit)
 {
     return edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_COPY || edit->kind == MACHINE_EDIT_TEMP_RELOAD ||
-           edit->kind == MACHINE_EDIT_REMATERIALIZE || edit->kind == MACHINE_EDIT_FRAME_RELOAD;
+           edit->kind == MACHINE_EDIT_REMATERIALIZE || edit->kind == MACHINE_EDIT_FRAME_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_frame_offset(u32 placement_offset, u32 frame_base_offset, Target target, s32* result)
@@ -9738,7 +9744,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
                     machine_ref_payload(instruction->operands[1]) == edit->subject;
             }
         }
-        bool writes_own = (edit->kind == MACHINE_EDIT_RELOAD && own) || rematerializes_own;
+        // A frame-address rematerialization names the value it recreates.
+        bool writes_own = ((edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) && own) || rematerializes_own;
         if (selected_register == (s32)edit->location && !writes_own)
         {
             *selected_invalid = true;
@@ -10038,7 +10045,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
         for (u32 edit_index = index->row_edits[row]; edit_index < index->row_edits[row + 1u]; edit_index += 1)
         {
             MachineEdit const* edit = placement->edits + edit_index;
-            if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD) && edit->subject < function->virtual_register_count &&
+            if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) &&
+                edit->subject < function->virtual_register_count &&
                 referenced[edit->subject])
             {
                 codegen_machine_debug_index_subject_event(arena, subject_events, subject_counts, subject_last_rows, edit->subject, row);
@@ -11386,35 +11394,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_module_assembly(Arena* arena, IrProgram* p
     return valid;
 }
 
-// One generation of the whole module -- globals, functions and global assembly
-// -- into a code buffer reserved at `capacity_scale` times the flat estimate
-// below. Everything it produces comes out of `arena`, so a caller that does not
-// like the answer can rewind and ask again; the target, the program ABI and the
-// IR validation are its caller's business and are not repeated per attempt.
-BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program,
-                                                                           CodegenCanonicalX64F80Cache const* f80_cache,
-                                                                           CodegenSlotCost const* slot_costs, IrModule* module,
-                                                                           Target target, CodegenModuleOptions options, u64 capacity_scale,
-                                                                           bool* code_buffer_exhausted,
-                                                                           CodegenX64MetadataCache* x64_metadata_cache,
-                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
+// Global images and their initializer bytes belong to one attempt. No function
+// or machine state is touched; a failed layout leaves its partial images
+// unpublished when the caller discards the attempt arena.
+BUSTER_GLOBAL_LOCAL CodegenError codegen_layout_globals(Arena* arena, IrProgram* program, IrModule* module, CodegenModule* result)
 {
-    CodegenModule result = {
-        .ir_module = module,
-        .abi = codegen_abi_for_target(target),
-        .failed_function = IR_FUNCTION_ID_INVALID,
-        .failed_instruction = IR_INSTRUCTION_ID_INVALID,
-        .failed_opcode = IR_OPCODE_COUNT,
-    };
-    // The one place -fPIC is turned into a fact about this module. It is a
-    // statement about which references `ld` will place in a shared object, so
-    // it is scoped to the format and architecture whose relocations say that:
-    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
-    // its own; neither reads this flag.
-    bool position_independent =
-        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
-    result.position_independent = position_independent;
-    result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
+    CodegenError error = CODEGEN_ERROR_NONE;
+    result->globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
     // Requested sections (issue 1276): each global's placement group
     // (codegen_section_group), and the order every layout loop below walks --
     // group zero first, then each named group, declaration order within a
@@ -11488,14 +11474,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrType* type = ir_type_from_id(&program->types, global->type);
         if (!type || !type->layout.resolved || !type->layout.alignment || type->layout.size > UINT32_MAX)
         {
-            result.error = CODEGEN_ERROR_INVALID_IR;
-            return result;
+            error = CODEGEN_ERROR_INVALID_IR;
+            break;
         }
         u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
         if (global_alignment < type->layout.alignment || (global_alignment & (global_alignment - 1)))
         {
-            result.error = CODEGEN_ERROR_INVALID_IR;
-            return result;
+            error = CODEGEN_ERROR_INVALID_IR;
+            break;
         }
         bool read_only = codegen_global_is_read_only(global);
         u32 group = global_groups ? global_groups[global_index] : 0;
@@ -11516,138 +11502,166 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         *capacity += type->layout.size;
     }
-    // The three data images are written initializer by initializer over a
-    // zero background; a fresh arena mapping is that background already.
-    u8* read_only_bytes = arena_allocate_zeroed(arena, u8, read_only_capacity);
-    u8* writable_bytes = arena_allocate(arena, u8, writable_capacity);
-    u8* thread_local_bytes = arena_allocate(arena, u8, thread_local_capacity);
-    if (writable_capacity)
+    if (error == CODEGEN_ERROR_NONE)
     {
-        memset(writable_bytes, 0, writable_capacity);
-    }
-    if (thread_local_capacity)
-    {
-        memset(thread_local_bytes, 0, thread_local_capacity);
-    }
-    // Zero-fill offsets are planned ahead of the assignment loop below because
-    // they are not taken in declaration order: globals under
-    // CODEGEN_LARGE_ZERO_FILL_THRESHOLD come first and the large ones follow,
-    // each group in declaration order so the layout stays deterministic. A
-    // third pass lays out the members of named `.bss` sections after both.
-    u64* zero_fill_offsets = arena_allocate(arena, u64, module->global_count ? module->global_count : 1);
-    u64 zero_fill_count = 0;
-    zero_fill_group = 0;
-    for (u32 layout_pass = 0; layout_pass < (global_section_count ? 3u : 2u); layout_pass += 1)
-    {
+        // The three data images are written initializer by initializer over a
+        // zero background; a fresh arena mapping is that background already.
+        u8* read_only_bytes = arena_allocate_zeroed(arena, u8, read_only_capacity);
+        u8* writable_bytes = arena_allocate(arena, u8, writable_capacity);
+        u8* thread_local_bytes = arena_allocate(arena, u8, thread_local_capacity);
+        if (writable_capacity)
+        {
+            memset(writable_bytes, 0, writable_capacity);
+        }
+        if (thread_local_capacity)
+        {
+            memset(thread_local_bytes, 0, thread_local_capacity);
+        }
+        // Zero-fill offsets are planned ahead of the assignment loop below because
+        // they are not taken in declaration order: globals under
+        // CODEGEN_LARGE_ZERO_FILL_THRESHOLD come first and the large ones follow,
+        // each group in declaration order so the layout stays deterministic. A
+        // third pass lays out the members of named `.bss` sections after both.
+        u64* zero_fill_offsets = arena_allocate(arena, u64, module->global_count ? module->global_count : 1);
+        u64 zero_fill_count = 0;
+        zero_fill_group = 0;
+        for (u32 layout_pass = 0; layout_pass < (global_section_count ? 3u : 2u); layout_pass += 1)
+        {
+            for (u32 position = 0; position < module->global_count; position += 1)
+            {
+                u32 global_index = global_order ? global_order[position] : position;
+                IrGlobal* global = module->globals + global_index;
+                IrType* type = ir_type_from_id(&program->types, global->type);
+                u32 group = global_groups ? global_groups[global_index] : 0;
+                bool zero_fill = !codegen_global_is_read_only(global) && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
+                                 (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
+                bool large = type->layout.size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD;
+                bool in_pass = group ? layout_pass == 2 : layout_pass == (large ? 1u : 0u);
+                if (zero_fill && !global->is_thread_local && in_pass)
+                {
+                    u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
+                    u32 layout_alignment = codegen_section_group_alignment(global_alignment, group, &zero_fill_group, group_alignments);
+                    u64 remainder = zero_fill_count % layout_alignment;
+                    if (remainder)
+                    {
+                        zero_fill_count += layout_alignment - remainder;
+                    }
+                    zero_fill_offsets[global_index] = zero_fill_count;
+                    zero_fill_count += type->layout.size;
+                }
+            }
+        }
+        u64 read_only_count = 0;
+        u64 writable_count = 0;
+        u64 thread_local_count = 0;
+        u64 thread_local_zero_count = 0;
+        read_only_group = 0;
+        writable_group = 0;
         for (u32 position = 0; position < module->global_count; position += 1)
         {
             u32 global_index = global_order ? global_order[position] : position;
             IrGlobal* global = module->globals + global_index;
             IrType* type = ir_type_from_id(&program->types, global->type);
+            u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
+            bool read_only = codegen_global_is_read_only(global);
             u32 group = global_groups ? global_groups[global_index] : 0;
-            bool zero_fill = !codegen_global_is_read_only(global) && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
+            bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
                              (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
-            bool large = type->layout.size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD;
-            bool in_pass = group ? layout_pass == 2 : layout_pass == (large ? 1u : 0u);
-            if (zero_fill && !global->is_thread_local && in_pass)
+            u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : read_only ? read_only_bytes : writable_bytes;
+            u32 offset;
+            if (zero_fill && !global->is_thread_local)
             {
-                u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
-                u32 layout_alignment = codegen_section_group_alignment(global_alignment, group, &zero_fill_group, group_alignments);
-                u64 remainder = zero_fill_count % layout_alignment;
+                offset = (u32)zero_fill_offsets[global_index];
+            }
+            else
+            {
+                u64* count = zero_fill                ? &thread_local_zero_count
+                             : global->is_thread_local ? &thread_local_count
+                             : read_only               ? &read_only_count
+                                                       : &writable_count;
+                u32 layout_alignment = global->is_thread_local
+                                           ? global_alignment
+                                           : codegen_section_group_alignment(global_alignment, group, read_only ? &read_only_group : &writable_group,
+                                                                             group_alignments);
+                u64 remainder = *count % layout_alignment;
                 if (remainder)
                 {
-                    zero_fill_count += layout_alignment - remainder;
+                    *count += layout_alignment - remainder;
                 }
-                zero_fill_offsets[global_index] = zero_fill_count;
-                zero_fill_count += type->layout.size;
+                offset = (u32)*count;
+                *count += type->layout.size;
             }
+            // Indexed by the IR global, whatever order the layout took.
+            result->globals[global_index] = (CodegenModuleGlobal){
+                .symbol = global->symbol,
+                .offset = offset,
+                .size = (u32)type->layout.size,
+                .alignment = global_alignment,
+                .read_only = read_only,
+                .is_thread_local = global->is_thread_local,
+                .zero_fill = zero_fill,
+            };
+            if (global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER || global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT)
+            {
+                u64 bits = global->initializer_bits;
+                if (global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_is_negative)
+                {
+                    bits = 0 - bits;
+                }
+                u64 copy_size = BUSTER_MIN(type->layout.size, sizeof(bits));
+                memcpy(bytes + offset, &bits, copy_size);
+            }
+            else if (global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+            {
+                memcpy(bytes + offset, global->bytes.pointer, global->bytes.length);
+            }
+            else if (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS)
+            {
+                error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+        }
+        if (error == CODEGEN_ERROR_NONE)
+        {
+            result->global_count = module->global_count;
+            result->read_only_data = (ByteSlice){
+                .pointer = read_only_bytes,
+                .length = read_only_count,
+            };
+            result->writable_data = (ByteSlice){
+                .pointer = writable_bytes,
+                .length = writable_count,
+            };
+            result->zero_fill_size = zero_fill_count;
+            result->thread_local_data = (ByteSlice){
+                .pointer = thread_local_bytes,
+                .length = thread_local_count,
+            };
+            result->thread_local_zero_size = thread_local_zero_count;
         }
     }
-    u64 read_only_count = 0;
-    u64 writable_count = 0;
-    u64 thread_local_count = 0;
-    u64 thread_local_zero_count = 0;
-    read_only_group = 0;
-    writable_group = 0;
-    for (u32 position = 0; position < module->global_count; position += 1)
-    {
-        u32 global_index = global_order ? global_order[position] : position;
-        IrGlobal* global = module->globals + global_index;
-        IrType* type = ir_type_from_id(&program->types, global->type);
-        u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
-        bool read_only = codegen_global_is_read_only(global);
-        u32 group = global_groups ? global_groups[global_index] : 0;
-        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
-                         (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
-        u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : read_only ? read_only_bytes : writable_bytes;
-        u32 offset;
-        if (zero_fill && !global->is_thread_local)
-        {
-            offset = (u32)zero_fill_offsets[global_index];
-        }
-        else
-        {
-            u64* count = zero_fill                ? &thread_local_zero_count
-                         : global->is_thread_local ? &thread_local_count
-                         : read_only               ? &read_only_count
-                                                   : &writable_count;
-            u32 layout_alignment = global->is_thread_local
-                                       ? global_alignment
-                                       : codegen_section_group_alignment(global_alignment, group, read_only ? &read_only_group : &writable_group,
-                                                                         group_alignments);
-            u64 remainder = *count % layout_alignment;
-            if (remainder)
-            {
-                *count += layout_alignment - remainder;
-            }
-            offset = (u32)*count;
-            *count += type->layout.size;
-        }
-        // Indexed by the IR global, whatever order the layout took.
-        result.globals[global_index] = (CodegenModuleGlobal){
-            .symbol = global->symbol,
-            .offset = offset,
-            .size = (u32)type->layout.size,
-            .alignment = global_alignment,
-            .read_only = read_only,
-            .is_thread_local = global->is_thread_local,
-            .zero_fill = zero_fill,
-        };
-        if (global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER || global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT)
-        {
-            u64 bits = global->initializer_bits;
-            if (global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_is_negative)
-            {
-                bits = 0 - bits;
-            }
-            u64 copy_size = BUSTER_MIN(type->layout.size, sizeof(bits));
-            memcpy(bytes + offset, &bits, copy_size);
-        }
-        else if (global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
-        {
-            memcpy(bytes + offset, global->bytes.pointer, global->bytes.length);
-        }
-        else if (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS)
-        {
-            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-            return result;
-        }
-    }
-    result.global_count = module->global_count;
-    result.read_only_data = (ByteSlice){
-        .pointer = read_only_bytes,
-        .length = read_only_count,
-    };
-    result.writable_data = (ByteSlice){
-        .pointer = writable_bytes,
-        .length = writable_count,
-    };
-    result.zero_fill_size = zero_fill_count;
-    result.thread_local_data = (ByteSlice){
-        .pointer = thread_local_bytes,
-        .length = thread_local_count,
-    };
-    result.thread_local_zero_size = thread_local_zero_count;
+    return error;
+}
+
+// Pure module reservation plan. It reads finalized IR and target slot costs
+// without allocating or publishing any output; an error leaves the plan
+// untouched. Keep the per-value sizing walk flat.
+typedef struct CodegenModuleCapacityPlan CodegenModuleCapacityPlan;
+struct CodegenModuleCapacityPlan
+{
+    u64 assembly_capacity;
+    u64 assembly_alignment_capacity;
+    u64 inline_assembly_capacity;
+    u64 stack_probe_capacity;
+    u64 aligned_argument_capacity;
+    u32 instruction_count;
+    u32 debug_location_capacity;
+};
+
+BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program, IrModule* module, CodegenSlotCost const* slot_costs,
+                                                           Target target, CodegenModuleOptions options, CodegenModuleCapacityPlan* plan_out)
+{
+    CodegenError error = CODEGEN_ERROR_NONE;
     u64 assembly_capacity = 0;
     // Alignment padding is the one part of global assembly whose size is not
     // bounded by the source that asks for it: a dozen source bytes of
@@ -11659,9 +11673,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         assembly_capacity += module->assemblies[assembly_index].source.length;
         assembly_alignment_capacity += codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
     }
-    u32 entry_capacity = module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - module->function_count);
-    result.entries = arena_allocate(arena, CodegenModuleEntry, entry_capacity);
-    result.functions = arena_allocate(arena, CodegenFunctionDescriptor, entry_capacity);
     u32 instruction_count = 0;
     u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
@@ -11676,7 +11687,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     u32 type_count = program->types.count;
     u64 slot_before_align = target.cpu_arch == CPU_ARCH_X86_64 ? ~(u64)0 : 0;
     u64 slot_after_align = ~slot_before_align;
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    for (u32 function_index = 0; function_index < module->function_count && error == CODEGEN_ERROR_NONE; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         instruction_count += function->instruction_count;
@@ -11699,8 +11710,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
             if (debug_location_capacity_64 > UINT32_MAX)
             {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                return result;
+                error = CODEGEN_ERROR_CAPACITY;
+                break;
             }
         }
         // The frame the function's canonical slots would take, walked from the
@@ -11715,13 +11726,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrValue const* values = function->values;
         IrInstruction const* instructions = function->instructions;
         u32 function_instruction_count = function->instruction_count;
-        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        for (u32 value_index = 0; value_index < function->value_count && error == CODEGEN_ERROR_NONE; value_index += 1)
         {
             IrValue value = values[value_index];
             if (value.canonical_type.value >= type_count)
             {
-                result.error = CODEGEN_ERROR_INVALID_IR;
-                return result;
+                error = CODEGEN_ERROR_INVALID_IR;
+                break;
             }
             CodegenSlotCost cost = slot_costs[value.canonical_type.value];
             // A global place occupies an eightbyte holding the object's
@@ -11737,8 +11748,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             u64 slot_alignment = global_place ? 8 : BUSTER_MAX(cost.alignment, value.alignment);
             if (!slot_size)
             {
-                result.error = CODEGEN_ERROR_INVALID_IR;
-                return result;
+                error = CODEGEN_ERROR_INVALID_IR;
+                break;
             }
             // x86-64 places the slot before aligning, AArch64 after; the two
             // masks are the target decided once outside the loop.
@@ -11770,7 +11781,72 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u64 probe_count = (function_value_bytes + A64_SP_ADJUST_CHUNK - 1) / A64_SP_ADJUST_CHUNK;
         stack_probe_capacity += probe_count * 11;
     }
-    CodegenDebugLocationSink debug_location_sink = {.arena = arena, .capacity = (u32)debug_location_capacity_64};
+    if (error == CODEGEN_ERROR_NONE)
+    {
+        *plan_out = (CodegenModuleCapacityPlan){
+            .assembly_capacity = assembly_capacity,
+            .assembly_alignment_capacity = assembly_alignment_capacity,
+            .inline_assembly_capacity = inline_assembly_capacity,
+            .stack_probe_capacity = stack_probe_capacity,
+            .aligned_argument_capacity = aligned_argument_capacity,
+            .instruction_count = instruction_count,
+            .debug_location_capacity = (u32)debug_location_capacity_64,
+        };
+    }
+    return error;
+}
+
+// One generation of the whole module -- globals, functions and global assembly
+// -- into a code buffer reserved at `capacity_scale` times the flat estimate
+// below. Everything it produces comes out of `arena`, so a caller that does not
+// like the answer can rewind and ask again; the target, the program ABI and the
+// IR validation are its caller's business and are not repeated per attempt.
+BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program,
+                                                                           CodegenCanonicalX64F80Cache const* f80_cache,
+                                                                           CodegenSlotCost const* slot_costs, IrModule* module,
+                                                                           Target target, CodegenModuleOptions options, u64 capacity_scale,
+                                                                           bool* code_buffer_exhausted,
+                                                                           CodegenX64MetadataCache* x64_metadata_cache,
+                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
+{
+    CodegenModule result = {
+        .ir_module = module,
+        .abi = codegen_abi_for_target(target),
+        .failed_phase = CODEGEN_PHASE_GLOBAL_LAYOUT,
+        .failed_function = IR_FUNCTION_ID_INVALID,
+        .failed_instruction = IR_INSTRUCTION_ID_INVALID,
+        .failed_opcode = IR_OPCODE_COUNT,
+    };
+    // The one place -fPIC is turned into a fact about this module. It is a
+    // statement about which references `ld` will place in a shared object, so
+    // it is scoped to the format and architecture whose relocations say that:
+    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
+    // its own; neither reads this flag.
+    bool position_independent =
+        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+    result.position_independent = position_independent;
+    result.error = codegen_layout_globals(arena, program, module, &result);
+    if (result.error != CODEGEN_ERROR_NONE)
+    {
+        return result;
+    }
+    result.failed_phase = CODEGEN_PHASE_MODULE_PLANNING;
+    CodegenModuleCapacityPlan plan = {0};
+    result.error = codegen_plan_module_capacity(program, module, slot_costs, target, options, &plan);
+    if (result.error != CODEGEN_ERROR_NONE)
+    {
+        return result;
+    }
+    u64 assembly_capacity = plan.assembly_capacity;
+    u64 assembly_alignment_capacity = plan.assembly_alignment_capacity;
+    u64 inline_assembly_capacity = plan.inline_assembly_capacity;
+    u64 stack_probe_capacity = plan.stack_probe_capacity;
+    u64 aligned_argument_capacity = plan.aligned_argument_capacity;
+    u32 instruction_count = plan.instruction_count;
+    u32 entry_capacity = module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - module->function_count);
+    result.entries = arena_allocate(arena, CodegenModuleEntry, entry_capacity);
+    result.functions = arena_allocate(arena, CodegenFunctionDescriptor, entry_capacity);
+    CodegenDebugLocationSink debug_location_sink = {.arena = arena, .capacity = plan.debug_location_capacity};
     u32 global_relocation_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -11923,11 +11999,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     }
     for (u32 emission = 0; emission < module->function_count; emission += 1)
     {
+        result.failed_phase = CODEGEN_PHASE_FUNCTION_ENTRY;
         u32 function_index = function_order ? function_order[emission] : emission;
-        if (emission == function_ordinary_count &&
-            !codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity, &x64_metadata_cache_tried))
+        if (emission == function_ordinary_count)
         {
-            return result;
+            result.failed_phase = CODEGEN_PHASE_PUBLICATION;
+            if (!codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity,
+                                              &x64_metadata_cache_tried))
+            {
+                return result;
+            }
+            result.failed_phase = CODEGEN_PHASE_FUNCTION_ENTRY;
         }
         IrFunction* function = module->functions + function_index;
         result.failed_function = (IrFunctionId){
@@ -12008,6 +12090,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
 
     canonical_prep:
         ;
+        result.failed_phase = CODEGEN_PHASE_ABI_STORAGE;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
@@ -12462,6 +12545,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         goto canonical_emit;
 
     machine_attempt:
+        result.failed_phase = CODEGEN_PHASE_MACHINE_SELECTION;
         // The descriptor is a shell until this path knows its unwind shape;
         // canonical fallback fills the same shell after its sizing pass.
         // MIR_STACK routes eligible functions through machine selection,
@@ -12525,6 +12609,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
             if (selected.supported && verify_error == MACHINE_VERIFY_NONE)
             {
+                result.failed_phase = CODEGEN_PHASE_MACHINE_PLACEMENT;
                 MachineStackPlacement placement;
 
                 switch (options.register_allocator)
@@ -12603,6 +12688,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 if (placement.valid)
                 {
+                    result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
                     MachineEncodeResult encoded;
 
                     // The encoder writes where the function will live when
@@ -13173,6 +13259,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         goto canonical_prep;
 
     canonical_emit:
+        result.failed_phase = CODEGEN_PHASE_CANONICAL_LOWERING;
         // A machine attempt that bailed after describing part of its prologue
         // leaves those actions behind; the canonical prologue below describes
         // the frame it actually emits, so the fallback starts from an empty
@@ -23997,6 +24084,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                (s32)canonical_x64_frame_base_offset, &debug_location_sink);
         }
     }
+    if (buffer.error == CODEGEN_ERROR_NONE && result.error == CODEGEN_ERROR_NONE)
+    {
+        result.failed_phase = CODEGEN_PHASE_PUBLICATION;
+    }
     for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
     {
         if (result.relocations[relocation_index].label_address)
@@ -24019,6 +24110,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     };
     result.statistics.code_bytes = result.code.length;
     result.error = buffer.error;
+    if (result.error == CODEGEN_ERROR_NONE)
+    {
+        result.failed_phase = CODEGEN_PHASE_NONE;
+    }
     return result;
 }
 
@@ -24027,6 +24122,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     CodegenModule result = {
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
+        .failed_phase = CODEGEN_PHASE_VALIDATION,
     };
     if (!arena || !program || !module || result.abi >= CODEGEN_ABI_COUNT || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
     {
@@ -24060,6 +24156,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
             }
         }
     }
+    result.failed_phase = CODEGEN_PHASE_MODULE_PLANNING;
     CodegenCanonicalX64F80Cache f80_cache = {0};
     CodegenX64MetadataCache* x64_metadata_cache = 0;
     if (target.cpu_arch == CPU_ARCH_X86_64)

@@ -8,7 +8,8 @@
 // propagation for computed goto (ir_label_provenance_*), the per-target
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
-// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value),
+// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value,
+// ir_abi_context_value_validated/cold),
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
@@ -3988,28 +3989,57 @@ void ir_abi_context_reserve(IrAbiContext* context, u32 type_count)
     }
 }
 
-IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+BUSTER_GLOBAL_LOCAL IrAbiValue ir_abi_context_value_cold(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
 {
     IrAbiValue result = {0};
+    IrAbiCachePage* page = ir_abi_context_page(context, type_id.value / IR_ABI_CACHE_PAGE_TYPES, use);
+    u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
+    u64 mask = (u64)1 << slot;
+    if (program->types.types[type_id.value].layout.resolved)
+    {
+        page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
+                                                  use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
+        page->resolved |= mask;
+        context->classified_values += 1;
+        result = page->values[slot];
+    }
+    return result;
+}
+
+// Call only after the public entry's program/type/use and context checks.
+// Keep allocation and classification out of the resident-page lookup so the
+// by-value answer can flow directly into an optimized caller on a cache hit.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE IrAbiValue ir_abi_context_value_validated(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+{
+    use = ir_abi_context_use(context, use);
+    IrAbiCachePage** pages = context->pages[use];
+    IrAbiCachePage* page = pages ? pages[type_id.value / IR_ABI_CACHE_PAGE_TYPES] : 0;
+    u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
+    u64 mask = (u64)1 << slot;
+    IrAbiValue result;
+    if (page && (page->resolved & mask))
+    {
+        result = page->values[slot];
+    }
+    else
+    {
+        result = ir_abi_context_value_cold(program, context, type_id, use);
+    }
+    return result;
+}
+
+IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+{
+    IrAbiValue result;
     if (program && context && context->arena && context->type_storage == program->types.types &&
         context->convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count &&
         type_id.value / IR_ABI_CACHE_PAGE_TYPES < context->page_capacity)
     {
-        use = ir_abi_context_use(context, use);
-        IrAbiCachePage* page = ir_abi_context_page(context, type_id.value / IR_ABI_CACHE_PAGE_TYPES, use);
-        u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
-        u64 mask = (u64)1 << slot;
-        if (!(page->resolved & mask) && program->types.types[type_id.value].layout.resolved)
-        {
-            page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
-                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
-            page->resolved |= mask;
-            context->classified_values += 1;
-        }
-        if (page->resolved & mask)
-        {
-            result = page->values[slot];
-        }
+        result = ir_abi_context_value_validated(program, context, type_id, use);
+    }
+    else
+    {
+        result = (IrAbiValue){0};
     }
     return result;
 }
@@ -4086,10 +4116,23 @@ void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention)
 
 IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
 {
-    IrAbiValue result = {0};
+    IrAbiValue result;
     if (program && program->arena && convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count)
     {
-        result = ir_abi_context_value(program, ir_program_abi_context(program, convention), type_id, use);
+        IrAbiContext* context = ir_program_abi_context(program, convention);
+        if (context->arena && context->type_storage == program->types.types && context->convention < IR_ABI_CONVENTION_COUNT &&
+            type_id.value / IR_ABI_CACHE_PAGE_TYPES < context->page_capacity)
+        {
+            result = ir_abi_context_value_validated(program, context, type_id, use);
+        }
+        else
+        {
+            result = (IrAbiValue){0};
+        }
+    }
+    else
+    {
+        result = (IrAbiValue){0};
     }
     return result;
 }
