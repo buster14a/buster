@@ -22221,12 +22221,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_identifier_declaration_p
             for (u32 index = 0; index + 1 < tokens.token_count; index += 1)
             {
                 if (string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[index]), S8("source_point_bound")) &&
-                    c_token_is_punctuator(&tokens.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
+                    tokens.tokens[index + 1].kind == C_TOKEN_PUNCTUATOR && tokens.tokens[index + 1].punctuator == C_PUNCTUATOR_LEFT_BRACKET)
                 {
                     start = index + 2;
                     for (u32 cursor = start; cursor < tokens.token_count && end == UINT32_MAX; cursor += 1)
                     {
-                        if (c_token_is_punctuator(&tokens.tokens[cursor], C_PUNCTUATOR_RIGHT_BRACKET)) end = cursor;
+                        if (tokens.tokens[cursor].kind == C_TOKEN_PUNCTUATOR && tokens.tokens[cursor].punctuator == C_PUNCTUATOR_RIGHT_BRACKET) end = cursor;
                     }
                     break;
                 }
