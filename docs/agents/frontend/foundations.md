@@ -851,6 +851,9 @@ context, just as changing layout does; neither selection mutates `IrType`.
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument
 classification except on Windows AArch64, whose convention distinguishes them.
+Both public query entries validate before the shared resident-page lookup.
+Allocation and classification live in a separate cold helper; a hit copies its
+answer directly without allocating, reclassifying, or repeating public checks.
 Unresolved layouts are not cached. Adding a type under a fresh id is supported;
 changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
 every independent context), because dependent aggregate classifications change
