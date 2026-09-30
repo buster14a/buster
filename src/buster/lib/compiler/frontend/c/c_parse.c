@@ -5840,6 +5840,7 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
     u32 capacity = end - start + 64;
     CTypeParseMachine machine = {
         .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+        .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
         .mutations = arena_allocate(scratch, CTypeMutation, capacity),
         .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
         .scratch_arena = scratch,
