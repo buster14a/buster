@@ -616,6 +616,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_apx_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_APX}, 2);
+
+    // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-apx-oracle.s.
+    u8 const expected[] = {
+        0xd5, 0x58, 0x89, 0xc8, 0xd5, 0x50, 0x01, 0xda, 0xd5, 0x78, 0x11, 0x74,
+        0xac, 0x80, 0x62, 0x0c, 0xc0, 0x10, 0x03, 0x44, 0xd1, 0x7f, 0x62, 0x4c,
+        0xa4, 0x10, 0x29, 0xec, 0x62, 0x6c, 0x8c, 0x14, 0x33, 0xb8, 0x00, 0x00,
+        0x00, 0x00, 0x62, 0xf4, 0x7c, 0x0c, 0x83, 0x05, 0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xd5, 0x58, 0x69, 0x8a, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
+        0x00, 0x62, 0xfc, 0xfc, 0x0c, 0xc1, 0xe3, 0xff, 0xd5, 0x78, 0x8d, 0xa4,
+        0xb5, 0x00, 0x00, 0x00, 0x00, 0xd5, 0xd1, 0xb6, 0x38, 0x62, 0xfc, 0x7c,
+        0x10, 0xff, 0xf1, 0x62, 0xdc, 0x0c, 0x10, 0x8f, 0xc7,
+    };
+    String8 const sources[] = {
+        S8("mov r16, r17\n"
+           "add r18d, r19d\n"
+           "adc qword ptr [r20+r21*4-128], r22\n"
+           "add r23, r24, qword ptr [r25+r26*8+127]\n"
+           "sub r27, r28, r29\n"
+           "{nf} xor r30, r31, qword ptr [r16+external_nf]\n"
+           "{nf} add dword ptr [rip+external_rip], 127\n"
+           "imul r17, qword ptr [r18+128], 128\n"
+           "{nf} shl r19, 255\n"
+           "lea r20, [r21+r22*4+external_lea]\n"
+           "movzx r23d, byte ptr [r24]\n"
+           "push2 r16, r17\n"
+           "pop2 r30, r31\n"),
+        S8("movq %r17, %r16\n"
+           "addl %r19d, %r18d\n"
+           "adcq %r22, -128(%r20,%r21,4)\n"
+           "addq 127(%r25,%r26,8), %r24, %r23\n"
+           "subq %r29, %r28, %r27\n"
+           "{nf} xorq external_nf(%r16), %r31, %r30\n"
+           "{nf} addl $127, external_rip(%rip)\n"
+           "imulq $128, 128(%r18), %r17\n"
+           "{nf} shlq $255, %r19\n"
+           "leaq external_lea(%r21,%r22,4), %r20\n"
+           "movzbl (%r24), %r23d\n"
+           "push2 %r17, %r16\n"
+           "pop2 %r31, %r30\n"),
+    };
+    u64 const offsets[] = {34, 44, 73};
+    s64 const addends[] = {0, -5, 0};
+    AssemblyRelocationKind const kinds[] = {ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED};
+    String8 const symbols[] = {S8("external_nf"), S8("external_rip"), S8("external_lea")};
+    for (u32 syntax = 0; syntax < BUSTER_ARRAY_LENGTH(sources); syntax += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, sources[syntax],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, expected, sizeof(expected)));
+        bool relocations_match = encoded.relocation_count == BUSTER_ARRAY_LENGTH(offsets);
+        for (u32 index = 0; relocations_match && index < encoded.relocation_count; index += 1)
+        {
+            AssemblyRelocation relocation = encoded.relocations[index];
+            relocations_match = relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                relocation.kind == kinds[index] && relocation.symbol < encoded.symbol_count &&
+                                string_equal(encoded.symbols[relocation.symbol].name, symbols[index]);
+        }
+        BUSTER_TEST(arguments, relocations_match);
+    }
+    AssemblyEncodeResult invalid = assembly_encode(arguments->arena,
+        S8("nop\n"
+           "mov r16b, ah\n"
+           "add r16, r17d, r18\n"
+           "lea r19, [r20+2147483648]\n"
+           "push2 r16, eax\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const valid_prefix[] = {0x90};
+    BUSTER_TEST(arguments, invalid.diagnostic_count == 4 &&
+                               assembly_test_bytes_equal(invalid.bytes, valid_prefix, sizeof(valid_prefix)) &&
+                               invalid.relocation_count == 0 && invalid.symbol_count == 0);
+    Target unavailable = target;
+    unavailable.cpu_features = target_cpu_features_remove(unavailable.cpu_features, TARGET_CPU_FEATURE_X86_APX);
+    AssemblyEncodeResult refused = assembly_encode(arguments->arena, S8("add r16, r17\n"),
+        (AssemblyEncodeOptions){.target = unavailable, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, refused.diagnostic_count == 1 && refused.bytes.length == 0 && refused.relocation_count == 0);
+    for (u32 mode = 0; mode < 3; mode += 1)
+    {
+        for (u32 symbolic = 0; symbolic < 2; symbolic += 1)
+        {
+            BusterX86MetadataPhysicalOperand operands[3] = {
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                 .reg = {.index = 31, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                 .reg = {.index = 17, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                 .memory = {.has_base = true, .base = {.index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                            .source_width = 64, .has_displacement = true, .displacement = symbolic ? 0 : 127,
+                            .has_symbol = symbolic != 0, .symbol = S8("external_disp")}},
+            };
+            if (mode == 0) operands[1] = operands[2];
+            String8 features[] = {S8("*")};
+            UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
+                .mnemonic = S8("ADD"), .operands = operands, .operand_count = mode == 0 ? 2u : 3u,
+                .attributes = {.apx_flags = mode == 0 ? 0 : mode == 1 ? BUSTER_X86_METADATA_APX_NDD
+                                                                                    : BUSTER_X86_METADATA_APX_NDD | BUSTER_X86_METADATA_APX_NF,
+                               .no_flags = mode == 2},
+                .features = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)}, .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true});
+            result.test_count += agreement.test_count;
+            result.succeeded_test_count += agreement.succeeded_test_count;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
 {
     bool result = false;
@@ -3279,6 +3392,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_scalar_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_legacy_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_evex_layout);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_apx_layout);
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;
