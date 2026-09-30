@@ -670,9 +670,12 @@ jobs:
             enabled_by=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
               --jq '.auto_merge.enabled_by.login // ""')
             if [[ -n "$enabled_by" ]]; then
+              # $id is a GraphQL variable, not a shell expansion.
+              # shellcheck disable=SC2016
               GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
                 -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' >/dev/null
             fi
+            # shellcheck disable=SC2016
             GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
               -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' >/dev/null
           fi
