@@ -11,11 +11,16 @@
  * computes itself rather than reads from the bundle.
  *
  * Cases (bench_service_zen5_test_case): success and replay, the plan frozen
- * before the first timed child; a changed plan refused before any child; a
- * pinned-tool mismatch; a missing tree identity; base != candidate; and a
- * budget that cannot cover the timing reserve. With KEEP_DIR only the success
- * case runs and its result tree is kept for the tests.c export-content bridge.
- * Needs python3 and an x86 /proc/cpuinfo; other hosts report unsupported-host.
+ * before the first timed child, with snapshot modules that would shadow the
+ * PMU tool's standard library; a changed plan refused before any child; a
+ * pinned-tool mismatch; a missing and an unlisted tree identity; base !=
+ * candidate; a budget that cannot cover the timing reserve; a frozen binary
+ * changed before the oracle, before the captures stage (only the capture
+ * runner's spec digests can notice) and after it; and a stage that
+ * runs past the recipe deadline. With KEEP_DIR only the success case runs and
+ * its result tree is kept for the tests.c export-content bridge. Fixtures
+ * honor TMPDIR. Needs python3 and an x86 /proc/cpuinfo; any other host fails
+ * with result=unsupported-host, so a run that exercised nothing is never green.
  */
 #if BUSTER_LINUX
 #define BENCH_SERVICE_ZEN5_TEST_REVISION "1111111111111111111111111111111111111111"
@@ -46,12 +51,24 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_directory(char* output, char co
     return ok;
 }
 
+/* A private directory under TMPDIR (default /tmp) named from `prefix`. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_mkdtemp(char output[BENCH_SERVICE_RECIPE_PATH_CAP], char const* prefix)
+{
+    char const* temporary = getenv("TMPDIR");
+    int length = snprintf(output, BENCH_SERVICE_RECIPE_PATH_CAP, "%s/%s-XXXXXX",
+                          temporary && temporary[0] == '/' ? temporary : "/tmp", prefix);
+    bool ok = length > 0 && (u32)length < BENCH_SERVICE_RECIPE_PATH_CAP && mkdtemp(output) != NULL;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_fixture(Arena* arena, BenchServiceZen5TestFixture* fixture,
-                                                         char const* keep, bool tree, char const* tampered_tool)
+                                                         char const* keep, bool tree, bool tree_listed,
+                                                         char const* tampered_tool)
 {
     *fixture = (BenchServiceZen5TestFixture){0};
-    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-zen5-XXXXXX";
-    bool ok = keep ? snprintf(fixture->root, sizeof(fixture->root), "%s", keep) > 0 : mkdtemp(root_template) != NULL;
+    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ok = keep ? snprintf(fixture->root, sizeof(fixture->root), "%s", keep) > 0 :
+                     bench_service_zen5_test_mkdtemp(root_template, "buster-bench-zen5");
     if (ok && !keep) snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
     char base[BENCH_SERVICE_RECIPE_PATH_CAP], candidate[BENCH_SERVICE_RECIPE_PATH_CAP], results[BENCH_SERVICE_RECIPE_PATH_CAP];
     char tools[BENCH_SERVICE_RECIPE_PATH_CAP], tests[BENCH_SERVICE_RECIPE_PATH_CAP], scratch[BENCH_SERVICE_RECIPE_PATH_CAP];
@@ -81,11 +98,29 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_fixture(Arena* arena, BenchServ
             if (descriptor >= 0) close(descriptor);
         }
     }
+    /* Snapshot files named after standard modules: the PMU stage must import
+     * only its pinned copies, so these would fail the success case. */
+    char const* shadows[] = {"tools/decimal.py", "tools/json.py", "tools/hashlib.py"};
     char path[BENCH_SERVICE_RECIPE_PATH_CAP];
-    ok = ok && bench_service_zen5_path(path, fixture->source, ".source-manifest") &&
-         bench_service_recipe_test_write(path, "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision="
-                                         BENCH_SERVICE_ZEN5_TEST_REVISION "\n"
-                                         "0000000000000000000000000000000000000000000000000000000000000000 cc\n", 0444);
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(shadows); index += 1)
+        ok = bench_service_zen5_path(path, fixture->source, shadows[index]) &&
+             bench_service_recipe_test_write(path, "raise SystemExit(97)\n", 0444);
+    /* The installed source manifest lists the tree identity file. */
+    char tree_digest[SHA256_HEX_CAPACITY] = {0};
+    String8 tree_bytes = S8(BENCH_SERVICE_ZEN5_TEST_TREE "\n");
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, tree_bytes.pointer, tree_bytes.length);
+    sha256_finish_hex(&hash, (char8*)tree_digest);
+    char manifest[512];
+    int manifest_length = snprintf(manifest, sizeof(manifest),
+                                   "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=" BENCH_SERVICE_ZEN5_TEST_REVISION "\n"
+                                   "%s .bq-source-tree\n"
+                                   "0000000000000000000000000000000000000000000000000000000000000000 cc\n",
+                                   tree_listed ? tree_digest : "1111111111111111111111111111111111111111111111111111111111111111");
+    ok = ok && manifest_length > 0 && (u32)manifest_length < sizeof(manifest) &&
+         bench_service_zen5_path(path, fixture->source, ".source-manifest") &&
+         bench_service_recipe_test_write(path, manifest, 0444);
     ok = ok && bench_service_zen5_path(path, fixture->source, "cc") &&
          bench_service_recipe_test_write(path,
              "#!/bin/sh\n"
@@ -112,8 +147,8 @@ BUSTER_GLOBAL_LOCAL void bench_service_zen5_test_cleanup(Arena* arena, BenchServ
 
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_scripts(Arena* arena, char scripts[BENCH_SERVICE_RECIPE_PATH_CAP])
 {
-    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-zen5-scripts-XXXXXX";
-    bool ok = mkdtemp(root_template) != NULL;
+    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ok = bench_service_zen5_test_mkdtemp(root_template, "buster-bench-zen5-scripts");
     if (ok) snprintf(scripts, BENCH_SERVICE_RECIPE_PATH_CAP, "%s", root_template);
     char const* names[] = {"driver", "ninja", "perf", "taskset"};
     char const* bodies[] = {
@@ -128,7 +163,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_scripts(Arena* arena, char scri
         "case \"$mode\" in\n"
         "generate) rm -rf \"$build\"; mkdir -p \"$build/Release\"\n"
         "  printf '[{\"directory\":\"%s\",\"command\":\"clang -c unity.c\"}]\\n' \"$build\" > \"$build/compile_commands.json\";;\n"
-        "build) cp \"$(readlink -f /bin/sh)\" \"$build/Release/ide\"; chmod 0755 \"$build/Release/ide\"; echo \"built $build\";;\n"
+        "build) [ -z \"${BENCH_SERVICE_ZEN5_TEST_SLOW:-}\" ] || sleep 60\n"
+        "  cp \"$(readlink -f /bin/sh)\" \"$build/Release/ide\"; chmod 0755 \"$build/Release/ide\"; echo \"built $build\";;\n"
         "*) exit 41;;\n"
         "esac\n",
         "#!/bin/sh\n"
@@ -297,6 +333,11 @@ enum BenchServiceZen5TestCase
     BENCH_SERVICE_ZEN5_TEST_MISSING_TREE,
     BENCH_SERVICE_ZEN5_TEST_TWO_SOURCES,
     BENCH_SERVICE_ZEN5_TEST_TIMING_RESERVE,
+    BENCH_SERVICE_ZEN5_TEST_UNLISTED_TREE,
+    BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_ORACLE,
+    BENCH_SERVICE_ZEN5_TEST_FROZEN_AFTER_CAPTURES,
+    BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES,
+    BENCH_SERVICE_ZEN5_TEST_STAGE_OVERRUN,
     BENCH_SERVICE_ZEN5_TEST_CASE_COUNT,
 };
 
@@ -305,9 +346,16 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
     BenchServiceZen5TestFixture fixture;
     char const* tampered = test_case == BENCH_SERVICE_ZEN5_TEST_PIN_MISMATCH ? "tools/zen5_qualification_replay.py" : NULL;
     bool ok = bench_service_zen5_test_fixture(arena, &fixture, keep, test_case != BENCH_SERVICE_ZEN5_TEST_MISSING_TREE,
-                                              tampered);
+                                              test_case != BENCH_SERVICE_ZEN5_TEST_UNLISTED_TREE, tampered);
     bench_service_zen5_test_tamper_plan = test_case == BENCH_SERVICE_ZEN5_TEST_PLAN_TAMPER;
     bench_service_zen5_test_reserve_seconds = test_case == BENCH_SERVICE_ZEN5_TEST_TIMING_RESERVE ? 100000u : 0;
+    bench_service_zen5_test_tamper_frozen = test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_ORACLE ? 1u :
+                                            test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_AFTER_CAPTURES ? 2u :
+                                            test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES ? 3u : 0u;
+    /* Overrun: a 4-second budget and a first build that sleeps past it. */
+    bool overrun = test_case == BENCH_SERVICE_ZEN5_TEST_STAGE_OVERRUN;
+    bench_service_zen5_test_budget_seconds = overrun ? 4u : 0u;
+    if (overrun) ok = ok && setenv("BENCH_SERVICE_ZEN5_TEST_SLOW", "1", 1) == 0;
     char const* candidate = test_case == BENCH_SERVICE_ZEN5_TEST_TWO_SOURCES ? "3333333333333333333333333333333333333333" :
                             BENCH_SERVICE_ZEN5_TEST_REVISION;
     ProcessResult result = ok ? bench_service_zen5_test_run(arena, &fixture, candidate) : PROCESS_RESULT_FAILED;
@@ -320,6 +368,10 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
              bench_service_zen5_test_manifest(fixture.result, manifest, "ab-authorized=false\n") &&
              bench_service_zen5_test_manifest(fixture.result, manifest, "oracle-consistent=true\n") &&
              bench_service_zen5_test_manifest(fixture.result, manifest, "pmu-status=invalid\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "immutable-capture-status=complete\n"
+                                              "same-root-rebuild-capture-status=complete\ncross-root-capture-status=complete\n") &&
+             bench_service_zen5_test_exists(fixture.result, "zen5/pmu/runtime.identity") &&
+             bench_service_zen5_test_exists(fixture.attempt, "zen5/pmu-tool/zen5_host_qualification.py") &&
              bench_service_zen5_test_replay(arena, &fixture);
         break;
     case BENCH_SERVICE_ZEN5_TEST_PLAN_TAMPER:
@@ -328,15 +380,15 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
              bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=captures\n") &&
              bench_service_zen5_test_exists(fixture.result, BENCH_SERVICE_ZEN5_NAME ".plan.manifest") &&
              !bench_service_zen5_test_exists(fixture.result, "zen5/captures/immutable.json") &&
-             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/immutable/capture.json") &&
-             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/immutable/output.o") &&
+             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable.json") &&
+             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable/output.o") &&
              bench_service_zen5_test_exists(fixture.result, BENCH_SERVICE_ZEN5_NAME ".bundle");
         break;
     case BENCH_SERVICE_ZEN5_TEST_PIN_MISMATCH:
         ok = ok && result == PROCESS_RESULT_FAILED &&
              bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=source\n") &&
              bench_service_zen5_test_manifest(fixture.result, manifest, "does not match the profile") &&
-             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/immutable-generate.log");
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-immutable-generate.log");
         break;
     case BENCH_SERVICE_ZEN5_TEST_MISSING_TREE:
         ok = ok && result == PROCESS_RESULT_FAILED &&
@@ -347,16 +399,56 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
         ok = ok && result == PROCESS_RESULT_FAILED &&
              !bench_service_zen5_test_exists(fixture.result, BENCH_SERVICE_ZEN5_NAME ".prepare.manifest");
         break;
-    default:
+    case BENCH_SERVICE_ZEN5_TEST_TIMING_RESERVE:
         ok = ok && result == PROCESS_RESULT_FAILED &&
              bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=plan\n") &&
              bench_service_zen5_test_exists(fixture.result, "zen5/builds/cross-root-B.json") &&
              !bench_service_zen5_test_exists(fixture.result, "zen5/plan.json") &&
-             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/immutable");
+             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_UNLISTED_TREE:
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=source\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "does not list .bq-source-tree") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-immutable-generate.log");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_ORACLE:
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=oracle\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "frozen binaries changed before the oracle") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/oracle.record") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-oracle.log");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_FROZEN_AFTER_CAPTURES:
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=captures\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "frozen binaries changed after capture immutable") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "immutable-capture-status=missing\n") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/captures/immutable.json");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES:
+        /* The runner compares against the spec's digests before any child. */
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=captures\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "captures were refused or failed") &&
+             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable.json") &&
+             !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable/output.o");
+        break;
+    default:
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=builds\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest,
+                                              "stage zen5-immutable-build exceeded the recipe budget") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/builds/immutable.json") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-same-root-A-generate.log") &&
+             !bench_service_zen5_test_exists(fixture.result, BENCH_SERVICE_ZEN5_NAME ".plan.manifest");
         break;
     }
     bench_service_zen5_test_tamper_plan = false;
     bench_service_zen5_test_reserve_seconds = 0;
+    bench_service_zen5_test_tamper_frozen = 0;
+    bench_service_zen5_test_budget_seconds = 0;
+    if (overrun) unsetenv("BENCH_SERVICE_ZEN5_TEST_SLOW");
     if (!ok) string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST_FAILURE case={u32} root={S8}\n"), (u32)test_case,
                           string_from_pointer(fixture.root));
     if (fixture.root[0]) bench_service_zen5_test_cleanup(arena, &fixture, keep != NULL);
@@ -398,7 +490,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* are
     if (scripts[0]) remove_path_recursive(arena, string_from_pointer(scripts));
     string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases,
                  string_from_pointer(ok && supported ? "pass" : ok ? "unsupported-host" : "fail"));
-    return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return ok && supported ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 #else
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* arena, SliceString8 arguments)

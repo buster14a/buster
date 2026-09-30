@@ -13,9 +13,21 @@
  * root as their only writable path; the trusted driver creates each root
  * before its generate. Stages 10..12 (oracle, pmu, captures) execute the
  * frozen binaries as the candidate account with one staging directory
- * writable. The pmu stage alone may also call perf_event_open; it never
- * changes a host setting, so a refused counter is recorded as invalid.
- * Every stage runs in ATTEMPT/base/source.
+ * writable. Every stage runs in ATTEMPT/base/source, with the broker's fixed
+ * PATH=/usr/bin:/bin and LC_ALL=C (the gate clears everything else).
+ *
+ * PMU grant: the pmu stage's seccomp allow-list alone gains perf_event_open.
+ * No capability is granted (the gate refuses any nonempty capability set, and
+ * CAP_PERFMON would widen the unit to system-wide monitoring) and no host
+ * setting changes: the host's perf_event_paranoid decides, and a refused or
+ * unsupported counter is recorded as `invalid`, never as a zero count. The
+ * PMU tool runs from ATTEMPT/zen5/pmu-tool, the driver-owned read-only copy
+ * of the four pinned files, with -B -E -s so no snapshot file or environment
+ * variable can shadow a module.
+ *
+ * Stop: `systemd-run --wait` returns only after the stage unit is inactive,
+ * and KillMode=control-group has killed every process in it, so no stage
+ * process survives to rewrite staging after the driver starts reading it.
  *
  * Map: BQ_ZEN5_STAGE_NAMES, BQ_ZEN5_STAGE_FIRST_NUMBER, BQ_ZEN5_STAGE_OUTER_VERB,
  * BQ_ZEN5_STAGE_BUILD_ROOTS, BqZen5StageCommand, bq_zen5_stage_command.
@@ -53,7 +65,12 @@
 /* Equal to the installed profile's workload= and cpu= (zen5_profile_test.py). */
 #define BQ_ZEN5_STAGE_WORKLOAD "tests/c_abi_cfuncs.c"
 #define BQ_ZEN5_STAGE_CPU "2"
+#define BQ_ZEN5_STAGE_CPU_NUMBER 2u
+/* The profile's pmu-capture pin, and the driver-owned directory holding the
+ * verified copies of the four pinned PMU files (by basename). */
 #define BQ_ZEN5_STAGE_PMU_TOOL "tools/zen5_host_qualification.py"
+#define BQ_ZEN5_STAGE_PMU_TOOL_DIRECTORY "zen5/pmu-tool"
+#define BQ_ZEN5_STAGE_PMU_TOOL_NAME "zen5_host_qualification.py"
 
 /* Attempt-relative paths the trusted driver writes and every stage reads. */
 #define BQ_ZEN5_STAGE_SOURCE "base/source"
@@ -153,7 +170,9 @@ static inline bool bq_zen5_stage_command(unsigned index, char const* attempt, Bq
     {
         bq_zen5_stage_literal(command, BQ_ZEN5_STAGE_PYTHON);
         bq_zen5_stage_literal(command, "-B");
-        bq_zen5_stage_path(command, attempt, BQ_ZEN5_STAGE_SOURCE, BQ_ZEN5_STAGE_PMU_TOOL);
+        bq_zen5_stage_literal(command, "-E");
+        bq_zen5_stage_literal(command, "-s");
+        bq_zen5_stage_path(command, attempt, BQ_ZEN5_STAGE_PMU_TOOL_DIRECTORY, BQ_ZEN5_STAGE_PMU_TOOL_NAME);
         bq_zen5_stage_literal(command, "capture");
         bq_zen5_stage_literal(command, "--output");
         bq_zen5_stage_path(command, attempt, BQ_ZEN5_STAGE_PMU_STAGING, "zen5-pmu-v1.json");

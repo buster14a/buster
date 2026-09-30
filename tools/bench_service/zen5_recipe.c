@@ -1,46 +1,40 @@
-/* zen5-calibration-v1: the fixed #426 Zen 5 calibration recipe (held).
+/* zen5-calibration-v1: the fixed #426 Zen 5 calibration recipe (served).
  *
  * Ownership: bench_service_zen5_recipe_add (the trusted build driver) owns the
  * phase order, the frozen binaries, the pre-sample plan and every file in the
  * result root. bench_service_zen5_capture_add (a stage program) owns only its
- * timed children and the raw record in its staging directory.
+ * timed children and the raw records in its staging directory.
  *
- * Held: queue.c registers the recipe but neither admits nor serves it
- * (bq_recipe_blocked), so no request reaches this code in production until
- * the systemd broker carries the stage contract below (production stages go
- * through `start-stage`, which the current broker refuses). The self-test
- * (zen5_recipe_test.c) runs the same phases with direct children.
+ * queue.c admits and serves the recipe; the worker starts its outer unit with
+ * the broker's `start-zen5-outer`, and every stage below goes through
+ * `start-stage JOB ATTEMPT <stage> REV REV`. zen5_stage.h is the stage
+ * contract the broker and credential gate share with this file: the stage
+ * names, the exact argv, account, writable path and the PMU stage's
+ * perf_event_open allowance. The self-test (zen5_recipe_test.c) runs the same
+ * argv with direct children.
  *
- * Phases (bench_service_zen5_run): profile pins and source identity ->
- * five serial trusted builds with frozen copies (bench_service_zen5_builds) ->
- * untimed oracle -> PMU phase outside timing (zen5_host_qualification.py) ->
- * bench_service_zen5_plan_freeze, durable before any timed child ->
- * three fixed 120-slot captures in the #884/#915 formats -> bundle and final
- * manifest (bench_service_zen5_finish). ab-authorized is always false.
- *
- * Stage contract the broker must implement before the recipe is served
- * (`start-stage JOB ATTEMPT zen5-<stage> REV REV`; ATTEMPT = the attempt tree,
- * Z = ATTEMPT/zen5, S = ATTEMPT/base/source; every stage keeps the result
- * root, queue and lease inaccessible and the fixed CPU/memory/task limits):
- *   <id>-generate, <id>-build (trusted identity; RW only Z/builds/<root>) for
- *     id immutable, same-root-A, same-root-B, cross-root-A, cross-root-B, run
- *     the fixed Release generate/build argv of bench_service_zen5_builds;
- *   <id>-commands (trusted; read-only) runs `ninja -t commands ide`;
- *   oracle, capture-<kind> (candidate identity; RO S and Z/frozen, RW only
- *     Z/staging/<name>) run `buster-bench-build bench_service_zen5_capture`;
- *   pmu (candidate; RW Z/staging/pmu) runs S/tools/zen5_host_qualification.py
- *     and additionally needs perf_event_open for the candidate account.
- * The frozen binaries, plan, specs and headers are written by the trusted
- * driver and are read-only to every stage.
+ * Phases (bench_service_zen5_run): profile pins, copied into the driver-owned
+ * zen5/pmu-tool, and source identity (the tree file must be manifest-listed)
+ * -> five serial trusted builds with frozen copies (bench_service_zen5_builds;
+ * the driver itself runs `ninja -t commands`) -> untimed oracle -> PMU phase
+ * outside timing -> bench_service_zen5_plan_freeze, durable before any timed
+ * child -> one captures stage running the three fixed 120-slot captures in the
+ * #884/#915 formats -> bundle and final manifest (bench_service_zen5_finish).
+ * All six frozen paths are re-hashed before the oracle, PMU and plan phases
+ * and after the captures (bench_service_zen5_frozen_verify); each capture
+ * runner receives the expected digests in its spec. ab-authorized is always
+ * false, and an invalid capture fails the attempt while staying published.
  *
  * Map: bench_service_zen5_profile_value, bench_service_zen5_child,
- * bench_service_zen5_stage, bench_service_zen5_text_section,
+ * bench_service_zen5_stage, bench_service_zen5_commands, bench_service_zen5_pmu_tools,
+ * bench_service_zen5_frozen_verify, bench_service_zen5_capture_check, bench_service_zen5_text_section,
  * bench_service_zen5_json_*, bench_service_zen5_schedule,
  * bench_service_zen5_family, bench_service_zen5_header,
  * bench_service_zen5_capture_run, bench_service_zen5_publish,
  * bench_service_zen5_bundle.
  */
 #include "zen5_calibration_profile.h"
+#include "zen5_stage.h"
 
 #define BENCH_SERVICE_ZEN5_NAME "zen5-calibration-v1"
 #define BENCH_SERVICE_ZEN5_BUILDS 5u
@@ -52,8 +46,9 @@
 #define BENCH_SERVICE_ZEN5_TEXT_CAP (4u * 1024u * 1024u)
 #define BENCH_SERVICE_ZEN5_BINARY_CAP (512ull * 1024 * 1024)
 #define BENCH_SERVICE_ZEN5_CHILD_SECONDS 120u
+#define BENCH_SERVICE_ZEN5_MANIFEST_CAP (4u * 1024u * 1024u)
 #define BENCH_SERVICE_ZEN5_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
-#define BENCH_SERVICE_ZEN5_PYTHON "/usr/bin/python3"
+#define BENCH_SERVICE_ZEN5_PYTHON BQ_ZEN5_STAGE_PYTHON
 #define BENCH_SERVICE_ZEN5_NINJA "/usr/bin/ninja"
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
@@ -69,6 +64,10 @@ BUSTER_GLOBAL_LOCAL String8 bench_service_zen5_self_override;
 BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_gap_ns;
 BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_reserve_seconds;
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_tamper_plan;
+/* Change a frozen binary 1: before the oracle; 2: after the captures stage;
+ * 3: after the capture specs, so only the capture runner can notice. */
+BUSTER_GLOBAL_LOCAL u32 bench_service_zen5_test_tamper_frozen;
+BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_budget_seconds;
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_cpu_set;
 BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_cpu;
 
@@ -115,6 +114,7 @@ struct BenchServiceZen5
     String8 workspace_root;
     String8 revision;
     String8 result_root;
+    char attempt[BENCH_SERVICE_RECIPE_PATH_CAP];
     char source[BENCH_SERVICE_RECIPE_PATH_CAP];
     char zen5[BENCH_SERVICE_RECIPE_PATH_CAP];
     char immutable_path1[BENCH_SERVICE_RECIPE_PATH_CAP];
@@ -143,6 +143,7 @@ struct BenchServiceZen5
     char pmu_status[32];
     char plan_sha256[SHA256_HEX_CAPACITY];
     char capture_sha256[BENCH_SERVICE_ZEN5_CAPTURES][SHA256_HEX_CAPACITY];
+    bool capture_complete[BENCH_SERVICE_ZEN5_CAPTURES];
     bool oracle_consistent;
     BenchServiceZen5Build builds[BENCH_SERVICE_ZEN5_BUILDS];
     char const* stage;
@@ -434,26 +435,44 @@ BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const* 
     return child;
 }
 
-/* A fixed recipe stage. In production the recipe asks the systemd broker to
- * start the named transient unit, which constructs the argv itself; the argv
- * here is the direct form the self-test runs and the broker must mirror. */
-BUSTER_GLOBAL_LOCAL bool bench_service_zen5_stage(BenchServiceZen5* recipe, char const* stage, char* const* direct,
-                                                  char const* directory, int* status)
+/* Recipe stage `index` of zen5_stage.h. In production the recipe asks the
+ * systemd broker to start the typed transient unit, which builds the same
+ * argv from the shared contract; the self-test's direct mode runs that argv
+ * as a plain child, substituting only the program (its stand-ins) and the
+ * PMU CPU (a CPU the test host has). The stage's output is its log. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_stage(BenchServiceZen5* recipe, u32 index, int* status)
 {
-    char log_name[160] = {0}, job[32] = {0}, token[32] = {0}, revision[72] = {0}, unit[128] = {0};
+    static char const* const names[BQ_ZEN5_STAGE_COUNT] = {BQ_ZEN5_STAGE_NAMES};
+    char const* stage = index < BQ_ZEN5_STAGE_COUNT ? names[index] : "unknown";
+    char log_name[160] = {0}, job[32] = {0}, token[32] = {0}, revision[72] = {0}, cpu[24] = {0};
+    BqZen5StageCommand stage_command;
+    BqZen5StageCommand* command = &stage_command;
     int length = snprintf(log_name, sizeof(log_name), "%s.log", stage);
-    bool named = length > 0 && (u32)length < sizeof(log_name) &&
+    bool named = index < BQ_ZEN5_STAGE_COUNT && length > 0 && (u32)length < sizeof(log_name) &&
                  snprintf(job, sizeof(job), "%.*s", (int)recipe->job_id.length, recipe->job_id.pointer) > 0 &&
                  snprintf(token, sizeof(token), "%.*s", (int)recipe->attempt_token.length, recipe->attempt_token.pointer) > 0 &&
                  snprintf(revision, sizeof(revision), "%.*s", (int)recipe->revision.length, recipe->revision.pointer) > 0 &&
-                 snprintf(unit, sizeof(unit), "zen5-%s", stage) > 0;
+                 snprintf(cpu, sizeof(cpu), "%llu", (unsigned long long)recipe->cpu) > 0 &&
+                 bq_zen5_stage_command(index, recipe->attempt, command);
+    char* direct[BQ_ZEN5_STAGE_MAX_ARGS + 1] = {0};
+    for (u32 argument = 0; named && argument <= command->count; argument += 1)
+        direct[argument] = (char*)command->argv[argument];
+    if (named)
+    {
+        direct[0] = index < BQ_ZEN5_STAGE_ORACLE ? recipe->driver : index == BQ_ZEN5_STAGE_PMU ? recipe->python : recipe->self;
+        for (u32 argument = 1; index == BQ_ZEN5_STAGE_PMU && argument + 1 < command->count; argument += 1)
+            if (!strcmp(command->argv[argument], "--cpu")) direct[argument + 1] = cpu;
+    }
     int log = named ? openat(recipe->logs_directory, log_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    char* broker[] = {BENCH_SERVICE_ZEN5_BROKER, "start-stage", job, token, unit, revision, revision, NULL};
+    char* broker[] = {BENCH_SERVICE_ZEN5_BROKER, "start-stage", job, token, (char*)stage, revision, revision, NULL};
     printf("+ zen5 stage %s\n", stage);
     fflush(stdout);
     BenchServiceZen5Child child = {.status = -1};
-    if (log >= 0) child = bench_service_zen5_child(bench_service_zen5_direct ? direct : broker, directory, log,
-                                                   recipe->deadline_ns);
+    /* No stage starts at or past the deadline (a capture stage would begin a
+     * timed child only to be killed). */
+    child.timed_out = bench_service_zen5_now() >= recipe->deadline_ns;
+    if (log >= 0 && !child.timed_out)
+        child = bench_service_zen5_child(bench_service_zen5_direct ? direct : broker, recipe->source, log, recipe->deadline_ns);
     bool ok = log >= 0 && child.launched && !child.timed_out;
     if (log >= 0)
     {
@@ -463,6 +482,28 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_stage(BenchServiceZen5* recipe, char
     if (child.timed_out) snprintf(recipe->reason, sizeof(recipe->reason), "stage %s exceeded the recipe budget", stage);
     else if (!ok) snprintf(recipe->reason, sizeof(recipe->reason), "stage %s could not run", stage);
     *status = child.status;
+    return ok;
+}
+
+/* `ninja -t commands ide` of one configured root, run by the trusted driver
+ * itself (read-only, no candidate code) into logs/zen5-<id>-commands.log. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_commands(BenchServiceZen5* recipe, BenchServiceZen5Build const* build,
+                                                     char* log_name, u32 log_capacity)
+{
+    int length = snprintf(log_name, log_capacity, "zen5-%s-commands.log", build->id);
+    bool ok = length > 0 && (u32)length < log_capacity;
+    int log = ok ? openat(recipe->logs_directory, log_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    char* argv[] = {recipe->ninja, "-C", (char*)build->root, "-f", "build-Release.ninja", "-t", "commands", "ide", NULL};
+    BenchServiceZen5Child child = log >= 0 ? bench_service_zen5_child(argv, recipe->source, log, recipe->deadline_ns) :
+                                             (BenchServiceZen5Child){.status = -1};
+    ok = log >= 0 && child.launched && !child.timed_out && child.status == 0;
+    if (log >= 0)
+    {
+        if (fchmod(log, 0400) != 0 || fsync(log) != 0) ok = false;
+        if (close(log) != 0) ok = false;
+    }
+    if (child.timed_out) snprintf(recipe->reason, sizeof(recipe->reason), "build %s commands exceeded the recipe budget",
+                                  build->id);
     return ok;
 }
 
@@ -851,10 +892,11 @@ BUSTER_GLOBAL_LOCAL String8 bench_service_zen5_header(Arena* arena, BenchService
  * Capture runner (stage program). The spec is a trusted, read-only file the
  * driver writes; the runner verifies the frozen plan before its first child.
  */
-#define BENCH_SERVICE_ZEN5_SPEC_KEYS 14u
+#define BENCH_SERVICE_ZEN5_SPEC_KEYS 18u
 BUSTER_GLOBAL_LOCAL char const* const bench_service_zen5_spec_keys[BENCH_SERVICE_ZEN5_SPEC_KEYS] = {
     "kind", "plan", "plan-sha256", "header", "directory", "input", "output", "gap-ns",
-    "expected-output", "path0", "path1", "binary-a", "binary-b", "children-log"};
+    "expected-output", "path0", "path1", "binary-a", "binary-b", "children-log",
+    "path0-sha256", "path1-sha256", "binary-a-sha256", "binary-b-sha256"};
 
 typedef struct BenchServiceZen5Spec BenchServiceZen5Spec;
 struct BenchServiceZen5Spec
@@ -912,11 +954,12 @@ BUSTER_GLOBAL_LOCAL String8 bench_service_zen5_spec_value(BenchServiceZen5Spec c
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool bench_service_zen5_spec_text(BenchServiceZen5Spec const* spec, char const* key, char* output)
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_spec_text(BenchServiceZen5Spec const* spec, char const* key, char* output,
+                                                      u32 capacity)
 {
     String8 value = bench_service_zen5_spec_value(spec, key);
-    bool ok = value.length > 0 && value.length < BENCH_SERVICE_RECIPE_PATH_CAP;
-    if (ok) snprintf(output, BENCH_SERVICE_RECIPE_PATH_CAP, "%.*s", (int)value.length, value.pointer);
+    bool ok = value.length > 0 && value.length < capacity;
+    if (ok) snprintf(output, capacity, "%.*s", (int)value.length, value.pointer);
     return ok;
 }
 
@@ -966,10 +1009,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_capture_run(Arena* arena, c
               bench_service_zen5_spec_parse(spec_text, &spec);
     char directory[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, input[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
     char output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, log_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    ok = ok && bench_service_zen5_spec_text(&spec, "directory", directory) &&
-         bench_service_zen5_spec_text(&spec, "input", input) && bench_service_zen5_spec_text(&spec, "output", output) &&
-         bench_service_zen5_spec_text(&spec, "children-log", log_path);
-    int log = ok ? open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && bench_service_zen5_spec_text(&spec, "directory", directory, sizeof(directory)) &&
+         bench_service_zen5_spec_text(&spec, "input", input, sizeof(input)) && bench_service_zen5_spec_text(&spec, "output", output, sizeof(output)) &&
+         bench_service_zen5_spec_text(&spec, "children-log", log_path, sizeof(log_path));
+    /* Group-readable: the trusted driver (another account) publishes it. */
+    int log = ok ? open(log_path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0640) : -1;
     ok = ok && log >= 0;
     BenchServiceZen5Json record = {.arena = arena, .ok = true};
     if (ok && spec.oracle)
@@ -994,22 +1038,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_capture_run(Arena* arena, c
         char plan_expected[SHA256_HEX_CAPACITY + 8] = {0}, plan_actual[SHA256_HEX_CAPACITY] = {0};
         char expected_output[SHA256_HEX_CAPACITY + 8] = {0}, gap_text[32] = {0};
         char paths[2][BENCH_SERVICE_RECIPE_PATH_CAP] = {{0}}, binaries[2][BENCH_SERVICE_RECIPE_PATH_CAP] = {{0}};
-        char binary_digest[2][SHA256_HEX_CAPACITY] = {{0}};
-        ok = bench_service_zen5_spec_text(&spec, "kind", kind) && bench_service_zen5_spec_text(&spec, "plan", plan) &&
-             bench_service_zen5_spec_text(&spec, "plan-sha256", plan_expected) &&
-             bench_service_zen5_spec_text(&spec, "header", header_path) &&
-             bench_service_zen5_spec_text(&spec, "expected-output", expected_output) &&
-             bench_service_zen5_spec_text(&spec, "gap-ns", gap_text) &&
-             bench_service_zen5_spec_text(&spec, "path0", paths[0]) &&
-             bench_service_zen5_spec_text(&spec, "path1", paths[1]) &&
+        char binary_digest[2][SHA256_HEX_CAPACITY] = {{0}}, path_digest[2][SHA256_HEX_CAPACITY] = {{0}};
+        ok = bench_service_zen5_spec_text(&spec, "kind", kind, sizeof(kind)) &&
+             bench_service_zen5_spec_text(&spec, "plan", plan, sizeof(plan)) &&
+             bench_service_zen5_spec_text(&spec, "plan-sha256", plan_expected, sizeof(plan_expected)) &&
+             bench_service_zen5_spec_text(&spec, "header", header_path, sizeof(header_path)) &&
+             bench_service_zen5_spec_text(&spec, "expected-output", expected_output, sizeof(expected_output)) &&
+             bench_service_zen5_spec_text(&spec, "gap-ns", gap_text, sizeof(gap_text)) &&
+             bench_service_zen5_spec_text(&spec, "path0", paths[0], sizeof(paths[0])) &&
+             bench_service_zen5_spec_text(&spec, "path1", paths[1], sizeof(paths[1])) &&
              bench_service_zen5_hex(plan_expected, 64) && bench_service_zen5_hex(expected_output, 64);
+        /* Expected binary digests come from the trusted spec (the digests
+         * taken at freeze), never from the files this runner is about to run.
+         * A control's frozen builds, or the immutable capture's two paths,
+         * must match them before the first child. */
         bool control = ok && strcmp(kind, "immutable") != 0;
-        ok = ok && (!control || (bench_service_zen5_spec_text(&spec, "binary-a", binaries[0]) &&
-                                 bench_service_zen5_spec_text(&spec, "binary-b", binaries[1]) &&
-                                 bench_service_zen5_file_digest(binaries[0], BENCH_SERVICE_ZEN5_BINARY_CAP,
-                                                                binary_digest[0], NULL, NULL) &&
-                                 bench_service_zen5_file_digest(binaries[1], BENCH_SERVICE_ZEN5_BINARY_CAP,
-                                                                binary_digest[1], NULL, NULL)));
+        char const* digest_keys[2][2] = {{"path0-sha256", "path1-sha256"}, {"binary-a-sha256", "binary-b-sha256"}};
+        for (u32 index = 0; ok && index < 2; index += 1)
+        {
+            char* expected = control ? binary_digest[index] : path_digest[index];
+            char const* file = control ? binaries[index] : paths[index];
+            char actual[SHA256_HEX_CAPACITY] = {0};
+            ok = (!control || bench_service_zen5_spec_text(&spec, index ? "binary-b" : "binary-a", binaries[index],
+                                                           sizeof(binaries[index]))) &&
+                 bench_service_zen5_spec_text(&spec, digest_keys[control][index], expected, SHA256_HEX_CAPACITY) &&
+                 bench_service_zen5_hex(expected, 64) &&
+                 bench_service_zen5_file_digest(file, BENCH_SERVICE_ZEN5_BINARY_CAP, actual, NULL, NULL) &&
+                 !strcmp(actual, expected);
+        }
         IntegerParsingU64 gap = string8_parse_u64_decimal(string_from_pointer(gap_text));
         ok = ok && gap.status == INTEGER_PARSING_SUCCESS && gap.length == strlen(gap_text) && gap.value > 0;
         /* The pre-sample plan must be the frozen one before any timed child. */
@@ -1065,6 +1121,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_capture_run(Arena* arena, c
                     memcpy(slots[slot].binary[1], after[slot_ab ? slot_a ^ 1u : slot_a], SHA256_HEX_CAPACITY);
                 }
             }
+        }
+        for (u32 path = 0; ok && !control && path < 2; path += 1)
+        {
+            /* The immutable paths are frozen; any change after the run
+             * refuses the record rather than labelling slots. */
+            char after[SHA256_HEX_CAPACITY] = {0};
+            ok = bench_service_zen5_file_digest(paths[path], BENCH_SERVICE_ZEN5_BINARY_CAP, after, NULL, NULL) &&
+                 !strcmp(after, path_digest[path]);
+            if (!ok) fprintf(stderr, "error: zen5 immutable capture path%u changed during the run\n", path);
         }
         BenchServiceZen5Json observations = {.arena = arena, .ok = true};
         BenchServiceZen5Json reasons = {.arena = arena, .ok = true};
@@ -1212,23 +1277,64 @@ BUSTER_GLOBAL_LOCAL int bench_service_zen5_result_directory(BenchServiceZen5* re
     return result;
 }
 
-/* Verify the pinned tools in the materialized snapshot and bind the source. */
-BUSTER_GLOBAL_LOCAL bool bench_service_zen5_identity_phase(Arena* arena, BenchServiceZen5* recipe)
+/* The four pinned PMU files. With `copy`, each snapshot file must match its
+ * profile digest and is copied read-only into the driver-owned
+ * zen5/pmu-tool; every call then re-hashes those copies, which are the only
+ * files the PMU stage imports (zen5_stage.h). */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_pmu_tools(Arena* arena, BenchServiceZen5* recipe, bool copy)
 {
     char const* pins[][2] = {{"pmu", "pmu-sha256"}, {"pmu-capture", "pmu-capture-sha256"},
                              {"pmu-common", "pmu-common-sha256"}, {"pmu-replay", "pmu-replay-sha256"}};
-    bool ok = true;
+    char directory[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ok = copy ? bench_service_zen5_mkdir(recipe->zen5, "pmu-tool", 02750, directory) :
+                     bench_service_zen5_path(directory, recipe->zen5, "pmu-tool");
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(pins); index += 1)
     {
         char relative[256] = {0}, expected[SHA256_HEX_CAPACITY + 8] = {0}, actual[SHA256_HEX_CAPACITY] = {0};
-        char path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        char path[BENCH_SERVICE_RECIPE_PATH_CAP], copied[BENCH_SERVICE_RECIPE_PATH_CAP];
+        String8 bytes = {0};
         ok = bench_service_zen5_profile_value(pins[index][0], relative, sizeof(relative)) &&
              bench_service_zen5_profile_value(pins[index][1], expected, sizeof(expected)) &&
-             bench_service_zen5_path(path, recipe->source, relative) &&
-             bench_service_zen5_file_digest(path, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, actual, NULL, NULL) &&
+             strchr(relative, '/') != NULL && bench_service_zen5_path(copied, directory, strrchr(relative, '/') + 1);
+        if (ok && copy)
+            ok = bench_service_zen5_path(path, recipe->source, relative) &&
+                 bench_service_zen5_read(arena, path, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, &bytes) &&
+                 bench_service_zen5_write_new(copied, bytes, 0444);
+        ok = ok && bench_service_zen5_file_digest(copied, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, actual, NULL, NULL) &&
              !strcmp(actual, expected);
         if (!ok) snprintf(recipe->reason, sizeof(recipe->reason), "pinned tool %.96s does not match the profile", relative);
     }
+    return ok;
+}
+
+/* python3, perf and taskset run by name in the PMU stage (PATH=/usr/bin:/bin);
+ * record what those names resolve to, or `missing`, as zen5/pmu/runtime.identity. */
+BUSTER_GLOBAL_LOCAL String8 bench_service_zen5_runtime_identity(Arena* arena, BenchServiceZen5 const* recipe)
+{
+    char const* names[] = {"python3", "perf", "taskset"};
+    String8List lines = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        char usr[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, bin[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        snprintf(usr, sizeof(usr), "%s", index == 0 ? recipe->python : "/usr/bin/");
+        snprintf(bin, sizeof(bin), "/bin/%s", names[index]);
+        if (index) snprintf(usr, sizeof(usr), "/usr/bin/%s", names[index]);
+        char const* found = access(usr, X_OK) == 0 ? usr : index && access(bin, X_OK) == 0 ? bin : NULL;
+        char* resolved = found ? realpath(found, NULL) : NULL;
+        bool hashed = resolved && bench_service_zen5_file_digest(resolved, BENCH_SERVICE_ZEN5_BINARY_CAP, digest, NULL, NULL);
+        string8_list_push(arena, &lines, string_format(arena, S8("{S8} {S8} {S8}\n"), string_from_pointer(names[index]),
+                                                       string_from_pointer(hashed ? resolved : "missing"),
+                                                       string_from_pointer(hashed ? digest : "missing")));
+        free(resolved);
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+}
+
+/* Verify the pinned tools in the materialized snapshot and bind the source. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_identity_phase(Arena* arena, BenchServiceZen5* recipe)
+{
+    bool ok = bench_service_zen5_pmu_tools(arena, recipe, true);
     char tree_file[64] = {0}, path[BENCH_SERVICE_RECIPE_PATH_CAP];
     String8 tree = {0}, manifest = {0};
     if (ok)
@@ -1246,15 +1352,25 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_identity_phase(Arena* arena, BenchSe
     }
     if (ok)
     {
-        /* The materializer's verified manifest copy names every source byte. */
-        char expected[160];
-        snprintf(expected, sizeof(expected), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%.*s\n",
-                 (int)recipe->revision.length, recipe->revision.pointer);
-        ok = bench_service_zen5_path(path, recipe->source, ".source-manifest") &&
-             bench_service_zen5_read(arena, path, 64 * 1024, &manifest) &&
+        /* The materializer's verified manifest copy names every source byte.
+         * The operator's installation lists the tree file in it, so the tree
+         * identity is bound to the installed source, not merely present. */
+        char expected[192], repository[96] = {0}, tree_digest[SHA256_HEX_CAPACITY] = {0}, listed[160] = {0};
+        ok = bench_service_zen5_profile_value("repository", repository, sizeof(repository)) &&
+             snprintf(expected, sizeof(expected), "BQ-SOURCE-V1\nrepository=%s\nrevision=%.*s\n", repository,
+                      (int)recipe->revision.length, recipe->revision.pointer) > 0 &&
+             bench_service_zen5_path(path, recipe->source, ".source-manifest") &&
+             bench_service_zen5_read(arena, path, BENCH_SERVICE_ZEN5_MANIFEST_CAP, &manifest) &&
              string_starts_with_sequence(manifest, string_from_pointer(expected)) &&
-             bench_service_zen5_file_digest(path, 64 * 1024, recipe->source_identity, NULL, NULL);
+             bench_service_zen5_file_digest(path, BENCH_SERVICE_ZEN5_MANIFEST_CAP, recipe->source_identity, NULL, NULL);
         if (!ok) snprintf(recipe->reason, sizeof(recipe->reason), "source manifest does not name the revision");
+        char tree_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        bool bound = ok && bench_service_zen5_path(tree_path, recipe->source, tree_file) &&
+                     bench_service_zen5_file_digest(tree_path, 64, tree_digest, NULL, NULL) &&
+                     snprintf(listed, sizeof(listed), "\n%s %s\n", tree_digest, tree_file) > 0 &&
+                     string_first_sequence(manifest, string_from_pointer(listed)) != BUSTER_STRING_NO_MATCH;
+        if (ok && !bound) snprintf(recipe->reason, sizeof(recipe->reason), "source manifest does not list %s", tree_file);
+        ok = ok && bound;
     }
     if (ok)
     {
@@ -1265,7 +1381,10 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_identity_phase(Arena* arena, BenchSe
     }
     if (ok)
     {
-        /* Toolchain and environment identities shared by all five builds. */
+        /* Toolchain and environment identities shared by all five builds. In
+         * production the broker and credential gate give every stage exactly
+         * this PATH and LC_ALL and clear the rest; the direct self-test mode
+         * inherits the test's environment instead. */
         char const* tools[] = {"/usr/bin/clang", "/usr/bin/cmake", "/usr/bin/ninja"};
         String8List lines = {0};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(tools); index += 1)
@@ -1319,26 +1438,21 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_builds(Arena* arena, BenchServiceZen
     for (u32 index = 0; ok && index < BENCH_SERVICE_ZEN5_BUILDS; index += 1)
     {
         BenchServiceZen5Build* build = recipe->builds + index;
-        char stage[96], name[64];
+        char name[64], commands_log[96] = {0}, root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
         int status = -1;
+        /* The stage unit can write only its configured root, so the trusted
+         * driver creates it; generate clears its contents. Same-root B
+         * reuses A's root. */
+        bool fresh_root = index == 0 || strcmp(build->root_name, recipe->builds[index - 1].root_name) != 0;
         ok = bench_service_zen5_path(build->root, builds, build->root_name) &&
+             (!fresh_root || bench_service_zen5_mkdir(builds, build->root_name, 02750, root)) &&
              bench_service_zen5_mkdir(frozen, build->id, 02750, scratch) &&
              bench_service_zen5_path(build->frozen, scratch, "ide");
-        char* generate[] = {recipe->driver, "generate", "--build-directory", build->root, "--config", "Release",
-                            "--cc", "clang", "--no-include-tests", "--no-developer-targets",
-                            "--no-check-optional-warnings", "--no-fuzz", "--no-sanitize", "--no-time-trace",
-                            "--no-instrument", "--no-lto", NULL};
-        char* compile[] = {recipe->driver, "build", "--build-directory", build->root, "--config", "Release", "-t", "ide",
-                           "--", "-j1", NULL};
-        char* commands[] = {recipe->ninja, "-C", build->root, "-f", "build-Release.ninja", "-t", "commands", "ide", NULL};
         build->started_ns = bench_service_zen5_now();
-        snprintf(stage, sizeof(stage), "%s-generate", build->id);
-        ok = ok && bench_service_zen5_stage(recipe, stage, generate, recipe->source, &status) && status == 0;
-        snprintf(stage, sizeof(stage), "%s-build", build->id);
-        ok = ok && bench_service_zen5_stage(recipe, stage, compile, recipe->source, &status) && status == 0;
+        ok = ok && bench_service_zen5_stage(recipe, index * 2u, &status) && status == 0;
+        ok = ok && bench_service_zen5_stage(recipe, index * 2u + 1u, &status) && status == 0;
         build->finished_ns = bench_service_zen5_now();
-        snprintf(stage, sizeof(stage), "%s-commands", build->id);
-        ok = ok && bench_service_zen5_stage(recipe, stage, commands, recipe->source, &status) && status == 0;
+        ok = ok && bench_service_zen5_commands(recipe, build, commands_log, sizeof(commands_log));
         if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "build %s failed", build->id);
         char built[BENCH_SERVICE_RECIPE_PATH_CAP], path[BENCH_SERVICE_RECIPE_PATH_CAP];
         ok = ok && bench_service_zen5_path(built, build->root, "Release/ide") &&
@@ -1360,16 +1474,15 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_builds(Arena* arena, BenchServiceZen
         ok = ok && bench_service_zen5_path(path, build->root, "compile_commands.json") &&
              bench_service_zen5_file_digest(path, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, build->compile_commands_sha256,
                                             NULL, NULL);
-        snprintf(name, sizeof(name), "%s-build.log", build->id);
+        snprintf(name, sizeof(name), "zen5-%s-build.log", build->id);
         char log_path[BENCH_SERVICE_RECIPE_PATH_CAP];
         int log_length = snprintf(log_path, sizeof(log_path), "%.*s/zen5/logs/%s", (int)recipe->result_root.length,
                                   recipe->result_root.pointer, name);
         ok = ok && log_length > 0 && (u32)log_length < sizeof(log_path) &&
              bench_service_zen5_file_digest(log_path, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, build->build_log_sha256,
                                             NULL, NULL);
-        snprintf(name, sizeof(name), "%s-commands.log", build->id);
         log_length = snprintf(log_path, sizeof(log_path), "%.*s/zen5/logs/%s", (int)recipe->result_root.length,
-                              recipe->result_root.pointer, name);
+                              recipe->result_root.pointer, commands_log);
         ok = ok && log_length > 0 && (u32)log_length < sizeof(log_path) &&
              bench_service_zen5_read(arena, log_path, BENCH_SERVICE_ZEN5_TEXT_CAP, &commands_text);
         if (ok)
@@ -1430,6 +1543,34 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_builds(Arena* arena, BenchServiceZen
     return ok;
 }
 
+/* Re-hash all six frozen paths (five builds and the second immutable path)
+ * against the digests taken when each was frozen. Later trusted builds run
+ * candidate CMake commands, so each phase after the builds re-checks. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_frozen_verify(BenchServiceZen5* recipe, char const* when)
+{
+    bool ok = true;
+    for (u32 index = 0; ok && index <= BENCH_SERVICE_ZEN5_BUILDS; index += 1)
+    {
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        char const* path = index < BENCH_SERVICE_ZEN5_BUILDS ? recipe->builds[index].frozen : recipe->immutable_path1;
+        char const* expected = recipe->builds[index < BENCH_SERVICE_ZEN5_BUILDS ? index : 0].sha256;
+        ok = expected[0] && bench_service_zen5_file_digest(path, BENCH_SERVICE_ZEN5_BINARY_CAP, digest, NULL, NULL) &&
+             !strcmp(digest, expected);
+    }
+    if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "frozen binaries changed %s", when);
+    return ok;
+}
+
+/* Self-test seam: append one byte to a read-only frozen binary. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_tamper(char const* path)
+{
+    bool ok = chmod(path, 0755) == 0;
+    int descriptor = ok ? open(path, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && bench_service_zen5_write_all(descriptor, (u8 const*)"\n", 1);
+    if (descriptor >= 0) close(descriptor);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_staging(BenchServiceZen5* recipe, char const* name, char* output)
 {
     char staging[BENCH_SERVICE_RECIPE_PATH_CAP];
@@ -1445,7 +1586,10 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_oracle(Arena* arena, BenchServiceZen
     char staging[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, spec_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
     char record_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
     char children[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool ok = bench_service_zen5_mkdir(recipe->zen5, "staging", 02750, root) &&
+    String8 record_header = S8("BQ-ZEN5-ORACLE-RECORD-V1\n");
+    if (bench_service_zen5_test_tamper_frozen == 1) (void)bench_service_zen5_test_tamper(recipe->builds[3].frozen);
+    bool ok = bench_service_zen5_frozen_verify(recipe, "before the oracle") &&
+              bench_service_zen5_mkdir(recipe->zen5, "staging", 02750, root) &&
               bench_service_zen5_staging(recipe, "oracle", staging) &&
               bench_service_zen5_path(spec_path, recipe->zen5, "oracle.spec") &&
               bench_service_zen5_path(record_path, staging, "oracle.record") &&
@@ -1463,19 +1607,18 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_oracle(Arena* arena, BenchServiceZen
         string8_list_push(arena, &spec, string_format(arena, S8("binary={S8}\n"),
                                                       string_from_pointer(recipe->builds[index].frozen)));
     ok = ok && bench_service_zen5_write_new(spec_path, string_join_arena(arena, string8_list_to_slice(arena, spec), false), 0444);
-    char* argv[] = {recipe->self, "bench_service_zen5_capture", spec_path, record_path, NULL};
     int status = -1;
-    ok = ok && bench_service_zen5_stage(recipe, "oracle", argv, recipe->source, &status) && status == 0;
+    ok = ok && bench_service_zen5_stage(recipe, BQ_ZEN5_STAGE_ORACLE, &status) && status == 0;
     int zen5_result = ok ? bench_service_zen5_result_directory(recipe, "zen5") : -1;
     String8 record = {0};
     ok = ok && zen5_result >= 0 && bench_service_zen5_read(arena, record_path, 64 * 1024, &record) &&
          bench_service_zen5_publish(zen5_result, "oracle.record", record) &&
          bench_service_zen5_publish_copy(arena, children, zen5_result, "oracle.children.log", NULL) &&
-         string_starts_with_sequence(record, S8("BQ-ZEN5-ORACLE-RECORD-V1\n"));
+         string_starts_with_sequence(record, record_header);
     if (zen5_result >= 0 && close(zen5_result) != 0) ok = false;
     u32 lines = 0;
     recipe->oracle_consistent = true;
-    for (u64 offset = 25; ok && offset < record.length; lines += 1)
+    for (u64 offset = record_header.length; ok && offset < record.length; lines += 1)
     {
         u32 index = 0;
         int child_status = -1;
@@ -1521,33 +1664,26 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_json_field(String8 text, char const*
  * unreplayable record stops the attempt. */
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_pmu(Arena* arena, BenchServiceZen5* recipe)
 {
+    /* Paths are the stage contract's; the tool is the profile's pinned one. */
     char staging[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, record[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, identity[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char tool[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, input[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char profile[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, relative[256] = {0}, cpu[24] = {0};
-    bool ok = bench_service_zen5_staging(recipe, "pmu", staging) &&
+    char identity[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, relative[256] = {0};
+    bool ok = bench_service_zen5_frozen_verify(recipe, "before the PMU phase") &&
+              bench_service_zen5_pmu_tools(arena, recipe, false) && bench_service_zen5_staging(recipe, "pmu", staging) &&
               bench_service_zen5_path(record, staging, "zen5-pmu-v1.json") &&
-              bench_service_zen5_path(output, staging, "output.o") &&
               bench_service_zen5_path(identity, recipe->zen5, "repository.json") &&
-              bench_service_zen5_path(profile, recipe->zen5, "recipe.profile") &&
-              bench_service_zen5_path(input, recipe->source, recipe->workload) &&
               bench_service_zen5_profile_value("pmu-capture", relative, sizeof(relative)) &&
-              bench_service_zen5_path(tool, recipe->source, relative) &&
-              snprintf(cpu, sizeof(cpu), "%llu", (unsigned long long)recipe->cpu) > 0;
+              !strcmp(relative, BQ_ZEN5_STAGE_PMU_TOOL);
     BenchServiceZen5Json repository = {.arena = arena, .ok = true};
     bench_service_zen5_repository(&repository, recipe);
     bench_service_zen5_json_raw(&repository, "\n");
     ok = ok && bench_service_zen5_write_new(identity, bench_service_zen5_json_join(&repository), 0444);
-    char* argv[] = {recipe->python, "-B", tool, "capture", "--output", record, "--cpu", cpu, "--repository-root",
-                    recipe->source, "--repository-identity", identity, "--working-directory", recipe->source,
-                    "--input", input, "--output-artifact", output, "--environment-input", profile, "--",
-                    recipe->builds[0].frozen, "cc", "-g0", "-O0", "-c", recipe->workload, "-o", output, NULL};
     int status = -1;
-    ok = ok && bench_service_zen5_stage(recipe, "pmu", argv, recipe->source, &status) && (status == 0 || status == 2);
+    ok = ok && bench_service_zen5_stage(recipe, BQ_ZEN5_STAGE_PMU, &status) && (status == 0 || status == 2);
     int pmu_result = ok ? bench_service_zen5_result_directory(recipe, "zen5/pmu") : -1;
     String8 text = {0};
     ok = ok && pmu_result >= 0 && bench_service_zen5_read(arena, record, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, &text) &&
          bench_service_zen5_publish(pmu_result, "zen5-pmu-v1.json", text) &&
+         bench_service_zen5_publish(pmu_result, "runtime.identity", bench_service_zen5_runtime_identity(arena, recipe)) &&
          bench_service_zen5_json_field(text, "environment_fingerprint_sha256", recipe->fingerprint,
                                        sizeof(recipe->fingerprint)) &&
          bench_service_zen5_hex(recipe->fingerprint, 64) &&
@@ -1571,9 +1707,13 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_pmu(Arena* arena, BenchServiceZen5* 
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_plan_freeze(Arena* arena, BenchServiceZen5* recipe)
 {
     char plan[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool ok = bench_service_zen5_now() + recipe->reserve_ns <= recipe->deadline_ns;
-    if (!ok) snprintf(recipe->reason, sizeof(recipe->reason),
-                      "the remaining budget is below the timing reserve; no timed child was started");
+    bool ok = bench_service_zen5_frozen_verify(recipe, "before the plan freeze");
+    if (ok && bench_service_zen5_now() + recipe->reserve_ns > recipe->deadline_ns)
+    {
+        ok = false;
+        snprintf(recipe->reason, sizeof(recipe->reason),
+                 "the remaining budget is below the timing reserve; no timed child was started");
+    }
     String8 family = ok ? bench_service_zen5_family(arena, recipe) : (String8){0};
     ok = ok && family.length > 0 && bench_service_zen5_path(plan, recipe->zen5, "plan.json") &&
          bench_service_zen5_write_new(plan, family, 0444);
@@ -1605,27 +1745,77 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_plan_freeze(Arena* arena, BenchServi
     return ok;
 }
 
+/* Native check of one capture record before it is published: the trusted
+ * header is its verbatim prefix, it says ab_authorized false exactly once,
+ * its observations are sequences 0..119 in order, and it ends with its
+ * capture_status. The offline readers replay every slot; this refuses a
+ * truncated, reordered or authorizing record without them. */
+BUSTER_GLOBAL_LOCAL bool bench_service_zen5_capture_check(String8 bytes, String8 header, bool* complete)
+{
+    String8 authorized = S8("\"ab_authorized\":");
+    String8 complete_tail = S8(",\"capture_status\":\"complete\"}\n");
+    String8 invalid_tail = S8(",\"capture_status\":\"invalid\"}\n");
+    bool ok = bytes.length > header.length + 1 && bytes.pointer[0] == '{' &&
+              !memcmp(bytes.pointer + 1, header.pointer, (size_t)header.length);
+    u32 authorizations = 0, false_authorizations = 0, observations = 0;
+    for (u64 index = 0; ok && index + authorized.length < bytes.length; index += 1)
+    {
+        if (!memcmp(bytes.pointer + index, authorized.pointer, (size_t)authorized.length))
+        {
+            authorizations += 1;
+            String8 rest = {bytes.pointer + index + authorized.length, bytes.length - index - authorized.length};
+            false_authorizations += string_starts_with_sequence(rest, S8("false,")) ? 1u : 0u;
+        }
+    }
+    ok = ok && authorizations == 1 && false_authorizations == 1;
+    String8 start = S8(",\"observations\":[");
+    u64 cursor = ok ? string_first_sequence(bytes, start) : BUSTER_STRING_NO_MATCH;
+    ok = ok && cursor != BUSTER_STRING_NO_MATCH;
+    for (u32 sequence = 0; ok && sequence < BENCH_SERVICE_ZEN5_SLOTS; sequence += 1)
+    {
+        char needle[48];
+        int length = snprintf(needle, sizeof(needle), "{\"sequence\":%u,", sequence);
+        String8 rest = {bytes.pointer + cursor, bytes.length - cursor};
+        u64 found = length > 0 ? string_first_sequence(rest, (String8){(char8*)needle, (u64)length}) : BUSTER_STRING_NO_MATCH;
+        ok = found != BUSTER_STRING_NO_MATCH;
+        if (ok) cursor += found + (u64)length;
+    }
+    for (u64 index = 0; ok && index + 12 < bytes.length; index += 1)
+        observations += !memcmp(bytes.pointer + index, "{\"sequence\":", 12) ? 1u : 0u;
+    ok = ok && observations == BENCH_SERVICE_ZEN5_SLOTS;
+    *complete = ok && string_ends_with_sequence(bytes, complete_tail);
+    ok = ok && (*complete || string_ends_with_sequence(bytes, invalid_tail));
+    return ok;
+}
+
+/* The three fixed captures run in one candidate stage (zen5-captures) in
+ * contract order; the trusted driver writes every spec and header first and
+ * verifies each record, and the frozen binaries, after the stage exits. */
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_captures(Arena* arena, BenchServiceZen5* recipe)
 {
     int captures = bench_service_zen5_result_directory(recipe, "zen5/captures");
     int logs = bench_service_zen5_result_directory(recipe, "zen5/logs");
-    bool ok = captures >= 0 && logs >= 0;
+    char root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, plan[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char output_paths[BENCH_SERVICE_ZEN5_CAPTURES][BENCH_SERVICE_RECIPE_PATH_CAP] = {{0}};
+    char children_paths[BENCH_SERVICE_ZEN5_CAPTURES][BENCH_SERVICE_RECIPE_PATH_CAP] = {{0}};
+    String8 headers[BENCH_SERVICE_ZEN5_CAPTURES] = {{0}};
+    bool ok = captures >= 0 && logs >= 0 && bench_service_zen5_staging(recipe, "captures", root) &&
+              bench_service_zen5_path(plan, recipe->zen5, "plan.json");
     for (u32 capture = 0; ok && capture < BENCH_SERVICE_ZEN5_CAPTURES; capture += 1)
     {
         char const* kind = bench_service_zen5_capture_names[capture];
         char staging[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, spec_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-        char header_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-        char object[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, children[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-        char plan[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, name[96] = {0}, stage[96] = {0};
+        char header_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, object[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+        char name[96] = {0};
         char paths[2][BENCH_SERVICE_RECIPE_PATH_CAP] = {{0}};
         snprintf(name, sizeof(name), "%s.spec", kind);
-        ok = bench_service_zen5_staging(recipe, kind, staging) && bench_service_zen5_path(spec_path, recipe->zen5, name) &&
+        ok = bench_service_zen5_mkdir(root, kind, 02770, staging) && bench_service_zen5_path(spec_path, recipe->zen5, name) &&
              snprintf(name, sizeof(name), "%s.header", kind) > 0 &&
              bench_service_zen5_path(header_path, recipe->zen5, name) &&
-             bench_service_zen5_path(output_path, staging, "capture.json") &&
+             snprintf(name, sizeof(name), "%s.json", kind) > 0 &&
+             bench_service_zen5_path(output_paths[capture], root, name) &&
              bench_service_zen5_path(object, staging, "output.o") &&
-             bench_service_zen5_path(children, staging, "children.log") &&
-             bench_service_zen5_path(plan, recipe->zen5, "plan.json");
+             bench_service_zen5_path(children_paths[capture], staging, "children.log");
         if (ok && capture == 0)
         {
             memcpy(paths[0], recipe->builds[0].frozen, sizeof(paths[0]));
@@ -1641,8 +1831,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_captures(Arena* arena, BenchServiceZ
                      bench_service_zen5_path(paths[path], directory, "ide");
             }
         }
-        String8 header = ok ? bench_service_zen5_header(arena, recipe, capture, (char const (*)[BENCH_SERVICE_RECIPE_PATH_CAP])paths) :
-                              (String8){0};
+        headers[capture] = ok ? bench_service_zen5_header(arena, recipe, capture,
+                                                          (char const (*)[BENCH_SERVICE_RECIPE_PATH_CAP])paths) : (String8){0};
         BenchServiceZen5Build const* a = bench_service_zen5_control(recipe, capture, 0);
         BenchServiceZen5Build const* b = bench_service_zen5_control(recipe, capture, 1);
         String8 spec = string_format(arena,
@@ -1651,30 +1841,37 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_captures(Arena* arena, BenchServiceZ
             string_from_pointer(kind), string_from_pointer(plan), string_from_pointer(recipe->plan_sha256),
             string_from_pointer(header_path), string_from_pointer(recipe->source), string_from_pointer(recipe->workload),
             string_from_pointer(object), recipe->gap_ns, string_from_pointer(recipe->expected_output),
-            string_from_pointer(paths[0]), string_from_pointer(paths[1]), string_from_pointer(children));
+            string_from_pointer(paths[0]), string_from_pointer(paths[1]), string_from_pointer(children_paths[capture]));
         if (capture)
-            spec = string_format(arena, S8("{S8}binary-a={S8}\nbinary-b={S8}\n"), spec, string_from_pointer(a->frozen),
-                                 string_from_pointer(b->frozen));
-        ok = ok && header.length > 0 && bench_service_zen5_write_new(header_path, header, 0444) &&
+            spec = string_format(arena, S8("{S8}binary-a={S8}\nbinary-b={S8}\nbinary-a-sha256={S8}\nbinary-b-sha256={S8}\n"),
+                                 spec, string_from_pointer(a->frozen), string_from_pointer(b->frozen),
+                                 string_from_pointer(a->sha256), string_from_pointer(b->sha256));
+        else
+            spec = string_format(arena, S8("{S8}path0-sha256={S8}\npath1-sha256={S8}\n"), spec,
+                                 string_from_pointer(recipe->builds[0].sha256), string_from_pointer(recipe->builds[0].sha256));
+        ok = ok && headers[capture].length > 0 && bench_service_zen5_write_new(header_path, headers[capture], 0444) &&
              bench_service_zen5_write_new(spec_path, spec, 0444);
-        char* argv[] = {recipe->self, "bench_service_zen5_capture", spec_path, output_path, NULL};
-        int status = -1;
-        snprintf(stage, sizeof(stage), "capture-%s", kind);
-        ok = ok && bench_service_zen5_stage(recipe, stage, argv, recipe->source, &status) && status == 0;
-        if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "capture %s was refused or failed",
-                                                kind);
+    }
+    if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "capture specs could not be written");
+    int status = -1;
+    if (ok && bench_service_zen5_test_tamper_frozen == 3) (void)bench_service_zen5_test_tamper(recipe->immutable_path1);
+    ok = ok && bench_service_zen5_stage(recipe, BQ_ZEN5_STAGE_CAPTURES, &status) && status == 0;
+    if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "captures were refused or failed");
+    if (ok && bench_service_zen5_test_tamper_frozen == 2) (void)bench_service_zen5_test_tamper(recipe->immutable_path1);
+    for (u32 capture = 0; ok && capture < BENCH_SERVICE_ZEN5_CAPTURES; capture += 1)
+    {
         /* The trusted header must be the capture's verbatim prefix, and the
          * frozen binaries must be the ones the plan names. */
+        char const* kind = bench_service_zen5_capture_names[capture];
+        char name[96] = {0};
         String8 bytes = {0};
-        ok = ok && bench_service_zen5_read(arena, output_path, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, &bytes) &&
-             bytes.length > header.length + 1 && bytes.pointer[0] == '{' &&
-             !memcmp(bytes.pointer + 1, header.pointer, (size_t)header.length);
-        for (u32 index = 0; ok && index < BENCH_SERVICE_ZEN5_BUILDS; index += 1)
-        {
-            char digest[SHA256_HEX_CAPACITY] = {0};
-            ok = bench_service_zen5_file_digest(recipe->builds[index].frozen, BENCH_SERVICE_ZEN5_BINARY_CAP, digest, NULL,
-                                                NULL) && !strcmp(digest, recipe->builds[index].sha256);
-        }
+        char when[96];
+        snprintf(when, sizeof(when), "after capture %s", kind);
+        ok = bench_service_zen5_read(arena, output_paths[capture], BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, &bytes) &&
+             bench_service_zen5_capture_check(bytes, headers[capture], &recipe->capture_complete[capture]);
+        if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "capture %s record is malformed",
+                                                kind);
+        ok = ok && bench_service_zen5_frozen_verify(recipe, when);
         snprintf(name, sizeof(name), "%s.json", kind);
         ok = ok && bench_service_zen5_publish(captures, name, bytes);
         if (ok)
@@ -1684,9 +1881,16 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_captures(Arena* arena, BenchServiceZ
             sha256_add(&hash, bytes.pointer, bytes.length);
             sha256_finish_hex(&hash, (char8*)recipe->capture_sha256[capture]);
             snprintf(name, sizeof(name), "capture-%s.children.log", kind);
-            ok = bench_service_zen5_publish_copy(arena, children, logs, name, NULL);
+            ok = bench_service_zen5_publish_copy(arena, children_paths[capture], logs, name, NULL);
         }
         if (!ok && !recipe->reason[0]) snprintf(recipe->reason, sizeof(recipe->reason), "capture %s did not verify", kind);
+    }
+    /* Invalid captures stay published as evidence, but the attempt fails. */
+    for (u32 capture = 0; ok && capture < BENCH_SERVICE_ZEN5_CAPTURES; capture += 1)
+    {
+        ok = recipe->capture_complete[capture];
+        if (!ok) snprintf(recipe->reason, sizeof(recipe->reason), "capture %s has invalid observations",
+                          bench_service_zen5_capture_names[capture]);
     }
     if (captures >= 0 && close(captures) != 0) ok = false;
     if (logs >= 0 && close(logs) != 0) ok = false;
@@ -1788,6 +1992,13 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL char const* bench_service_zen5_capture_status(BenchServiceZen5 const* recipe, u32 capture)
+{
+    char const* status = !recipe->capture_sha256[capture][0] ? "missing" :
+                         recipe->capture_complete[capture] ? "complete" : "invalid";
+    return status;
+}
+
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_finish(Arena* arena, BenchServiceZen5* recipe, bool succeeded)
 {
     char bundle[SHA256_HEX_CAPACITY] = {0};
@@ -1799,6 +2010,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_finish(Arena* arena, BenchServiceZen
            "budget-seconds={u64}\nelapsed-ns={u64}\nplan-sha256={S8}\nplan-frozen-monotonic-ns={u64}\n"
            "oracle-output-sha256={S8}\noracle-consistent={S8}\npmu-status={S8}\nhost-qualification-sha256={S8}\n"
            "immutable-capture-sha256={S8}\nsame-root-rebuild-capture-sha256={S8}\ncross-root-capture-sha256={S8}\n"
+           "immutable-capture-status={S8}\nsame-root-rebuild-capture-status={S8}\ncross-root-capture-status={S8}\n"
            "trusted-builds=5\npairs=360\ntimed-children=720\nab-authorized=false\naa-decision=not-evaluated\n"
            "bundle-sha256={S8}\n"),
         string_from_pointer(succeeded ? "succeeded" : "failed"), string_from_pointer(recipe->stage),
@@ -1811,7 +2023,9 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_finish(Arena* arena, BenchServiceZen
         string_from_pointer(recipe->pmu_status[0] ? recipe->pmu_status : "missing"),
         string_from_pointer(recipe->host_qualification), string_from_pointer(recipe->capture_sha256[0]),
         string_from_pointer(recipe->capture_sha256[1]), string_from_pointer(recipe->capture_sha256[2]),
-        string_from_pointer(bundle));
+        string_from_pointer(bench_service_zen5_capture_status(recipe, 0)),
+        string_from_pointer(bench_service_zen5_capture_status(recipe, 1)),
+        string_from_pointer(bench_service_zen5_capture_status(recipe, 2)), string_from_pointer(bundle));
     ok = ok && bench_service_zen5_publish(recipe->result_directory, BENCH_SERVICE_ZEN5_NAME ".manifest", manifest);
     return ok;
 }
@@ -1852,23 +2066,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_run(Arena* arena, SliceStri
     valid = valid && snprintf(attempt, sizeof(attempt), "%.*s/job-%.*s-attempt-%.*s", (int)recipe->workspace_root.length,
                               recipe->workspace_root.pointer, (int)recipe->job_id.length, recipe->job_id.pointer,
                               (int)recipe->attempt_token.length, recipe->attempt_token.pointer) > 0 &&
-            bench_service_zen5_path(recipe->source, attempt, "base/source") &&
+            snprintf(recipe->attempt, sizeof(recipe->attempt), "%s", attempt) > 0 &&
+            bench_service_zen5_path(recipe->source, attempt, BQ_ZEN5_STAGE_SOURCE) &&
             bench_service_zen5_profile_value("workload", recipe->workload, sizeof(recipe->workload)) &&
             bench_service_zen5_profile_u64("budget-seconds", &recipe->budget_seconds) &&
             bench_service_zen5_profile_u64("timing-reserve-seconds", &recipe->reserve_ns) &&
             bench_service_zen5_profile_u64("interblock-gap-ns", &recipe->gap_ns) &&
             bench_service_zen5_profile_u64("cpu", &recipe->cpu) &&
+            /* The broker's stage argv fixes these; the profile must agree. */
+            !strcmp(recipe->workload, BQ_ZEN5_STAGE_WORKLOAD) && recipe->cpu == BQ_ZEN5_STAGE_CPU_NUMBER &&
             bench_service_zen5_setting(bench_service_recipe_driver_override, BENCH_SERVICE_RECIPE_DRIVER, recipe->driver) &&
             bench_service_zen5_setting(bench_service_zen5_python_override, BENCH_SERVICE_ZEN5_PYTHON, recipe->python) &&
             bench_service_zen5_setting(bench_service_zen5_ninja_override, BENCH_SERVICE_ZEN5_NINJA, recipe->ninja) &&
             bench_service_zen5_setting(bench_service_zen5_self_override, BENCH_SERVICE_RECIPE_DRIVER, recipe->self);
-    char const* build_names[BENCH_SERVICE_ZEN5_BUILDS][2] = {{"immutable", "immutable"},
-        {"same-root-A", "same-root"}, {"same-root-B", "same-root"}, {"cross-root-A", "cross-root-a"},
-        {"cross-root-B", "cross-root-b"}};
+    /* Build ids and roots come from the stage contract the broker enforces. */
+    static char const* const build_ids[BENCH_SERVICE_ZEN5_BUILDS] = {BQ_ZEN5_STAGE_BUILD_IDS};
+    static char const* const build_roots[BENCH_SERVICE_ZEN5_BUILDS] = {BQ_ZEN5_STAGE_BUILD_ROOTS};
     for (u32 index = 0; index < BENCH_SERVICE_ZEN5_BUILDS; index += 1)
     {
-        recipe->builds[index].id = build_names[index][0];
-        recipe->builds[index].root_name = build_names[index][1];
+        recipe->builds[index].id = build_ids[index];
+        recipe->builds[index].root_name = build_roots[index] + sizeof("zen5/builds/") - 1;
     }
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (!valid)
@@ -1880,6 +2097,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_run(Arena* arena, SliceStri
         if (bench_service_zen5_test_gap_ns) recipe->gap_ns = bench_service_zen5_test_gap_ns;
         if (bench_service_zen5_test_reserve_seconds) recipe->reserve_ns = bench_service_zen5_test_reserve_seconds;
         if (bench_service_zen5_test_cpu_set) recipe->cpu = bench_service_zen5_test_cpu;
+        if (bench_service_zen5_test_budget_seconds) recipe->budget_seconds = bench_service_zen5_test_budget_seconds;
         recipe->reserve_ns *= 1000000000ull;
         recipe->started_ns = bench_service_zen5_now();
         recipe->deadline_ns = recipe->started_ns + recipe->budget_seconds * 1000000000ull;
@@ -1947,17 +2165,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_add(Arena* arena, Sl
     return result;
 }
 
+/* Stage program: one or more SPEC OUTPUT pairs, run in order (the zen5
+ * oracle stage passes one pair, the captures stage three); the first failure
+ * stops the rest. */
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_capture_add(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
-    char spec[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool valid = arguments.length == 2 && bench_service_recipe_path(arguments.pointer[0]) &&
-                 bench_service_recipe_path(arguments.pointer[1]) &&
-                 snprintf(spec, sizeof(spec), "%.*s", (int)arguments.pointer[0].length, arguments.pointer[0].pointer) > 0 &&
-                 snprintf(output, sizeof(output), "%.*s", (int)arguments.pointer[1].length, arguments.pointer[1].pointer) > 0;
-    if (valid) result = bench_service_zen5_capture_run(arena, spec, output);
-    else string_print(S8("error: bench_service_zen5_capture requires SPEC OUTPUT absolute paths\n"));
+    bool valid = arguments.length >= 2 && arguments.length <= 2u * BENCH_SERVICE_ZEN5_CAPTURES && arguments.length % 2 == 0;
+    for (u64 index = 0; valid && index < arguments.length; index += 1)
+        valid = bench_service_recipe_path(arguments.pointer[index]) && arguments.pointer[index].length < BENCH_SERVICE_RECIPE_PATH_CAP;
+    result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    for (u64 pair = 0; valid && result == PROCESS_RESULT_SUCCESS && pair < arguments.length; pair += 2)
+    {
+        char spec[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+        snprintf(spec, sizeof(spec), "%.*s", (int)arguments.pointer[pair].length, arguments.pointer[pair].pointer);
+        snprintf(output, sizeof(output), "%.*s", (int)arguments.pointer[pair + 1].length, arguments.pointer[pair + 1].pointer);
+        result = bench_service_zen5_capture_run(arena, spec, output);
+    }
+    if (!valid) string_print(S8("error: bench_service_zen5_capture requires one to three SPEC OUTPUT absolute path pairs\n"));
 #else
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(arguments);
