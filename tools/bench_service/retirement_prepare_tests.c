@@ -3269,6 +3269,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 #include "retirement_unit_oracle_tests.h"
 #include "worker_budget_crosscheck_tests.h"
 #include "retirement_unit_campaign_tests.h"
+#include "retirement_worker_unit_tests.h"
 
 int main(void)
 {
@@ -3279,6 +3280,7 @@ int main(void)
     bq_prep_test_raw_census_boundary();
     bq_prep_test_unit_oracle();
     bq_prep_test_unit_campaign();
+    bq_prep_test_worker_unit();
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};
     BqRequest request = {0};

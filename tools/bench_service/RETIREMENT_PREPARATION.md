@@ -211,9 +211,11 @@ inventory descriptors. It must stay in place and be released with
 
 The public wrapper uses the compiled profile and the fixed toolchain root.
 With the blocked profile it fails with `BQ_RECIPE_MISMATCH` at the A
-inventory pin. `bq_worker_unit` does not call it: the recipe stays
-unadmitted, and the `worker-unit` recipe check and the supervisor's recipe-name
-gate still reject the job before any child launches. The supervisor's export
+inventory pin. `bq_worker_unit` calls it only from the forked
+[producer](#worker-unit-producer-881), which it admits only with a complete
+profile; with the compiled blocked profile the `worker-unit` admission and the
+supervisor's recipe-name gate still reject the job before any child launches.
+The supervisor's export
 therefore runs only on a path that is still rejected. The unit authenticates
 file contents, not the inodes the coordinator wrote. A byte-identical
 replacement by the same service identity carries the same lease-authenticated
@@ -339,8 +341,9 @@ cannot satisfy a broker sequence. The direct launcher (fork and `fexecve` of
 the held driver in the held source) remains for the fixture and the queue
 API.
 
-`bq_worker_unit` does not call `bq_retirement_unit_build`, and the recipe
-gates still reject the job first.
+`bq_worker_unit` reaches the build only through the forked
+[producer](#worker-unit-producer-881), and with the compiled profile its
+admission still rejects the job first.
 
 ### Broker retirement stages
 
@@ -521,8 +524,9 @@ references.
 `main.c` now defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED` before it
 includes `retirement_oracle_authority.c`. The service's adapter therefore
 accepts only the pending token of the live producer bound to that authority.
-`bq_worker_unit` still calls none of these steps, and every recipe gate
-still rejects the job first. `BqRetirementUnitOracle` also keeps, for each
+`bq_worker_unit` reaches these steps only through the forked
+[producer](#worker-unit-producer-881), and with the compiled profile every
+recipe gate still rejects the job first. `BqRetirementUnitOracle` also keeps, for each
 reference, the held binary and output directory numbers of its
 `/proc/self/fd` runtime command, so the replay can rebuild that command.
 
@@ -1226,6 +1230,90 @@ honesty. The fixture shows both limits:
   digest changed, the correctness gate rerun over it, and the gate seal and
   record recomputed under a new record digest.
 
+## Worker-unit producer (#881)
+
+`retirement_worker_unit.c` wires the steps above into `bq_worker_unit`
+(PR 1 of 4 of the #881 worker-unit wiring). It is compiled only into the
+service translation unit, after `retirement_unit.c`.
+
+The steps cannot run in the recipe executable, because that binary is also
+the pinned matched-build driver. They cannot run in the unit process either:
+step 9 requires a process without children, and the lease keeper is already
+a child of `worker-unit`. So the unit process keeps the lease and the keeper
+and forks a producer.
+
+**Admission.** `bq_worker_unit_pinned` admits the retirement recipe only when
+`bq_retirement_profile_complete` accepts the profile. That requires every
+integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
+reference-policy, nine census, required-checks, row-plan and campaign-budget
+digests) and no `status=blocked` line. `bq_worker_unit` passes the compiled
+profile (`bq_retirement_worker_unit_installed`), which is blocked. A
+production retirement job is therefore still refused with `BQ_BAD_REQUEST`
+before the lease handoff, the keeper, any directory or any child. The other
+recipe gates (`bq_recipe_admitted`, `bq_recipe_service`, `bq_request_valid`,
+`bq_worker_run`'s recipe-name check and `bq_worker_finalization_recipe`) are
+unchanged and still refuse the recipe. Only the test seam admits it, with a
+complete fixture profile.
+
+**The unit process.** After the pause and the pre-exec lease recheck,
+`bq_retirement_worker_unit_run` performs these steps in order:
+
+1. It blocks SIGTERM, installs a handler that forwards SIGTERM to the
+   producer, and refuses if SIGTERM is already pending or the deadline has
+   passed.
+2. It forks the producer. The lease and phase descriptors stay close-on-exec
+   on this path.
+3. It closes its own copy of the phase descriptor. The producer is the
+   channel's only writer, so the coordinator sees EOF when the producer
+   exits.
+4. It waits for the producer on a pidfd until the execution deadline plus
+   twice the 10-second stop budget. A producer still running then is killed.
+
+`bq_worker_unit_pinned` then stops the keeper as before and returns the
+mapped status:
+
+- An exit status between 1 and `BQ_EXPORT_TIMEOUT` is the producer's
+  `BqError`.
+- Exit 0 cannot be a success before MEASURED is wired, so it returns
+  `BQ_WORKER_FAILED`.
+- A producer killed by a signal, or at the bound, never proved its
+  descendants absent, so it returns `BQ_CLEANUP_FAILED`.
+
+**The producer.** `bq_retirement_worker_unit_child` performs these steps:
+
+1. It closes its lease reference and sets `PR_SET_PDEATHSIG` to SIGTERM.
+2. It becomes a child subreaper.
+3. It installs a SIGTERM handler that writes to a close-on-exec,
+   non-blocking self-pipe. The pipe's read end is every step's cancellation
+   descriptor.
+4. It requires that it has no child yet.
+
+`bq_retirement_worker_unit_produce` then runs store open, prepare, build
+(which sends PREPARING), project, oracle, gate and ready through their
+profile seams. The projection holds the pinned census files itself. The
+stop reason is rechecked between steps.
+
+Everything is released in reverse on every path, and a surviving
+descendant turns the result into `BQ_CLEANUP_FAILED`. A failure sends no
+phase message after PREPARING. Its partial evidence stays in the attempt,
+and the ready record is never written.
+
+**Not wired yet.** After the ready record, PR 1 stops with
+`BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED` (`BQ_UNSUPPORTED`). It does not send
+SETTLING or MEASURED, so the job fails closed. The record's digest appears
+only in the producer's stderr diagnostic. Decision 1 of the design moves it
+to a versioned phase packet (PR 4), never through files, so this PR writes no
+`ready-sha256=` failure-bundle line.
+
+The remaining work is split across three PRs:
+
+- **PR 2:** the in-unit campaign through READY.
+- **PR 3:** composition, the authority and MEASURED.
+- **PR 4:** the coordinator's phase packet, the replay at finalization and
+  the coordinator-side gates.
+
+A/A admission stays compiled out (#426, #1021).
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,
@@ -1597,3 +1685,56 @@ checks that `bq_retirement_unit_build` succeeds with the four broker requests
 in order. Afterwards the attempt is still `02710`, `retirement-work` is
 private, and the two roots are `02700` and `02770`. Requiring a private
 attempt again makes this case fail.
+
+The worker-unit producer fixture (`retirement_worker_unit_tests.h`) runs on
+the unit-oracle fixture.
+
+**Setup.** A reference attempt's projection and oracle pin B's stand-in
+required checks, a row plan and the reviewed campaign budget. That completes
+the profile. The gate takes an honest synthetic observation of the plan
+through its seam, re-addressed to each producer attempt; the plan's
+commands are logical, so only the job and token differ.
+
+**Driving the unit.** The test process plays the coordinator:
+
+1. It hands the lease and the phase channel to a forked `worker-unit`
+   through `bq_worker_lease_handoff_send`.
+2. It resumes the paused unit.
+3. It acknowledges every phase message and reads the channel to EOF.
+
+The unit reports its `BqError` as its exit status. It reports 200 instead if
+a child was left over (an unstopped keeper or an unreaped producer) or its
+descriptor count changed.
+
+**Checks.**
+
+- **Profile.** Every digest pin of the complete profile is required, and so
+  is every pin in the list. A non-digest pin, a `status=blocked` line and a
+  second status line are refused.
+- **Blocked profile.** The public `bq_worker_unit`, a blocked-status copy and
+  a copy without the row-plan pin each return `BQ_BAD_REQUEST`. No keeper
+  directory, no `retirement-build/` and no child exists afterwards.
+- **Success.** The producer runs through the ready record and exits with the
+  not-yet-wired `BQ_UNSUPPORTED` after exactly one PREPARING message and EOF.
+  `retirement-ready/` holds one `ready-<digest>` that
+  `bq_retirement_unit_replay_pinned` accepts. The gate's no-children check
+  passed, so the keeper was not the producer's child, and the keeper was
+  stopped.
+- **SIGTERM.** A SIGTERM to the unit during job 63's hanging generate is
+  forwarded to the self-pipe. The unit returns `BQ_WORKER_CANCEL_SIGNAL`, the
+  stage's pid is gone and no ready record exists.
+- **Failed stage.** Job 67's failing generate returns `BQ_WORKER_FAILED`.
+- **Killed producer.** Killing the producer during job 64's hanging generate
+  returns `BQ_CLEANUP_FAILED`. The test reaps the orphaned broker CLI and
+  stage as a temporary subreaper.
+
+In every case the keeper's socket is gone and no descriptor or child leaks.
+
+**Mutations.** Each of these makes the fixture fail:
+
+- running the producer in the unit process;
+- dropping the not-yet-wired result;
+- dropping the admission check, a pin or the status check;
+- not forwarding SIGTERM, or not writing the self-pipe;
+- not stopping the keeper;
+- mapping a signalled producer by its exit code.

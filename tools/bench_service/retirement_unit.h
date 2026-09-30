@@ -13,8 +13,9 @@
  * bq_retirement_unit_ready writes the durable ready record
  * only for a gate whose seal verifies, and the coordinator's
  * bq_retirement_unit_replay re-derives every digest that record binds,
- * including each same-attempt check receipt. The retirement recipe stays
- * unadmitted and bq_worker_unit calls none of these yet.
+ * including each same-attempt check receipt. bq_worker_unit reaches these
+ * only through its forked producer (retirement_worker_unit.c), which it
+ * admits only with a complete profile; the compiled profile is blocked.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H

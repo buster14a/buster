@@ -696,9 +696,14 @@ smoke recipe from being relabelled as a retirement result while preserving a
 machine-visible identity for the future admitted implementation. Because the
 unit cannot reach the queue, the supervisor exports the verified preparation
 record and the request into a sealed `retirement/` directory of the attempt
-workspace. The unit-side importer, matched-build runner, census projection
-and oracle/reference-producer caller in `retirement_unit.c` are compiled but
-not yet called; the correctness gate after them stays fail-closed. The runner
+workspace. The unit-side importer, matched-build runner, census projection,
+oracle/reference-producer caller, correctness gate and ready record in
+`retirement_unit.c` are reached only through the forked worker-unit producer
+in `retirement_worker_unit.c`, which `worker-unit` admits only with a complete
+profile (`bq_retirement_profile_complete`); the compiled blocked profile is
+refused before the lease handoff, and a producer that writes its ready record
+still fails the job because the in-unit campaign is not wired (see
+[the producer](RETIREMENT_PREPARATION.md#worker-unit-producer-881)). The runner
 sends both subjects' build stages through typed broker `start-stage`
 requests. The broker
 source now defines those four stages (see

@@ -14,7 +14,10 @@
  * Unit: bq_worker_unit adopts the transferred lease
  * (bq_worker_lease_handoff_receive), starts its lease keeper
  * (bq_worker_lease_keeper_start, bq_worker_lease_keeper_serve), pauses for the
- * coordinator's checks and executes the installed recipe.
+ * coordinator's checks and executes the installed recipe. A retirement job
+ * with a complete profile (bq_worker_unit_pinned) instead forks the producer
+ * in retirement_worker_unit.c (bq_retirement_worker_unit_run); the compiled
+ * blocked profile is refused before the lease handoff.
  *
  * Manager seam: bq_worker_backend_systemd (bq_systemd_observe, bq_systemd_signal,
  * bq_systemd_join); readback checks bq_worker_observed and
@@ -5150,23 +5153,31 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return error;
 }
 
-BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 recipe_name,
-                       String8 workspace_root, String8 base_revision, String8 candidate_revision,
-                       String8 result_root)
+/* seams selects the retirement producer's profile and roots: the installed
+ * ones in production (bq_retirement_worker_unit_installed), whose blocked
+ * profile bq_retirement_profile_complete refuses before the lease handoff. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_unit_pinned(String8 lease_file, String8 job_id, String8 attempt_token,
+                                                   String8 recipe_name, String8 workspace_root,
+                                                   String8 base_revision, String8 candidate_revision,
+                                                   String8 result_root, BqRetirementWorkerUnitSeams const* seams)
 {
     char path[BQ_PATH_CAP + 1];
     char job_id_text[32], attempt_token_text[32], recipe_text[BQ_RECIPE_NAME_CAP + 1];
     char workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
     BqRecipe recipe = bq_recipe_from_name(recipe_name);
+    /* Retirement runs in a forked producer (retirement_worker_unit.c), and
+     * only with a complete profile; smoke keeps the recipe exec. */
+    bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && seams &&
+                      bq_retirement_profile_complete(seams->profile);
     BqRecipeFiles files = {0};
     BqWorkerLease lease = {.descriptor = -1};
     int phase_descriptor = -1;
-    u64 execution_deadline_ns = 0;
+    u64 execution_deadline_ns = 0, job_number = 0, token_number = 0;
     char preparation_sha256[SHA256_HEX_CAPACITY] = {0};
     BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
                     !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
                     !bq_worker_text(recipe_name, recipe_text, sizeof(recipe_text)) ||
-                    !bq_recipe_admitted(recipe) || !bq_recipe_service(recipe) ||
+                    (!retirement && (!bq_recipe_admitted(recipe) || !bq_recipe_service(recipe))) ||
                     !bq_recipe_files(recipe, &files) || !files.command[0] || strcmp(recipe_text, files.name) ||
                     !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
                     !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
@@ -5183,12 +5194,16 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     {
         IntegerParsingU64 job_value = string8_parse_u64_decimal(job_id);
         IntegerParsingU64 token_value = string8_parse_u64_decimal(attempt_token);
+        job_number = job_value.status == INTEGER_PARSING_SUCCESS ? job_value.value : 0;
+        token_number = token_value.status == INTEGER_PARSING_SUCCESS ? token_value.value : 0;
         keeper = job_value.status == INTEGER_PARSING_SUCCESS && token_value.status == INTEGER_PARSING_SUCCESS ?
                  bq_worker_lease_keeper_start(workspace_text, job_value.value, token_value.value, path,
                                               lease.descriptor, phase_descriptor) : -1;
         if (keeper <= 0) error = BQ_IO;
     }
-    if (error == BQ_OK)
+    /* Only the exec'd recipe inherits the lease and the phase channel; the
+     * retirement producer is forked, so both stay close-on-exec. */
+    if (error == BQ_OK && !retirement)
     {
         int flags = fcntl(lease.descriptor, F_GETFD);
         if (flags < 0 || fcntl(lease.descriptor, F_SETFD, flags & ~FD_CLOEXEC) != 0)
@@ -5196,7 +5211,7 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
             error = BQ_IO;
         }
     }
-    if (error == BQ_OK)
+    if (error == BQ_OK && !retirement)
     {
         int flags = fcntl(phase_descriptor, F_GETFD);
         if (flags < 0 || fcntl(phase_descriptor, F_SETFD, flags & ~FD_CLOEXEC) != 0) error = BQ_IO;
@@ -5219,19 +5234,41 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
         u64 now_ns = bq_phase_clock();
         bool live = now_ns && now_ns < execution_deadline_ns;
         bool lease_matches = live && bq_worker_lease_recheck_for_exec(path, &lease);
+        bool produced = false;
         if (live && lease_matches && bq_phase_clock() < execution_deadline_ns)
         {
 #ifdef BUSTER_BENCH_SERVICE_TEST
             bq_worker_test_recipe_exec_count += 1;
 #endif
-            execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+            if (retirement)
+            {
+                error = bq_retirement_worker_unit_run(seams, job_number, token_number, workspace_text,
+                                                      lease.descriptor, &phase_descriptor, preparation_sha256,
+                                                      execution_deadline_ns);
+                produced = true;
+            }
+            else
+            {
+                execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+            }
         }
-        error = !now_ns || bq_phase_clock() >= execution_deadline_ns ?
-                BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH;
+        if (!produced)
+            error = !now_ns || bq_phase_clock() >= execution_deadline_ns ?
+                    BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH;
     }
     if (!bq_worker_lease_keeper_stop(keeper) && error == BQ_OK) error = BQ_IO;
     bq_worker_lease_release(&lease);
     if (phase_descriptor >= 0) close(phase_descriptor);
+    return error;
+}
+
+BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 recipe_name,
+                       String8 workspace_root, String8 base_revision, String8 candidate_revision,
+                       String8 result_root)
+{
+    BqRetirementWorkerUnitSeams seams = bq_retirement_worker_unit_installed();
+    BqError error = bq_worker_unit_pinned(lease_file, job_id, attempt_token, recipe_name, workspace_root,
+                                          base_revision, candidate_revision, result_root, &seams);
     return error;
 }
 

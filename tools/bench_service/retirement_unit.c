@@ -67,8 +67,9 @@
  * the finished oracle authority; bq_retirement_unit_ready_publish is the
  * temporary-then-link write.
  *
- * The retirement recipe stays unadmitted and bq_worker_unit calls none of
- * these yet. The blocked profile pins neither step 9 authority, so the gate
+ * bq_worker_unit reaches these only through the forked producer in
+ * retirement_worker_unit.c (#881), which it admits only with a complete
+ * profile. The blocked profile pins neither step 9 authority, so the gate
  * refuses and the ready record is never written in production; nothing here
  * is a correctness verdict or a timing fact.
  */
