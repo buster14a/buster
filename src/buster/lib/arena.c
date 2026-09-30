@@ -272,6 +272,20 @@ u64 arena_pool_release_thread(void)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Counts, without releasing, the calling thread's parked arenas of one
+// reservation size, so a test can bound what an owner leaves in its pool.
+u64 arena_test_pool_count(u64 reserved_size)
+{
+    u64 result = 0;
+    for (Arena* pooled = arena_pool_head; pooled; pooled = *(Arena**)((u8*)pooled + arena_minimum_position))
+    {
+        result += pooled->reserved_size == reserved_size;
+    }
+    return result;
+}
+#endif
+
 // A pooled arena is handed back with the pages it already had and without
 // reissuing the prefault request, so a creation that asked for prefaulting
 // must not be served from -- or parked in -- the pool.
