@@ -23,6 +23,17 @@ on:
         description: Full lowercase hexadecimal candidate commit
         required: true
         type: string
+      # The reviewed recipe allowlist. The submit job re-checks the value
+      # against the same list and its reviewed budget, and the installed
+      # service admits only recipes its compiled registry serves.
+      recipe:
+        description: Installed service recipe from the reviewed allowlist
+        required: true
+        type: choice
+        default: validate-buster-v1
+        options:
+          - validate-buster-v1
+          - zen5-calibration-v1
 
 # Zero token capabilities are stricter than the repository-wide static
 # read-only policy marker retained for common workflow tooling: contents: read
@@ -108,37 +119,98 @@ jobs:
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    # BQ_JOB_TIMEOUT_SECONDS must equal timeout-minutes; the policy test
+    # enforces it. The result wait is derived from the recipe budget and never
+    # outlives this job.
     timeout-minutes: 120
     env:
       BQ_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
       BQ_BASE_COMMIT: ${{ inputs.base_commit }}
       BQ_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+      BQ_RECIPE: ${{ inputs.recipe }}
+      BQ_JOB_TIMEOUT_SECONDS: 7200
     steps:
+      # Reviewed allowlist: recipe -> service runtime budget in seconds. Each
+      # budget must equal the broker's fixed RuntimeMaxSec, so the wait never
+      # gives up before the service itself would stop the job. The service
+      # finalization allowance covers the TERM/KILL escalation, stage cleanup,
+      # workspace removal, bundle publication and one bounded client poll.
+      # Admission must end early enough that the full wait fits in the job.
+      - name: Select the reviewed recipe and its result-wait budget
+        id: budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          started="$(date +%s)"
+          case "$BQ_RECIPE" in
+            validate-buster-v1) runtime_budget=3600 ;;
+            zen5-calibration-v1) runtime_budget=3600 ;;
+            *)
+              echo 'BENCH_DISPATCH_RECIPE_REFUSED recipe is not in the reviewed allowlist' >&2
+              exit 1
+              ;;
+          esac
+          finalization_allowance=600
+          job_margin=300
+          [[ "$BQ_JOB_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,5}$ ]]
+          wait_seconds=$((runtime_budget + finalization_allowance))
+          job_deadline=$((started + BQ_JOB_TIMEOUT_SECONDS - job_margin))
+          admission_deadline=$((job_deadline - wait_seconds))
+          if ((admission_deadline <= started)); then
+            echo 'BENCH_DISPATCH_BUDGET_REFUSED recipe budget does not fit in the job timeout' >&2
+            exit 1
+          fi
+          {
+            printf 'recipe=%s\n' "$BQ_RECIPE"
+            printf 'runtime-budget=%s\n' "$runtime_budget"
+            printf 'wait-seconds=%s\n' "$wait_seconds"
+            printf 'admission-deadline=%s\n' "$admission_deadline"
+            printf 'job-deadline=%s\n' "$job_deadline"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Validate immutable request fields and installed gateway
         shell: bash
+        env:
+          BQ_SELECTED_RECIPE: ${{ steps.budget.outputs.recipe }}
         run: |
           set -euo pipefail
           [[ "$BQ_IDEMPOTENCY_KEY" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
           [[ "$BQ_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
           [[ "$BQ_CANDIDATE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
           [[ ${#BQ_BASE_COMMIT} -eq ${#BQ_CANDIDATE_COMMIT} ]]
+          [[ "$BQ_SELECTED_RECIPE" == "$BQ_RECIPE" ]]
+          [[ "$BQ_RECIPE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
           test -x /usr/local/libexec/buster-bench-service
           capabilities="$(/usr/bin/sudo -n -u buster-bench -- \
             /usr/local/libexec/buster-bench-service gateway capabilities)"
-          grep -Fq 'service-recipes=validate-buster-v1' <<<"$capabilities"
+          # The installed service must list the selected recipe as one exact
+          # comma-separated member of its service-recipes field.
+          if ! grep -Eq "(^|[[:space:]])service-recipes=([^[:space:]]*,)?${BQ_RECIPE}(,[^[:space:]]*)?([[:space:]]|\$)" \
+            <<<"$capabilities"; then
+            echo 'BENCH_DISPATCH_RECIPE_NOT_INSTALLED the installed service does not serve this recipe' >&2
+            exit 1
+          fi
           grep -Fq 'admission=idle-only-atomic' <<<"$capabilities"
 
       - name: Drain and submit through the fixed gateway
         id: admission
         shell: bash
+        env:
+          BQ_ADMISSION_DEADLINE: ${{ steps.budget.outputs.admission-deadline }}
+          BQ_RUNTIME_BUDGET: ${{ steps.budget.outputs.runtime-budget }}
+          BQ_WAIT_SECONDS: ${{ steps.budget.outputs.wait-seconds }}
         run: |
           set -euo pipefail
+          [[ "$BQ_ADMISSION_DEADLINE" =~ ^[1-9][0-9]*$ ]]
           receipt=
           admitted=0
           for ((attempt = 0; attempt < 180; attempt += 1)); do
+            if (($(date +%s) >= BQ_ADMISSION_DEADLINE)); then
+              break
+            fi
             set +e
-            receipt="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit \
-              "$BQ_IDEMPOTENCY_KEY" "$BQ_BASE_COMMIT" "$BQ_CANDIDATE_COMMIT" 2>&1)"
+            receipt="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit-recipe \
+              "$BQ_RECIPE" "$BQ_IDEMPOTENCY_KEY" "$BQ_BASE_COMMIT" "$BQ_CANDIDATE_COMMIT" 2>&1)"
             status=$?
             set -e
             if [[ $status -eq 0 ]]; then
@@ -152,26 +224,45 @@ jobs:
               exit "$status"
             fi
           done
-          [[ $admitted -eq 1 ]]
+          if [[ $admitted -ne 1 ]]; then
+            echo 'BENCH_DISPATCH_NOT_ADMITTED the service stayed busy for the whole admission window' >&2
+            exit 1
+          fi
           printf '%s\n' "$receipt"
           job="$(printf '%s\n' "$receipt" | sed -n 's/^job=\([1-9][0-9]*\) .*/\1/p')"
           [[ "$job" =~ ^[1-9][0-9]*$ ]]
           printf 'job=%s\n' "$job" >> "$GITHUB_OUTPUT"
           {
-            printf '## 9700X admission receipt\n\n```text\n'
+            printf '## 9700X admission receipt\n\n'
+            # Backticks delimit literal Markdown code in the summary.
+            # shellcheck disable=SC2016
+            printf 'recipe `%s`, runtime budget %s s, result wait %s s\n\n' \
+              "$BQ_RECIPE" "$BQ_RUNTIME_BUDGET" "$BQ_WAIT_SECONDS"
+            printf '```text\n'
             printf '%s\n' "$receipt"
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Poll until the recipe's reviewed wait has elapsed after admission,
+      # capped by the job deadline; the budget step guarantees that cap
+      # leaves the full wait.
       - name: Wait for the complete service receipt
         shell: bash
         env:
           BQ_JOB: ${{ steps.admission.outputs.job }}
+          BQ_WAIT_SECONDS: ${{ steps.budget.outputs.wait-seconds }}
+          BQ_JOB_DEADLINE: ${{ steps.budget.outputs.job-deadline }}
         run: |
           set -euo pipefail
+          [[ "$BQ_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BQ_JOB_DEADLINE" =~ ^[1-9][0-9]*$ ]]
+          deadline=$(($(date +%s) + BQ_WAIT_SECONDS))
+          if ((deadline > BQ_JOB_DEADLINE)); then
+            deadline=$BQ_JOB_DEADLINE
+          fi
           complete=0
           result=
-          for ((attempt = 0; attempt < 360; attempt += 1)); do
+          while (($(date +%s) < deadline)); do
             set +e
             result="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$BQ_JOB" 2>&1)"
             status=$?
@@ -189,7 +280,10 @@ jobs:
             fi
             sleep 10
           done
-          [[ $complete -eq 1 ]]
+          if [[ $complete -ne 1 ]]; then
+            echo 'BENCH_DISPATCH_RESULT_WAIT_EXPIRED the reviewed result wait elapsed before the job finished' >&2
+            exit 1
+          fi
           {
             printf '\n## Complete result receipt\n\n```text\n'
             printf '%s\n' "$result"

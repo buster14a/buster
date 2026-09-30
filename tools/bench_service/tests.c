@@ -111,6 +111,31 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
     BQ_CHECK(!bq_client_arguments(4, gateway, true, &typed, &operation));
     gateway[1] = "run-123-1";
     BQ_CHECK(!bq_client_arguments(6, client, true, &typed, &operation));
+
+    /* submit-recipe names a registry service recipe and encodes exactly the
+     * fixed submit's bytes for it; every other recipe name is refused. */
+    char* selected[] = {"submit-recipe", "validate-buster-v1", gateway[1], gateway[2], gateway[3], 0};
+    BqPacket chosen;
+    BQ_CHECK(bq_client_arguments(4, gateway, true, &fixed, &operation) && operation == BQ_OP_SUBMIT);
+    BQ_CHECK(bq_client_arguments(5, selected, true, &chosen, &operation) && operation == BQ_OP_SUBMIT &&
+             chosen.size == fixed.size && !memcmp(chosen.bytes, fixed.bytes, fixed.size));
+    BQ_CHECK(!bq_client_arguments(5, selected, false, &typed, &operation) && !typed.size);
+    BQ_CHECK(!bq_client_arguments(4, selected, true, &typed, &operation) && !typed.size);
+    char const* refused_recipes[] = {"zen5-calibration-v1", "native-retirement-performance-v1", "fake-success-v1",
+                                     "fake-failure-v1", "Validate-Buster-v1", "validate-buster-v1 ", "",
+                                     "../validate-buster-v1", "--recipe=validate-buster-v1"};
+    for (u32 i = 0; i < sizeof(refused_recipes) / sizeof(refused_recipes[0]); i += 1)
+    {
+        selected[1] = (char*)refused_recipes[i];
+        BQ_CHECK(!bq_client_arguments(5, selected, true, &typed, &operation) && !typed.size);
+    }
+    selected[1] = "validate-buster-v1";
+    selected[3] = "main";
+    BQ_CHECK(!bq_client_arguments(5, selected, true, &typed, &operation) && !typed.size);
+    selected[3] = gateway[2];
+    selected[2] = "not a key";
+    BQ_CHECK(!bq_client_arguments(5, selected, true, &typed, &operation) && !typed.size);
+    selected[2] = gateway[1];
     char* private_operation[] = {"worker-run"};
     BQ_CHECK(!bq_client_arguments(1, private_operation, true, &typed, &operation));
     char* status[] = {"result", "7"};
