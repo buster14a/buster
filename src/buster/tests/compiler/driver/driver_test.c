@@ -6643,7 +6643,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
                 {
                     // Each combination runs its own images: Windows may refuse to
                     // replace an image that just ran (#2089).
-                    u32 iteration = (target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                    u32 iteration = (target * (u32)BUSTER_ARRAY_LENGTH(modes) + mode) * (u32)BUSTER_ARRAY_LENGTH(frontends) + frontend;
                     String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
                     String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), executable_suffix);
                     String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
@@ -6722,7 +6722,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                         {
                             // Each combination runs its own image: Windows may refuse to
                             // replace an image that just ran (#2089).
-                            u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * BUSTER_ARRAY_LENGTH(pics) + pic;
+                            u32 iteration = ((target * (u32)BUSTER_ARRAY_LENGTH(modes) + mode) * (u32)BUSTER_ARRAY_LENGTH(frontends) + frontend) * (u32)BUSTER_ARRAY_LENGTH(pics) + pic;
                             String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
                             String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), executable_suffix);
                             String8 link[10];
@@ -6800,7 +6800,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
                     // keep an image that just ran open (loader teardown, Defender)
                     // and refuse its replacement with ERROR_ACCESS_DENIED (#2089),
                     // so no iteration relinks a path an earlier one executed.
-                    u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * 2 + fixture;
+                    u32 iteration = ((target * (u32)BUSTER_ARRAY_LENGTH(modes) + mode) * (u32)BUSTER_ARRAY_LENGTH(frontends) + frontend) * 2 + fixture;
                     String8 object_suffix = string_format(temporary.arena, S8("-{u32}.o"), iteration);
                     String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), object_suffix);
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
