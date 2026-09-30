@@ -250,6 +250,80 @@ class AdmissionWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, code, result.stderr)
 
+    def reserved_root_candidate(self, root: Path, track_external: bool) -> tuple[Path, str, str]:
+        candidate = root / "candidate"
+        git(root, "init", "-q", "-b", "main", str(candidate))
+        git(candidate, "config", "user.name", "Admission Test")
+        git(candidate, "config", "user.email", "test@example.invalid")
+        (candidate / "README.md").write_text("base\n")
+        git(candidate, "add", ".")
+        git(candidate, "commit", "-q", "-m", "base")
+        base = git(candidate, "rev-parse", "HEAD")
+        (candidate / "README.md").write_text("feature\n")
+        if track_external:
+            (candidate / "external").mkdir()
+            (candidate / "external/owned.txt").write_text("candidate-owned\n")
+        git(candidate, "add", ".")
+        git(candidate, "commit", "-q", "-m", "feature")
+        head = git(candidate, "rev-parse", "HEAD")
+        git(candidate, "remote", "add", "origin", str(candidate))
+        return candidate, base, head
+
+    def test_reserved_roots_are_rejected_before_pinned_materialization(self):
+        workflow = (ROOT / ".github/workflows/native-retirement-rebind.yml").read_text()
+        repository = workflow.split("  repository:\n", 1)[1]
+        reject = repository.index("      - name: Reject candidate-controlled checkout destinations")
+        self.assertLess(repository.index("      - name: Check out exact candidate or merge revision"), reject)
+        self.assertLess(reject, repository.index("      - name: Check out pinned cJSON closure"))
+        self.assertNotIn("if:", repository[reject:].split("        run: |\n", 1)[0])
+        script = self.rebind_step("Reject candidate-controlled checkout destinations")
+        for tracked, code in ((False, 0), (True, 1)):
+            with self.subTest(tracked=tracked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.reserved_root_candidate(root, tracked)
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", script],
+                    env={**os.environ, "GITHUB_WORKSPACE": str(root)},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_group_admission_classifies_despite_materialized_closures(self):
+        # Pinned closures already occupy candidate/external when a landed
+        # group is admitted; only a candidate-tracked root may be rejected.
+        script = self.rebind_step("Admit the landed merge group with trusted tools")
+        gate = textwrap.dedent("""\
+            import json, sys
+            print(json.dumps({"mode": "ordinary-merge-group", "status": "admitted"}))
+            """)
+        for tracked, code in ((False, 0), (True, 1)):
+            with self.subTest(tracked=tracked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidate, base, head = self.reserved_root_candidate(root, tracked)
+                (candidate / "external/cjson").mkdir(parents=True)
+                (candidate / "external/cjson/cJSON.c").write_text("pinned\n")
+                tools = root / "trusted/tools"
+                tools.mkdir(parents=True)
+                (tools / "native_retirement_merge_gate.py").write_text(gate)
+                (tools / "native_retirement_integration.py").write_bytes(
+                    (ROOT / "tools/native_retirement_integration.py").read_bytes())
+                temp = root / "temp"
+                temp.mkdir()
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", script], cwd=root,
+                    env={**os.environ, "GITHUB_WORKSPACE": str(root), "RUNNER_TEMP": str(temp),
+                         "GITHUB_OUTPUT": str(temp / "output"), "TRUSTED_REF": base,
+                         "CANDIDATE_HEAD": head, "EVENT_NAME": "merge_group",
+                         "GITHUB_REPOSITORY": "owner/repo"},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code == 0:
+                    self.assertIn('"kind":"ordinary"', result.stdout.replace(" ", ""))
+                    self.assertEqual(git(candidate, "worktree", "list", "--porcelain").count("worktree "), 1)
+                else:
+                    self.assertIn("reserved materialization root 'external'", result.stderr)
+
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
         repo = root / "repo"
         git(root, "init", "-b", "main", str(repo))

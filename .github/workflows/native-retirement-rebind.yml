@@ -123,6 +123,19 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      # Pinned closures are checked out into candidate/external before a merge
+      # group is admitted, so the reserved-root check must run here, on the
+      # pristine candidate checkout, for every event.
+      - name: Reject candidate-controlled checkout destinations
+        run: |
+          set -euo pipefail
+          for relative in external .native-retirement-trusted; do
+            path="$GITHUB_WORKSPACE/candidate/$relative"
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "error: candidate controls reserved materialization root '$relative'" >&2
+              exit 1
+            fi
+          done
       - name: Reject feature-owned generated state and classify trust transitions
         id: admission
         if: ${{ github.event_name == 'pull_request' }}
@@ -243,13 +256,28 @@ jobs:
           path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare pinned SDK and external inputs with trusted code
         run: |
           python3 trusted/tools/native_retirement_sdks.py \
-            --source-root "$GITHUB_WORKSPACE/candidate"
+            --source-root "$GITHUB_WORKSPACE/candidate" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/candidate/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/candidate"
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
       # Reconstruction is read-only, so it runs on the speculative group as
       # soon as the group exists (#1893). Only the cheap identity/policy wait
       # and the admission gate below run after the predecessor lands.
@@ -340,11 +368,18 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "catch_up=$catch_up" >> "$GITHUB_OUTPUT"
           if [[ "$mode" != trusted-integration-merge-group ]]; then
+            # candidate/external now holds the pinned closures, which the
+            # classifier's reserved-root check would reject. Classify a
+            # pristine worktree of the same head instead; the candidate's own
+            # reserved roots were rejected before materialization.
+            pristine="$RUNNER_TEMP/native-retirement-classify"
+            git -C candidate worktree add --detach "$pristine" "$CANDIDATE_HEAD"
             python3 "$classifier" classify \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              --repo-root "$pristine" \
               --base "$base" \
               --head "$CANDIDATE_HEAD" \
               | tee "$RUNNER_TEMP/native-retirement-classification.json"
+            git -C candidate worktree remove --force "$pristine"
           fi
       - name: Require exact current generated state for attested non-catch-up heads
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
