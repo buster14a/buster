@@ -8740,6 +8740,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
 
 MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_aarch64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                                u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     u32 push_count = 0;
     for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
@@ -8897,7 +8903,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         return result;
     }
     MachineA64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineBuilderStream fixups;

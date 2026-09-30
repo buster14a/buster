@@ -11,6 +11,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
 include(cmake/IOSBundleAssets.cmake)
+include(cmake/NativeTargetCompatibility.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
 
@@ -352,20 +353,34 @@ if (BUSTER_FUZZ_AVAILABLE)
         message(FATAL_ERROR "Unsupported fuzz runtime architecture: ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
 
+    # Distribution packages suffix the runtime with its architecture; upstream
+    # LLVM releases use the per-target runtime directory with unsuffixed names.
     if (WIN32)
-        set(BUSTER_FUZZ_RUNTIME_NAME "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib"
+            "clang_rt.fuzzer_no_main.lib"
+        )
     else()
-        set(BUSTER_FUZZ_RUNTIME_NAME "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a"
+            "libclang_rt.fuzzer_no_main.a"
+        )
     endif()
 
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${BUSTER_FUZZ_RUNTIME_NAME}"
-        OUTPUT_VARIABLE BUSTER_FUZZ_NO_MAIN_RUNTIME
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
-    )
-    if (NOT BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 OR NOT IS_ABSOLUTE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}" OR NOT EXISTS "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
-        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime '${BUSTER_FUZZ_RUNTIME_NAME}': ${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+    foreach(runtime_name IN LISTS BUSTER_FUZZ_RUNTIME_NAMES)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${runtime_name}"
+            OUTPUT_VARIABLE BUSTER_FUZZ_RUNTIME_CANDIDATE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
+        )
+        if (BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 AND IS_ABSOLUTE "${BUSTER_FUZZ_RUNTIME_CANDIDATE}" AND EXISTS "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            set(BUSTER_FUZZ_NO_MAIN_RUNTIME "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            break()
+        endif()
+    endforeach()
+    if (NOT BUSTER_FUZZ_NO_MAIN_RUNTIME)
+        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime (tried ${BUSTER_FUZZ_RUNTIME_NAMES})")
     endif()
 endif()
 
@@ -752,7 +767,7 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
         set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
     elseif (C_COMPILER_GNU_FAMILY)
         set(BUSTER_LINUX_ASAN_RUNTIME_NAMES)
-        if (C_COMPILER_CLANG_FAMILY)
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG)
             if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
                 set(BUSTER_LINUX_ASAN_ARCH x86_64)
             elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
@@ -762,11 +777,12 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
             if (BUSTER_LINUX_ASAN_ARCH)
                 list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES
                     "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so"
-                    "libclang_rt.asan.so"
                 )
             endif()
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libclang_rt.asan.so")
+        elseif (C_COMPILER_GNU)
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
         endif()
-        list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
 
         foreach(runtime_name IN LISTS BUSTER_LINUX_ASAN_RUNTIME_NAMES)
             execute_process(
@@ -775,14 +791,36 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 RESULT_VARIABLE BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT
             )
+            get_filename_component(BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME
+                "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" NAME)
             if (BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT EQUAL 0
                 AND IS_ABSOLUTE "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}"
+                AND BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME STREQUAL "${runtime_name}"
                 AND EXISTS "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}")
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" REALPATH)
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}" DIRECTORY)
                 break()
             endif()
         endforeach()
+
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND NOT BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+            set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME "libclang_rt.asan.so")
+            if (BUSTER_LINUX_ASAN_ARCH)
+                set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME
+                    "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so (or libclang_rt.asan.so)")
+            endif()
+            string(REGEX MATCH "^[0-9]+" BUSTER_LINUX_ASAN_CLANG_MAJOR
+                "${CMAKE_C_COMPILER_VERSION}")
+            set(BUSTER_LINUX_ASAN_PACKAGE_HINT
+                "Install the matching compiler-rt development package")
+            if (BUSTER_LINUX_ASAN_CLANG_MAJOR)
+                string(APPEND BUSTER_LINUX_ASAN_PACKAGE_HINT
+                    " (Debian/Ubuntu: libclang-rt-${BUSTER_LINUX_ASAN_CLANG_MAJOR}-dev)")
+            endif()
+            message(FATAL_ERROR
+                "Could not find Clang's Linux AddressSanitizer runtime ${BUSTER_LINUX_ASAN_EXPECTED_RUNTIME} for ${CMAKE_C_COMPILER}. "
+                "${BUSTER_LINUX_ASAN_PACKAGE_HINT}.")
+        endif()
     endif()
 
     if (BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
@@ -1065,7 +1103,9 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
+    src/buster/tests/compiler/frontend/c/type_layout_test.c
     src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+    src/buster/tests/compiler/frontend/c/record_layout_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
@@ -1123,7 +1163,10 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
+    src/buster/tests/compiler/frontend/c/type_layout_test.h
     src/buster/tests/compiler/frontend/c/macro_conditional_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_corpus.generated.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
@@ -1312,6 +1355,11 @@ if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
+buster_native_target_compatibility_flags(
+    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+)
+list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.

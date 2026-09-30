@@ -1324,6 +1324,10 @@ struct CLexState
 {
     CLexResult* result;
     CTranslatedSource translated;
+    // The result's arena. Diagnostic rows grow in diagnostic_arena, which is
+    // rewound or destroyed once lexing ends and the rows are copied out, so
+    // anything a row points at -- a formatted message -- lives here instead.
+    Arena* arena;
     Arena* diagnostic_arena;
     u64 diagnostic_capacity;
     u64 maximum_diagnostic_count;
@@ -1705,7 +1709,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     }
     c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
     c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
-                      string_format(state->diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
+                      string_format(state->arena, S8("invalid character byte {u32} in C source"), (u32)character));
     return offset + 1;
 }
 
@@ -2678,6 +2682,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
+                        .arena = arena,
                         .diagnostic_arena = diagnostic_arena,
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
@@ -3252,6 +3257,40 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         .length_and_id = length_word | id,
     };
     return id;
+}
+
+// The id `name` was interned under, or 0 when it never was. The probe is
+// c_symbol_intern's without the insertion, so a consumer that holds a
+// spelling from outside the token stream -- lowering's IrField names -- can
+// ask for its id without growing the table. A 0 answer is exact: no token
+// interned into this table spells `name`.
+BUSTER_C_SHARED u32 c_symbol_find(const CSymbolTable* table, String8 name)
+{
+    CSymbolKey key = c_symbol_key(name);
+    u64 length_word = (u64)name.length << 32;
+    u32 mask = table->slot_capacity - 1;
+    u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    u32 result = 0;
+    for (;;)
+    {
+        CSymbolSlot* entry = &table->slots[slot];
+        u64 length_and_id = entry->length_and_id;
+        if (!length_and_id)
+        {
+            break;
+        }
+        if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
+        {
+            u32 id = (u32)length_and_id;
+            if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
+            {
+                result = id;
+                break;
+            }
+        }
+        slot = (slot + 1) & mask;
+    }
+    return result;
 }
 
 BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
@@ -4503,6 +4542,16 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
+            // A pasted identifier is interned where it is formed, exactly as
+            // the token pass interns every lexed one, so the id -- not the
+            // spelling -- is the name key every later phase reads. Left at 0,
+            // each downstream lookup re-interned the joined spelling and
+            // dropped the answer; interning here is once per paste. The
+            // joined bytes live in the spelling space, which outlives the
+            // table's borrowed name pointer.
+            u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
+                                    ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
+                                    : 0;
             left->token = (CPpToken){
                 .token =
                     {
@@ -4510,6 +4559,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                         .length = c_token_length_field(joined_length),
                         .kind = pasted_shape.kind,
                         .punctuator = pasted_shape.punctuator,
+                        .symbol = pasted_symbol,
                     },
                 .stamp = stamp & C_PP_STAMP_MASK,
                 .foreign = true,
@@ -6379,6 +6429,21 @@ CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeF
     return c_include_file_entry(table, identity, spelling, entry_out);
 }
 
+u32 c_test_symbol_intern(CSymbolTable* table, String8 name)
+{
+    return c_symbol_intern(table, name);
+}
+
+u32 c_test_symbol_find(CSymbolTable const* table, String8 name)
+{
+    return c_symbol_find(table, name);
+}
+
+u32 c_test_symbol_count(CSymbolTable const* table)
+{
+    return table->count;
+}
+
 bool c_test_include_file_table_grow(CIncludeFileTable* table)
 {
     return c_include_file_table_grow(table);
@@ -7265,6 +7330,9 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
         *map_out = (FileMapRead){0};
     }
     String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
+    // A mapping exists only when bytes do, so a miss owns nothing. A hit
+    // transfers the mapping to `map_out`; a probe without one (feature
+    // queries) releases it here and reports no source bytes.
     FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
     ByteSlice bytes = map.bytes;
     bool result;
@@ -7275,10 +7343,15 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
     else
     {
         *path_out = path;
-        *source_out = BYTE_SLICE_TO_STRING(8, bytes);
         if (map_out)
         {
+            *source_out = BYTE_SLICE_TO_STRING(8, bytes);
             *map_out = map;
+        }
+        else
+        {
+            *source_out = (String8){0};
+            file_map_unmap(map);
         }
         result = true;
     }
@@ -8000,8 +8073,8 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
-           dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU89 || dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
@@ -8020,6 +8093,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_GNU23:
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
+    case C_PREPROCESS_DIALECT_GNU89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -8240,7 +8314,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .length = 1,
         .kind = C_TOKEN_PREPROCESSING_NUMBER,
     };
-    standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    String8 standard_version = c_preprocess_standard_version(options.dialect);
+    standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
     // The GNU version macros are not a dialect switch.  Both reference
@@ -8742,7 +8817,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         hosted_replacement.offset = C_SPELLING_ZERO;
     }
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
+    if (standard_version.length)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    }
     CTokenStream token_stream = {
         .arena = token_arena,
         .shape_arena = token_shape_arena,

@@ -97,6 +97,7 @@ enum
     PDB_LF_PROCEDURE = 0x1008,
     PDB_LF_ARGLIST = 0x1201,
     PDB_LF_FIELDLIST = 0x1203,
+    PDB_LF_BITFIELD = 0x1205,
     PDB_LF_INDEX = 0x1404,
     PDB_LF_ENUMERATE = 0x1502,
     PDB_LF_ARRAY = 0x1503,
@@ -440,21 +441,43 @@ BUSTER_GLOBAL_LOCAL bool pdb_type_index_map(PdbTypeModule* module, ByteSlice byt
 
 BUSTER_GLOBAL_LOCAL u64 pdb_skip_numeric(ByteSlice bytes, u64 offset)
 {
+    // The payload sizes of the numeric leaves, LF_CHAR (0x8000) through
+    // LF_COMPLEX128 (0x800f), as CodeView defines them (cvinfo.h, LLVM's
+    // CodeViewTypes.def): LF_REAL32 is four bytes and LF_REAL80 ten, not the
+    // one and two this used to skip (#1440). LF_VARSTRING carries its own
+    // u16 length; the octwords and LF_REAL16 follow the dense range. A value
+    // below 0x8000 is the number itself, with no payload.
+    static const u8 numeric_sizes[] = {1, 2, 2, 4, 4, 4, 8, 10, 16, 8, 8, 6, 8, 16, 20, 32};
+    u64 result = bytes.length + 1;
     u16 leaf = 0;
-    if (!pdb_read_u16_checked(bytes, offset, &leaf))
+    if (pdb_read_u16_checked(bytes, offset, &leaf))
     {
-        return bytes.length + 1;
+        offset += sizeof(leaf);
+        u64 size = bytes.length + 1;
+        u16 varstring_length = 0;
+        if (leaf < 0x8000)
+        {
+            size = 0;
+        }
+        else if (leaf < 0x8000 + BUSTER_ARRAY_LENGTH(numeric_sizes))
+        {
+            size = numeric_sizes[leaf - 0x8000];
+        }
+        else if (leaf == 0x8010 && pdb_read_u16_checked(bytes, offset, &varstring_length))
+        {
+            size = 2 + (u64)varstring_length;
+        }
+        else if (leaf == 0x8017 || leaf == 0x8018)
+        {
+            size = 16;
+        }
+        else if (leaf == 0x801c)
+        {
+            size = 2;
+        }
+        result = size > bytes.length ? bytes.length + 1 : offset + size;
     }
-    offset += sizeof(leaf);
-    if (leaf < 0x8000)
-    {
-        return offset;
-    }
-    u64 size = leaf == 0x8000 || leaf == 0x8005 ? 1
-               : leaf == 0x8001 || leaf == 0x8002 || leaf == 0x8006 || leaf == 0x8007 ? 2
-               : leaf == 0x8003 || leaf == 0x8004 || leaf == 0x8008 || leaf == 0x800b || leaf == 0x8010 ? 4
-                                                                                                             : 8;
-    return offset + size;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u64 pdb_skip_name(ByteSlice bytes, u64 offset)
@@ -618,6 +641,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlic
     {
     case PDB_LF_MODIFIER:
     case PDB_LF_POINTER:
+    case PDB_LF_BITFIELD:
         return pdb_type_index_map(module, record, 4);
     case PDB_LF_ARRAY:
         return pdb_type_index_map(module, record, 4) && pdb_type_index_map(module, record, 8);

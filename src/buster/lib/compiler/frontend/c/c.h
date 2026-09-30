@@ -465,6 +465,7 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
+    C_PREPROCESS_DIALECT_GNU89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -804,6 +805,10 @@ struct CMember
 {
     String8 name;
     CSourceLocation location;
+    // Interned id of `name`, carried from the declarator token; 0 for an
+    // unnamed member or a parse without a symbol table. Member lookups key
+    // on it and compare spellings only when either side lacks one.
+    u32 symbol;
     CTypeId type;
     u32 alignment_start;
     u32 alignment_count;
@@ -1001,6 +1006,9 @@ struct CEntity
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
     // but they name external storage rather than an automatic local place.
     bool is_extern;
+    // The function's only definition so far is GNU inline-only, so the unit
+    // may still give its external definition.
+    bool definition_is_gnu_inline_only;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1076,6 +1084,9 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    // A GNU `extern inline` function definition: its body is only for
+    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
     // recomputed.
@@ -1166,6 +1177,36 @@ struct CParserResult
     u32 diagnostic_count;
     u32 declaration_capacity;
     u32 diagnostic_capacity;
+};
+
+// Definition token -> lowest type id ever given that definition_start.
+// c_parse_scalar_type_core_begin is the only writer of definition_start; a
+// row that holds a start later is that row, a younger copy of it, or one of
+// them restored by rollback, so no live row with the start is older than the
+// recorded id. A scan for rows defined at a token may therefore begin at that
+// id, and skip the table when the start was never assigned. Like the
+// aggregate lookup below, the header outlives rollback, recorded ids only
+// ever decrease, and at most half the slots are occupied; an exhausted arena
+// sets `incomplete` and sends every query back to a whole-table scan.
+typedef struct CDefinitionIndexSlot CDefinitionIndexSlot;
+struct CDefinitionIndexSlot
+{
+    u32 start_plus_one;
+    u32 lowest_type;
+};
+
+typedef struct CDefinitionIndex CDefinitionIndex;
+struct CDefinitionIndex
+{
+    CDefinitionIndexSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 search_count;
+    u64 probe_count;
+    u64 scan_row_count;
+#endif
 };
 
 // (kind, tag) -> oldest matching aggregate type id. Speculative rollback
@@ -1265,6 +1306,15 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // c_parse_scope_for_token's answer for every token of one function body
+    // under one root scope (c_parse_body_scopes_build), installed while that
+    // body's lowering constraints are checked so each query inside it is one
+    // load instead of a binary-search descent per scope level. Null outside
+    // that window.
+    u32* body_scopes;
+    u32 body_scope_start;
+    u32 body_scope_count;
+    CScopeId body_scope_root;
     // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
@@ -1273,6 +1323,34 @@ struct CTokenPositionIndex
     // to their exact scalar walks.
     u32 delimiter_mismatch_count;
     bool built;
+};
+
+// Work of the parse-side layout fold (c_parse_type_layout_core), the
+// sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
+// exists. Counts of actual operations, not timings; see
+// docs/agents/frontend/layout.md for each field's exact meaning.
+typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
+struct CTypeLayoutStatistics
+{
+    // Queries that needed a solve: not a builtin kind, not a committed entry.
+    u64 solves;
+    // Ordered-pass solves, the types their per-query state covered (the whole
+    // table without a cache, the uncommitted list with one) and their
+    // per-type attempts.
+    u64 pass_solves;
+    u64 pass_state_types;
+    u64 pass_attempts;
+    // Demand-driven solves, the entries each created (the distinct types it
+    // reached that the seed rule does not answer), their attempts,
+    // prerequisite edges registered, edge completions delivered, agenda pushes
+    // and solves abandoned to the ordered passes.
+    u64 agenda_solves;
+    u64 agenda_types;
+    u64 agenda_attempts;
+    u64 agenda_edges;
+    u64 agenda_notifications;
+    u64 agenda_pushes;
+    u64 agenda_fallbacks;
 };
 
 typedef struct CParseResult CParseResult;
@@ -1304,7 +1382,12 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
+    // Outside the checkpointed body, like position_index, so a rollback or a
+    // by-value operand copy keeps counting into the same record. Null for
+    // hand-built results, which then count nothing.
+    CTypeLayoutStatistics* type_layout_statistics;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
@@ -1423,6 +1506,7 @@ typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
