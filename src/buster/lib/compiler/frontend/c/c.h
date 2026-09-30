@@ -109,6 +109,25 @@ struct CSourceLocation
     u32 map_offset;
 };
 
+// Where a semantic record (declaration, entity, member, parameter,
+// enumerator, deferred static assertion) was named, without its line and
+// column: the naming token's mapped offset, plus one so that a
+// zero-initialized site is the unknown location a zero CSourceLocation was,
+// and the source that offset lies in. A successful compilation reads only
+// these two fields, as the offset and source of an IrSourceRange; line,
+// column and physical offset are recovered by c_preprocess_site_location
+// only when a diagnostic or the declared-before fallback asks, from the
+// published source map the translation unit retains. Recovery is a pure
+// function of that map and the offset, so it returns the location
+// c_preprocess_token_location would have returned for the naming token when
+// the record was built.
+typedef struct CSourceSite CSourceSite;
+struct CSourceSite
+{
+    u32 map_offset_plus_one;
+    u32 file;
+};
+
 // A token no longer stores its spelling pointer or an eager source location.
 // The spelling is `spelling_base + offset` for `length` bytes, where the base
 // is the owning CLexResult's or CPreprocessResult's spelling space; the
@@ -502,7 +521,11 @@ struct CPreprocessOptions
     // text macro expansion are not replayed. This consumes a reserved byte so
     // the public options record keeps its existing size.
     bool already_preprocessed;
-    u8 reserved[1];
+    // No report will read preprocessed.bytes (the driver passes its
+    // invocation's omit_spelled_bytes), so the pass over the output stream
+    // that sums spelling lengths is skipped and the field stays zero. Every
+    // other metric is still gathered. It takes the last reserved byte.
+    bool omit_spelled_bytes;
 };
 
 typedef struct CSymbolTable CSymbolTable;
@@ -804,7 +827,7 @@ typedef struct CMember CMember;
 struct CMember
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     // Interned id of `name`, carried from the declarator token; 0 for an
     // unnamed member or a parse without a symbol table. Member lookups key
     // on it and compare spellings only when either side lacks one.
@@ -929,7 +952,7 @@ typedef struct CEnumMember CEnumMember;
 struct CEnumMember
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     // Interned id of `name`; zero when parsing without a symbol table.
     u32 symbol;
     // The source token and owning enum retain declaration order and scope for
@@ -948,19 +971,19 @@ struct CEnumMember
     bool is_published;
     u8 reserved[6];
 };
-BUSTER_CT_CHECK(sizeof(CEnumMember) == 104);
+BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
 typedef struct CParameter CParameter;
 struct CParameter
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     CTypeId type;
     CEntityId entity;
-    // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+    // Interned id of `name`, as CEnumMember.symbol.
     u32 symbol;
 };
-BUSTER_CT_CHECK(sizeof(CParameter) == 48);
+BUSTER_CT_CHECK(sizeof(CParameter) == 40);
 
 typedef struct CParserDeclaration CParserDeclaration;
 
@@ -982,7 +1005,7 @@ struct CEntity
     // Interned id of `name` (0 when the parse ran without a symbol table);
     // the scope-lookup buckets and chains key on it.
     u32 symbol;
-    CSourceLocation location;
+    CSourceSite location;
     CTypeId type;
     CScopeId scope;
     CEntityId next_in_scope;
@@ -1067,7 +1090,7 @@ typedef struct CDeclaration CDeclaration;
 struct CDeclaration
 {
     String8 name;
-    CSourceLocation location;
+    CSourceSite location;
     u32 token_start;
     u32 token_count;
     // The one declarator this declaration owns out of a comma-separated list,
@@ -1107,7 +1130,7 @@ struct CDeferredStaticAssert
     u32 token_start;
     u32 token_count;
     CScopeId scope;
-    CSourceLocation location;
+    CSourceSite location;
 };
 
 typedef enum CParserDeclarationKind
@@ -1147,7 +1170,6 @@ struct CParserStaticAssert
 struct CParserDeclaration
 {
     CParserDeclaration* next;
-    CSourceLocation location;
     u32 token_start;
     u32 token_count;
     // See CDeclaration: one declarator of a comma-separated list, or a zero
@@ -1495,6 +1517,11 @@ struct CIRLowerOptions
 {
     bool disable_direct_ssa;
     bool sysv_unnamed_bitfields_integer;
+    // No consumer will read debug information (-g0): lowered functions carry
+    // no IrDebugLocal records. Their only readers are the debug-value, debug
+    // location and debug-model builders, which run only with debug output;
+    // every other part of the program is unchanged.
+    bool omit_debug_locals;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -1573,6 +1600,11 @@ BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult cons
 // tokens, so a printer that reproduces source adjacency must still separate
 // them. The -E printer and diagnostics quoting source text share this rule.
 BUSTER_F_DECL bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling);
+// A record's site for `token`: its mapped offset and source, without the
+// checkpoint search a line and column cost.
+BUSTER_F_DECL CSourceSite c_preprocess_token_site(CPreprocessResult const* preprocess, CToken token);
+// The location a site stands for, recovered on demand (see CSourceSite).
+BUSTER_F_DECL CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, CSourceSite site);
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
 {
     CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;

@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/driver/fixtures/wasi_test_data.h>
@@ -2097,6 +2098,203 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
     BUSTER_TEST(arguments, serial.preprocessed.definitions == parallel.preprocessed.definitions);
     BUSTER_TEST(arguments, serial.direct_ssa.functions == parallel.direct_ssa.functions);
     BUSTER_TEST(arguments, serial.local_promotion.instructions_after == parallel.local_promotion.instructions_after);
+    return result;
+}
+
+// preprocessed.bytes is read only by the -v source report and the
+// -fsource-metrics file. A driver caller gets it by default; omit_spelled_bytes,
+// which the cc command sets when it prints neither report, skips the sum and
+// leaves it zero while the other preprocessed counts are gathered either way.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_spelled_byte_metrics_on_request(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define WIDE long long\nWIDE value = 12;\n"))));
+    String8 command[] = {S8("-g0"), S8("-fsyntax-only"), input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.omit_spelled_bytes);
+    CompilerDriverResult measured = compiler_driver_execute_invocation(arena, invocation);
+    invocation.omit_spelled_bytes = 1;
+    CompilerDriverResult omitted = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE && omitted.error == COMPILER_DRIVER_ERROR_NONE);
+    // "long" "long" "value" "=" "12" ";"
+    BUSTER_TEST(arguments, measured.preprocessed.bytes == 17 && omitted.preprocessed.bytes == 0);
+    BUSTER_TEST(arguments, measured.preprocessed.tokens == 6 && omitted.preprocessed.tokens == 6);
+    BUSTER_TEST(arguments, measured.preprocessed.spelling_bytes == omitted.preprocessed.spelling_bytes);
+    BUSTER_TEST(arguments, measured.preprocessed.expansions == omitted.preprocessed.expansions);
+    BUSTER_TEST(arguments, measured.source_lexed.bytes == omitted.source_lexed.bytes && measured.source_lexed.tokens == omitted.source_lexed.tokens);
+    // The sum is taken before C23 respelling rewrites `bool` as `_Bool`, so it
+    // counts the spelling the source used: "bool" "b" ";".
+    String8 c23_input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics-c23"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(c23_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("bool b;\n"))));
+    String8 c23_command[] = {S8("-g0"), S8("-std=c23"), S8("-fsyntax-only"), c23_input};
+    CompilerDriverResult c23 = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c23_command)));
+    BUSTER_TEST(arguments, c23.error == COMPILER_DRIVER_ERROR_NONE && c23.preprocessed.tokens == 3 && c23.preprocessed.bytes == 6);
+    scratch_end(temporary);
+    return result;
+}
+
+// Every structured record of a compilation, one line each, with the input's
+// temporary paths replaced by `main` and `header` so the text is stable.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, CompilerDriverResult result, String8 main_path, String8 header_path)
+{
+    String8* lines = arena_allocate(arena, String8, (u64)result.diagnostic_count + 1);
+    lines[0] = string_format(arena, S8("error={u32} records={u32}\n"), (u32)result.error, result.diagnostic_count);
+    for (u32 index = 0; index < result.diagnostic_count; index += 1)
+    {
+        CompilerDiagnostic diagnostic = result.diagnostics[index];
+        String8 path = string_equal(diagnostic.primary.path, main_path)     ? S8("main")
+                       : string_equal(diagnostic.primary.path, header_path) ? S8("header")
+                                                                            : diagnostic.primary.path;
+        String8 original = string_equal(diagnostic.primary.original_path, main_path)     ? S8("main")
+                           : string_equal(diagnostic.primary.original_path, header_path) ? S8("header")
+                                                                                         : diagnostic.primary.original_path;
+        String8 severity = diagnostic.severity == COMPILER_DIAGNOSTIC_WARNING ? S8("warning") : S8("error");
+        lines[index + 1] = string_format(arena, S8("{S8} {S8} {S8}:{u32}:{u32} source={u32} length={u32} range={u32} original={S8}:{u32}:{u32} notes={u32} | {S8}\n"),
+                                         severity, diagnostic.code, path, diagnostic.primary.position.line, diagnostic.primary.position.column,
+                                         diagnostic.primary.range.source.value, diagnostic.primary.range.length, (u32)diagnostic.primary.has_range, original,
+                                         diagnostic.primary.original_position.line, diagnostic.primary.original_position.column, diagnostic.note_count,
+                                         diagnostic.message);
+    }
+    return string_join_arena(arena, (SliceString8){.pointer = lines, .length = (u64)result.diagnostic_count + 1}, false);
+}
+
+// Diagnostics whose location comes from a semantic record -- a declaration,
+// entity, member, parameter, enumerator or deferred static assertion -- or
+// from lowering, plus lexical, syntax and preprocessing controls, through
+// includes, macro expansions and #line. Every structured record (severity,
+// code, path, line, column, range source/length, original position, notes,
+// message) and the rendered first error are frozen from main before records
+// stopped resolving line and column eagerly, and must be identical under
+// -fsyntax-only, -c -g0 and -c -g. Valid controls must stay valid.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_record_diagnostic_equivalence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 dialect;
+        String8 header;
+        String8 source;
+        String8 expected_syntax;
+        String8 expected_object;
+    } cases[] = {
+        {S8("redefinition_object"), S8("-std=gnu17"), {0}, S8("int x = 1;\n  int x = 2;\n"), S8("error=6 records=1\nerror c.redefinition main:2:7 source=0 length=0 range=1 original=main:2:7 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition main:2:7 source=0 length=0 range=1 original=main:2:7 notes=0 | redefinition\n")},
+        {S8("redefinition_function"), S8("-std=gnu17"), {0}, S8("int f(void) { return 0; }\nint f(void) { return 1; }\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition\n")},
+        {S8("conflicting_declaration"), S8("-std=gnu17"), {0}, S8("int x;\nlong x;\n"), S8("error=6 records=1\nerror c.conflicting-declaration main:2:6 source=0 length=0 range=1 original=main:2:6 notes=0 | conflicting declaration of 'x' (previous type 0, new type 1)\n"), S8("error=6 records=1\nerror c.conflicting-declaration main:2:6 source=0 length=0 range=1 original=main:2:6 notes=0 | conflicting declaration of 'x' (previous type 0, new type 1)\n")},
+        {S8("enumerator_redefinition"), S8("-std=gnu17"), {0}, S8("enum A { RED };\nenum B {\n    GREEN,\n    RED\n};\n"), S8("error=6 records=1\nerror c.redefinition main:4:5 source=0 length=0 range=1 original=main:4:5 notes=0 | redefinition of enumerator\n"), S8("error=6 records=1\nerror c.redefinition main:4:5 source=0 length=0 range=1 original=main:4:5 notes=0 | redefinition of enumerator\n")},
+        {S8("local_redefinition"), S8("-std=gnu17"), {0}, S8("int f(void)\n{\n    int a;\n    int a;\n    return 0;\n}\n"), S8("error=6 records=1\nerror c.redefinition main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | redefinition of local identifier\n"), S8("error=6 records=1\nerror c.redefinition main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | redefinition of local identifier\n")},
+        {S8("static_assert_file"), S8("-std=gnu17"), {0}, S8("_Static_assert(sizeof(int) == 3, \"int is not 3 bytes\");\n"), S8("error=6 records=1\nerror c.static-assert-failed main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | static assertion failed: \"int is not 3 bytes\"\n"), S8("error=6 records=1\nerror c.static-assert-failed main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | static assertion failed: \"int is not 3 bytes\"\n")},
+        {S8("static_assert_block"), S8("-std=gnu17"), {0}, S8("int f(void)\n{\n    _Static_assert(0, \"nope\");\n    return 0;\n}\n"), S8("error=6 records=1\nerror c.static-assert-failed main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | static assertion failed: \"nope\"\n"), S8("error=6 records=1\nerror c.static-assert-failed main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | static assertion failed: \"nope\"\n")},
+        {S8("static_assert_nonconstant"), S8("-std=gnu17"), {0}, S8("int n;\n_Static_assert(n, \"not constant\");\n"), S8("error=6 records=1\nerror c.static-assert-not-constant main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | static assertion expression is not an integer constant expression: n\n"), S8("error=6 records=1\nerror c.static-assert-not-constant main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | static assertion expression is not an integer constant expression: n\n")},
+        {S8("void_member"), S8("-std=gnu17"), {0}, S8("struct S\n{\n    int ok;\n    void v;\n};\n"), S8("error=6 records=1\nerror c.invalid-void-object main:4:10 source=0 length=0 range=1 original=main:4:10 notes=0 | a member may not have type 'void'\n"), S8("error=6 records=1\nerror c.invalid-void-object main:4:10 source=0 length=0 range=1 original=main:4:10 notes=0 | a member may not have type 'void'\n")},
+        {S8("bit_field_width"), S8("-std=gnu17"), {0}, S8("struct S\n{\n    int ok;\n    int x : 0;\n};\n"), S8("error=6 records=1\nerror c.invalid-bit-field-width main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | named bit-field 'x' has zero width\n"), S8("error=6 records=1\nerror c.invalid-bit-field-width main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | named bit-field 'x' has zero width\n")},
+        {S8("flexible_array_not_last"), S8("-std=gnu17"), {0}, S8("struct S\n{\n    int items[];\n    int count;\n};\n"), S8("error=6 records=1\nerror c.invalid-flexible-array-member main:3:9 source=0 length=0 range=1 original=main:3:9 notes=0 | flexible array member must be the last structure member\n"), S8("error=6 records=1\nerror c.invalid-flexible-array-member main:3:9 source=0 length=0 range=1 original=main:3:9 notes=0 | flexible array member must be the last structure member\n")},
+        {S8("void_object"), S8("-std=gnu17"), {0}, S8("void v;\n"), S8("error=6 records=1\nerror c.invalid-void-object main:1:6 source=0 length=0 range=1 original=main:1:6 notes=0 | variable 'v' may not have type 'void'\n"), S8("error=6 records=1\nerror c.invalid-void-object main:1:6 source=0 length=0 range=1 original=main:1:6 notes=0 | variable 'v' may not have type 'void'\n")},
+        {S8("invalid_alignment"), S8("-std=gnu17"), {0}, S8("_Alignas(3) int x;\n"), S8("error=6 records=1\nerror c.invalid-alignment main:1:17 source=0 length=0 range=1 original=main:1:17 notes=0 | alignment specifier requests 3, which is not a power of two the target can align to\n"), S8("error=6 records=1\nerror c.invalid-alignment main:1:17 source=0 length=0 range=1 original=main:1:17 notes=0 | alignment specifier requests 3, which is not a power of two the target can align to\n")},
+        {S8("alignment_redeclaration"), S8("-std=gnu17"), {0}, S8("_Alignas(16) int x;\n_Alignas(32) int x;\n"), S8("error=0 records=0\n"), S8("error=6 records=1\nerror c.invalid-alignment main:1:18 source=0 length=0 range=1 original=main:1:18 notes=0 | invalid object alignment\n")},
+        {S8("alias_missing_target"), S8("-std=gnu17"), {0}, S8("int f(void) __attribute__((alias(\"missing\")));\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:1:5 source=0 length=0 range=1 original=main:1:5 notes=0 | alias target 'missing' is not declared in this translation unit\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:1:5 source=0 length=0 range=1 original=main:1:5 notes=0 | alias target 'missing' is not declared in this translation unit\n")},
+        {S8("constexpr_function"), S8("-std=c23"), {0}, S8("constexpr int f(void);\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr may only declare an object\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr may only declare an object\n")},
+        {S8("constexpr_no_initializer"), S8("-std=c23"), {0}, S8("constexpr int x;\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr object declaration requires an initializer\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr object declaration requires an initializer\n")},
+        {S8("constexpr_extern"), S8("-std=c23"), {0}, S8("extern constexpr int y = 1;\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr cannot be combined with this storage-class specifier\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:1 source=0 length=0 range=1 original=main:1:1 notes=0 | constexpr cannot be combined with this storage-class specifier\n")},
+        {S8("constexpr_pointer"), S8("-std=c23"), {0}, S8("constexpr int *p = (int *)1;\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:16 source=0 length=0 range=1 original=main:1:16 notes=0 | pointer constexpr initializer must have a null pointer value\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:1:16 source=0 length=0 range=1 original=main:1:16 notes=0 | pointer constexpr initializer must have a null pointer value\n")},
+        {S8("constexpr_local"), S8("-std=c23"), {0}, S8("int f(void)\n{\n    constexpr int x = 1;\n    constexpr int *p = (int *)8;\n    return x;\n}\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:4:20 source=0 length=0 range=1 original=main:4:20 notes=0 | pointer constexpr initializer must have a null pointer value\n"), S8("error=6 records=1\nerror c.invalid-constexpr main:4:20 source=0 length=0 range=1 original=main:4:20 notes=0 | pointer constexpr initializer must have a null pointer value\n")},
+        {S8("global_initializer"), S8("-std=gnu17"), {0}, S8("int f(void);\nint x = f();\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:2:9 source=0 length=0 range=1 original=main:2:9 notes=0 | C IR lowering: cannot fold the call to 'f' in a static initializer\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:2:9 source=0 length=0 range=1 original=main:2:9 notes=0 | C IR lowering: cannot fold the call to 'f' in a static initializer\n")},
+        {S8("static_vla"), S8("-std=gnu17"), {0}, S8("int f(int n)\n{\n    static int a[n];\n    return a[0];\n}\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | in function 'f': variable-length array cannot have static storage duration\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | in function 'f': variable-length array cannot have static storage duration\n")},
+        {S8("undeclared_identifier"), S8("-std=gnu17"), {0}, S8("int f(void) { return missing; }\n"), S8("error=6 records=1\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n"), S8("error=6 records=1\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n")},
+        {S8("type_assignment"), S8("-std=gnu17"), {0}, S8("int g(void)\n{\n    int x;\n    x = \"t\";\n    return x;\n}\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | in function 'g': cannot convert from 'char *' to 'int'\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | in function 'g': cannot convert from 'char *' to 'int'\n")},
+        {S8("header_redefinition"), S8("-std=gnu17"), S8("int dup = 1;\n"), S8("int dup = 2;\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition\n")},
+        {S8("header_member"), S8("-std=gnu17"), S8("struct S\n{\n    void v;\n};\n"), S8("int ok;\n"), S8("error=6 records=1\nerror c.invalid-void-object header:3:10 source=1 length=0 range=1 original=header:3:10 notes=0 | a member may not have type 'void'\n"), S8("error=6 records=1\nerror c.invalid-void-object header:3:10 source=1 length=0 range=1 original=header:3:10 notes=0 | a member may not have type 'void'\n")},
+        {S8("header_line_directive"), S8("-std=gnu17"), S8("#line 7 \"renamed.h\"\nint dup;\nlong dup;\n"), S8("int ok;\n"), S8("error=6 records=1\nerror c.conflicting-declaration renamed.h:8:6 source=1 length=0 range=1 original=header:3:6 notes=0 | conflicting declaration of 'dup' (previous type 0, new type 1)\n"), S8("error=6 records=1\nerror c.conflicting-declaration renamed.h:8:6 source=1 length=0 range=1 original=header:3:6 notes=0 | conflicting declaration of 'dup' (previous type 0, new type 1)\n")},
+        {S8("macro_redefinition"), S8("-std=gnu17"), {0}, S8("#define DECLARE(name) int name = 1; int name = 2;\n\nDECLARE(twice)\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition\n")},
+        {S8("macro_nested_redefinition"), S8("-std=gnu17"), {0}, S8("#define INNER(x) x = 1\n#define OUTER(x) int INNER(x); int INNER(x);\nOUTER(v)\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition\n")},
+        {S8("macro_enum_member"), S8("-std=gnu17"), {0}, S8("#define COLORS X(RED) X(GREEN) X(RED)\n#define X(n) n,\nenum C { COLORS };\n"), S8("error=6 records=1\nerror c.redefinition main:3:10 source=0 length=0 range=1 original=main:3:10 notes=0 | redefinition of enumerator\n"), S8("error=6 records=1\nerror c.redefinition main:3:10 source=0 length=0 range=1 original=main:3:10 notes=0 | redefinition of enumerator\n")},
+        {S8("macro_static_assert"), S8("-std=gnu17"), {0}, S8("#define CHECK(e) _Static_assert(e, #e)\nCHECK(1 == 2);\n"), S8("error=6 records=1\nerror c.static-assert-failed main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | static assertion failed: \"1 == 2\"\n"), S8("error=6 records=1\nerror c.static-assert-failed main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | static assertion failed: \"1 == 2\"\n")},
+        {S8("line_directive_redefinition"), S8("-std=gnu17"), {0}, S8("#line 500 \"virtual.c\"\nint dup = 1;\nint dup = 2;\n"), S8("error=6 records=1\nerror c.redefinition virtual.c:501:5 source=1 length=0 range=1 original=main:3:5 notes=0 | redefinition\n"), S8("error=6 records=1\nerror c.redefinition virtual.c:501:5 source=1 length=0 range=1 original=main:3:5 notes=0 | redefinition\n")},
+        {S8("line_directive_member"), S8("-std=gnu17"), {0}, S8("#line 40\nstruct S\n{\n    int x : 0;\n};\n"), S8("error=6 records=1\nerror c.invalid-bit-field-width main:42:9 source=0 length=0 range=1 original=main:4:9 notes=0 | named bit-field 'x' has zero width\n"), S8("error=6 records=1\nerror c.invalid-bit-field-width main:42:9 source=0 length=0 range=1 original=main:4:9 notes=0 | named bit-field 'x' has zero width\n")},
+        {S8("parameter_scope"), S8("-std=gnu17"), {0}, S8("int f(int a)\n{\n    int a;\n    return a;\n}\n"), S8("error=6 records=1\nerror c.redefinition main:3:9 source=0 length=0 range=1 original=main:3:9 notes=0 | redefinition of local identifier\n"), S8("error=6 records=1\nerror c.redefinition main:3:9 source=0 length=0 range=1 original=main:3:9 notes=0 | redefinition of local identifier\n")},
+        {S8("multiple_semantic"), S8("-std=gnu17"), {0}, S8("int x;\nlong x;\nenum E { A };\nenum F { A };\nstruct S { void v; };\n_Static_assert(0, \"z\");\n"), S8("error=6 records=3\nerror c.conflicting-declaration main:2:6 source=0 length=0 range=1 original=main:2:6 notes=0 | conflicting declaration of 'x' (previous type 0, new type 1)\nerror c.redefinition main:4:10 source=0 length=0 range=1 original=main:4:10 notes=0 | redefinition of enumerator\nerror c.static-assert-failed main:6:1 source=0 length=0 range=1 original=main:6:1 notes=0 | static assertion failed: \"z\"\n"), S8("error=6 records=3\nerror c.conflicting-declaration main:2:6 source=0 length=0 range=1 original=main:2:6 notes=0 | conflicting declaration of 'x' (previous type 0, new type 1)\nerror c.redefinition main:4:10 source=0 length=0 range=1 original=main:4:10 notes=0 | redefinition of enumerator\nerror c.static-assert-failed main:6:1 source=0 length=0 range=1 original=main:6:1 notes=0 | static assertion failed: \"z\"\n")},
+        {S8("recovery_after_early_error"), S8("-std=gnu17"), {0}, S8("int f(void) { return missing; }\nint g(void) { return 1; }\nint g(void) { return 2; }\n"), S8("error=6 records=2\nerror c.redefinition main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | redefinition\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n"), S8("error=6 records=2\nerror c.redefinition main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | redefinition\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n")},
+        {S8("lexical_utf8"), S8("-std=gnu17"), {0}, S8("int caf\xc3(void);\nint ok;\n"), S8("error=4 records=1\nerror c.invalid-utf8 main:1:8 source=0 length=0 range=1 original=main:1:8 notes=0 | invalid UTF-8 sequence in C source token\n"), S8("error=4 records=1\nerror c.invalid-utf8 main:1:8 source=0 length=0 range=1 original=main:1:8 notes=0 | invalid UTF-8 sequence in C source token\n")},
+        {S8("lexical_invalid_character"), S8("-std=gnu17"), {0}, S8("int y = 3 ` 4;\n"), S8("error=4 records=1\nerror c.invalid-character main:1:11 source=0 length=0 range=1 original=main:1:11 notes=0 | invalid character byte 96 in C source\n"), S8("error=4 records=1\nerror c.invalid-character main:1:11 source=0 length=0 range=1 original=main:1:11 notes=0 | invalid character byte 96 in C source\n")},
+        {S8("lexical_unterminated_comment"), S8("-std=gnu17"), {0}, S8("int a;\n/* never closed\nint b;\n"), S8("error=4 records=1\nerror c.unterminated-block-comment main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | unterminated block comment\n"), S8("error=4 records=1\nerror c.unterminated-block-comment main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | unterminated block comment\n")},
+        {S8("lexical_unterminated_string"), S8("-std=gnu17"), {0}, S8("const char *s = \"abc;\nint x;\n"), S8("error=4 records=1\nerror c.unterminated-string-literal main:1:17 source=0 length=0 range=1 original=main:1:17 notes=0 | unterminated string literal\n"), S8("error=4 records=1\nerror c.unterminated-string-literal main:1:17 source=0 length=0 range=1 original=main:1:17 notes=0 | unterminated string literal\n")},
+        {S8("literal_overflow"), S8("-std=gnu17"), {0}, S8("int x = 99999999999999999999999;\n"), S8("error=5 records=1\nerror c.invalid-integer-literal main:1:9 source=0 length=0 range=1 original=main:1:9 notes=0 | invalid integer literal or value outside the supported 64-bit range\n"), S8("error=5 records=1\nerror c.invalid-integer-literal main:1:9 source=0 length=0 range=1 original=main:1:9 notes=0 | invalid integer literal or value outside the supported 64-bit range\n")},
+        {S8("syntax_missing_semicolon"), S8("-std=gnu17"), {0}, S8("int x\nint y;\n"), S8("error=6 records=1\nerror c.expected-declaration main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | unexpected token after declarator\n"), S8("error=6 records=1\nerror c.expected-declaration main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | unexpected token after declarator\n")},
+        {S8("syntax_unmatched_close"), S8("-std=gnu17"), {0}, S8("int x; }\n"), S8("error=5 records=2\nerror c.unmatched-delimiter main:1:8 source=0 length=0 range=1 original=main:1:8 notes=0 | unmatched closing delimiter\nerror c.expected-declaration main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | expected ';' or a function body after declaration\n"), S8("error=5 records=2\nerror c.unmatched-delimiter main:1:8 source=0 length=0 range=1 original=main:1:8 notes=0 | unmatched closing delimiter\nerror c.expected-declaration main:2:1 source=0 length=0 range=1 original=main:2:1 notes=0 | expected ';' or a function body after declaration\n")},
+        {S8("preprocessor_errors"), S8("-std=gnu17"), {0}, S8("#error first\n#error second\n#warning third\nint x;\n"), S8("error=4 records=3\nerror c.preprocessor-error main:1:2 source=0 length=0 range=1 original=main:1:2 notes=0 | first\nerror c.preprocessor-error main:2:2 source=0 length=0 range=1 original=main:2:2 notes=0 | second\nwarning c.preprocessor-warning main:3:2 source=0 length=0 range=1 original=main:3:2 notes=0 | third\n"), S8("error=4 records=3\nerror c.preprocessor-error main:1:2 source=0 length=0 range=1 original=main:1:2 notes=0 | first\nerror c.preprocessor-error main:2:2 source=0 length=0 range=1 original=main:2:2 notes=0 | second\nwarning c.preprocessor-warning main:3:2 source=0 length=0 range=1 original=main:3:2 notes=0 | third\n")},
+        {S8("valid_contexts"), S8("-std=gnu17"), S8("#pragma once\nstruct P { int x; int y; };\nstatic inline int sum(struct P p) { return p.x + p.y; }\n"),
+         S8("#define MAKE(a, b) ((struct P){ .x = (a), .y = (b) })\n#line 90 \"logical.c\"\nenum Color { RED, GREEN = 4, BLUE };\n"
+            "struct Q { int a : 3; unsigned b : 5; int tail[]; };\nint table[BLUE + 1];\nint compute(int n, int m)\n{\n    int total = 0;\n"
+            "    for (int i = 0; i < n; i += 1)\n    {\n        struct P p = MAKE(i, m);\n        total += sum(p);\n    }\n    static int calls;\n"
+            "    calls += 1;\n    return total + ({ int t = calls; t; });\n}\n_Static_assert(sizeof(int) == 4, \"int\");\n"), S8("error=0 records=0\n"), S8("error=0 records=0\n")},
+        {S8("valid_c23"), S8("-std=c23"), {0}, S8("constexpr int limit = 8;\nstatic_assert(limit == 8);\nbool flag = true;\nalignas(16) int aligned;\nint f(void)\n{\n    constexpr int local = 3;\n    return local + limit;\n}\n"),
+         S8("error=0 records=0\n"), S8("error=0 records=0\n")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-record-diagnostic"), S8(".c"));
+        String8 header = {0};
+        String8 source = cases[index].source;
+        if (cases[index].header.length)
+        {
+            header = buster_test_temporary_path(arena, S8("buster-record-diagnostic-header"), S8(".h"));
+            u64 slash = header.length;
+            while (slash && header.pointer[slash - 1] != '/' && header.pointer[slash - 1] != '\\')
+            {
+                slash -= 1;
+            }
+            String8 header_name = {.pointer = header.pointer + slash, .length = header.length - slash};
+            BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].header)));
+            source = string_format(arena, S8("#include \"{S8}\"\n{S8}"), header_name, cases[index].source);
+        }
+        String8 output = buster_test_temporary_path(arena, S8("buster-record-diagnostic"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 commands[3][7] = {
+            {S8("-g0"), cases[index].dialect, S8("-fsyntax-only"), input},
+            {S8("-g0"), cases[index].dialect, S8("-c"), S8("-o"), output, input},
+            {S8("-g"), cases[index].dialect, S8("-c"), S8("-o"), output, input},
+        };
+        u64 command_lengths[3] = {4, 6, 6};
+        String8 first_rendered = {0};
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+#if BUSTER_BENCH_ALLOCATIONS
+            IrDiagnosticCensus census_before = ir_diagnostic_census();
+#endif
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = commands[mode], .length = command_lengths[mode]}));
+            String8 dump = compiler_driver_test_record_dump(arena, compiled, input, header);
+            String8 expected = mode == 0 ? cases[index].expected_syntax : cases[index].expected_object;
+            BUSTER_TEST_RAW(arguments, string_equal(dump, expected),
+                            string_format(arena, S8("RECORD_DIAGNOSTIC_DUMP case={S8} mode={u32}\n{S8}RECORD_DIAGNOSTIC_END"), cases[index].name, mode, dump));
+            String8 rendered = compiled.diagnostic_count ? compiler_diagnostic_render(arena, compiled.diagnostics[0]) : (String8){0};
+            if (mode == 1)
+            {
+                first_rendered = rendered;
+            }
+            else if (mode == 2)
+            {
+                // Debug information never changes what a failure reports.
+                BUSTER_STRING_TEST(arguments, rendered, first_rendered);
+            }
+#if BUSTER_BENCH_ALLOCATIONS
+            IrDiagnosticCensus census_after = ir_diagnostic_census();
+            BUSTER_TEST(arguments, !census_before.overflowed && !census_after.overflowed);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                // A successful compilation recovers no record's line or column.
+                BUSTER_TEST(arguments, census_after.values[IR_DIAGNOSTIC_CENSUS_C_SITE_RESOLUTIONS] ==
+                                           census_before.values[IR_DIAGNOSTIC_CENSUS_C_SITE_RESOLUTIONS]);
+            }
+#endif
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -11532,6 +11730,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
 

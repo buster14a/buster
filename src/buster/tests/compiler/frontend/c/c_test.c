@@ -2230,6 +2230,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_diagnostic_message_lifetime(UnitTe
     return result;
 }
 
+// Lexer diagnostic rows are taken at the first diagnostic: 64 of them (fewer
+// for a shorter file), then doubling, in scratch when the file's worst case
+// fits and in a dedicated arena when it does not (about 2.6 MB). Lex 0, 1, 64,
+// 65 and 200 invalid characters after a short and after a 3 MB comment, so
+// every growth step runs on both storages, and require every row in order
+// with its exact kind, text and location.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_diagnostic_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 paddings[] = {0, (u64)3 * 1024 * 1024};
+    u32 counts[] = {0, 1, 64, 65, 200};
+    for (u32 padding_index = 0; padding_index < BUSTER_ARRAY_LENGTH(paddings); padding_index += 1)
+    {
+        for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+        {
+            Arena* arena = arena_create((ArenaCreation){0});
+            if (BUSTER_REQUIRE(arguments, arena != 0))
+            {
+                u64 padding = paddings[padding_index];
+                u32 count = counts[count_index];
+                u64 length = 2 + padding + 3 + (u64)count * 2;
+                char8* text = arena_allocate(arena, char8, length);
+                text[0] = '/';
+                text[1] = '*';
+                memset(text + 2, 'x', padding);
+                memcpy(text + 2 + padding, "*/\n", 3);
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    text[2 + padding + 3 + (u64)index * 2] = '`';
+                    text[2 + padding + 3 + (u64)index * 2 + 1] = '\n';
+                }
+                CLexResult lex = c_lex(arena, (String8){.pointer = text, .length = length});
+                if (BUSTER_REQUIRE(arguments, lex.diagnostic_count == count))
+                {
+                    bool rows = true;
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lex.diagnostics[index];
+                        rows = rows && diagnostic.kind == C_DIAGNOSTIC_INVALID_CHARACTER && diagnostic.severity == C_DIAGNOSTIC_ERROR &&
+                               diagnostic.location.line == index + 2 && diagnostic.location.column == 1 &&
+                               string_equal(diagnostic.message, S8("invalid character byte 96 in C source"));
+                    }
+                    BUSTER_TEST(arguments, rows);
+                }
+                arena_destroy(arena, 1);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27664,6 +27715,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
