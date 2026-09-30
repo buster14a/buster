@@ -96,6 +96,12 @@ non-cancelling concurrency group. Protect the
 Dispatch it with an open non-draft PR number. The default `auto` class and
 `configured` authorization mode resolve the immutable request from trusted main.
 Optional SHA and class overrides remain strict assertions.
+Resolution refuses a candidate before authorization or any branch update when
+it is non-empty and changes no admitted repository source, trusted
+implementation, or policy/schema path. It shares the merge gate's
+`classification_is_bound` predicate over the current-main source snapshot,
+because admission would reject such an integration head. Catch-ups (empty
+candidates) and bound candidates remain eligible.
 
 For a previously attested head, preparation first verifies its original trusted
 publication and recovers the original source candidate. It requires the recorded
@@ -108,6 +114,12 @@ as parents, so generated commits can be replaced without losing source history.
 Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
+
+Pull-request admission (the `Native retirement merge admission` check and the
+rebind job's policy step) evaluates against the trusted main checkout. If main
+advances after that checkout, the step re-fetches the new main into the trusted
+and candidate checkouts and re-evaluates, up to three attempts in total, rather
+than failing the candidate. It fails only if main keeps advancing throughout.
 
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at
@@ -192,8 +204,9 @@ on the PR head. A failure after staging can leave a temporary
 Configure `NATIVE_RETIREMENT_PUBLICATION_TOKEN` as an Actions secret in the
 protected `native-retirement-integration` environment to trigger PR CI from
 the publication push automatically. Use a fine-grained personal access token
-restricted to this repository with Contents read/write and Workflows read/write
-(for candidates changing workflow files). Give it an expiry and rotate it.
+restricted to this repository with Contents read/write, Workflows read/write
+(for candidates changing workflow files) and Pull requests read/write (to queue
+a published catch-up). Give it an expiry and rotate it.
 Never paste the token into a PR, workflow input, log, or chat.
 
 The secret is exposed only to the final publication step, after independent
@@ -239,6 +252,26 @@ bytes intact. Once trusted, a separate policy transition may change the test,
 its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
+
+For #1007, the current support declaration digest
+`50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` and both
+earlier declaration digests remain accepted for historical evidence. The
+trusted-reader bootstrap admits the exact proposed successor digest
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932`
+(`PROPOSED_SUPPORT_*`): the current declaration with only the
+`tests/basic_c_f80_machine.c` row changed to 7,233 bytes and SHA-256
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`; the
+declaration stays 79,744 bytes. The same bootstrap admits the successor
+applicability ledger digest
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` (65,467
+bytes) next to the current
+`934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa` in the
+full-census validator: the same 374 identities with only the four
+`tests/basic_c_f80_machine.c` `fixture_sha256` cells updated. After that
+bootstrap is trusted, a separate policy transition may update only that
+fixture, its support byte/hash row, those four applicability cells, the
+census producer's applicability-ledger pin, and the benchmark-service support
+pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
 
 ### Solo-maintainer authorization
 
@@ -379,15 +412,16 @@ Two requirements are part of the decision:
    - **Dispatch.** `native-retirement-catch-up.yml` runs from trusted `main`
      on `main` pushes and every 30 minutes. When `snapshot_stale` finds the
      committed snapshot behind the admitted sources, it opens one bot-owned
-     PR from `native-retirement/catch-up` whose only commit is empty, and
-     enables auto-merge. The standing-authorization controller
+     PR from `native-retirement/catch-up` whose only commit is empty. It does
+     not enable auto-merge, because a `GITHUB_TOKEN` enqueue starts no
+     `merge_group` workflows. The standing-authorization controller
      (`native-retirement-automation.yml`, #1791) then dispatches the existing
      writer for it as an ordinary request, with no prerequisite CI. No human
      dispatches anything; see
      [automation](native-retirement-automation.md#automatic-catch-up-1893).
    - **Route to `main`.** The writer publishes the usual two-parent
-     integration head on that PR, and auto-merge queues it in the same native
-     queue. The writer gets no direct write path to `main` and no ruleset
+     integration head on that PR, then enables auto-merge with its
+     publication credential, which queues it in the same native queue. The writer gets no direct write path to `main` and no ruleset
      bypass.
    - **Admission.** A catch-up is a writer integration of an empty candidate.
      It is admitted when all of these hold:
