@@ -26,7 +26,10 @@ On GitHub-hosted machines, bootstrap `build/build` with the image's Clang as
 place of `./build.sh`. Canonical local bootstrapping still uses TCC. On Windows
 use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
-all three. Hardware counters currently have a Linux implementation only.
+all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
+it runs weekly, on demand, and for ready pull requests that change a harness
+input, so the Linux comparison never waits for a macOS runner. Hardware
+counters currently have a Linux implementation only.
 
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
@@ -414,8 +417,16 @@ nothing. No extra arena storage or whole-function row stream is retained.
   visits, incoming nodes examined including matches, and emitted copy
   sources. Direct/non-native consumers do not call this builder: zero
   means no work at this hook, not absence of all CFG work.
+- `debug_value_blocks` counts blocks walked for `-g` locals without a single
+  place, and `debug_value_local_visits` the per-block entries loaded, filled,
+  reset or emitted for them: every unresolved local twice per block only when
+  blocks carry `local_values`, otherwise three per parameter-filled entry.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
+- `debug_function_index_rows` counts IR functions entered into the
+  per-model symbol index that matches `-g` debug seeds to their canonical
+  locals; `debug_function_seed_scan_rows` counts rows examined by the
+  search kept for a seed without a program symbol, which codegen never emits.
 
 The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 
@@ -438,8 +449,13 @@ Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
 The `validation_*` and `preparation_*` fields attribute the canonical boundary.
 `validation_calls` counts complete module-verifier entries. The ownership fields
 count the preliminary function scan, published-CFG checks, lowered functions,
-blocks, instruction-chain steps and owner-map clear bytes. The remaining fields
-count globals/relocations and their overlap pairs, aliases, initializers, value
+blocks, instruction-chain steps and owner-map clear bytes.
+`validation_global_relocation_pairs` counts relocation overlap comparisons:
+one per relocation against its predecessor while a global's offsets ascend,
+then one per neighbour of a sorted copy for a global whose offsets do not.
+`validation_global_relocation_sorts` counts those unordered globals and
+`validation_global_relocation_sort_rows` the rows their radix passes moved.
+The remaining fields count globals, relocations, aliases, initializers, value
 and provenance visits, block parameters and incoming values, instruction,
 operand, target and result checks, opcode-operation checks, conversions,
 calls/fixed arguments, provenance-bearing opcodes and terminator checks.
