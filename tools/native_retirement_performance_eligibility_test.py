@@ -294,7 +294,8 @@ class RetirementEligibilityTests(unittest.TestCase):
                       (census.FULL_SUPPORT_CONTRACT_SHA256,
                        census.NEXT_SUPPORT_CONTRACT_SHA256,
                        census.APPLE_CI_SUPPORT_CONTRACT_SHA256,
-                       census.PROPOSED_SUPPORT_CONTRACT_SHA256))
+                       census.PROPOSED_SUPPORT_CONTRACT_SHA256,
+                       census.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256))
         with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
             subjects = [row for row in csv.DictReader(stream, delimiter="\t")
                         if row["role"] == "subject"]

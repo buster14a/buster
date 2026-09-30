@@ -9682,7 +9682,7 @@ BUSTER_GLOBAL_LOCAL DebugRegister codegen_machine_debug_register(MachineFunction
 BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_edit_writes_register(MachineEdit const* edit)
 {
     return edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_COPY || edit->kind == MACHINE_EDIT_TEMP_RELOAD ||
-           edit->kind == MACHINE_EDIT_REMATERIALIZE || edit->kind == MACHINE_EDIT_FRAME_RELOAD;
+           edit->kind == MACHINE_EDIT_REMATERIALIZE || edit->kind == MACHINE_EDIT_FRAME_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_frame_offset(u32 placement_offset, u32 frame_base_offset, Target target, s32* result)
@@ -9744,7 +9744,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
                     machine_ref_payload(instruction->operands[1]) == edit->subject;
             }
         }
-        bool writes_own = (edit->kind == MACHINE_EDIT_RELOAD && own) || rematerializes_own;
+        // A frame-address rematerialization names the value it recreates.
+        bool writes_own = ((edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) && own) || rematerializes_own;
         if (selected_register == (s32)edit->location && !writes_own)
         {
             *selected_invalid = true;
@@ -10044,7 +10045,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
         for (u32 edit_index = index->row_edits[row]; edit_index < index->row_edits[row + 1u]; edit_index += 1)
         {
             MachineEdit const* edit = placement->edits + edit_index;
-            if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD) && edit->subject < function->virtual_register_count &&
+            if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) &&
+                edit->subject < function->virtual_register_count &&
                 referenced[edit->subject])
             {
                 codegen_machine_debug_index_subject_event(arena, subject_events, subject_counts, subject_last_rows, edit->subject, row);

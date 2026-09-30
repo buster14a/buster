@@ -47,7 +47,8 @@ class PerformanceIdentityTests(unittest.TestCase):
                       (binding.SUPPORT_DECLARATION_SHA256,
                        binding.NEXT_SUPPORT_DECLARATION_SHA256,
                        binding.APPLE_CI_SUPPORT_DECLARATION_SHA256,
-                       binding.PROPOSED_SUPPORT_DECLARATION_SHA256))
+                       binding.PROPOSED_SUPPORT_DECLARATION_SHA256,
+                       binding.MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256))
 
     def test_support_counts_follow_checked_in_population(self):
         self.assertEqual(binding._approved_support_counts(),

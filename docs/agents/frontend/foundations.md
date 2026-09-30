@@ -272,6 +272,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- Static pointer folding retains casts that precede trailing arithmetic:
+  `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
+  and local statics. Only a cast covering the entire operand range may be
+  removed by the bare-address shortcut. Constant subscripts retain their
+  signedness before checked scaling into the relocation's signed addend.
+  `compiler_driver_test_static_pointer_addresses` checks the address family
+  under both frontend forms and all four allocators, reads serialized ELF
+  addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
+  non-null integer-to-pointer static casts remains unsupported; it is refused
+  rather than folded as if the trailing operator belonged inside the cast.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.

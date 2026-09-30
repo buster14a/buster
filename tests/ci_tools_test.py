@@ -892,8 +892,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("!cancelled()", condition)
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
-        self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", text)
+        self.assertIn("needs: reuse", mobile)
+        self.assertNotIn("needs: test", mobile)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_windows_runs_native_worker_controls_before_the_combination_matrix(self):
@@ -908,7 +909,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
-        self.assertNotIn("needs:", native)
+        self.assertIn("needs: reuse", native)
+        self.assertNotIn("needs: test", native)
         self.assertNotIn("test_mode_matrix", desktop)
         self.assertNotIn("test_differential", desktop.replace("test_differential --self-test", ""))
         self.assertEqual(desktop.count("test_differential --self-test"), 1)
@@ -1155,7 +1157,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
         # predicate. Exercise all 625 existing shard outcomes with UEFI/analyzer
@@ -1170,8 +1172,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             script = r"""
 set -eu
 checked=0
-UEFI_RESULT=success ANALYZER_RESULT=success
-export UEFI_RESULT ANALYZER_RESULT
+UEFI_RESULT=success ANALYZER_RESULT=success REUSE_REQUESTED=false REUSE_REVERIFIED=skipped
+export UEFI_RESULT ANALYZER_RESULT REUSE_REQUESTED REUSE_REVERIFIED
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
@@ -1207,6 +1209,29 @@ for ANALYZER_RESULT in failure cancelled skipped ''; do
   [[ "$actual" -ne 0 ]] || exit 1
   checked=$((checked + 1))
 done
+ANALYZER_RESULT=success REUSE_REQUESTED=true
+NATIVE_RESULT=skipped MOBILE_RESULT=skipped UEFI_RESULT=skipped
+export ANALYZER_RESULT REUSE_REQUESTED NATIVE_RESULT MOBILE_RESULT UEFI_RESULT
+for REUSE_REVERIFIED in success failure cancelled skipped ''; do
+  export REUSE_REVERIFIED
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  if [[ "$REUSE_REVERIFIED" == success ]]; then
+    [[ "$actual" -eq 0 ]] || exit 1
+  else
+    [[ "$actual" -ne 0 ]] || exit 1
+  fi
+  checked=$((checked + 1))
+done
+REUSE_REVERIFIED=success
+export REUSE_REVERIFIED
+for NATIVE_RESULT in success failure cancelled ''; do
+  export NATIVE_RESULT
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  [[ "$actual" -ne 0 ]] || exit 1
+  checked=$((checked + 1))
+done
 printf '%s\n' "$checked"
 """
             # Windows CreateProcess can choose System32/bash.exe (WSL)
@@ -1223,7 +1248,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=120 if os.name == "nt" else 30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "633")
+            self.assertEqual(result.stdout.strip(), "642")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_correctness_environment(self):
