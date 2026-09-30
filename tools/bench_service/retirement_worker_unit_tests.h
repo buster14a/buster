@@ -1921,10 +1921,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_names(void)
     char directory[] = "/tmp/bq-worker-unit-names-XXXXXX", output[64];
     bool made = mkdtemp(directory) != NULL;
     int named = made ? snprintf(output, sizeof(output), "%s/names", directory) : -1;
-    char* argv[6 + BQ_PREP_WORKER_UNIT_NAMES + 1] = {"python3", "-B", "-W", "error", "-c", script, output};
+    /* The seven leading arguments, one per path and the terminating NULL. */
+    char* argv[7 + BQ_PREP_WORKER_UNIT_NAMES + 1] = {"python3", "-B", "-W", "error", "-c", script, output};
     for (u32 index = 0; index < BQ_PREP_WORKER_UNIT_NAMES; index += 1)
         argv[7u + index] = (char*)table[index].path;
+    argv[7u + BQ_PREP_WORKER_UNIT_NAMES] = NULL;
     bool ran = made && named > 0 && (size_t)named < sizeof(output) && bq_prep_test_run(argv);
+    if (!ran) fprintf(stderr, "evidence names: lane F's evidence_name did not run (%s)\n", made ? output : directory);
     int opened = ran ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
     u32 length = 0;
     char* lane_f = opened >= 0 ? bq_prep_worker_unit_slurp(opened, "names", &length) : NULL;
