@@ -36,6 +36,19 @@ def profile_fields() -> dict[str, str]:
     return fields
 
 
+def queue_macro(name: str) -> int:
+    """Evaluate an unsigned integer macro of queue.h built from other such macros."""
+    text = QUEUE_HEADER.read_text(encoding="utf-8").replace("\\\n", " ")
+    macros = dict(re.findall(r"^#define (BQ_[A-Z0-9_]+) ([0-9]+u|\(.*\))$", text, re.MULTILINE))
+    expression = macros[name]
+    while (found := re.search(r"BQ_[A-Z0-9_]+", expression)) is not None:
+        expression = expression.replace(found.group(0), macros[found.group(0)])
+    expression = re.sub(r"([0-9]+)u", r"\1", expression)
+    if not re.fullmatch(r"[0-9+*() ]+", expression):
+        raise AssertionError(f"{name} is not a sum of products: {expression}")
+    return eval(expression)
+
+
 def function_body(source: str, name: str) -> str:
     start = source.index(f"bool {name}(BqRecipe recipe)")
     return source[start:source.index("\n}\n", start)]
@@ -49,8 +62,7 @@ class Zen5ProfileTest(unittest.TestCase):
         self.assertEqual(compiled.encode("utf-8"), PROFILE.read_bytes())
 
     def test_profile_fits_the_installed_recipe_cap(self):
-        cap = int(re.search(r"#define BQ_RECIPE_PROFILE_CAP ([0-9]+)u", QUEUE_HEADER.read_text(encoding="utf-8")).group(1))
-        self.assertLessEqual(len(PROFILE.read_bytes()), cap)
+        self.assertLessEqual(len(PROFILE.read_bytes()), queue_macro("BQ_RECIPE_PROFILE_CAP"))
 
     def test_pins_match_the_repository_tools(self):
         fields = profile_fields()
