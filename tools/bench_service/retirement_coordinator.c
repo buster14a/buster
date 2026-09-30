@@ -1,4 +1,4 @@
-/* Coordinator side of the retirement worker-unit (#881, PR 4 of 4).
+/* Coordinator side of the retirement worker-unit (#881, PRs 3 and 4 of 4).
  *
  * Ownership: the steps the coordinator (bq_worker_run in worker_linux.c)
  * performs for a retirement job around the phase channel. The unit side is
@@ -32,20 +32,34 @@
  *                                        at finalization: the journalled copy
  *                                        of the authority MEASURED named,
  *                                        classified COMPLETE
+ *   bq_retirement_coordinator_finalize   at finalization: the replay, the
+ *                                        journalled authority and the
+ *                                        derivation of its plan and context
+ *                                        (#881 PR 3, review item M1 of #1961)
  *
  * Map: bq_retirement_coordinator_authority_read parses the producer's
  * canonical BQ-RETIREMENT-AUTHORITY-V3 record from
  * job-<id>-attempt-<token>/retirement-authority/ and requires its bytes to
  * hash to the channel's digest and to re-format byte for byte; the handoff
  * then reopens the receipt, its shards and the retained manifest itself.
- * bq_retirement_context_chain_format is the canonical
- * BQ-RETIREMENT-CONTEXT-CHAIN-V1 record (job, attempt, A digest, ready
- * digest, row-plan pin, plan, context) PR 3's producer writes beside the
- * authority; bq_retirement_coordinator_chain_check requires the stored chain
- * to equal the one the coordinator formats from its own A digest, the
- * channel's ready digest and the profile's row-plan pin. The chain names
- * those facts; it does not yet prove the plan and context were derived from
- * them, which needs PR 3's authority content (RETIREMENT_PREPARATION.md).
+ * bq_retirement_coordinator_chain_check requires the producer's
+ * BQ-RETIREMENT-CONTEXT-CHAIN-V2 record (retirement_context_chain.h) to be
+ * exactly the one the coordinator formats from its own A digest, the
+ * channel's ready digest and the profile's row-plan pin, the authority's plan
+ * and context, and the values the chain carries.
+ * bq_retirement_coordinator_derive then refuses to trust the plan, the
+ * context or the binding: it recomputes lane D's five documents from the
+ * replayed gate and row plan, the pinned profile, budget, rows and
+ * untimed-command contract and the result's admission receipt
+ * (BqRetirementCoordinatorDocuments, bq_retirement_coordinator_documents),
+ * recomputes the pre-sample context from its own A digest (in the replayed
+ * gate), the ready digest, its own boot identity and the result's sealed
+ * untimed record stream, recomputes the post-sample context from the carried
+ * pre-sample context and stage facts, finds lane D's post-sample record
+ * through the retained manifest the authority binds, renders the binding
+ * itself from the pinned binding context and those documents
+ * (bq_retirement_worker_binding_render) and requires the result's bytes, and
+ * recomputes the final context from it and the A/B stage's numeric digest.
  * bq_retirement_coordinator_authority_root opens the producer's root and
  * bq_retirement_coordinator_queue_root opens (creating once, 0700, fsynced)
  * the queue directory's retirement-authority/, only after the chain check.
@@ -61,9 +75,6 @@
 #define BQ_RETIREMENT_COORDINATOR_BUDGET_NAME "native-retirement-performance-v1.campaign-budget"
 /* Equal to BQ_WORKER_BUDGET_BYTES (checked in worker_linux.c). */
 #define BQ_RETIREMENT_COORDINATOR_BUDGET_CAP 4096u
-/* The producer's private authority root in its attempt workspace; PR 3's
- * tp_retirement_store_receipt_authority call publishes there. */
-#define BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY "retirement-authority"
 /* The coordinator's queue-private copy root, inside the queue directory,
  * which the unit cannot reach. */
 #define BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY "retirement-authority"
@@ -71,9 +82,12 @@
 /* The authority record: magic, job label, attempt and five digests. */
 #define BQ_RETIREMENT_COORDINATOR_AUTHORITY_LINES 8u
 #define BQ_RETIREMENT_COORDINATOR_AUTHORITY_CAP 640u
-/* The context chain (bq_retirement_context_chain_format). */
-#define BQ_RETIREMENT_COORDINATOR_CHAIN_MAGIC "BQ-RETIREMENT-CONTEXT-CHAIN-V1"
-#define BQ_RETIREMENT_COORDINATOR_CHAIN_CAP 512u
+/* Bounds of the result-root files the derivation reads: the retained
+ * manifest (TP_RETIREMENT_RETAINED_MANIFEST_HEADER and one line per store
+ * file) and the binding (one bundle file). */
+#define BQ_RETIREMENT_COORDINATOR_RETAINED_CAP (UINT32_C(2) << 20)
+#define BQ_RETIREMENT_COORDINATOR_BINDING_CAP ((u32)BQ_WORKER_BUNDLE_FILE_CAP)
+#define BQ_RETIREMENT_COORDINATOR_ARENA_BYTES (UINT64_C(1) << 32)
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_request_valid_pinned(BqRequest const* request, String8 profile)
 {
@@ -201,57 +215,37 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_coordinator_queue_root(int queue_directory
     return root;
 }
 
-/* The canonical BQ-RETIREMENT-CONTEXT-CHAIN-V1 record binding the
- * authority's plan and final context to facts the coordinator holds itself:
- * the job and attempt, its own A digest (preparation), the ready digest the
- * RETIREMENT_READY packet carried, and the pinned row-plan authority (which
- * the replayed ready record's row-plan= also names). PR 3's producer writes
- * exactly these bytes as `context-chain-job-<id>-<token>.txt` (0400) in its
- * private authority root beside the authority record. Returns the length, or
- * 0 when a field is not a lowercase digest. */
-BUSTER_GLOBAL_LOCAL u32 bq_retirement_context_chain_format(char chain[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP],
-    u64 job_id, u64 attempt_token, char const* preparation_sha256, char const* ready_sha256,
-    char const* row_plan_sha256, char const* plan_sha256, char const* context_sha256)
-{
-    char const* digests[] = {preparation_sha256, ready_sha256, row_plan_sha256, plan_sha256, context_sha256};
-    bool ok = chain && job_id && attempt_token;
-    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(digests); index += 1)
-        ok = digests[index] && bq_retirement_hex(string_from_pointer(digests[index]), 64);
-    int length = ok ? snprintf(chain, BQ_RETIREMENT_COORDINATOR_CHAIN_CAP, BQ_RETIREMENT_COORDINATOR_CHAIN_MAGIC
-                               "\njob=job-%" PRIu64 "\nattempt=%" PRIu64 "\npreparation=%s\nready=%s\nrow-plan=%s"
-                               "\nplan=%s\ncontext=%s\n", (uint64_t)job_id, (uint64_t)attempt_token,
-                               preparation_sha256, ready_sha256, row_plan_sha256, plan_sha256, context_sha256) : -1;
-    u32 result = length > 0 && length < (int)BQ_RETIREMENT_COORDINATOR_CHAIN_CAP ? (u32)length : 0;
-    return result;
-}
-
 /* The producer's authority record, named by the channel's digest, and its
  * context chain, which must be byte for byte the chain the coordinator
  * formats from its own A digest, the channel's ready digest and the profile's
- * row-plan pin together with that authority's plan and context. */
+ * row-plan pin together with that authority's plan and context and the
+ * values the stored chain carries (*carried, when given, receives them). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_chain_check(int authority, u64 job_id, u64 attempt_token,
     String8 profile, char const* preparation_sha256, char const* ready_sha256,
-    char const authority_sha256[SHA256_HEX_CAPACITY], TpRetirementReceiptAuthority* trusted)
+    char const authority_sha256[SHA256_HEX_CAPACITY], TpRetirementReceiptAuthority* trusted,
+    BqRetirementContextChainCarried* carried)
 {
     char row_plan[SHA256_HEX_CAPACITY] = {0}, name[TP_RETIREMENT_STORE_PATH_BYTES + 1];
-    char expected[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP], stored[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP];
+    char expected[BQ_RETIREMENT_CONTEXT_CHAIN_CAP], stored[BQ_RETIREMENT_CONTEXT_CHAIN_CAP];
+    BqRetirementContextChainCarried values = {0};
     bool ok = bq_retirement_coordinator_authority_read(authority, job_id, attempt_token, authority_sha256, trusted) &&
-              bq_retirement_profile_sha(profile, S8("row-plan-sha256="), row_plan);
-    u32 length = ok ? bq_retirement_context_chain_format(expected, job_id, attempt_token, preparation_sha256,
-                                                         ready_sha256, row_plan, trusted->plan_sha256,
-                                                         trusted->context_sha256) : 0;
-    int named = length ? snprintf(name, sizeof(name), "context-chain-job-%" PRIu64 "-%" PRIu64 ".txt",
-                                  (uint64_t)job_id, (uint64_t)attempt_token) : -1;
-    int file = named > 0 && (size_t)named < sizeof(name) ?
-               openat(authority, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+              bq_retirement_profile_sha(profile, S8("row-plan-sha256="), row_plan) &&
+              bq_retirement_context_chain_name(name, job_id, attempt_token);
+    int file = ok ? openat(authority, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info = {0};
     u32 read_length = 0;
     ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
-         info.st_uid == geteuid() && (info.st_mode & 0777) == 0400 && (u64)info.st_size == length &&
-         bq_read_file(file, (u8*)stored, length, &read_length) && read_length == length &&
-         !memcmp(stored, expected, length);
+         info.st_uid == geteuid() && (info.st_mode & 0777) == 0400 && info.st_size > 0 &&
+         (u64)info.st_size < BQ_RETIREMENT_CONTEXT_CHAIN_CAP &&
+         bq_read_file(file, (u8*)stored, (u32)info.st_size, &read_length) && read_length == (u32)info.st_size &&
+         bq_retirement_context_chain_parse(stored, read_length, &values);
     if (file >= 0 && close(file) != 0) ok = false;
+    u32 length = ok ? bq_retirement_context_chain_format(expected, job_id, attempt_token, preparation_sha256,
+                                                         ready_sha256, row_plan, trusted->plan_sha256,
+                                                         trusted->context_sha256, &values) : 0;
+    ok = ok && length == read_length && !memcmp(stored, expected, length);
     if (!ok && trusted) *trusted = (TpRetirementReceiptAuthority){0};
+    if (carried) *carried = ok ? values : (BqRetirementContextChainCarried){0};
     return ok;
 }
 
@@ -291,7 +285,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_handoff(int result_directo
     BqError result = authority >= 0 ? BQ_OK : BQ_IO;
     if (result == BQ_OK && !bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile,
                                                                   preparation_sha256, ready_sha256, authority_sha256,
-                                                                  &trusted))
+                                                                  &trusted, NULL))
         result = BQ_WORKER_MISMATCH;
     int queue_root = result == BQ_OK ? bq_retirement_coordinator_queue_root(queue_directory) : -1;
     if (result == BQ_OK && queue_root < 0) result = BQ_IO;
@@ -308,10 +302,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_handoff(int result_directo
  * the coordinator copied and journalled. Its queue-private copy must hash to
  * authority_sha256, the producer's chain must still bind it to the
  * coordinator's facts, and tp_retirement_store_authority_state must classify
- * the handoff COMPLETE against the result. */
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_authority_complete(int result_directory,
-    String8 workspace_root, int queue_directory, u64 job_id, u64 attempt_token, String8 profile,
-    char const* preparation_sha256, char const* ready_sha256, char const authority_sha256[SHA256_HEX_CAPACITY])
+ * the handoff COMPLETE against the result. *journalled and *carried, when
+ * given, receive the copied authority and the chain's carried values. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_authority_complete(int result_directory, String8 workspace_root,
+    int queue_directory, u64 job_id, u64 attempt_token, String8 profile, char const* preparation_sha256,
+    char const* ready_sha256, char const authority_sha256[SHA256_HEX_CAPACITY], TpRetirementReceiptAuthority* journalled,
+    BqRetirementContextChainCarried* carried)
 {
     TpRetirementReceiptAuthority trusted = {0}, copied = {0};
     int authority = result_directory >= 0 ? bq_retirement_coordinator_authority_root(workspace_root, job_id,
@@ -321,13 +317,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_authority_complete(int res
     BqError result = authority >= 0 && queue_root >= 0 ? BQ_OK : BQ_WORKER_MISMATCH;
     if (result == BQ_OK &&
         !(bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile, preparation_sha256,
-                                                ready_sha256, authority_sha256, &trusted) &&
+                                                ready_sha256, authority_sha256, &trusted, carried) &&
           bq_retirement_coordinator_authority_read(queue_root, job_id, attempt_token, authority_sha256, &copied) &&
           tp_retirement_store_authority_state(result_directory, queue_root, job_id, attempt_token, copied.plan_sha256,
                                               copied.context_sha256, &copied) == TP_RETIREMENT_AUTHORITY_COMPLETE))
         result = BQ_WORKER_MISMATCH;
     if (queue_root >= 0 && close(queue_root) != 0 && result == BQ_OK) result = BQ_IO;
     if (authority >= 0 && close(authority) != 0 && result == BQ_OK) result = BQ_IO;
+    if (journalled) *journalled = result == BQ_OK ? copied : (TpRetirementReceiptAuthority){0};
+    if (carried && result != BQ_OK) *carried = (BqRetirementContextChainCarried){0};
     return result;
 }
 
@@ -337,7 +335,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_authority_complete(int res
  * the replay's authority imports. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_replay(BqRetirementWorkerUnitSeams const* seams,
     String8 workspace_root, u64 job_id, u64 attempt_token, char const preparation_sha256[SHA256_HEX_CAPACITY],
-    char const ready_sha256[SHA256_HEX_CAPACITY])
+    char const ready_sha256[SHA256_HEX_CAPACITY], BqRetirementUnitReplayed* kept)
 {
     BqRetirementStore store = {-1};
     bool usable = seams && seams->installed_root && seams->broker_workspaces && workspace_root.length &&
@@ -348,11 +346,355 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_replay(BqRetirementWorkerU
     BqError result = !usable ? BQ_BAD_REQUEST : installed >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_unit_store_open(workspaces, job_id, attempt_token, &store);
     if (result == BQ_OK)
-        result = bq_retirement_unit_replay_pinned(store, workspaces, installed, job_id, attempt_token,
+        result = bq_retirement_unit_replay_kept(store, workspaces, installed, job_id, attempt_token,
             string_from_pointer(seams->broker_workspaces), seams->profile, seams->census_profile, seams->driver,
-            seams->toolchain_root, seams->broker, seams->broker_workspaces, preparation_sha256, ready_sha256);
+            seams->toolchain_root, seams->broker, seams->broker_workspaces, preparation_sha256, ready_sha256, kept);
     if (store.directory >= 0 && close(store.directory) != 0 && result == BQ_OK) result = BQ_IO;
     if (installed >= 0 && close(installed) != 0 && result == BQ_OK) result = BQ_IO;
     if (workspaces >= 0 && close(workspaces) != 0 && result == BQ_OK) result = BQ_IO;
+    return result;
+}
+
+/* ------------------------------------------------------------ derivation */
+
+/* A single-link, service-owned regular file of the result root, read whole
+ * (at most `cap` bytes, NUL-terminated after them); *digest receives its
+ * SHA-256. */
+BUSTER_GLOBAL_LOCAL char* bq_retirement_coordinator_result_read(Arena* arena, int result_directory, char const* name,
+    u32 cap, u32* length, char digest[SHA256_HEX_CAPACITY])
+{
+    int file = result_directory >= 0 ? openat(result_directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    bool ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+              info.st_uid == geteuid() && info.st_size > 0 && (u64)info.st_size <= cap;
+    char* bytes = ok ? bq_retirement_worker_allocate(arena, (u64)info.st_size + 1u, 1) : NULL;
+    u32 used = 0;
+    ok = ok && bytes && bq_read_file(file, (u8*)bytes, (u32)info.st_size, &used) && used == (u32)info.st_size;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (ok)
+    {
+        bytes[used] = 0;
+        bq_digest(bytes, used, (char8*)digest);
+    }
+    *length = ok ? used : 0;
+    return ok ? bytes : NULL;
+}
+
+/* The 64-hex value of the `\n<key>` line of a NUL-free record. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_record_digest(char const* text, char const* key,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    char pattern[48];
+    int length = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    char const* found = length > 0 && (size_t)length < sizeof(pattern) ? strstr(text, pattern) : NULL;
+    char const* value = found ? found + length : NULL;
+    bool ok = value && strlen(value) > 64 && value[64] == '\n' && !strstr(value, pattern);
+    if (ok)
+    {
+        memcpy(digest, value, 64);
+        digest[64] = 0;
+        ok = tp_retirement_digest(digest);
+    }
+    return ok;
+}
+
+/* Exactly one `\n<key>` line in a NUL-free record, and it is
+ * `\n<key><value>\n`. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_record_line(char const* text, char const* key, char const* value)
+{
+    char line[256], pattern[64];
+    int length = snprintf(line, sizeof(line), "\n%s%s\n", key, value);
+    int key_length = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    char const* found = length > 0 && (size_t)length < sizeof(line) ? strstr(text, line) : NULL;
+    bool ok = found && key_length > 0 && (size_t)key_length < sizeof(pattern) && strstr(text, pattern) == found &&
+              !strstr(found + 1, pattern);
+    return ok;
+}
+
+/* Lane D's five workflow documents, recomputed from what the coordinator
+ * derives itself: the replayed gate and row plan, the pinned profile's
+ * campaign values, budget record, performance rows and untimed-command
+ * contract, and the admission receipt's digest. The untimed batches are
+ * rebuilt as the unit builds them (bq_retirement_worker_untimed_build, which
+ * writes no response file here), and each untimed compile row's reproduction
+ * is the gate's sealed artifact, which the untimed step must have reproduced
+ * (a code row whose reproduction differs refuses the campaign). As
+ * bq_retirement_unit_campaign_documents_derive does before timing, the
+ * pinned performance rows and the budget are the campaign's, the family's
+ * counts the plan's, and the untimed batches four per untimed group; the
+ * documents are only encoded and hashed. *plan and d_plan receive the #619
+ * plan and lane D's campaign plan digest. */
+typedef struct BqRetirementCoordinatorDocuments
+{
+    BqRetirementUnitCampaignDocumentSet set;
+    BqRetirementDocumentDescriptor documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
+} BqRetirementCoordinatorDocuments;
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_documents(Arena* arena, int installed, String8 profile,
+    BqRetirementUnitReplayed const* replayed, char const admission_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementUnitCampaignPins* pins, TpRetirementPlan* plan, char d_plan[SHA256_HEX_CAPACITY],
+    BqRetirementCoordinatorDocuments* derived)
+{
+    BqRetirementCorrectness const* gate = &replayed->gate.correctness;
+    BqRetirementUnitCampaignDocumentSet* set = &derived->set;
+    TpRetirementCampaignBudget budget = {0};
+    BqRetirementDocumentPopulation population = {0};
+    BqRetirementDocumentPartition timed = {0}, untimed = {0};
+    BqRetirementWorkerUntimedContract contract = {0};
+    BqRetirementWorkerUntimed build = {0};
+    char performance[65] = {0}, budget_sha256[65] = {0};
+    memset(derived, 0, sizeof(*derived));
+    BqError result = replayed->kept && admission_sha256 && tp_retirement_digest(admission_sha256) &&
+                     bq_retirement_unit_campaign_pins(profile, pins) &&
+                     bq_retirement_unit_campaign_plan(gate, pins, plan) &&
+                     bq_retirement_unit_campaign_plan_digest(gate, plan, d_plan) &&
+                     bq_retirement_unit_campaign_document_pins(profile, set->support, set->manifest, set->rows,
+                                                               performance) ?
+                     BQ_OK : BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK) result = bq_retirement_worker_budget_load(installed, profile, &budget);
+    if (result == BQ_OK && !(tp_retirement_budget_digest(&budget, budget_sha256) &&
+                             !strcmp(budget_sha256, pins->budget_sha256)))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK)
+        result = bq_retirement_documents_population(installed, profile, gate->trusted_rows, gate->prepared.rows,
+                                                    gate->prepared.native_target, &population);
+    if (result == BQ_OK && !(!strcmp(performance, population.performance_rows_sha256) &&
+                             bq_retirement_documents_partition(&population, 0, &timed) &&
+                             bq_retirement_documents_partition(&population, 1, &untimed) &&
+                             bq_retirement_documents_family(&population, &timed, &set->family) &&
+                             set->family.bootstrap_members == plan->bootstrap_members_per_scope &&
+                             set->family.cell_members == plan->cell_members_per_scope &&
+                             bq_retirement_unit_campaign_document_timed_rows(&population, &timed, set->timed_rows)))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK)
+        result = bq_retirement_worker_untimed_import(arena, installed, profile, &replayed->plan, &untimed, &contract);
+    if (result == BQ_OK &&
+        !(bq_retirement_worker_untimed_build(arena, BQ_RETIREMENT_WORKER_DERIVE_ONLY, &replayed->plan, gate, &untimed,
+                                             &contract, &budget, &build) &&
+          build.groups == untimed.count))
+        result = BQ_RECIPE_MISMATCH;
+    /* The untimed compile rows' code facts, each reproduction the gate's. */
+    TpRetirementCodeRow* codes = result == BQ_OK ? bq_retirement_worker_allocate(arena, population.count + 1u,
+                                                                                 sizeof(*codes)) : NULL;
+    unsigned code_count = 0;
+    if (result == BQ_OK && !codes) result = BQ_IO;
+    for (u32 row = 0; result == BQ_OK && row < population.count; row += 1)
+    {
+        if (bq_retirement_document_timed(&population, row) || !population.rows[row].compile) continue;
+        TpRetirementCodeRow* code = codes + code_count++;
+        code->row = row;
+        for (u32 side = 0; side < 2; side += 1)
+        {
+            memcpy(code->sides[side].artifact_sha256, gate->facts[row].side[side].artifact_sha256, 65);
+            memcpy(code->sides[side].reproduction_sha256, gate->facts[row].side[side].artifact_sha256, 65);
+        }
+    }
+    BqRetirementDocumentInputs inputs = {gate, &population, &timed, &untimed, &budget, plan, build.batches,
+        4u * build.groups, build.rows, codes, code_count, (int)replayed->plan.cpu, set->support, set->manifest,
+        set->rows};
+    BqRetirementDocumentDescriptor* documents = derived->documents;
+    BqRetirementDocumentPhase phase = {&set->family, documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256,
+        bq_retirement_unit_campaign_document_paths[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN],
+        &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN], documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256,
+        admission_sha256};
+    if (result == BQ_OK &&
+        !(bq_retirement_documents_oracle(NULL, &inputs, &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE]) &&
+          bq_retirement_documents_execution_plan(NULL, &inputs, &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN]) &&
+          bq_retirement_documents_result_input_plan(NULL, &inputs, set->partitions, set->counts,
+                                                    &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN]) &&
+          bq_retirement_documents_phase(NULL, &inputs, &phase, 0, &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE]) &&
+          bq_retirement_documents_phase(NULL, &inputs, &phase, 1, &documents[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA])))
+        result = BQ_RECIPE_MISMATCH;
+    bq_retirement_worker_untimed_release(&build);
+    bq_retirement_documents_partition_release(&untimed);
+    bq_retirement_documents_partition_release(&timed);
+    bq_retirement_documents_population_release(&population);
+    return result;
+}
+
+/* Review items M1 of #1961 and of #1964: the coordinator never trusts the
+ * authority's plan or context, the chain's naming of them, nor the binding
+ * the chain names. Over its own replay (`replayed`, from the A digest it
+ * holds and the ready digest the channel carried) it requires, in order:
+ *   1. lane D's five documents, recomputed (bq_retirement_coordinator_documents
+ *      over the result's admission receipt), the authority's plan being the
+ *      execution-plan document;
+ *   2. the carried pre-sample context to be the one it recomputes from the
+ *      replayed gate (which binds its A digest), the ready digest, lane D's
+ *      plan digest, the pinned budget, the campaign commands rebuilt from the
+ *      replayed row plan, the result's untimed record stream as the store
+ *      sealed it, its own boot identity (so a reboot between MEASURED and
+ *      finalization refuses, and a durable success is held), the job, the
+ *      attempt, the row plan's CPU and the carried bind time;
+ *   3. the carried post-sample context to descend from that pre-sample
+ *      context (bq_retirement_unit_campaign_post_digest over the carried log
+ *      chains and stage facts);
+ *   4. lane D's post-sample record, found through the retained manifest the
+ *      authority binds, to name the same job, attempt, plans, contexts, log
+ *      chains, admission receipt, family and timed rows, and the recomputed
+ *      pre-sample plan, result-input plan and post-A/A documents;
+ *   5. the binding the chain names to be, byte for byte, the one it renders
+ *      itself (bq_retirement_worker_binding_render) from the pinned binding
+ *      context, checked against the replayed gate and plan
+ *      (bq_retirement_worker_binding_check), the recomputed documents and the
+ *      admission receipt, and the authority's context to be the validator's
+ *      _execution_context of that binding over the A/B stage's numeric
+ *      digest.
+ * What it cannot re-observe it binds by digest: the bind time, the stage
+ * facts and log chains (measurement outputs, which the post-sample record
+ * and the receipt also bind), the untimed records' contents and the fixture
+ * admission receipt. BQ_WORKER_MISMATCH on any refusal. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_derive(BqRetirementWorkerUnitSeams const* seams,
+    BqRetirementUnitReplayed const* replayed, u64 job_id, u64 attempt_token, char const ready_sha256[SHA256_HEX_CAPACITY],
+    TpRetirementReceiptAuthority const* trusted, BqRetirementContextChainCarried const* carried, int result_directory)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BQ_RETIREMENT_COORDINATOR_ARENA_BYTES,
+                                                .flags = {.no_pool = 1}});
+    int installed = seams && seams->installed_root ? bq_open_absolute_directory(string_from_pointer(seams->installed_root)) :
+                    -1;
+    BqRetirementCorrectness const* gate = replayed ? &replayed->gate.correctness : NULL;
+    BqRetirementUnitCampaignPins pins = {0};
+    TpRetirementPlan plan = {0};
+    BqRetirementCoordinatorDocuments* derived = arena ? bq_retirement_worker_allocate(arena, 1, sizeof(*derived)) : NULL;
+    char d_plan[SHA256_HEX_CAPACITY] = {0};
+    BqError result = arena && derived && installed >= 0 && replayed && replayed->kept && trusted && carried &&
+                     ready_sha256 && result_directory >= 0 ? BQ_OK : BQ_BAD_REQUEST;
+    /* 1. The documents over the result's admission receipt, and the plan. */
+    u32 admission_length = 0;
+    char admission_sha256[SHA256_HEX_CAPACITY] = {0};
+    char* admission = result == BQ_OK ? bq_retirement_coordinator_result_read(arena, result_directory,
+        BQ_RETIREMENT_WORKER_ADMISSION_PATH, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX, &admission_length,
+        admission_sha256) : NULL;
+    if (result == BQ_OK && !admission) result = BQ_WORKER_MISMATCH;
+    if (result == BQ_OK)
+        result = bq_retirement_coordinator_documents(arena, installed, seams->profile, replayed, admission_sha256, &pins,
+                                                     &plan, d_plan, derived);
+    BqRetirementDocumentDescriptor const* documents = derived ? derived->documents : NULL;
+    if (result == BQ_OK && strcmp(documents[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].sha256, trusted->plan_sha256))
+        result = BQ_WORKER_MISMATCH;
+    /* 2. The pre-sample context from the coordinator's own facts. */
+    BqRetirementCampaignPlanCommands commands = {0};
+    char measured[SHA256_HEX_CAPACITY] = {0}, label[TP_RETIREMENT_STORE_TOKEN_CAPACITY] = {0};
+    char boot[TP_RETIREMENT_STORE_TOKEN_CAPACITY] = {0}, pre[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK &&
+        !(bq_retirement_campaign_plan_commands(&replayed->plan, &replayed->gate, &commands) &&
+          bq_retirement_unit_campaign_commands_measured(commands.commands, commands.commands + commands.count,
+                                                        commands.count, measured) &&
+          tp_retirement_store_job_label(label, job_id) && bq_retirement_worker_boot(boot)))
+        result = BQ_RECIPE_MISMATCH;
+    u32 length = 0;
+    char untimed_sha256[SHA256_HEX_CAPACITY] = {0};
+    char* untimed = result == BQ_OK ? bq_retirement_coordinator_result_read(arena, result_directory,
+        BQ_RETIREMENT_WORKER_UNTIMED_PATH, (u32)TP_RETIREMENT_STORE_FILE_BYTES, &length, untimed_sha256) : NULL;
+    if (result == BQ_OK && !untimed) result = BQ_WORKER_MISMATCH;
+    TpRetirementShard shard = {.bytes = length};
+    memcpy(shard.sha256, untimed_sha256, SHA256_HEX_CAPACITY);
+    for (u32 index = 0; result == BQ_OK && index < length; index += 1) shard.records += untimed[index] == '\n';
+    BqRetirementUnitCampaignFacts facts = {d_plan, ready_sha256, pins.budget_sha256, measured, &shard, label, boot,
+                                           attempt_token, carried ? carried->bound_at_ns : 0,
+                                           replayed ? (int)replayed->plan.cpu : -1};
+    if (result == BQ_OK && !(bq_retirement_unit_campaign_pre_context(gate, &facts, pre) &&
+                             !strcmp(pre, carried->pre_sample)))
+        result = BQ_WORKER_MISMATCH;
+    bq_retirement_campaign_plan_commands_release(&commands);
+    /* 3. The post-sample context descends from the carried pre-sample one. */
+    char post[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK &&
+        !(bq_retirement_unit_campaign_post_digest(carried->pre_sample, d_plan, carried->logs, carried->stages, post) &&
+          !strcmp(post, carried->post_sample)))
+        result = BQ_WORKER_MISMATCH;
+    /* 4. Lane D's post-sample record, bound by the authority's retained
+     * manifest. */
+    char retained_sha256[SHA256_HEX_CAPACITY] = {0}, record_sha256[SHA256_HEX_CAPACITY] = {0};
+    char listed[128];
+    u32 retained_length = 0, record_length = 0;
+    char* retained = result == BQ_OK ? bq_retirement_coordinator_result_read(arena, result_directory,
+        TP_RETIREMENT_RETAINED_MANIFEST_PATH, BQ_RETIREMENT_COORDINATOR_RETAINED_CAP, &retained_length,
+        retained_sha256) : NULL;
+    char* record = result == BQ_OK && retained && !strcmp(retained_sha256, trusted->retained_sha256) &&
+                   !strncmp(retained, TP_RETIREMENT_RETAINED_MANIFEST_HEADER,
+                            strlen(TP_RETIREMENT_RETAINED_MANIFEST_HEADER)) ?
+                   bq_retirement_coordinator_result_read(arena, result_directory, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD,
+                       BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX, &record_length, record_sha256) : NULL;
+    int line = record ? snprintf(listed, sizeof(listed), "\n%s %s %u " BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD "\n",
+                                 bq_retirement_unit_handoff_declared[0].kind, record_sha256, record_length) : -1;
+    char attempt_text[24];
+    snprintf(attempt_text, sizeof(attempt_text), "%" PRIu64, (uint64_t)attempt_token);
+    bool linked = line > 0 && (size_t)line < sizeof(listed) && strstr(retained, listed) &&
+                  strlen(record) == record_length && bq_retirement_coordinator_record_line(record, "job=", label) &&
+                  bq_retirement_coordinator_record_line(record, "attempt=", attempt_text);
+    static char const* const keys[] = {"pre-sample=", "post-sample=", "plan=", "execution-plan=", "log-untimed=",
+                                       "log-aa=", "log-ab=", "pre-sample-plan=", "result-input-plan=",
+                                       "post-aa-binding=", "aa-admission=", "family=", "timed-rows="};
+    char const* expected[BUSTER_ARRAY_LENGTH(keys)] = {0};
+    if (linked)
+    {
+        char const* values[] = {carried->pre_sample, carried->post_sample, d_plan, trusted->plan_sha256,
+            carried->logs[0], carried->logs[1], carried->logs[2],
+            documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256,
+            documents[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256,
+            documents[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].sha256, admission_sha256, derived->set.family.sha256,
+            derived->set.timed_rows};
+        memcpy(expected, values, sizeof(values));
+    }
+    for (u32 index = 0; linked && index < BUSTER_ARRAY_LENGTH(keys); index += 1)
+    {
+        char value[SHA256_HEX_CAPACITY] = {0};
+        linked = bq_retirement_coordinator_record_digest(record, keys[index], value) && !strcmp(value, expected[index]);
+    }
+    if (result == BQ_OK && !linked) result = BQ_WORKER_MISMATCH;
+    /* 5. The binding, rendered by the coordinator, and the final context. */
+    char binding_sha256[SHA256_HEX_CAPACITY] = {0}, context_sha256[SHA256_HEX_CAPACITY] = {0};
+    u32 binding_length = 0;
+    char* binding = result == BQ_OK ? bq_retirement_coordinator_result_read(arena, result_directory,
+        BQ_RETIREMENT_WORKER_BINDING_PATH, BQ_RETIREMENT_COORDINATOR_BINDING_CAP, &binding_length, binding_sha256) : NULL;
+    BqRetirementWorkerBindingContext pinned = {0};
+    if (result == BQ_OK && !(binding && !strcmp(binding_sha256, carried->binding))) result = BQ_WORKER_MISMATCH;
+    if (result == BQ_OK &&
+        bq_retirement_worker_binding_import(arena, installed, seams->profile, &pinned) != BQ_OK)
+        result = BQ_RECIPE_MISMATCH;
+    char* rendered = NULL;
+    u64 rendered_length = 0;
+    if (result == BQ_OK &&
+        !(bq_retirement_worker_binding_check(&pinned, seams->profile, gate, derived->set.family.sha256, &pins, &plan) &&
+          bq_retirement_worker_binding_render(&pinned, documents, admission_length, admission_sha256, arena, &rendered,
+                                              &rendered_length) &&
+          rendered_length == binding_length && !memcmp(rendered, binding, binding_length)))
+        result = BQ_WORKER_MISMATCH;
+    char* context = NULL;
+    size_t context_length = 0;
+    if (result == BQ_OK &&
+        !tp_retirement_compose_execution_context((unsigned char const*)rendered, (size_t)rendered_length,
+                                                 carried->stages[1].raw, arena, &context, &context_length))
+        result = BQ_WORKER_MISMATCH;
+    if (result == BQ_OK) bq_digest(context, (u32)context_length, (char8*)context_sha256);
+    if (result == BQ_OK && strcmp(context_sha256, trusted->context_sha256)) result = BQ_WORKER_MISMATCH;
+    bq_retirement_worker_binding_release(&pinned);
+    if (installed >= 0 && close(installed) != 0 && result == BQ_OK) result = BQ_IO;
+    if (arena) arena_destroy(arena, 1);
+    return result;
+}
+
+/* At finalization, in order: the replay of the attempt from the A digest and
+ * the ready digest, the journalled authority the MEASURED packet named, and
+ * the derivation of that authority's plan and context
+ * (bq_retirement_coordinator_derive). */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_finalize(BqRetirementWorkerUnitSeams const* seams,
+    String8 workspace_root, int result_directory, int queue_directory, u64 job_id, u64 attempt_token,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY],
+    char const authority_sha256[SHA256_HEX_CAPACITY])
+{
+    BqRetirementUnitReplayed replayed = {0};
+    TpRetirementReceiptAuthority journalled = {0};
+    BqRetirementContextChainCarried carried = {0};
+    BqError result = bq_retirement_coordinator_replay(seams, workspace_root, job_id, attempt_token,
+                                                           preparation_sha256, ready_sha256, &replayed);
+    if (result == BQ_OK)
+        result = bq_retirement_coordinator_authority_complete(result_directory, workspace_root, queue_directory, job_id,
+            attempt_token, seams->profile, preparation_sha256, ready_sha256, authority_sha256, &journalled, &carried);
+    if (result == BQ_OK)
+        result = bq_retirement_coordinator_derive(seams, &replayed, job_id, attempt_token, ready_sha256, &journalled,
+                                                  &carried, result_directory);
+    if (!bq_retirement_unit_replayed_release(&replayed) && result == BQ_OK) result = BQ_IO;
     return result;
 }

@@ -137,7 +137,7 @@ class ExportReplayTest(unittest.TestCase):
         arguments = mock.Mock(
             download=self.archive, destination=self.root / "fresh",
             test_publication=self.destination, bench_service=self.root / "trusted-utility",
-            repository_root=self.root, binding="record.json", job=self.job,
+            repository_root=self.root, binding=replay.COMPOSER_BINDING_PATH, job=self.job,
             attempt=self.attempt, full_result_sha256=self.full_digest,
             export_receipt_sha256=self.receipt_sha256,
             trusted_execution_receipt_sha256="b" * 64,
@@ -155,7 +155,7 @@ class ExportReplayTest(unittest.TestCase):
             download=self.archive, destination=self.root / "fresh",
             test_publication=self.destination, retrieval=None,
             bench_service=self.root / "trusted-utility", repository_root=self.root,
-            binding="record.json", job=self.job, attempt=self.attempt,
+            binding=replay.COMPOSER_BINDING_PATH, job=self.job, attempt=self.attempt,
             full_result_sha256=self.full_digest,
             export_receipt_sha256=self.receipt_sha256,
             trusted_execution_receipt_sha256="b" * 64,
@@ -209,7 +209,7 @@ class ExportReplayTest(unittest.TestCase):
     def test_publisher_and_consumer_are_separate_cli_processes(self):
         command = [sys.executable, str(Path(replay.__file__).resolve())]
         identities = ["--bench-service", str(self.root / "reviewed-service"),
-                      "--repository-root", str(self.root), "--binding", "record.json",
+                      "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                       "--job", str(self.job), "--attempt", str(self.attempt),
                       "--full-result-sha256", self.full_digest,
                       "--export-receipt-sha256", self.receipt_sha256,
@@ -228,7 +228,8 @@ class ExportReplayTest(unittest.TestCase):
         wrong = identities.copy()
         wrong[wrong.index("--export-receipt-sha256") + 1] = "c" * 64
         second = subprocess.run(command + [str(published), str(clean_root / "new-result"),
-                                          "--consume-published", "--retrieval", str(clean)] + wrong,
+                                          "--consume-published", "--retrieval", str(clean),
+                                          "--lane-f", str(clean_root / "lane-f")] + wrong,
                                 cwd=clean_root, env={"PATH": os.environ.get("PATH", ""),
                                                      "LANG": "C"},
                                 check=False, capture_output=True, text=True)
@@ -265,7 +266,7 @@ class ExportReplayTest(unittest.TestCase):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
                    str(self.archive), "--publish-only", "--test-publication",
                    str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
-                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                    "--job", str(self.job), "--attempt", str(self.attempt),
                    "--full-result-sha256", self.full_digest,
                    "--trusted-execution-receipt-sha256", "b" * 64]
@@ -445,22 +446,99 @@ class ExportReplayTest(unittest.TestCase):
         self.assertFalse(ledger["per_file_fits"])
         self.assertFalse(ledger["fits"])
 
-    def test_composer_hook_fixes_the_binding_location(self):
-        self.assertIsNone(replay.COMPOSER_BINDING_PATH)
-        self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
-        with mock.patch.object(replay, "COMPOSER_BINDING_PATH", "retirement/binding.json"):
-            self.assertEqual(str(replay.composer_binding_path("retirement/binding.json")),
-                             "retirement/binding.json")
-            with self.assertRaisesRegex(ValueError, "composer"):
-                replay.composer_binding_path("other/binding.json")
-            with self.assertRaises(ValueError):
-                replay.composer_binding_path("../binding.json")
+    def test_composer_fixes_the_binding_location(self):
+        # The worker-unit producer's BQ_RETIREMENT_WORKER_BINDING_PATH.
+        root = Path(replay.__file__).resolve().parents[2]
+        source = (root / "tools/bench_service/retirement_worker_compose.c").read_text(encoding="utf-8")
+        match = re.search(r'^#define BQ_RETIREMENT_WORKER_BINDING_PATH "([^"]+)"$', source, re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertEqual(replay.COMPOSER_BINDING_PATH, match.group(1))
+        self.assertEqual(str(replay.composer_binding_path(replay.COMPOSER_BINDING_PATH)),
+                         replay.COMPOSER_BINDING_PATH)
+        for other in ("any/record.json", "other/" + replay.COMPOSER_BINDING_PATH):
+            with self.subTest(other=other), self.assertRaisesRegex(ValueError, "composer"):
+                replay.composer_binding_path(other)
+        with self.assertRaises(ValueError):
+            replay.composer_binding_path("../binding.json")
+        with mock.patch.object(replay, "COMPOSER_BINDING_PATH", None):
+            self.assertEqual(str(replay.composer_binding_path("any/record.json")), "any/record.json")
+
+    def lane_f_fixture(self):
+        """A composed record with both late phases pending, its sealed
+        result, and lane F's directory with the matching final binding."""
+        result = self.root / "result"
+        lane_f = self.root / "lane-f"
+        result.mkdir(mode=0o700)
+        lane_f.mkdir(mode=0o700)
+        sealed = b'{"sealed":1}\n'
+        (result / "retirement-sealed-result.json").write_bytes(sealed)
+        pending = dict(replay.PENDING_DESCRIPTOR)
+        composed = {"subjects": {"candidate": "c"}, "workflow": {"phases": {
+            "sealed_result": dict(pending, path="retirement-sealed-result.json"),
+            "independent_replay": dict(pending, path="retirement-independent-replay.json")}}}
+        (result / replay.COMPOSER_BINDING_PATH).write_text(json.dumps(composed))
+        replayed = b'{"replayed":1}\n'
+        (lane_f / "retirement-independent-replay.json").write_bytes(replayed)
+        final = json.loads(json.dumps(composed))
+        final["workflow"]["phases"]["sealed_result"] = {
+            "path": "retirement-sealed-result.json", "bytes": len(sealed),
+            "sha256": hashlib.sha256(sealed).hexdigest()}
+        final["workflow"]["phases"]["independent_replay"] = {
+            "path": "retirement-independent-replay.json", "bytes": len(replayed),
+            "sha256": hashlib.sha256(replayed).hexdigest()}
+        return result, lane_f, composed, final
+
+    def test_final_binding_is_the_composed_record_with_lane_f_phases(self):
+        result, lane_f, composed, final = self.lane_f_fixture()
+        (lane_f / replay.FINAL_BINDING_NAME).write_text(json.dumps(final))
+        path = replay.lane_f_import(lane_f, result)
+        self.assertEqual(path, result / replay.FINAL_BINDING_NAME)
+        self.assertEqual(replay.final_binding_check(result, path), final)
+        # A second import collides with the files already placed.
+        with self.assertRaisesRegex(ValueError, "collides"):
+            replay.lane_f_import(lane_f, result)
+        mutations = {
+            "other field": lambda value: value["subjects"].__setitem__("candidate", "other"),
+            "sealed digest": lambda value: value["workflow"]["phases"]["sealed_result"].__setitem__("sha256", "f" * 64),
+            "pending replay": lambda value: value["workflow"]["phases"]["independent_replay"].update(
+                replay.PENDING_DESCRIPTOR),
+            "replay elsewhere": lambda value: value["workflow"]["phases"]["independent_replay"].__setitem__(
+                "path", "elsewhere.json"),
+        }
+        for name, mutate in mutations.items():
+            changed = json.loads(json.dumps(final))
+            mutate(changed)
+            other = self.root / f"final-{len(name)}.json"
+            other.write_text(json.dumps(changed))
+            with self.subTest(mutation=name), self.assertRaises(ValueError):
+                replay.final_binding_check(result, other)
+        # The composed record itself can never stand in for the final one.
+        with self.assertRaises(ValueError):
+            replay.final_binding_check(result, result / replay.COMPOSER_BINDING_PATH)
+        # A composed record whose sealed phase is already filled is refused.
+        (result / replay.COMPOSER_BINDING_PATH).chmod(0o600)
+        (result / replay.COMPOSER_BINDING_PATH).write_text(json.dumps(final))
+        with self.assertRaisesRegex(ValueError, "pending"):
+            replay.final_binding_check(result, path)
+
+    def test_lane_f_directory_holds_only_regular_files_and_the_final_binding(self):
+        result, lane_f, _composed, final = self.lane_f_fixture()
+        with self.assertRaisesRegex(ValueError, "lacks the final binding"):
+            replay.lane_f_import(lane_f, result)
+        (lane_f / replay.FINAL_BINDING_NAME).write_text(json.dumps(final))
+        os.symlink("retirement-independent-replay.json", lane_f / "link.json")
+        with self.assertRaisesRegex(ValueError, "regular files"):
+            replay.lane_f_import(lane_f, result)
+        (lane_f / "link.json").unlink()
+        (lane_f / replay.COMPOSER_BINDING_PATH).write_text("{}")
+        with self.assertRaisesRegex(ValueError, "collides"):
+            replay.lane_f_import(lane_f, result)
 
     def test_publish_only_capacity_output_does_not_claim_replay(self):
         command = [sys.executable, str(Path(replay.__file__).resolve()),
                    str(self.archive), "--publish-only", "--test-publication",
                    str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
-                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--repository-root", str(self.root), "--binding", replay.COMPOSER_BINDING_PATH,
                    "--job", str(self.job), "--attempt", str(self.attempt),
                    "--full-result-sha256", self.full_digest,
                    "--trusted-execution-receipt-sha256", "b" * 64,

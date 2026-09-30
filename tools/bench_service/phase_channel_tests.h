@@ -441,7 +441,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
         BQ_CHECK(attempt >= 0 && bq_coordinator_fixture_authority(finalization.result_directory, attempt, id, token,
                      defect == 7 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_PREPARATION_HEX,
                      defect == 6 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_READY_HEX,
-                     defect == 8 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_ROW_PLAN_HEX, defect != 9, authority_sha256));
+                     defect == 8 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_ROW_PLAN_HEX, defect != 9, NULL, authority_sha256));
         int pair[2] = {-1, -1};
         BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
         BqPhaseChannel phases;
@@ -521,16 +521,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
             String8 root = fixture.config.workspace_root;
             BQ_CHECK(bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
                          queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
-                         BQ_TEST_PHASE_READY_HEX, authority_sha256) == BQ_OK);
+                         BQ_TEST_PHASE_READY_HEX, authority_sha256, NULL, NULL) == BQ_OK);
             BQ_CHECK(bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
                          queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
-                         BQ_TEST_PHASE_READY_HEX, BQ_TEST_PHASE_OTHER_HEX) != BQ_OK &&
+                         BQ_TEST_PHASE_READY_HEX, BQ_TEST_PHASE_OTHER_HEX, NULL, NULL) != BQ_OK &&
                      bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
                          queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
-                         BQ_TEST_PHASE_OTHER_HEX, authority_sha256) != BQ_OK &&
+                         BQ_TEST_PHASE_OTHER_HEX, authority_sha256, NULL, NULL) != BQ_OK &&
                      bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
                          queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_OTHER_HEX,
-                         BQ_TEST_PHASE_READY_HEX, authority_sha256) != BQ_OK);
+                         BQ_TEST_PHASE_READY_HEX, authority_sha256, NULL, NULL) != BQ_OK);
             char body[512] = {0};
             u32 size = 0;
             BQ_CHECK(job && job->phase == BQ_MEASURING && bq_worker_phases_validate(queue, job, &finalization) == BQ_OK &&

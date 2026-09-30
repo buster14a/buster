@@ -27,7 +27,9 @@
  * which it admits only with a complete profile; the compiled profile is
  * blocked, so the job is still rejected before any directory or child. The
  * producer's in-unit campaign (retirement_worker_campaign.c) runs lane D's
- * driver through READY; its A/A admission stays compiled out here. The
+ * driver through READY and then composes, issues the receipt authority and
+ * sends MEASURED (retirement_worker_compose.c); its A/A admission stays
+ * compiled out here. The
  * coordinator's side (retirement_coordinator.c: request gate, budget loader,
  * authority handoff before MEASURED, replay at finalization) is refused the
  * same way. */
@@ -43,10 +45,11 @@
 #include "retirement_row_plan.c"
 #include "retirement_row_producer.c"
 #include "retirement_unit.c"
-/* The in-unit campaign (#881 PR 2): lane D's store-based seams, then the
- * producer's campaign, then the producer. */
+/* The in-unit campaign (#881 PRs 2 and 3): lane D's store-based seams, then
+ * the producer's campaign and composition, then the producer. */
 #include "retirement_campaign_service.h"
 #include "retirement_worker_campaign.c"
+#include "retirement_worker_compose.c"
 #include "retirement_worker_unit.c"
 #include "retirement_coordinator.c"
 #endif

@@ -572,6 +572,77 @@ static inline int bq_retirement_unit_campaign_derive(BqRetirementCorrectness con
     return ok;
 }
 
+/* One collected stage's facts the post-sample context binds: its transcript
+ * shard chain, invocation count and completion time, its numeric digest
+ * (every exported sample record, rows then batches) and shard descriptor
+ * digests, its exported sample count and its metrics totals. */
+typedef struct BqRetirementUnitCampaignStageFacts
+{
+    char transcript_shards[65], raw[65], row_shards[65], batch_shards[65];
+    uint64_t invocations, completed_at_ns, samples, metrics_artifacts, metrics_bytes;
+} BqRetirementUnitCampaignStageFacts;
+
+/* The post-sample digest over explicit values: the pre-sample digest, the
+ * campaign plan digest, the three launch-log chains (0 untimed, 1 A/A, 2
+ * A/B) and both stages' facts. The coordinator recomputes it from the values
+ * a context chain carries (retirement_coordinator.c), so it is the single
+ * definition bq_retirement_unit_campaign_post_context also uses. */
+static inline int bq_retirement_unit_campaign_post_digest(char const* pre_context, char const* plan_sha256,
+    char const log_chains[3][65], BqRetirementUnitCampaignStageFacts const stages[TP_RETIREMENT_CAMPAIGN_STAGES],
+    char digest[65])
+{
+    int ok = pre_context && tp_retirement_digest(pre_context) && plan_sha256 && tp_retirement_digest(plan_sha256) &&
+        log_chains && stages && digest;
+    for (unsigned index = 0; ok && index < 3; ++index) ok = tp_retirement_digest(log_chains[index]);
+    for (unsigned stage = 0; ok && stage < TP_RETIREMENT_CAMPAIGN_STAGES; ++stage)
+        ok = tp_retirement_digest(stages[stage].transcript_shards) && tp_retirement_digest(stages[stage].raw) &&
+            tp_retirement_digest(stages[stage].row_shards) && tp_retirement_digest(stages[stage].batch_shards);
+    Sha256 hash;
+    sha256_init(&hash);
+    if (ok)
+    {
+        static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_DOMAIN;
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        bq_retirement_unit_campaign_text(&hash, "pre-sample", pre_context);
+        bq_retirement_unit_campaign_text(&hash, "plan", plan_sha256);
+        for (unsigned index = 0; index < 3; ++index) bq_retirement_unit_campaign_text(&hash, "logs", log_chains[index]);
+        for (unsigned stage = 0; stage < TP_RETIREMENT_CAMPAIGN_STAGES; ++stage)
+        {
+            BqRetirementUnitCampaignStageFacts const* facts = &stages[stage];
+            bq_retirement_unit_campaign_number(&hash, "stage", stage);
+            bq_retirement_unit_campaign_text(&hash, "transcript-shards", facts->transcript_shards);
+            bq_retirement_unit_campaign_number(&hash, "invocations", facts->invocations);
+            bq_retirement_unit_campaign_number(&hash, "completed-at", facts->completed_at_ns);
+            bq_retirement_unit_campaign_text(&hash, "raw", facts->raw);
+            bq_retirement_unit_campaign_text(&hash, "row-shards", facts->row_shards);
+            bq_retirement_unit_campaign_text(&hash, "batch-shards", facts->batch_shards);
+            bq_retirement_unit_campaign_number(&hash, "samples", facts->samples);
+            bq_retirement_unit_campaign_number(&hash, "metrics-artifacts", facts->metrics_artifacts);
+            bq_retirement_unit_campaign_number(&hash, "metrics-bytes", facts->metrics_bytes);
+        }
+        sha256_finish_hex(&hash, digest);
+    }
+    else if (digest) digest[0] = 0;
+    return ok;
+}
+
+/* A collected stage's facts (bq_retirement_unit_campaign_post_digest). */
+static inline void bq_retirement_unit_campaign_stage_facts(TpRetirementSamples const* samples,
+    char const shard_chain[65], BqRetirementUnitCampaignStageFacts* facts)
+{
+    TpRetirementTranscript const* transcript = samples->transcript;
+    *facts = (BqRetirementUnitCampaignStageFacts){0};
+    snprintf(facts->transcript_shards, sizeof(facts->transcript_shards), "%s", shard_chain);
+    snprintf(facts->raw, sizeof(facts->raw), "%s", samples->raw_sha256);
+    snprintf(facts->row_shards, sizeof(facts->row_shards), "%s", samples->descriptors_sha256[0]);
+    snprintf(facts->batch_shards, sizeof(facts->batch_shards), "%s", samples->descriptors_sha256[1]);
+    facts->invocations = transcript->total_records;
+    facts->completed_at_ns = transcript->completed_at_ns;
+    facts->samples = samples->exported;
+    facts->metrics_artifacts = samples->metrics ? samples->metrics->artifacts : 0;
+    facts->metrics_bytes = samples->metrics ? samples->metrics->total_bytes : 0;
+}
+
 /* The post-sample context chains the pre-sample digest the campaign froze to
  * both stages' transcript shard chains and numeric digests, and to the three
  * launch-log chains (0 untimed, 1 A/A, 2 A/B). It exists only for a
@@ -583,36 +654,14 @@ static inline int bq_retirement_unit_campaign_post_context(TpRetirementCampaign 
     int ok = campaign && shard_chains && log_chains && digest && pre_context && tp_retirement_digest(pre_context) &&
         campaign->phase == TP_RETIREMENT_CAMPAIGN_COLLECTED &&
         outcome.execution == TP_RETIREMENT_CAMPAIGN_STATE_COMPLETE && !strcmp(campaign->context_sha256, pre_context);
+    BqRetirementUnitCampaignStageFacts stages[TP_RETIREMENT_CAMPAIGN_STAGES];
     for (unsigned stage = 0; ok && stage < TP_RETIREMENT_CAMPAIGN_STAGES; ++stage)
-        ok = tp_retirement_digest(shard_chains[stage]);
-    for (unsigned index = 0; ok && index < 3; ++index) ok = tp_retirement_digest(log_chains[index]);
-    Sha256 hash;
-    sha256_init(&hash);
-    if (ok)
     {
-        static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_DOMAIN;
-        sha256_add(&hash, domain, sizeof(domain) - 1);
-        bq_retirement_unit_campaign_text(&hash, "pre-sample", pre_context);
-        bq_retirement_unit_campaign_text(&hash, "plan", campaign->plan_sha256);
-        for (unsigned index = 0; index < 3; ++index) bq_retirement_unit_campaign_text(&hash, "logs", log_chains[index]);
-        for (unsigned stage = 0; stage < TP_RETIREMENT_CAMPAIGN_STAGES; ++stage)
-        {
-            TpRetirementSamples const* samples = campaign->samples[stage];
-            TpRetirementTranscript const* transcript = samples->transcript;
-            bq_retirement_unit_campaign_number(&hash, "stage", stage);
-            bq_retirement_unit_campaign_text(&hash, "transcript-shards", shard_chains[stage]);
-            bq_retirement_unit_campaign_number(&hash, "invocations", transcript->total_records);
-            bq_retirement_unit_campaign_number(&hash, "completed-at", transcript->completed_at_ns);
-            bq_retirement_unit_campaign_text(&hash, "raw", samples->raw_sha256);
-            bq_retirement_unit_campaign_text(&hash, "row-shards", samples->descriptors_sha256[0]);
-            bq_retirement_unit_campaign_text(&hash, "batch-shards", samples->descriptors_sha256[1]);
-            bq_retirement_unit_campaign_number(&hash, "samples", samples->exported);
-            bq_retirement_unit_campaign_number(&hash, "metrics-artifacts", samples->metrics ? samples->metrics->artifacts : 0);
-            bq_retirement_unit_campaign_number(&hash, "metrics-bytes", samples->metrics ? samples->metrics->total_bytes : 0);
-        }
-        sha256_finish_hex(&hash, digest);
+        ok = tp_retirement_digest(shard_chains[stage]);
+        if (ok) bq_retirement_unit_campaign_stage_facts(campaign->samples[stage], shard_chains[stage], &stages[stage]);
     }
-    else if (digest) digest[0] = 0;
+    ok = ok && bq_retirement_unit_campaign_post_digest(pre_context, campaign->plan_sha256, log_chains, stages, digest);
+    if (!ok && digest) digest[0] = 0;
     return ok;
 }
 
@@ -2058,12 +2107,12 @@ static inline int bq_retirement_unit_campaign_measured_digest(char const post_co
  * confirmation; the two confirmed digests are recorded and chained to the
  * post-sample context and record (measured_sha256). A BQPHASE1 message
  * carries no digest (phase_channel.h); on the worker-unit's BQPHASE2 channel
- * MEASURED must carry the authority digest (bq_phase_exchange_digest_until,
- * #881 PR 3), and this digest-less send is refused there. The post-sample
- * record, sealed by lane E's retained manifest under the producer authority,
- * keeps the A/B log chain durable. A failed or incomplete campaign never
- * sends it,
- * which the supervisor requires for success. */
+ * MEASURED carries the confirmed authority digest
+ * (bq_phase_exchange_digest_until, #881 PR 3), which the coordinator hands
+ * off before it acknowledges. The post-sample record, sealed by lane E's
+ * retained manifest under the producer authority, keeps the A/B log chain
+ * durable. A failed or incomplete campaign never sends it, which the
+ * supervisor requires for success. */
 static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignHandoff const* handoff)
 {
@@ -2071,7 +2120,10 @@ static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign*
         bq_retirement_unit_campaign_measured_digest(driver->post_context_sha256, driver->record.sha256,
             handoff->sealed_result_sha256, handoff->authority_sha256, driver->measured_sha256) &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
-        bq_phase_exchange_until(driver->phases, BQ_PHASE_MEASURED, driver->deadline_ns);
+        (driver->phases->version == BQ_PHASE_VERSION_2 ?
+         bq_phase_exchange_digest_until(driver->phases, BQ_PHASE_MEASURED, handoff->authority_sha256,
+                                        driver->deadline_ns) :
+         bq_phase_exchange_until(driver->phases, BQ_PHASE_MEASURED, driver->deadline_ns));
     if (ok)
     {
         memcpy(driver->sealed_result_sha256, handoff->sealed_result_sha256, 65);

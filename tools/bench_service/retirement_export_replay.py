@@ -8,11 +8,12 @@ It never executes a file from the bundle and does not publish a release asset.
 Map: ``archive_source`` checks the pinned export receipt; ``publish_test_copy``
 and ``retrieve_test_copy`` make the immutable test publication and the fresh
 consumer copy; ``replay`` unpacks with the reviewed service utility, runs the
-production binding validator and ``authenticated_attempt_join``.
+production binding validator over lane F's final binding
+(``lane_f_import``, ``final_binding_check``) and ``authenticated_attempt_join``.
 ``copy_ledger``/``capacity_ledger`` give the receipt-derived six-copy ledger;
 ``a1_export_ledger`` maps the A1 campaign model (metrics shards, untimed
 records) onto the export limits, printed by the ``a1-capacity`` subcommand.
-``composer_binding_path`` is the marked hook for E's result composer.
+``composer_binding_path`` holds the binding to E's fixed result location.
 """
 
 import argparse
@@ -65,10 +66,23 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 # labels the execution receipt's job as "job-<numeric job id>"; the export
 # receipt carries the numeric id.
 SERVICE_JOB_LABEL = "job-{}"
-# HOOK(#1023, E composer): the reviewed composer fixes where the binding
-# record lives inside the finalized service result. Until it lands, the
-# operator names it with --binding; once set, --binding must equal it.
-COMPOSER_BINDING_PATH = None
+# The reviewed composer fixes where the binding record lives inside the
+# finalized service result: the worker-unit producer writes it at the result
+# root (BQ_RETIREMENT_WORKER_BINDING_PATH, retirement_worker_compose.c, #881
+# PR 3), and --binding must equal it. That record carries the sealed-result
+# and independent-replay phases as pending descriptors (the sealed result
+# binds the record's digest), so it can never pass a complete replay itself.
+COMPOSER_BINDING_PATH = "retirement-binding.json"
+# The composer's pending descriptor (BQ_RETIREMENT_WORKER_PENDING_SHA256).
+PENDING_DESCRIPTOR = {"bytes": 1, "sha256": "0" * 64}
+# Lane F's final binding: the composed record with its two late phases
+# filled (the composed sealed result, and lane F's publication and
+# independent replay). It is produced after the service result is exported,
+# so it lives with lane F's replay evidence in the operator's lane-F
+# directory (--lane-f), outside the service result; the replay copies that
+# directory into the clean replay destination and validates this file.
+FINAL_BINDING_NAME = "retirement-final-binding.json"
+FINAL_PHASES = ("sealed_result", "independent_replay")
 
 
 def fail(message):
@@ -462,16 +476,90 @@ def relative_binding_path(text):
 
 
 def composer_binding_path(text):
-    """HOOK(#1023, E composer): the binding record's place in the result.
+    """The binding record's place in the result (#1023, E composer).
 
-    The composer, not the operator, owns this location. While
-    COMPOSER_BINDING_PATH is unset the operator-supplied canonical path is
-    used; once the composer contract sets it, any other path is refused.
+    The composer, not the operator, owns this location: any path other than
+    COMPOSER_BINDING_PATH is refused (were it unset, the operator-supplied
+    canonical path would be used).
     """
     relative = relative_binding_path(text)
     if COMPOSER_BINDING_PATH is not None and text != COMPOSER_BINDING_PATH:
         fail("binding path differs from the reviewed composer's fixed location")
     return relative
+
+
+def lane_f_import(lane_f, destination):
+    """Copy lane F's regular files (its final binding and the evidence it
+    names) into the clean replay destination, never replacing a file of the
+    unpacked service result. Returns the final binding's path there."""
+    source = os.open(lane_f, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    target = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        owner = os.fstat(source)
+        if owner.st_uid != os.geteuid() or owner.st_mode & 0o022:
+            fail("lane F directory must be owned by the caller and not writable by others")
+        names = sorted(os.listdir(source))
+        if FINAL_BINDING_NAME not in names:
+            fail("lane F directory lacks the final binding")
+        # Every name is checked before anything is copied.
+        present = set(os.listdir(target))
+        for name in names:
+            info = os.stat(name, dir_fd=source, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                fail("lane F directory may hold only single-link regular files")
+            if name in present:
+                fail("lane F file collides with the service result")
+        for name in names:
+            data_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=source)
+            try:
+                with os.fdopen(data_fd, "rb", closefd=False) as stream:
+                    data = stream.read()
+            finally:
+                os.close(data_fd)
+            try:
+                out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400,
+                              dir_fd=target)
+            except FileExistsError:
+                fail("lane F file collides with the service result")
+            try:
+                offset = 0
+                while offset < len(data):
+                    offset += os.write(out, data[offset:])
+                os.fsync(out)
+            finally:
+                os.close(out)
+        os.fsync(target)
+    finally:
+        os.close(target)
+        os.close(source)
+    return Path(destination) / FINAL_BINDING_NAME
+
+
+def final_binding_check(destination, final_path):
+    """Lane F's final binding is the composed record with only its two late
+    phases filled: sealed_result the composed sealed result (by its bytes)
+    and independent_replay a non-pending descriptor at the composed path.
+    Every other byte of meaning is the composer's."""
+    root = Path(destination)
+    composed = json.loads((root / COMPOSER_BINDING_PATH).read_bytes())
+    final = json.loads(Path(final_path).read_bytes())
+    phases = composed["workflow"]["phases"]
+    for name in FINAL_PHASES:
+        if {key: phases[name].get(key) for key in PENDING_DESCRIPTOR} != PENDING_DESCRIPTOR:
+            fail(f"composed binding's {name} phase is not the composer's pending descriptor")
+    sealed_path = phases["sealed_result"]["path"]
+    sealed = (root / relative_binding_path(sealed_path)).read_bytes()
+    replayed = final["workflow"]["phases"]["independent_replay"]
+    if replayed.get("path") != phases["independent_replay"]["path"] or \
+            {key: replayed.get(key) for key in PENDING_DESCRIPTOR} == PENDING_DESCRIPTOR:
+        fail("final binding's independent replay is pending or elsewhere")
+    expected = json.loads(json.dumps(composed))
+    expected["workflow"]["phases"]["sealed_result"] = {
+        "path": sealed_path, "bytes": len(sealed), "sha256": hashlib.sha256(sealed).hexdigest()}
+    expected["workflow"]["phases"]["independent_replay"] = replayed
+    if final != expected:
+        fail("final binding differs from the composed record beyond lane F's phases")
+    return final
 
 
 def authenticated_attempt_join(destination, record_path, job, attempt, trusted_sha256):
@@ -536,6 +624,9 @@ def replay(args):
     record_path = args.destination.joinpath(*record.parts)
     if not record_path.is_file() or record_path.is_symlink():
         fail("downloaded result lacks a regular binding record")
+    # The composed record is pending; lane F's final binding is validated.
+    record_path = lane_f_import(args.lane_f, args.destination)
+    final_binding_check(args.destination, record_path)
     validation = subprocess.run(
         [sys.executable, str(Path(binding.__file__).resolve()), str(record_path),
          "--evidence-root", str(args.destination),
@@ -616,6 +707,8 @@ def main():
     parser.add_argument("--repository-root", required=True, type=Path,
                         help="checkout with the immutable Git objects needed for replay")
     parser.add_argument("--binding", required=True, help="binding path within the service result")
+    parser.add_argument("--lane-f", type=Path,
+                        help="lane F's directory: its final binding and the evidence it names (required for replay)")
     parser.add_argument("--job", required=True, type=int)
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--full-result-sha256", required=True)
@@ -633,6 +726,8 @@ def main():
             fail("publisher requires --test-publication and cannot retrieve")
         if not args.publish_only and args.destination is None:
             fail("replay requires a new private destination")
+        if not args.publish_only and args.lane_f is None:
+            fail("replay requires lane F's directory with its final binding")
         replay(args)
     except (ValueError, OSError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired, KeyError, TypeError) as error:

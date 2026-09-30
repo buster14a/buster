@@ -1290,11 +1290,9 @@ fixture profile.
 `bq_worker_unit_pinned` then stops the keeper as before and returns the
 mapped status:
 
-- An exit status between 1 and `BQ_EXPORT_TIMEOUT` is the producer's
-  `BqError`.
-- Exit 0 cannot be a success before MEASURED is wired, so it returns
-  `BQ_WORKER_FAILED`. (`BQ_OK` is never an exit status: the producer's
-  success is `BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED`, below.)
+- An exit status between 0 and `BQ_EXPORT_TIMEOUT` is the producer's
+  `BqError`. The producer exits 0 (`BQ_OK`) only after MEASURED was
+  acknowledged and the result manifest written (PR 3, below).
 - A producer killed by a signal, or at the bound, never proved its
   descendants absent, so it returns `BQ_CLEANUP_FAILED`.
 
@@ -1352,9 +1350,14 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    `bq_retirement_unit_handoff_declared`), D's five documents as prior
    entries at their measured sizes, and the result root's worker-written
    entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
-   three control files and the five `BQPHASE2` `worker-phase-N` receipts,
-   `worker-phase-5` included), so store files plus those entries stay within
-   `BQ_WORKER_BUNDLE_ENTRY_CAP`. The untimed streams are published, then
+   three control files, the five `BQPHASE2` `worker-phase-N` receipts,
+   `worker-phase-5` included, and PR 3's binding and A/A admission receipt,
+   `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`), so store files plus those entries
+   stay within `BQ_WORKER_BUNDLE_ENTRY_CAP`. Every other result-root file is
+   a store file (the untimed streams, D's documents, the post-sample record,
+   both stages' streams and the composer's outputs), so the plan covers the
+   whole root; the authority and its context chain live in the attempt
+   workspace, outside it. The untimed streams are published, then
    attach, the documents (their written sizes must equal the measured ones,
    else `BQ_CORRUPT`), A/A, admission, the post-A/A document, freeze, A/B and
    READY on the post-sample record.
@@ -1374,19 +1377,78 @@ line). Orphans of a killed launch are swept first. Launches take the
 producer's self-pipe as their cancellation descriptor, and `tp_process` then
 leaves SIGINT and SIGTERM to its caller instead of installing its own
 `_exit` handler, so a SIGTERM during A/A ends as a retained cancellation.
-Everything is released in reverse and the store is aborted: an unfinished
-campaign never composes.
+Everything is released in reverse and, unless the campaign composed, the
+store is aborted: an unfinished campaign never composes.
 
 Production A/A admission has no authority (#426, #1021) and stays compiled
 out (`BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED`); only the preparation
 fixture compiles the driver's fixture admission and supplies a receipt
 stand-in.
 
-**Not composed yet.** A READY campaign stops with
-`BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED` (`BQ_UNSUPPORTED`) and sends no
-MEASURED, so the job fails closed. No `ready-sha256=` failure-bundle line is
-written: the digest reaches the coordinator only in the RETIREMENT_READY
-packet (decision 1), never through files.
+**Composition (PR 3).** After READY, `bq_retirement_worker_compose`
+(`retirement_worker_compose.c`) runs, in order:
+
+1. **The request.** Lane D's handoff (`bq_retirement_unit_handoff` over the
+   campaign's timed rows), whose retained entries must equal the declaration
+   bound before timing (`bq_retirement_unit_handoff_retained_matches`), the
+   published stream paths, D's five documents as the prior closure, and the
+   adapter: the profile's `adapter-sha256=` pins the executable the seams
+   name (`BQ_RETIREMENT_WORKER_UNIT_ADAPTER`, the installed throughput tool's
+   `retirement-replay`), run under the time left.
+2. **The #511 binding.** The producer writes `retirement-binding.json` in the
+   result root from a pinned, reviewed binding context
+   (`native-retirement-performance-v1.binding-context`, pinned by
+   `binding-context-sha256=`, `BQ-RETIREMENT-BINDING-CONTEXT-V1`: one
+   `<section>=<canonical JSON>` line per pre-campaign section and the
+   workflow's admission record). `bq_retirement_worker_binding_check`
+   requires the context to agree with the profile and the campaign before
+   anything is written: the contract pin, each support file's digest against
+   its profile pin, the population's rows digest, count and statistical
+   family, the gate's two binaries and lane D's frozen sampling values, and
+   exactly one admission-receipt sentinel, which must be
+   `execution.host.aa_admission_receipt` itself (canonical key order puts it
+   first in the execution section). The writer renders the binding in
+   canonical key order (`bq_retirement_worker_binding_render`, which the
+   coordinator reuses) with the A/A admission receipt
+   (`retirement-aa-admission.json`) in place of the sentinel and the
+   workflow phases and records from D's documents. The admitted receipt
+   must be present and within the driver's receipt cap, or the campaign
+   refuses at admission. The sealed-result and independent-replay phases
+   are pending descriptors: the sealed result binds this record's digest, so
+   lane F's final binding fills them (see `EXPORT.md`). The
+   preparation fixture's context comes from
+   `retirement_binding_context_fixture.py`, and its bytes pass the #511
+   validator structurally.
+3. **Composition and the authority.** `tp_retirement_compose` (a refusal
+   prints its stage), then `tp_retirement_store_receipt_authority` into
+   `<attempt>/retirement-authority/` with the result root as the store root:
+   plan = lane D's execution-plan document digest, context = the composer's
+   `_execution_context` of the binding over the A/B numeric digest. Beside it
+   the producer writes `context-chain-job-<id>-<token>.txt` (mode `0400`,
+   `BQ-RETIREMENT-CONTEXT-CHAIN-V2`, `retirement_context_chain.h`), which
+   carries, besides the coordinator's facts and the authority's plan and
+   context, the bind time, D's pre-sample and post-sample contexts, the
+   three log chains, both stages' facts and the binding digest.
+4. **MEASURED.** `bq_retirement_unit_campaign_measured` sends
+   `bq_phase_exchange_digest_until(phases, BQ_PHASE_MEASURED,
+   authority_sha256, deadline_ns)` on the `BQPHASE2` channel.
+5. **The result manifest.** After the acknowledgement the producer writes
+   `native-retirement-performance-v1.bundle` (`BQ-BUNDLE-V1` over every
+   result-root file) and the manifest
+   (`bq_retirement_worker_manifest_format`: the smoke fields, then
+   `ready-sha256=`, `authority-sha256=`, `receipt-sha256=`, `sealed-result=`,
+   `sealed-result-sha256=`, `binding=`, `binding-sha256=` and
+   `bundle-sha256=`). `bq_worker_result_validate` dispatches a retirement
+   manifest to `bq_worker_result_validate_retirement`, which re-formats it
+   from rehashed files and requires the same bytes (the smoke branch is
+   unchanged). `bq_worker_result_binding_validate` admits the retirement
+   recipe only through the complete-profile seam
+   (`bq_worker_result_binding_validate_pinned`); the public entry passes no
+   seams and still refuses it.
+
+No `ready-sha256=` failure-bundle line is written for a failed campaign: the
+digest reaches the coordinator only in the RETIREMENT_READY packet
+(decision 1), never through files.
 
 **The runtime rule.** Lane B's runtime template is `./{{output}}`
 (`retirement_row_plan.c`): the step executes the program its compile step
@@ -1462,40 +1524,27 @@ launch cost milliseconds each); a survivor is killed and reaped
 `BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS`, retained like any failure.
 The final sweep in `bq_retirement_worker_campaign_run` stays.
 
-The remaining work:
-
-- **PR 3:** composition, the authority and MEASURED. It must, in order:
-  1. publish the receipt authority into
-     `job-<id>-attempt-<token>/retirement-authority/`, with the attempt's
-     result directory as the store root;
-  2. write beside it, as `context-chain-job-<id>-<token>.txt` (mode `0400`),
-     the bytes `bq_retirement_context_chain_format` returns for its A digest,
-     the ready digest it sent, the profile's `row-plan-sha256=` pin and the
-     authority's plan and context;
-  3. send `bq_phase_exchange_digest_until(phases, BQ_PHASE_MEASURED,
-     authority.authority_sha256, deadline_ns)`. A digest-less MEASURED is
-     refused on the `BQPHASE2` channel.
-
-  PR 3 must also make the chain a derivation rather than a naming: the
-  coordinator should recompute the authority's plan from the replayed ready
-  record and the pinned profile, and verify that the final context descends
-  from a pre-sample context that binds the A and ready digests (see "What
-  the chain does not prove" below).
-- **PR 4:** the coordinator side below.
+The coordinator side is below (PR 4, extended by PR 3's derivation).
 
 **Fixture.** `retirement_worker_unit_tests.h` drives real launches through
 stand-in compilers (`retirement_stand_in_compiler.h`, dash scripts the
 matched-build fixture freezes as the census subjects' compilers). The
 runtime rows compile a host program (`tests/unit.c.program`) that prints the
-reference oracle's output. Job 82 runs SETTLING, MEASURING, A/A, the
-fixture admission, the post-A/A document, the freeze, A/B and READY; all
-five documents are written at exactly the sizes the campaign retained before
-timing (`documents-sized.txt`), and the post-sample record and every stream
-kind of both stages are published. Job 85 retains a failing untimed launch,
-job 86 a SIGTERM during A/A, job 87 the deadline expiring during A/A, and
-job 88 a detached (`setsid`) sleeper left by its first second-label compile,
-found and killed right after that launch; each with the keeper stopped and
-nothing left running.
+reference oracle's output. Job 82 runs through the real coordinator path
+(`bq_prep_worker_unit_coordinate`: the queue's active job, the lease and
+channel handed to the forked unit, `bq_worker_phase_join`) SETTLING,
+MEASURING, A/A, the fixture admission, the post-A/A document, the freeze,
+A/B, READY, composition and MEASURED, then the finalization; all five
+documents are written at exactly the sizes the campaign retained before
+timing (`documents-sized.txt`), and the post-sample record, every stream
+kind of both stages, every composer output, the binding, the manifest and
+the bundle are published. The composed result is exported beside the runner
+(`build/bench-service-tools/retirement-worker-unit-result/`) for
+`retirement_compose_test.py` and `retirement_export_replay_real_test.py`.
+Job 85 retains a failing untimed launch, job 86 a SIGTERM during A/A, job 87
+the deadline expiring during A/A, and job 88 a detached (`setsid`) sleeper
+left by its first second-label compile, found and killed right after that
+launch; each with the keeper stopped and nothing left running.
 
 Job 82 is the one full campaign and its launch count is fixed: the census
 fixture's 145 untimed object groups give 580 untimed batches, and each stage
@@ -1506,7 +1555,10 @@ at its first untimed launch. Job 86 is terminated as soon as its first A/A
 second-label launch leaves the stand-in's marker, and job 88 fails right after
 that launch. Only job 87 must spend its deadline margin in A/A. Per launch,
 the descendant check reads the producer's own child lists, and the stand-in
-forks one `cat` per file it writes.
+forks one `cat` per file it writes. PR 3's end-to-end and refusal cases
+reuse job 82's single run: one finalization, one replay shared by every
+derivation and binding refusal, scratch copies of its result for the
+forgeries, and no further campaign.
 
 `bq_prep_test_worker_store_plan` covers the declaration, the retained-entry
 equality and the control-entry reservation at the exact store boundary, and
@@ -1567,11 +1619,12 @@ MEASURED, and before writing its record and receipt,
    the canonical `BQ-RETIREMENT-AUTHORITY-V3` record.
 2. `bq_retirement_coordinator_chain_check` then requires
    `context-chain-job-<id>-<token>.txt` beside it (single-link, owner-read-only)
-   to equal, byte for byte, the `BQ-RETIREMENT-CONTEXT-CHAIN-V1` record the
+   to equal, byte for byte, the `BQ-RETIREMENT-CONTEXT-CHAIN-V2` record the
    coordinator formats itself. It uses the job and attempt, its own A digest,
    the ready digest the RETIREMENT_READY packet carried and the seams'
    `row-plan-sha256=` pin (which the replayed ready record's `row-plan=` also
-   names), plus the authority's plan and context. A self-consistent authority
+   names), plus the authority's plan and context and the values the chain
+   carries (checked at finalization, below). A self-consistent authority
    whose chain names another ready digest, another A digest or another row
    plan, or that has no chain, is refused before the queue-private root is
    created and before any copy or journal.
@@ -1586,14 +1639,55 @@ during the handoff withholds the acknowledgement (`BQ_WORKER_TIMEOUT`). Only
 a completed handoff writes MEASURED's record and receipt, so a durable
 `worker-phase-4` means the authority was copied and journalled.
 
-**What the chain does not prove.** The chain makes the unit name the
-coordinator's facts next to the authority's plan and context. It does not
-prove that the plan or the context was derived from them: a same-UID unit
-can still write a chain that names the right digests beside a plan and
-context it made up. Closing that needs PR 3's definition of the authority's
-content. The coordinator would then recompute the execution plan from the
-replayed ready record and the pinned profile, and re-derive the context
-chain from the pre-sample context that binds the A and ready digests.
+**The derivation (PR 3, review items M1 of #1961 and #1964).** Naming alone
+would let a same-UID unit write a chain with the right digests beside a
+plan, context or binding it made up. At finalization
+`bq_retirement_coordinator_derive` therefore trusts none of them: over its
+own replay (`bq_retirement_unit_replay_kept`, from its A digest and the
+channel's ready digest; the replay marks its re-admitted gate issued only
+through `bq_retirement_unit_gate_reissue`, over the seal it just verified)
+it requires, in order:
+
+1. lane D's five documents recomputed itself
+   (`bq_retirement_coordinator_documents`: the replayed gate and row plan,
+   the pinned budget, rows and untimed-command contract, the untimed batches
+   rebuilt without writing anything, and the digest of the result's
+   `retirement-aa-admission.json`, with the pre-timing checks of
+   `bq_retirement_unit_campaign_documents_derive`), the authority's plan
+   being the execution-plan document;
+2. the carried pre-sample context to be the one it recomputes from the
+   replayed gate (which binds its A digest), the ready digest, D's plan
+   digest, the pinned budget, the campaign commands rebuilt from the row
+   plan, the result's sealed untimed record stream, its own boot identity,
+   the job, attempt, CPU and the carried bind time;
+3. the carried post-sample context to descend from that pre-sample context
+   over the carried log chains and stage facts
+   (`bq_retirement_unit_campaign_post_digest`);
+4. lane D's post-sample record, found through the retained manifest the
+   authority binds, to name the same job, attempt, plans, contexts, log
+   chains, admission receipt, family and timed rows and the recomputed
+   pre-sample plan, result-input plan and post-A/A documents;
+5. the binding the chain names to be, byte for byte, the one it renders
+   itself (`bq_retirement_worker_binding_render`) from the pinned binding
+   context, checked against the replayed gate and plan
+   (`bq_retirement_worker_binding_check`), the recomputed documents and the
+   admission receipt; and the authority's context to be the validator's
+   `_execution_context` of that binding over the A/B stage's numeric digest.
+
+**Boot identity.** Step 2 uses the coordinator's boot identity at
+finalization, and the pre-sample context binds the unit's at bind time. A
+reboot between the bind and finalization therefore refuses the derivation:
+an attempt still running fails, and a success already durable (FINALIZING
+or later, for example one recovered after the reboot) is held for
+reconciliation by `bq_worker_finish`, never rewritten. A campaign cannot
+survive a reboot anyway (its processes and lease are gone), so this only
+makes the loss explicit.
+
+What remains unverifiable by the coordinator, bound only by digest: the bind
+time, the stage facts and log chains (measurement outputs the post-sample
+record and the receipt also bind), the untimed records' contents and the
+fixture's A/A admission receipt (production admission has no authority).
+The two pending binding phases are lane F's.
 
 On the producer side, the version-2 MEASURED acknowledgement window
 (`bq_phase_ack_deadline`) is the job's remaining execution deadline, not the
@@ -1611,6 +1705,8 @@ digests. For a retirement job, `bq_worker_finish` accepts success only if
    authority copy under the MEASURED digest and rechecks the chain. It then
    requires `tp_retirement_store_authority_state` to classify the handoff
    `COMPLETE` against the result.
+3. `bq_retirement_coordinator_derive` (above) derives that authority's plan
+   and context (`bq_retirement_coordinator_finalize` runs all three).
 
 A missing digest, a failed replay, a changed record or a different authority
 fails the job. A pending cancellation or an expired execution deadline
@@ -1659,12 +1755,11 @@ exclusive admission) is `bq_request_valid_admitting(request, false)`. That
 queue is also built without the Linux retirement units, so it cannot
 evaluate the gate, and a retirement request still cannot be submitted.
 Opening submission needs a queue seam that carries the gate's verdict. That
-seam is left to the integration, together with
-`bq_worker_result_binding_validate`, which still accepts only the service
-recipe.
+seam is left to the integration; `bq_worker_result_binding_validate` accepts
+a retirement result only through its complete-profile seam, and its public
+entry still refuses one.
 
-**Still open.** These are inputs for the `bq_worker_recover` classification
-and for PR 3:
+**Still open.** These are inputs for the `bq_worker_recover` classification:
 
 - A handoff that times out after `tp_retirement_store_authority_handoff`
   has already copied and journalled the authority leaves the copy and the

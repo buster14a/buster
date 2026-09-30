@@ -1,4 +1,4 @@
-/* #881 PR 1 and PR 2 fixture: the retirement producer behind bq_worker_unit.
+/* #881 PR 1 to PR 3 fixture: the retirement producer behind bq_worker_unit.
  * Included by the preparation test runner after retirement_unit_campaign_tests.h.
  *
  * The attempts are the real unit-oracle fixture's (retirement_unit_oracle_tests.h),
@@ -69,10 +69,31 @@
  * and bq_retirement_request_valid_pinned, bq_worker_finalization_recipe and
  * bq_worker_recipe_launchable admit the recipe only through the complete
  * seams. bq_prep_worker_unit_campaign_order checks that the campaign's
- * SETTLING follows RETIREMENT_READY on a BQPHASE2 channel. */
+ * SETTLING follows RETIREMENT_READY on a BQPHASE2 channel.
+ *
+ * #881 PR 3: job 82 reaches MEASURED through the real coordinator path
+ * (bq_prep_worker_unit_coordinate: the queue's active job, the lease and
+ * channel handed to the forked unit, bq_worker_phase_join acknowledging every
+ * phase and handing the authority off). The composition pins its adapter
+ * (this runner's `retirement-replay` mode) and the binding context the Python
+ * fixture emits (bq_prep_worker_unit_composition,
+ * retirement_binding_context_fixture.py). Checked: the phase receipts, the
+ * finalization (replay, journalled authority and its derivation), every
+ * composer output, the binding and admission receipt, the manifest and bundle
+ * (bq_prep_worker_unit_result, bq_prep_worker_unit_bound); the exported
+ * result for the Python checks, whose binding the #511 validator accepts
+ * (bq_prep_worker_unit_export); over one shared replay, the derivation's
+ * refusals of a forged plan digest, another ready record, a changed stage
+ * fact, another binding digest, a flipped context, and scratch copies with a
+ * changed untimed file, a record byte, every checked record line forged
+ * consistently, and a binding relinked or with another measurement harness
+ * (bq_prep_worker_unit_derivation, BqPrepWorkerUnitForge,
+ * bq_prep_worker_unit_forged), and the binding writer's refusals
+ * (bq_prep_worker_unit_binding_refusals); a tampered manifest or bundle digest
+ * and a missing context chain (bq_prep_worker_unit_result_refusals). Each
+ * section's wall time is printed (bq_prep_test_timing). */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
-#include "retirement_coordinator_fixture.h"
 
 #define BQ_PREP_WORKER_UNIT_REFERENCE 81u
 #define BQ_PREP_WORKER_UNIT_SUCCESS 82u
@@ -117,6 +138,76 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirem
     if (ok) bq_digest(receipt, (u32)written, (char8*)digest);
     *length = ok ? (u32)written : 0;
     return ok;
+}
+
+/* The next line of the #619 series whose manifest is `manifest` (its shards
+ * are the leaves it names beside it, read in order), or NULL at its end. */
+BUSTER_GLOBAL_LOCAL char* bq_prep_worker_unit_series_line(FILE* manifest, FILE** shard, char* line, size_t capacity)
+{
+    char* result = NULL;
+    bool done = false;
+    while (!done)
+    {
+        if (*shard && fgets(line, (int)capacity, *shard))
+        {
+            result = line;
+            done = true;
+        }
+        else
+        {
+            char entry[512], leaf[256];
+            if (*shard) fclose(*shard);
+            *shard = NULL;
+            while (!*shard && fgets(entry, sizeof(entry), manifest))
+                if (sscanf(entry, "shard=%*u offset=%*u bytes=%*u sha256=%*s path=%255s", leaf) == 1)
+                    *shard = fopen(leaf, "rb");
+            done = !*shard;
+        }
+    }
+    return result;
+}
+
+/* The worker-unit fixture's composer adapter (this runner's
+ * `retirement-replay` mode, executed by the composer from its hashed
+ * descriptor): one structurally valid #619 result per series member. It
+ * stands in for the reviewed `bench_throughput retirement-replay` adapter,
+ * which the installed service pins instead; its bounds are test data, not a
+ * statistics result. Exit 0 only when every declared member was written. */
+BUSTER_GLOBAL_LOCAL int bq_prep_worker_unit_adapter(char const* input_path, char const* output_path)
+{
+    FILE* input = fopen(input_path, "rb");
+    FILE* output = input ? fopen(output_path, "wb") : NULL;
+    FILE* shard = NULL;
+    char line[4096];
+    unsigned members = 0, bootstrap = 0, cells = 0, resamples = 0, pairs = 0, version = 0, total = 0;
+    unsigned long long seed = 0;
+    bool ok = input && output && bq_prep_worker_unit_series_line(input, &shard, line, sizeof(line)) &&
+              sscanf(line, "version=%u seed=%llu bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=1 "
+                     "members=%u", &version, &seed, &bootstrap, &cells, &pairs, &resamples, &total) == 7;
+    if (ok) fputs("{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[", output);
+    while (ok && bq_prep_worker_unit_series_line(input, &shard, line, sizeof(line)))
+    {
+        char name[TP_RETIREMENT_COMPOSE_MEMBER_BYTES];
+        unsigned metric = 0, kind = 0, family = 0, member_cells = 0, member_pairs = 0, member_resamples = 0;
+        double limit = 0.0;
+        if (sscanf(line, "member=%127s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%lf", name,
+                   &metric, &kind, &family, &member_cells, &member_pairs, &member_resamples, &limit) == 8)
+        {
+            double alpha = 0.05 / (2.0 * 3.0 * 2.0 * (double)(kind ? cells : bootstrap));
+            fprintf(output, "%s{\"member\":\"%s\",\"metric\":%u,\"kind\":%u,\"family_index\":%u,\"outcome\":\"pass\","
+                    "\"valid\":true,\"resampled\":%s,\"resamples\":%u,\"tail_alpha\":%.17g,"
+                    "\"round\":[{\"estimate\":1.0,\"lower\":0.99,\"upper\":1.001},"
+                    "{\"estimate\":1.0,\"lower\":0.99,\"upper\":1.001}],"
+                    "\"pooled\":{\"estimate\":1.0,\"lower\":0.995,\"upper\":1.0005}}",
+                    members++ ? "," : "", name, metric, kind, family, kind ? "false" : "true", member_resamples, alpha);
+        }
+    }
+    if (ok) fputs("]}\n", output);
+    if (output && fclose(output) != 0) ok = false;
+    if (shard) fclose(shard);
+    if (input) fclose(input);
+    int status = ok && members == total ? 0 : 2;
+    return status;
 }
 
 typedef enum BqPrepWorkerUnitMode
@@ -216,7 +307,37 @@ typedef struct BqPrepWorkerUnitResult
     u64 document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
     u64 record_bytes;
     u32 untimed_records, untimed_metrics, entries, published_kinds, unmatched;
+    /* (#881 PR 3) Composition's entries: the composer's outputs, the
+     * producer's binding and admission receipt, the coordinator's
+     * worker-phase-N receipts and the manifest and bundle; outputs has one bit
+     * per bq_prep_worker_unit_outputs name present. */
+    u32 composed, outputs;
 } BqPrepWorkerUnitResult;
+
+/* The result root's entries composition adds, by exact name, then by prefix. */
+#define BQ_PREP_WORKER_UNIT_OUTPUTS 11u
+BUSTER_GLOBAL_LOCAL char const* const bq_prep_worker_unit_outputs[BQ_PREP_WORKER_UNIT_OUTPUTS] = {
+    TP_RETIREMENT_COMPOSE_CODE_PATH, TP_RETIREMENT_COMPOSE_SERIES_PATH, TP_RETIREMENT_COMPOSE_REPLAY_PATH,
+    TP_RETIREMENT_COMPOSE_BUNDLE_PATH, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
+    BQ_RETIREMENT_WORKER_SEALED_PATH, BQ_RETIREMENT_WORKER_BINDING_PATH, BQ_RETIREMENT_WORKER_ADMISSION_PATH,
+    "native-retirement-performance-v1.manifest", "native-retirement-performance-v1.bundle"};
+BUSTER_GLOBAL_LOCAL char const* const bq_prep_worker_unit_output_prefixes[] = {TP_RETIREMENT_COMPOSE_SERIES_SHARD_PREFIX,
+    "retirement-result-rows-", "retirement-result-batches-", "worker-phase-"};
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_composed_entry(char const* name, u32* outputs)
+{
+    bool known = false;
+    for (u32 index = 0; index < BQ_PREP_WORKER_UNIT_OUTPUTS; index += 1)
+        if (!strcmp(name, bq_prep_worker_unit_outputs[index]))
+        {
+            known = true;
+            *outputs |= 1u << index;
+        }
+    for (u32 index = 0; !known && index < BUSTER_ARRAY_LENGTH(bq_prep_worker_unit_output_prefixes); index += 1)
+        known = !strncmp(name, bq_prep_worker_unit_output_prefixes[index],
+                         strlen(bq_prep_worker_unit_output_prefixes[index]));
+    return known;
+}
 
 BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const* result_root, int attempt)
 {
@@ -249,6 +370,9 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitResult bq_prep_worker_unit_result(char const
         bool known = !strcmp(entry->d_name, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD);
         for (u32 index = 0; index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
             known = known || !strcmp(entry->d_name, bq_retirement_unit_campaign_document_paths[index]);
+        bool composed = !known && bq_prep_worker_unit_composed_entry(entry->d_name, &result.outputs);
+        result.composed += composed;
+        known = known || composed;
         u32 kind = known ? BQ_PREP_WORKER_UNIT_STREAM_KINDS : bq_prep_worker_unit_stream_kind(entry->d_name);
         struct stat published = {0}, copy = {0};
         bool stream = kind < BQ_PREP_WORKER_UNIT_STREAM_KINDS && staged >= 0 &&
@@ -514,153 +638,6 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_record(BqQueue* queue, BqJob const*
     bool ok = length > 0 && (size_t)length < sizeof(body) && bq_record_name(record, name, job->id) &&
               bq_record_write(queue, record, (u8 const*)body, (u32)length, false) == BQ_OK;
     return ok;
-}
-
-/* #881 PR 4, the coordinator's side over the attempt the producer just ran.
- * The replay at finalization accepts the digest the channel carried and
- * refuses another digest and a changed record. bq_worker_retirement_finalize
- * (bq_worker_finish's hook) requires the ready digest, the replay and the
- * journalled authority the packet named, stops at the execution deadline
- * before or after the replay, reloads every digest from the durable queue
- * records in recovery, and a durable success whose READY record was tampered
- * with is held, never rewritten. The request, finalization and launch gates
- * refuse the recipe under the compiled or no profile and admit it only
- * through the complete seams. */
-BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
-    BqRetirementWorkerUnitSeams const* seams, char const channel_digest[SHA256_HEX_CAPACITY])
-{
-    String8 workspaces = string_from_pointer(fixture->workspaces);
-    u64 job = attempt->job.id, token = attempt->job.token;
-    char tampered[SHA256_HEX_CAPACITY], record[80];
-    memcpy(tampered, channel_digest, SHA256_HEX_CAPACITY);
-    tampered[0] = tampered[0] == '0' ? '1' : '0';
-    snprintf(record, sizeof(record), "ready-%s", channel_digest);
-    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) ==
-                  BQ_OK);
-    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, tampered) != BQ_OK);
-    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
-                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) !=
-                      BQ_OK &&
-                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
-                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) ==
-                      BQ_OK);
-    /* The compiled profile cannot replay even the true record. */
-    BqRetirementWorkerUnitSeams installed = bq_retirement_worker_unit_installed();
-    installed.installed_root = seams->installed_root;
-    installed.broker_workspaces = seams->broker_workspaces;
-    BQ_PREP_CHECK(bq_retirement_coordinator_replay(&installed, workspaces, job, token, attempt->digest,
-                                                   channel_digest) != BQ_OK);
-    /* The finish hook over a real handoff: a result directory holding a
-     * receipt, the producer's authority and its chain bound to this attempt's
-     * A digest and the channel's ready digest, copied and journalled into the
-     * queue-private root. */
-    char result_root[] = "/tmp/bq-worker-unit-result-XXXXXX", row_plan[SHA256_HEX_CAPACITY] = {0};
-    char authority[SHA256_HEX_CAPACITY] = {0}, other_authority[SHA256_HEX_CAPACITY];
-    bool made = mkdtemp(result_root) != NULL;
-    int result = made ? open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    BqQueue* queue = &fixture->queue;
-    BQ_PREP_CHECK(result >= 0 && bq_retirement_profile_sha(seams->profile, S8("row-plan-sha256="), row_plan) &&
-                  bq_coordinator_fixture_authority(result, attempt->attempt, job, token, attempt->digest,
-                                                   channel_digest, row_plan, true, authority) &&
-                  bq_retirement_coordinator_handoff(result, workspaces, queue->directory_fd, job, token,
-                      seams->profile, attempt->digest, channel_digest, authority) == BQ_OK);
-    memcpy(other_authority, authority, SHA256_HEX_CAPACITY);
-    other_authority[0] = other_authority[0] == '0' ? '1' : '0';
-    BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
-    BqWorkerConfig config = {.workspace_root = workspaces, .backend = &clock};
-    BqWorkerFinalization finalization = {.config = &config, .result_directory = result, .retirement = seams};
-    memcpy(finalization.retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
-    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
-    bq_prep_worker_unit_clock_mode = 0;
-    /* No durable READY record yet, so the missing digest cannot be reloaded. */
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_MISMATCH);
-    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) != BQ_OK);
-    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_OK);
-    /* A changed record fails the replay even with every digest and the
-     * authority intact. */
-    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
-                  bq_worker_retirement_finalize(queue, &attempt->job, &finalization) != BQ_OK &&
-                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
-                  bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_OK);
-    /* The authority the packet named must be the journalled one. */
-    memcpy(finalization.retirement_authority_sha256, other_authority, SHA256_HEX_CAPACITY);
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_MISMATCH);
-    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
-    /* The execution deadline (backend clock) before the replay, which then
-     * never runs (a tampered digest would fail it), and after it. */
-    finalization.execution_deadline = 1000;
-    bq_prep_worker_unit_clock_mode = 1;
-    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_TIMEOUT);
-    bq_prep_worker_unit_clock_mode = 2;
-    bq_prep_worker_unit_clock_calls = 0;
-    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_TIMEOUT);
-    finalization.execution_deadline = 0;
-    bq_prep_worker_unit_clock_mode = 0;
-    BqJob smoke = attempt->job;
-    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("coordinator"), S8("validate-buster-v1"),
-                                      bq_field(&attempt->job.request, 3), bq_field(&attempt->job.request, 4)};
-    BQ_PREP_CHECK(bq_request_make(fields, &smoke.request) == BQ_OK);
-    BqWorkerFinalization plain_smoke = {.config = &config, .result_directory = -1, .retirement = seams};
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &smoke, &plain_smoke) == BQ_OK);
-    /* Recovery: a fresh finalization reloads every digest from the durable
-     * queue records and replays. */
-    BQ_PREP_CHECK(bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_RETIREMENT_READY, channel_digest) &&
-                  bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_MEASURED, authority));
-    BqWorkerFinalization recovered = {.config = &config, .result_directory = result, .retirement = seams};
-    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &recovered) == BQ_OK &&
-                  !strcmp(recovered.retirement_preparation_sha256, attempt->digest) &&
-                  !strcmp(recovered.retirement_ready_sha256, channel_digest) &&
-                  !strcmp(recovered.retirement_authority_sha256, authority));
-    /* A tampered durable READY record: a success that was already durable is
-     * held for reconciliation, never rewritten as a failure. */
-    char name[48];
-    BQ_PREP_CHECK(bq_record_name(name, "worker-phase-5", job) && unlinkat(queue->directory_fd, name, 0) == 0 &&
-                  bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_RETIREMENT_READY, tampered));
-    BqJob durable = attempt->job;
-    durable.phase = BQ_FINALIZING;
-    durable.outcome = BQ_SUCCEEDED;
-    BqWorkerConfig production = config;
-    production.production_path = true;
-    BqWorkerFinalization restarted = {.config = &production, .result_directory = result, .retirement = seams};
-    snprintf(restarted.result_root, sizeof(restarted.result_root), "%s", result_root);
-    queue->needs_reconciliation = false;
-    BQ_PREP_CHECK(bq_worker_finish(queue, &production, &durable, BQ_SUCCEEDED, BQ_NOT_FOUND, &restarted) != BQ_OK &&
-                  bq_failure_evidence(queue, &durable) == BQ_NOT_FOUND && durable.outcome == BQ_SUCCEEDED &&
-                  durable.phase == BQ_FINALIZING && queue->needs_reconciliation);
-    queue->needs_reconciliation = false;
-    if (result >= 0) close(result);
-    if (made) bq_prep_test_cleanup(result_root);
-    /* The gates: the compiled profile, a missing seam and a blocked status
-     * refuse; the complete seams admit; the queue's own gate never does. */
-    char blocked[4096];
-    BQ_PREP_CHECK(bq_prep_worker_unit_status(fixture->profile, "status=blocked\n", blocked, sizeof(blocked)));
-    BqRetirementWorkerUnitSeams refused = *seams;
-    refused.profile = string_from_pointer(blocked);
-    BqRequest const* request = &attempt->job.request;
-    BQ_PREP_CHECK(!bq_request_valid(request) && !bq_retirement_request_valid_pinned(request, installed.profile) &&
-                  !bq_retirement_request_valid_pinned(request, refused.profile) &&
-                  bq_retirement_request_valid_pinned(request, seams->profile) &&
-                  bq_retirement_request_valid_pinned(&smoke.request, installed.profile));
-    BqRequest malformed = *request;
-    malformed.size -= 1;
-    BQ_PREP_CHECK(!bq_retirement_request_valid_pinned(&malformed, seams->profile));
-    BqRetirementWorkerUnitSeams const* const gated[] = {NULL, &installed, &refused, seams};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(gated); index += 1)
-    {
-        BqWorkerFinalization gate = {.result_directory = -1, .retirement = gated[index]};
-        bool admitted = bq_worker_finalization_recipe(&attempt->job, &gate);
-        /* The launch gate on a bound retirement recipe decides by itself. */
-        BqWorkerFinalization launch = {.result_directory = -1, .retirement = gated[index]};
-        BQ_PREP_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &launch.recipe));
-        BQ_PREP_CHECK(admitted == (index == 3) && bq_worker_recipe_launchable(&launch) == (index == 3) &&
-                      (index != 3 || !strcmp(gate.recipe.name, "native-retirement-performance-v1")));
-        BqWorkerFinalization plain = {.result_directory = -1, .retirement = gated[index]};
-        BQ_PREP_CHECK(bq_worker_finalization_recipe(&smoke, &plain) && bq_worker_recipe_launchable(&plain));
-    }
 }
 
 /* #881 PR 4: on the worker-unit's BQPHASE2 channel the in-unit campaign
@@ -1105,7 +1082,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_campaign_checks(BqPrepOracleFixture
                       S8("self-test"), fixture->driver, fixture->toolchain_root, fixture->broker,
                       fixture->workspaces, attempt->digest, digest) == BQ_OK);
     *failure = bq_prep_worker_unit_failure(attempt->attempt);
-    BQ_PREP_CHECK(status == BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED ? !failure->present :
+    BQ_PREP_CHECK(status == BQ_OK ? !failure->present :
                   failure->present && failure->result == status);
 }
 
@@ -1176,6 +1153,920 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_sized(int attempt, u64 const writte
     return ok;
 }
 
+/* ---------------------------------------------------- #881 PR 3: composition */
+
+/* This runner's own path, the fixture's composer adapter (its
+ * `retirement-replay` mode). */
+BUSTER_GLOBAL_LOCAL char bq_prep_worker_unit_self[4096];
+
+/* A whole small file into a new malloc'd buffer (NUL-terminated). */
+BUSTER_GLOBAL_LOCAL char* bq_prep_worker_unit_slurp(int directory, char const* name, u32* length)
+{
+    int file = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat info = {0};
+    bool ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
+              info.st_size < (1 << 26);
+    char* bytes = ok ? malloc((size_t)info.st_size + 1u) : NULL;
+    u32 used = 0;
+    ok = ok && bytes && bq_read_file(file, (u8*)bytes, (u32)info.st_size, &used) && used == (u32)info.st_size;
+    if (file >= 0) close(file);
+    if (ok) bytes[used] = 0;
+    else
+    {
+        free(bytes);
+        bytes = NULL;
+    }
+    *length = ok ? used : 0;
+    return bytes;
+}
+
+/* The composition's authorities for the reference projection, pinned and
+ * appended to pins: the composer adapter (this runner) and the binding
+ * context the Python fixture emits over the installed census with the
+ * reference's held binaries, the profile's contract pin and lane D's frozen
+ * values (retirement_binding_context_fixture.py), installed under recipes/. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_composition(BqPrepOracleFixture* fixture,
+    BqRetirementProjection const* projection, char* pins, size_t capacity)
+{
+    char adapter[SHA256_HEX_CAPACITY] = {0}, contract[SHA256_HEX_CAPACITY] = {0}, output[256], pin[128] = {0};
+    ssize_t self = readlink("/proc/self/exe", bq_prep_worker_unit_self, sizeof(bq_prep_worker_unit_self) - 1u);
+    bool ok = self > 0 && (size_t)self < sizeof(bq_prep_worker_unit_self) - 1u;
+    if (ok) bq_prep_worker_unit_self[self] = 0;
+    int named = snprintf(output, sizeof(output), "%s/binding-context.fixture", fixture->workspaces);
+    ok = ok && named > 0 && (size_t)named < sizeof(output) && bq_prep_test_file_sha(bq_prep_worker_unit_self, adapter) &&
+         bq_retirement_profile_sha(string_from_pointer(fixture->profile), S8("contract-sha256="), contract);
+    char* emit[] = {"python3", "-W", "error", "tools/bench_service/retirement_binding_context_fixture.py",
+                    fixture->census, output, (char*)projection->prepared.binary_sha256[0],
+                    (char*)projection->prepared.binary_sha256[1], contract, "7", "60", "100000", NULL};
+    ok = ok && bq_prep_test_run(emit);
+    int workspaces = ok ? open(fixture->workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    u32 length = 0;
+    char* bytes = workspaces >= 0 ? bq_prep_worker_unit_slurp(workspaces, "binding-context.fixture", &length) : NULL;
+    if (workspaces >= 0) close(workspaces);
+    ok = ok && bytes && unlink(output) == 0 &&
+         bq_prep_worker_unit_install(fixture->recipes, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_NAME, bytes, length,
+                                     BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN, pin);
+    free(bytes);
+    size_t used = strlen(pins);
+    int appended = ok ? snprintf(pins + used, capacity - used, "adapter-sha256=%s\n%s", adapter, pin) : -1;
+    ok = ok && appended > 0 && (size_t)appended < capacity - used;
+    return ok;
+}
+
+/* One retirement worker-unit driven by the real coordinator path (#881 PR 4,
+ * now reaching MEASURED): the attempt is the queue's active preparing job,
+ * the lease and phase channel are handed to a forked worker-unit, and
+ * bq_worker_phase_join acknowledges every BQPHASE2 phase, keeps the ready
+ * digest and hands the authority off before MEASURED is acknowledged. The
+ * result root, its finalization state and the queue state before the
+ * attempt are kept for the checks (bq_prep_worker_unit_composed_close). */
+typedef struct BqPrepWorkerUnitComposed
+{
+    char root[32], result_root[128];
+    int result_directory;
+    BqWorkerConfig config;
+    BqWorkerFinalization finalization;
+    BqPhaseChannel phases;
+    BqState* saved;
+    BqError joined;
+    int status;
+    bool made;
+} BqPrepWorkerUnitComposed;
+
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinate(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, u32 milliseconds, BqPrepWorkerUnitComposed* composed)
+{
+    *composed = (BqPrepWorkerUnitComposed){.result_directory = -1, .joined = BQ_IO, .status = -1,
+                                           .phases = {.descriptor = -1, .failed = 1}};
+    snprintf(composed->root, sizeof(composed->root), "/tmp/bq-worker-unit-XXXXXX");
+    char lease_path[128], job_text[24], token_text[24];
+    BqWorkerLease lease = {.descriptor = -1};
+    BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
+    BqQueue* queue = &fixture->queue;
+    composed->made = mkdtemp(composed->root) != NULL;
+    int lengths[4] = {snprintf(lease_path, sizeof(lease_path), "%s/host.lock", composed->root),
+                      snprintf(composed->result_root, sizeof(composed->result_root), "%s/result", composed->root),
+                      snprintf(job_text, sizeof(job_text), "%" PRIu64, (uint64_t)attempt->job.id),
+                      snprintf(token_text, sizeof(token_text), "%" PRIu64, (uint64_t)attempt->job.token)};
+    bool ok = composed->made && lengths[0] > 0 && (size_t)lengths[0] < sizeof(lease_path) && lengths[1] > 0 &&
+              (size_t)lengths[1] < sizeof(composed->result_root) && lengths[2] > 0 && lengths[3] > 0 &&
+              mkdir(composed->result_root, 0700) == 0;
+    composed->result_directory = ok ? open(composed->result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    ok = ok && composed->result_directory >= 0 && fstat(composed->result_directory, &info) == 0 &&
+         bq_worker_lease_acquire(lease_path, &lease) == 0 &&
+         bq_worker_lease_handoff_open(composed->result_root, composed->result_directory, &handoff);
+    /* The queue holds the attempt as its active, preparing job. */
+    composed->saved = ok ? malloc(sizeof(*composed->saved)) : NULL;
+    ok = ok && composed->saved && queue->state.job_count < BQ_JOB_CAP;
+    if (ok)
+    {
+        memcpy(composed->saved, &queue->state, sizeof(queue->state));
+        BqJob* job = queue->state.jobs + queue->state.job_count++;
+        *job = attempt->job;
+        job->phase = BQ_PREPARING;
+        job->outcome = BQ_NO_OUTCOME;
+        job->cancel_requested = false;
+        job->result_bound = false;
+        queue->state.active_id = job->id;
+    }
+    composed->config = (BqWorkerConfig){.workspace_root = string_from_pointer(fixture->workspaces)};
+    BqWorkerFinalization* finalization = &composed->finalization;
+    *finalization = (BqWorkerFinalization){.config = &composed->config, .result_directory = composed->result_directory,
+        .result_device = info.st_dev, .result_inode = info.st_ino, .phase_version = BQ_PHASE_VERSION_2,
+        .retirement = seams};
+    snprintf(finalization->result_root, sizeof(finalization->result_root), "%s", composed->result_root);
+    memcpy(finalization->retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
+    ok = ok && bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &finalization->recipe);
+    pid_t unit = ok ? fork() : -1;
+    if (unit == 0)
+    {
+        close(handoff.listener);
+        close(handoff.parent);
+        close(composed->result_directory);
+        close(lease.descriptor);
+        u32 before = bq_prep_test_open_descriptors();
+        BqError error = bq_worker_unit_pinned(string_from_pointer(lease_path), string_from_pointer(job_text),
+            string_from_pointer(token_text), S8("native-retirement-performance-v1"),
+            string_from_pointer(fixture->workspaces), bq_field(&attempt->job.request, 3),
+            bq_field(&attempt->job.request, 4), string_from_pointer(composed->result_root), seams);
+        bool clean = bq_prep_test_live_children() == 0 && bq_prep_test_open_descriptors() == before;
+        _exit(clean ? (int)error : BQ_PREP_WORKER_UNIT_UNCLEAN);
+    }
+    int phase = -1;
+    u64 deadline = bq_worker_monotonic_milliseconds() + milliseconds;
+    finalization->execution_deadline = deadline;
+    ok = ok && unit > 0 && bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, attempt->job.id,
+        attempt->job.token, attempt->digest, deadline, &phase) == BQ_OK;
+    int status = 0;
+    pid_t waited = 0;
+    u64 pause = bq_worker_monotonic_milliseconds() + 10000u;
+    while (ok && !waited && bq_worker_monotonic_milliseconds() < pause)
+    {
+        waited = waitpid(unit, &status, WUNTRACED | WNOHANG);
+        if (!waited) poll(NULL, 0, 5);
+    }
+    ok = ok && waited == unit && WIFSTOPPED(status) && kill(unit, SIGCONT) == 0 &&
+         bq_phase_init_version(&composed->phases, phase, attempt->job.id, attempt->job.token, BQ_PHASE_VERSION_2);
+    BqSystemdContext context = {.pid = unit};
+    if (ok)
+        composed->joined = bq_worker_phase_join(queue, &context, &composed->phases, &status, deadline + 2u * 10000u,
+                                                finalization);
+    /* A unit the join did not reap is stopped here. */
+    bool reaped = ok && context.pid < 0;
+    if (unit > 0 && !reaped)
+    {
+        kill(unit, SIGKILL);
+        while (waitpid(unit, &status, 0) < 0 && errno == EINTR) {}
+    }
+    composed->status = unit > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (phase >= 0) close(phase);
+    composed->phases.descriptor = -1;
+    bq_worker_lease_handoff_close(&handoff);
+    bq_worker_lease_release(&lease);
+}
+
+/* The queue state before the attempt, the result root removed. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_composed_close(BqPrepOracleFixture* fixture,
+    BqPrepWorkerUnitComposed* composed)
+{
+    if (composed->saved) memcpy(&fixture->queue.state, composed->saved, sizeof(fixture->queue.state));
+    free(composed->saved);
+    composed->saved = NULL;
+    if (composed->result_directory >= 0) close(composed->result_directory);
+    composed->result_directory = -1;
+    if (composed->made) bq_prep_test_cleanup(composed->root);
+    composed->made = false;
+}
+
+/* The attempt's retirement-authority/ path. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_authority_path(BqPrepOracleFixture const* fixture, BqJob const* job,
+    char path[256])
+{
+    char name[64];
+    int length = bq_workspace_name(name, job->id, job->token) ?
+                 snprintf(path, 256, "%s/%s/" BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, fixture->workspaces, name) : -1;
+    return length > 0 && length < 256;
+}
+
+/* Every regular file of `from` copied into the new directory `to`. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_copy_tree(char const* from, char const* to)
+{
+    DIR* listing = opendir(from);
+    bool ok = listing && mkdir(to, 0700) == 0;
+    for (struct dirent* entry = listing && ok ? readdir(listing) : NULL; ok && entry; entry = readdir(listing))
+    {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char source[512], target[512];
+        int lengths[2] = {snprintf(source, sizeof(source), "%s/%s", from, entry->d_name),
+                          snprintf(target, sizeof(target), "%s/%s", to, entry->d_name)};
+        ok = lengths[0] > 0 && (size_t)lengths[0] < sizeof(source) && lengths[1] > 0 &&
+             (size_t)lengths[1] < sizeof(target) && bq_prep_test_copy_file(source, target);
+    }
+    if (listing) closedir(listing);
+    return ok;
+}
+
+/* The composed job-82 result for the Python checks
+ * (retirement_compose_test.py, retirement_export_replay_real_test.py):
+ * `retirement-worker-unit-result/` beside this runner, replaced, holding
+ * `result/` (the result root), `authority/` (the producer's authority and
+ * context chain) and `census/` (the installed census the binding's support
+ * files name). */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_export(BqPrepOracleFixture const* fixture,
+    BqPrepWorkerUnitComposed const* composed, BqJob const* job)
+{
+    char directory[4096], result[4200], authority[4200], census[4200], source[256];
+    size_t length = strlen(bq_prep_worker_unit_self);
+    char const* slash = length ? strrchr(bq_prep_worker_unit_self, '/') : NULL;
+    int named = slash ? snprintf(directory, sizeof(directory), "%.*s/retirement-worker-unit-result",
+                                 (int)(slash - bq_prep_worker_unit_self), bq_prep_worker_unit_self) : -1;
+    bool ok = named > 0 && (size_t)named < sizeof(directory) &&
+              bq_prep_worker_unit_authority_path(fixture, job, source);
+    struct stat info = {0};
+    if (ok && lstat(directory, &info) == 0) bq_prep_test_cleanup(directory);
+    snprintf(result, sizeof(result), "%s/result", directory);
+    snprintf(authority, sizeof(authority), "%s/authority", directory);
+    snprintf(census, sizeof(census), "%s/census", directory);
+    ok = ok && mkdir(directory, 0700) == 0 && bq_prep_worker_unit_copy_tree(composed->result_root, result) &&
+         bq_prep_worker_unit_copy_tree(source, authority) && bq_prep_worker_unit_copy_tree(fixture->census, census);
+    /* The #511 validator accepts the written binding (structurally: its
+     * subject, provenance and host descriptors are the test record's). */
+    char binding[4300];
+    int bound = snprintf(binding, sizeof(binding), "%s/" BQ_RETIREMENT_WORKER_BINDING_PATH, result);
+    char* validate[] = {"python3", "-W", "error", "tools/native_retirement_performance_binding.py", binding, NULL};
+    ok = ok && bound > 0 && (size_t)bound < sizeof(binding) && bq_prep_test_run(validate);
+    return ok;
+}
+
+/* The digest with its first hex digit changed. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_flip(char digest[SHA256_HEX_CAPACITY])
+{
+    digest[0] = digest[0] == '0' ? '1' : '0';
+}
+
+/* `name` copied from `from` into `to` (mode 0600) with the first occurrence
+ * of `find` replaced by `replace` (both NULL: unchanged); digest receives the
+ * copy's SHA-256. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_copy_edit(int from, int to, char const* name, char const* find,
+    char const* replace, char digest[SHA256_HEX_CAPACITY])
+{
+    u32 length = 0;
+    char* bytes = bq_prep_worker_unit_slurp(from, name, &length);
+    char* at = bytes && find ? strstr(bytes, find) : NULL;
+    size_t find_length = find ? strlen(find) : 0, replace_length = replace ? strlen(replace) : 0;
+    bool ok = bytes && (!find || at);
+    size_t total = ok ? (size_t)length - find_length + replace_length : 0;
+    char* edited = ok ? malloc(total + 1u) : NULL;
+    ok = ok && edited;
+    if (ok)
+    {
+        size_t prefix = at ? (size_t)(at - bytes) : length;
+        memcpy(edited, bytes, prefix);
+        if (at)
+        {
+            memcpy(edited + prefix, replace, replace_length);
+            memcpy(edited + prefix + replace_length, at + find_length, (size_t)length - prefix - find_length);
+        }
+    }
+    int file = ok ? openat(to, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && file >= 0 && bq_write_all(file, (u8 const*)edited, (u32)total);
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (ok) bq_digest(edited, (u32)total, (char8*)digest);
+    free(edited);
+    free(bytes);
+    return ok;
+}
+
+/* The final context of a binding over a raw numeric digest. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_context(int directory, char const* raw, char digest[SHA256_HEX_CAPACITY])
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+    u32 length = 0;
+    char* binding = bq_prep_worker_unit_slurp(directory, BQ_RETIREMENT_WORKER_BINDING_PATH, &length);
+    char* context = NULL;
+    size_t context_length = 0;
+    bool ok = arena && binding && tp_retirement_compose_execution_context((unsigned char const*)binding, length, raw,
+                                                                          arena, &context, &context_length);
+    if (ok) bq_digest(context, (u32)context_length, (char8*)digest);
+    free(binding);
+    if (arena) arena_destroy(arena, 1);
+    return ok;
+}
+
+/* One scratch edit of the composed result for the derivation: `find`
+ * replaced by `replace` in one copied file; `relist` moves the record's
+ * retained line and the authority's retained digest to the edited record (a
+ * consistent forgery of the record), `plan` moves the authority's plan to
+ * the edited record's execution-plan value, `rebind` moves the chain's
+ * binding digest to the edited binding, and `recontext` the authority's
+ * context to the one recomputed over it. */
+typedef struct BqPrepWorkerUnitForge
+{
+    u32 file;
+    char find[96], replace[96];
+    bool relist, plan, rebind, recontext;
+} BqPrepWorkerUnitForge;
+
+/* Every result-root file the derivation reads, the retained manifest last
+ * (it lists the record's copy). */
+enum { BQ_PREP_FORGE_UNTIMED, BQ_PREP_FORGE_RECORD, BQ_PREP_FORGE_BINDING, BQ_PREP_FORGE_ADMISSION,
+       BQ_PREP_FORGE_RETAINED, BQ_PREP_FORGE_FILES };
+
+/* The derivation over a scratch result directory of copies with `forge`
+ * applied (NULL: unedited). */
+BUSTER_GLOBAL_LOCAL BqError bq_prep_worker_unit_forged(BqRetirementWorkerUnitSeams const* seams,
+    BqRetirementUnitReplayed const* replayed, BqJob const* job, char const* ready, int result,
+    TpRetirementReceiptAuthority const* trusted, BqRetirementContextChainCarried const* carried,
+    BqPrepWorkerUnitForge const* forge)
+{
+    static char const* const files[BQ_PREP_FORGE_FILES] = {BQ_RETIREMENT_WORKER_UNTIMED_PATH,
+        BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, BQ_RETIREMENT_WORKER_BINDING_PATH, BQ_RETIREMENT_WORKER_ADMISSION_PATH,
+        TP_RETIREMENT_RETAINED_MANIFEST_PATH};
+    char scratch[] = "/tmp/bq-worker-unit-derive-XXXXXX";
+    bool made = mkdtemp(scratch) != NULL;
+    int copy = made ? open(scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    char digests[BQ_PREP_FORGE_FILES][SHA256_HEX_CAPACITY] = {{0}}, record_digest[SHA256_HEX_CAPACITY] = {0};
+    char listed[80] = {0}, relisted[80] = {0};
+    u32 length = 0;
+    char* record = bq_prep_worker_unit_slurp(result, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, &length);
+    if (record) bq_digest(record, length, (char8*)record_digest);
+    bool ok = copy >= 0 && record;
+    for (u32 index = 0; ok && index < BQ_PREP_FORGE_RETAINED; index += 1)
+    {
+        bool edited = forge && forge->file == index;
+        ok = bq_prep_worker_unit_copy_edit(result, copy, files[index], edited ? forge->find : NULL,
+                                           edited ? forge->replace : NULL, digests[index]);
+    }
+    bool relist = forge && forge->relist;
+    snprintf(listed, sizeof(listed), " %s ", record_digest);
+    snprintf(relisted, sizeof(relisted), " %s ", digests[BQ_PREP_FORGE_RECORD]);
+    ok = ok && bq_prep_worker_unit_copy_edit(result, copy, files[BQ_PREP_FORGE_RETAINED], relist ? listed : NULL,
+                                             relist ? relisted : NULL, digests[BQ_PREP_FORGE_RETAINED]);
+    TpRetirementReceiptAuthority edited = *trusted;
+    BqRetirementContextChainCarried linked = *carried;
+    if (relist) memcpy(edited.retained_sha256, digests[BQ_PREP_FORGE_RETAINED], SHA256_HEX_CAPACITY);
+    char const* value = forge && forge->plan ? strchr(forge->replace, '=') : NULL;
+    if (value) memcpy(edited.plan_sha256, value + 1, 64);
+    if (forge && forge->rebind) memcpy(linked.binding, digests[BQ_PREP_FORGE_BINDING], SHA256_HEX_CAPACITY);
+    if (forge && forge->recontext)
+        ok = ok && bq_prep_worker_unit_context(copy, carried->stages[1].raw, edited.context_sha256);
+    BqError derived = ok ? bq_retirement_coordinator_derive(seams, replayed, job->id, job->token, ready, &edited, &linked,
+                                                            copy) : BQ_IO;
+    free(record);
+    if (copy >= 0) close(copy);
+    if (made) bq_prep_test_cleanup(scratch);
+    return derived;
+}
+
+/* A record-line forgery: the first character of `key`'s value flipped. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_forge_line(char const* record, char const* key, bool plan,
+    BqPrepWorkerUnitForge* forge)
+{
+    char pattern[48];
+    int named = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    char const* found = named > 0 && record ? strstr(record, pattern) : NULL;
+    char const* end = found ? strchr(found + 1, '\n') : NULL;
+    size_t span = end ? (size_t)(end - found) : 0;
+    bool ok = span && span < sizeof(forge->find) && (size_t)named < span;
+    *forge = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_RECORD, .relist = true, .plan = plan};
+    if (ok)
+    {
+        memcpy(forge->find, found, span);
+        memcpy(forge->replace, found, span);
+        bq_prep_worker_unit_flip(forge->replace + named);
+    }
+    return ok;
+}
+
+/* Review items M1 of #1961 and of #1964, over the composed job: the
+ * coordinator's derivation (bq_retirement_coordinator_derive) accepts the
+ * genuine authority and chain and refuses, each through one check alone:
+ *   an authority whose plan differs from the recomputed execution-plan
+ *   document; a ready digest other than the coordinator's (the pre-sample
+ *   context no longer binds it); a carried stage fact that does not give
+ *   the carried post-sample context; a carried binding digest that is not
+ *   the result's binding; an authority context that is not the binding's
+ *   execution context;
+ * and, over scratch copies of every result-root file it reads (which the
+ * unedited copy derives): an untimed record stream other than the one the
+ * store sealed; an admission receipt other than the one the record names; a
+ * record byte no line check reads (its
+ * retained line is stale); every checked line of the post-sample record
+ * forged consistently (the record, its retained line and the authority's
+ * retained digest), including its execution-plan line with the authority's
+ * plan following (so only the recomputed document refuses it) and without
+ * it (so only the record's line check refuses it); a binding linked to
+ * another post-A/A document, or with another measurement harness, each with
+ * the chain's binding digest and the authority's context recomputed over it
+ * (refused because the coordinator derives the context from its own
+ * rendering); and a binding with another measurement harness whose chain
+ * digest follows but whose authority context stays the genuine one (so only
+ * the byte comparison with that rendering refuses it); and a pinned binding
+ * context with another campaign seed, installed under its own pin, with the
+ * result's binding rendered from it (so only the coordinator's own check of
+ * the context refuses it). */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_derivation(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, BqPrepWorkerUnitComposed const* composed,
+    BqRetirementUnitReplayed const* replayed)
+{
+    String8 workspaces = string_from_pointer(fixture->workspaces);
+    BqWorkerFinalization const* finalization = &composed->finalization;
+    u64 job = attempt->job.id, token = attempt->job.token;
+    TpRetirementReceiptAuthority trusted = {0};
+    BqRetirementContextChainCarried carried = {0};
+    BQ_PREP_CHECK(bq_retirement_coordinator_authority_complete(composed->result_directory, workspaces,
+                      fixture->queue.directory_fd, job, token, seams->profile, attempt->digest,
+                      finalization->retirement_ready_sha256, finalization->retirement_authority_sha256, &trusted,
+                      &carried) == BQ_OK);
+    char const* ready = finalization->retirement_ready_sha256;
+    int result = composed->result_directory;
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, ready, &trusted, &carried, result) ==
+                  BQ_OK);
+    TpRetirementReceiptAuthority forged = trusted;
+    bq_prep_worker_unit_flip(forged.plan_sha256);
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, ready, &forged, &carried, result) ==
+                  BQ_WORKER_MISMATCH);
+    char other[SHA256_HEX_CAPACITY];
+    memcpy(other, ready, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_flip(other);
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, other, &trusted, &carried, result) ==
+                  BQ_WORKER_MISMATCH);
+    BqRetirementContextChainCarried changed = carried;
+    changed.stages[0].invocations += 1u;
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, ready, &trusted, &changed, result) ==
+                  BQ_WORKER_MISMATCH);
+    changed = carried;
+    bq_prep_worker_unit_flip(changed.binding);
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, ready, &trusted, &changed, result) ==
+                  BQ_WORKER_MISMATCH);
+    forged = trusted;
+    bq_prep_worker_unit_flip(forged.context_sha256);
+    BQ_PREP_CHECK(bq_retirement_coordinator_derive(seams, replayed, job, token, ready, &forged, &carried, result) ==
+                  BQ_WORKER_MISMATCH);
+    /* The scratch edits: unedited first (which derives). */
+    u32 length = 0, bound = 0;
+    char* record = bq_prep_worker_unit_slurp(result, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, &length);
+    char* binding = bq_prep_worker_unit_slurp(result, BQ_RETIREMENT_WORKER_BINDING_PATH, &bound);
+    char const* post = record ? strstr(record, "\npost-aa-binding=") : NULL;
+    char const* harness = binding ? strstr(binding, "\"harness_source_commit\":\"") : NULL;
+    BQ_PREP_CHECK(record && post && harness);
+    static char const* const lines[] = {"job=", "attempt=", "plan=", "pre-sample=", "post-sample=", "log-untimed=",
+        "log-aa=", "log-ab=", "pre-sample-plan=", "result-input-plan=", "post-aa-binding=", "aa-admission=", "family=",
+        "timed-rows=", "execution-plan="};
+    BqPrepWorkerUnitForge forges[3u + BUSTER_ARRAY_LENGTH(lines) + 4u];
+    u32 count = 0;
+    forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_UNTIMED, .find = "\"", .replace = "'"};
+    /* Another admission receipt than the one the record and binding name. */
+    forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_ADMISSION, .find = "\"admitted\":true",
+                                              .replace = "\"admitted\":TRUE"};
+    forges[count++] = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_RECORD, .find = "\nlaunches=",
+                                              .replace = "\nLaunches="};
+    bool prepared = record && post && harness;
+    for (u32 index = 0; prepared && index < BUSTER_ARRAY_LENGTH(lines); index += 1)
+    {
+        bool plan = !strcmp(lines[index], "execution-plan=");
+        prepared = bq_prep_worker_unit_forge_line(record, lines[index], plan, &forges[count]);
+        count += prepared;
+    }
+    if (prepared)
+    {
+        prepared = bq_prep_worker_unit_forge_line(record, "execution-plan=", false, &forges[count]);
+        count += prepared;
+        BqPrepWorkerUnitForge* link = &forges[count++];
+        *link = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_BINDING, .rebind = true, .recontext = true};
+        snprintf(link->find, sizeof(link->find), "%.64s", post + 17);
+        snprintf(link->replace, sizeof(link->replace), "%.64s", post + 17);
+        bq_prep_worker_unit_flip(link->replace);
+        BqPrepWorkerUnitForge* measurement = &forges[count++];
+        *measurement = (BqPrepWorkerUnitForge){.file = BQ_PREP_FORGE_BINDING, .rebind = true, .recontext = true};
+        snprintf(measurement->find, sizeof(measurement->find), "%.30s", harness);
+        snprintf(measurement->replace, sizeof(measurement->replace), "%.30s", harness);
+        bq_prep_worker_unit_flip(measurement->replace + 25);
+        forges[count] = *measurement;
+        forges[count++].recontext = false;
+    }
+    BQ_PREP_CHECK(prepared && count == BUSTER_ARRAY_LENGTH(forges));
+    BqJob const* queued = &attempt->job;
+    BQ_PREP_CHECK(bq_prep_worker_unit_forged(seams, replayed, queued, ready, result, &trusted, &carried, NULL) == BQ_OK);
+    for (u32 index = 0; prepared && index < count; index += 1)
+    {
+        BqError derived = bq_prep_worker_unit_forged(seams, replayed, queued, ready, result, &trusted, &carried,
+                                                     &forges[index]);
+        if (derived != BQ_WORKER_MISMATCH)
+            fprintf(stderr, "RETIREMENT_PREP derivation forge %u (%s): %d\n", index, forges[index].find, (int)derived);
+        BQ_PREP_CHECK(derived == BQ_WORKER_MISMATCH);
+    }
+    /* A pinned binding context the replayed plan refuses (another campaign
+     * seed), installed under its own pin, with the result's binding rendered
+     * from it (the context's rules section is the binding's verbatim) and the
+     * chain and authority following: the coordinator's rendering then equals
+     * the result, so only its own check of the context refuses it. */
+    BqRetirementUnitCampaignPins pins = {0};
+    char seed[32], other_seed[32], pin[128] = {0}, profile[sizeof(fixture->profile)];
+    u32 context_length = 0;
+    int recipes = open(fixture->recipes, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    char* context = recipes >= 0 ? bq_prep_worker_unit_slurp(recipes, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_NAME,
+                                                             &context_length) : NULL;
+    if (recipes >= 0) close(recipes);
+    bool pinned = context && bq_retirement_unit_campaign_pins(seams->profile, &pins);
+    snprintf(seed, sizeof(seed), "\"seed\":%" PRIu64 ",", (uint64_t)pins.seed);
+    snprintf(other_seed, sizeof(other_seed), "\"seed\":%" PRIu64 ",", (uint64_t)(pins.seed ^ 1u));
+    char* rules = pinned ? strstr(context, "\nrules=") : NULL;
+    char* at = rules ? strstr(rules, seed) : NULL;
+    char* key = strstr(fixture->profile, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN);
+    pinned = at && key && strlen(seed) == strlen(other_seed) && binding && strstr(binding, seed);
+    if (pinned) memcpy(at, other_seed, strlen(other_seed));
+    pinned = pinned && bq_prep_worker_unit_install(fixture->recipes, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_NAME,
+                                                   context, context_length, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN,
+                                                   pin);
+    if (pinned)
+    {
+        size_t offset = (size_t)(key - fixture->profile) + strlen(BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN);
+        memcpy(profile, fixture->profile, sizeof(profile));
+        memcpy(profile + offset, pin + strlen(BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN), 64);
+        BqRetirementWorkerUnitSeams reseeded = *seams;
+        reseeded.profile = string_from_pointer(profile);
+        BqPrepWorkerUnitForge rendered = {.file = BQ_PREP_FORGE_BINDING, .rebind = true, .recontext = true};
+        snprintf(rendered.find, sizeof(rendered.find), "%s", seed);
+        snprintf(rendered.replace, sizeof(rendered.replace), "%s", other_seed);
+        BqError derived = bq_prep_worker_unit_forged(&reseeded, replayed, queued, ready, result, &trusted, &carried,
+                                                     &rendered);
+        if (derived != BQ_WORKER_MISMATCH) fprintf(stderr, "RETIREMENT_PREP derivation reseeded context: %d\n", derived);
+        BQ_PREP_CHECK(derived == BQ_WORKER_MISMATCH);
+        memcpy(at, seed, strlen(seed));
+    }
+    /* The genuine context again, under its original pin. */
+    char restored[128] = {0};
+    BQ_PREP_CHECK(pinned && bq_prep_worker_unit_install(fixture->recipes, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_NAME,
+                      context, context_length, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN, restored) &&
+                  !memcmp(restored + strlen(BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN),
+                          key + strlen(BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN), 64));
+    free(context);
+    free(binding);
+    free(record);
+}
+
+/* The binding writer's context check (bq_retirement_worker_binding_check)
+ * accepts the installed context and refuses, each alone: a pinned support
+ * file at another digest, another contract, another candidate or baseline
+ * binary, another statistical family or required-row count, another
+ * campaign seed, pairs per round or bootstrap member count, and an
+ * admission receipt that is not the sentinel or is not execution's first
+ * member. A non-canonical section is refused by the parse. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_binding_refusals(BqPrepOracleFixture* fixture,
+    BqRetirementWorkerUnitSeams const* seams, BqRetirementUnitReplayed const* replayed)
+{
+    BqRetirementCorrectness const* gate = &replayed->gate.correctness;
+    String8 profile = seams->profile;
+    BqRetirementDocumentPopulation population = {0};
+    BqRetirementDocumentPartition timed = {0};
+    BqRetirementDocumentFamily family = {0};
+    BqRetirementUnitCampaignPins pins = {0};
+    TpRetirementPlan plan = {0};
+    char support[SHA256_HEX_CAPACITY] = {0}, contract[SHA256_HEX_CAPACITY] = {0};
+    int recipes = open(fixture->recipes, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    u32 length = 0;
+    char* installed = recipes >= 0 ? bq_prep_worker_unit_slurp(recipes, BQ_RETIREMENT_WORKER_BINDING_CONTEXT_NAME,
+                                                               &length) : NULL;
+    if (recipes >= 0) close(recipes);
+    bool ready = installed && bq_retirement_documents_population(fixture->installed_fd, profile, gate->trusted_rows,
+                     gate->prepared.rows, gate->prepared.native_target, &population) == BQ_OK &&
+                 bq_retirement_documents_partition(&population, 0, &timed) &&
+                 bq_retirement_documents_family(&population, &timed, &family) &&
+                 bq_retirement_unit_campaign_pins(profile, &pins) && bq_retirement_unit_campaign_plan(gate, &pins, &plan) &&
+                 bq_retirement_profile_sha(profile, S8("support-declaration-sha256="), support) &&
+                 bq_retirement_profile_sha(profile, S8("contract-sha256="), contract);
+    BQ_PREP_CHECK(ready);
+    char const* candidate = gate->prepared.binary_sha256[1];
+    char const* baseline = gate->prepared.binary_sha256[0];
+    /* Integer fields keep their digit count with the low bit flipped. */
+    char seed[32], other_seed[32], rows[48], other_rows[48], pairs[40], other_pairs[40], members[48], other_members[48];
+    snprintf(seed, sizeof(seed), "\"seed\":%" PRIu64 ",", (uint64_t)pins.seed);
+    snprintf(other_seed, sizeof(other_seed), "\"seed\":%" PRIu64 ",", (uint64_t)pins.seed + 1u);
+    snprintf(rows, sizeof(rows), "\"required_row_count\":%u,", gate->prepared.rows);
+    snprintf(other_rows, sizeof(other_rows), "\"required_row_count\":%u,", gate->prepared.rows ^ 1u);
+    snprintf(pairs, sizeof(pairs), "\"pairs_per_round\":%u,", pins.pairs);
+    snprintf(other_pairs, sizeof(other_pairs), "\"pairs_per_round\":%u,", pins.pairs ^ 1u);
+    snprintf(members, sizeof(members), "\"bootstrap_members_per_scope\":%u,", plan.bootstrap_members_per_scope);
+    snprintf(other_members, sizeof(other_members), "\"bootstrap_members_per_scope\":%u,",
+             plan.bootstrap_members_per_scope ^ 1u);
+    /* (line key, digest or text to replace, its replacement) */
+    char changed[10][80];
+    char const* finds[] = {NULL, support, contract, candidate, family.sha256, seed, "\"sha256\":\"0000", baseline,
+                           rows, pairs, members};
+    char const* lines[] = {NULL, "support=", "contract=", "subjects=", "population=", "rules=", "execution=",
+                           "subjects=", "population=", "rules=", "rules="};
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        snprintf(changed[index], sizeof(changed[index]), "%s", finds[index + 1]);
+        bq_prep_worker_unit_flip(changed[index]);
+    }
+    snprintf(changed[4], sizeof(changed[4]), "%s", other_seed);
+    snprintf(changed[5], sizeof(changed[5]), "\"sha256\":\"1000");
+    snprintf(changed[6], sizeof(changed[6]), "%s", baseline);
+    bq_prep_worker_unit_flip(changed[6]);
+    snprintf(changed[7], sizeof(changed[7]), "%s", other_rows);
+    snprintf(changed[8], sizeof(changed[8]), "%s", other_pairs);
+    snprintf(changed[9], sizeof(changed[9]), "%s", other_members);
+    for (u32 index = 0; ready && index < BUSTER_ARRAY_LENGTH(finds); index += 1)
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+        BqRetirementWorkerBindingContext context = {.bytes = malloc(length + 1u), .length = length};
+        bool copied = arena && context.bytes;
+        if (copied) memcpy(context.bytes, installed, length + 1u);
+        char* line = copied && lines[index] ? strstr((char*)context.bytes, lines[index]) : NULL;
+        char* at = line ? strstr(line, finds[index]) : NULL;
+        char* end = line ? strchr(line, '\n') : NULL;
+        copied = copied && (!index || (at && end && at < end));
+        if (copied && index) memcpy(at, changed[index - 1], strlen(finds[index]));
+        bool accepted = copied && bq_retirement_worker_binding_parse(arena, &context) &&
+                        bq_retirement_worker_binding_check(&context, profile, gate, family.sha256, &pins, &plan);
+        BQ_PREP_CHECK(copied && accepted == (index == 0));
+        bq_retirement_worker_binding_release(&context);
+        if (arena) arena_destroy(arena, 1);
+    }
+    /* A section re-encoded non-canonically (a space after its first colon). */
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+    BqRetirementWorkerBindingContext spaced = {.bytes = malloc(length + 2u), .length = length + 1u};
+    char* colon = spaced.bytes ? strstr(installed, "contract={\"source\":") : NULL;
+    bool spaced_ok = arena && colon;
+    if (spaced_ok)
+    {
+        size_t at = (size_t)(colon - installed) + strlen("contract={\"source\":");
+        memcpy(spaced.bytes, installed, at);
+        spaced.bytes[at] = ' ';
+        memcpy(spaced.bytes + at + 1u, installed + at, length - at + 1u);
+    }
+    BQ_PREP_CHECK(spaced_ok && !bq_retirement_worker_binding_parse(arena, &spaced));
+    bq_retirement_worker_binding_release(&spaced);
+    if (arena) arena_destroy(arena, 1);
+    /* Canonical, with the sentinel once and every receipt field in place, but
+     * with another execution key sorted before host: the sentinel is no
+     * longer the section's first member, which the writer splices at. */
+    static char const leading[] = "\"aaa\":1,";
+    arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+    BqRetirementWorkerBindingContext shifted = {.bytes = malloc(length + sizeof(leading)),
+                                                .length = length + (u32)sizeof(leading) - 1u};
+    char* section = shifted.bytes ? strstr(installed, "\nexecution={") : NULL;
+    bool shifted_ok = arena && section;
+    if (shifted_ok)
+    {
+        size_t at = (size_t)(section - installed) + strlen("\nexecution={");
+        memcpy(shifted.bytes, installed, at);
+        memcpy(shifted.bytes + at, leading, sizeof(leading) - 1u);
+        memcpy(shifted.bytes + at + sizeof(leading) - 1u, installed + at, length - at + 1u);
+    }
+    BQ_PREP_CHECK(shifted_ok && bq_retirement_worker_binding_parse(arena, &shifted) &&
+                  !bq_retirement_worker_binding_check(&shifted, profile, gate, family.sha256, &pins, &plan));
+    bq_retirement_worker_binding_release(&shifted);
+    if (arena) arena_destroy(arena, 1);
+    free(installed);
+    bq_retirement_documents_partition_release(&timed);
+    bq_retirement_documents_population_release(&population);
+}
+
+/* The retirement result's manifest and context chain at finalization: the
+ * coordinator's re-formatted manifest refuses a manifest whose ready digest
+ * or bundle line was changed (on a fresh, unbound validation), and the
+ * journalled authority finalization requires
+ * (bq_retirement_coordinator_authority_complete) is refused without its
+ * context chain; both pass again restored. The end-to-end finalization is
+ * checked once, over the genuine result, by the caller. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_result_refusals(BqPrepOracleFixture* fixture,
+    BqPrepUnitAttempt const* attempt, BqPrepWorkerUnitComposed* composed)
+{
+    BqQueue* queue = &fixture->queue;
+    BqJob const* job = bq_job(&queue->state, attempt->job.id);
+    char const* manifest = composed->finalization.recipe.manifest;
+    u32 length = 0;
+    char* bytes = bq_prep_worker_unit_slurp(composed->result_directory, manifest, &length);
+    char const* keys[] = {"\nready-sha256=", "\nbundle-sha256="};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(keys); index += 1)
+    {
+        char* at = bytes ? strstr(bytes, keys[index]) : NULL;
+        bool ok = job && at && fchmodat(composed->result_directory, manifest, 0600, 0) == 0;
+        size_t digit = at ? (size_t)(at - bytes) + strlen(keys[index]) : 0;
+        char saved = ok ? bytes[digit] : 0;
+        if (ok) bytes[digit] = saved == '0' ? '1' : '0';
+        int file = ok ? openat(composed->result_directory, manifest, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && file >= 0 && bq_write_all(file, (u8 const*)bytes, length);
+        if (file >= 0) close(file);
+        /* Read-only again, as the producer left it, so only the content
+         * differs from the genuine manifest. */
+        ok = ok && fchmodat(composed->result_directory, manifest, 0400, 0) == 0;
+        BqWorkerFinalization fresh = composed->finalization;
+        fresh.result_bound = false;
+        BQ_PREP_CHECK(ok && bq_worker_result_validate(&composed->config, job, &fresh) == BQ_CONFIGURATION_MISMATCH);
+        if (ok) bytes[digit] = saved;
+        ok = ok && fchmodat(composed->result_directory, manifest, 0600, 0) == 0;
+        file = ok ? openat(composed->result_directory, manifest, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && file >= 0 && bq_write_all(file, (u8 const*)bytes, length);
+        if (file >= 0) close(file);
+        fresh = composed->finalization;
+        BQ_PREP_CHECK(ok && fchmodat(composed->result_directory, manifest, 0400, 0) == 0 &&
+                      bq_worker_result_validate(&composed->config, job, &fresh) == BQ_OK);
+    }
+    free(bytes);
+    char authority[256], name[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    bool named = job && bq_prep_worker_unit_authority_path(fixture, job, authority) &&
+                 bq_retirement_context_chain_name(name, job->id, job->token);
+    int directory = named ? open(authority, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BqWorkerFinalization fresh = composed->finalization;
+    BqRetirementWorkerUnitSeams const* seams = fresh.retirement;
+    bool moved = directory >= 0 && seams && renameat(directory, name, directory, "moved-chain") == 0;
+    /* The journalled authority is refused without its chain (before the
+     * derivation, which would also lack the carried values). */
+    BQ_PREP_CHECK(moved && bq_retirement_coordinator_authority_complete(composed->result_directory,
+                      string_from_pointer(fixture->workspaces), queue->directory_fd, job->id, job->token,
+                      seams->profile, attempt->digest, fresh.retirement_ready_sha256,
+                      fresh.retirement_authority_sha256, NULL, NULL) == BQ_WORKER_MISMATCH);
+    BQ_PREP_CHECK(moved && renameat(directory, "moved-chain", directory, name) == 0 &&
+                  bq_retirement_coordinator_authority_complete(composed->result_directory,
+                      string_from_pointer(fixture->workspaces), queue->directory_fd, job->id, job->token,
+                      seams->profile, attempt->digest, fresh.retirement_ready_sha256,
+                      fresh.retirement_authority_sha256, NULL, NULL) == BQ_OK);
+    if (directory >= 0) close(directory);
+}
+
+/* #881 PR 4, the coordinator's side over the attempt the producer composed.
+ * The replay at finalization accepts the digest the channel carried and
+ * refuses another digest and a changed record. bq_worker_retirement_finalize
+ * (bq_worker_finish's hook) requires the ready digest, the replay, the
+ * journalled authority the packet named and (#881 PR 3) its derivation,
+ * stops at the execution deadline before or after the replay, reloads every
+ * digest from the durable queue records in recovery, and a durable success
+ * whose READY record was tampered with is held, never rewritten. The
+ * request, finalization and launch gates refuse the recipe under the
+ * compiled or no profile and admit it only through the complete seams. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, BqPrepWorkerUnitComposed const* composed)
+{
+    String8 workspaces = string_from_pointer(fixture->workspaces);
+    u64 job = attempt->job.id, token = attempt->job.token;
+    char const* channel_digest = composed->finalization.retirement_ready_sha256;
+    char const* authority = composed->finalization.retirement_authority_sha256;
+    char tampered[SHA256_HEX_CAPACITY], record[80], other_authority[SHA256_HEX_CAPACITY];
+    memcpy(tampered, channel_digest, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_flip(tampered);
+    memcpy(other_authority, authority, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_flip(other_authority);
+    snprintf(record, sizeof(record), "ready-%s", channel_digest);
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest, NULL) ==
+                  BQ_OK);
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, tampered, NULL) !=
+                  BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest,
+                                                   NULL) != BQ_OK &&
+                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest,
+                                                   NULL) == BQ_OK);
+    /* The compiled profile cannot replay even the true record. */
+    BqRetirementWorkerUnitSeams installed = bq_retirement_worker_unit_installed();
+    installed.installed_root = seams->installed_root;
+    installed.broker_workspaces = seams->broker_workspaces;
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(&installed, workspaces, job, token, attempt->digest,
+                                                   channel_digest, NULL) != BQ_OK);
+    /* The finish hook over the composed result. */
+    BqQueue* queue = &fixture->queue;
+    BqJob const* queued = bq_job(&queue->state, job);
+    BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
+    BqWorkerConfig config = {.workspace_root = workspaces, .backend = &clock};
+    BqWorkerFinalization finalization = {.config = &config, .result_directory = composed->result_directory,
+                                         .retirement = seams};
+    memcpy(finalization.retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
+    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_clock_mode = 0;
+    /* A missing ready digest is reloaded from the durable READY record. */
+    BQ_PREP_CHECK(queued && bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_OK &&
+                  !strcmp(finalization.retirement_ready_sha256, channel_digest));
+    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) != BQ_OK);
+    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_OK);
+    /* A changed record fails the replay even with every digest and the
+     * authority intact. */
+    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_worker_retirement_finalize(queue, queued, &finalization) != BQ_OK &&
+                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_OK);
+    /* The authority the packet named must be the journalled one. */
+    memcpy(finalization.retirement_authority_sha256, other_authority, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_WORKER_MISMATCH);
+    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
+    /* The execution deadline (backend clock) before the replay, which then
+     * never runs (a tampered digest would fail it), and after it. */
+    finalization.execution_deadline = 1000;
+    bq_prep_worker_unit_clock_mode = 1;
+    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_WORKER_TIMEOUT);
+    bq_prep_worker_unit_clock_mode = 2;
+    bq_prep_worker_unit_clock_calls = 0;
+    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_WORKER_TIMEOUT);
+    finalization.execution_deadline = 0;
+    bq_prep_worker_unit_clock_mode = 0;
+    BqJob smoke = attempt->job;
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("coordinator"), S8("validate-buster-v1"),
+                                      bq_field(&attempt->job.request, 3), bq_field(&attempt->job.request, 4)};
+    BQ_PREP_CHECK(bq_request_make(fields, &smoke.request) == BQ_OK);
+    BqWorkerFinalization plain_smoke = {.config = &config, .result_directory = -1, .retirement = seams};
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &smoke, &plain_smoke) == BQ_OK);
+    /* Recovery: a fresh finalization reloads every digest from the durable
+     * queue records the coordinator wrote and derives again. */
+    BqWorkerFinalization recovered = {.config = &config, .result_directory = composed->result_directory,
+                                      .retirement = seams};
+    BQ_PREP_CHECK(queued && bq_worker_retirement_finalize(queue, queued, &recovered) == BQ_OK &&
+                  !strcmp(recovered.retirement_preparation_sha256, attempt->digest) &&
+                  !strcmp(recovered.retirement_ready_sha256, channel_digest) &&
+                  !strcmp(recovered.retirement_authority_sha256, authority));
+    /* A tampered durable READY record: a success that was already durable is
+     * held for reconciliation, never rewritten as a failure. The genuine
+     * record is restored afterwards. */
+    char name[48];
+    u8 genuine[512];
+    u32 genuine_bytes = 0;
+    BQ_PREP_CHECK(bq_record_name(name, "worker-phase-5", job) &&
+                  bq_record_read(queue, name, genuine, sizeof(genuine), &genuine_bytes) == BQ_OK &&
+                  unlinkat(queue->directory_fd, name, 0) == 0 &&
+                  bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_RETIREMENT_READY, tampered));
+    BqJob durable = attempt->job;
+    durable.phase = BQ_FINALIZING;
+    durable.outcome = BQ_SUCCEEDED;
+    BqWorkerConfig production = config;
+    production.production_path = true;
+    BqWorkerFinalization restarted = {.config = &production, .result_directory = composed->result_directory,
+                                      .retirement = seams};
+    snprintf(restarted.result_root, sizeof(restarted.result_root), "%s", composed->result_root);
+    queue->needs_reconciliation = false;
+    BQ_PREP_CHECK(bq_worker_finish(queue, &production, &durable, BQ_SUCCEEDED, BQ_NOT_FOUND, &restarted) != BQ_OK &&
+                  bq_failure_evidence(queue, &durable) == BQ_NOT_FOUND && durable.outcome == BQ_SUCCEEDED &&
+                  durable.phase == BQ_FINALIZING && queue->needs_reconciliation);
+    queue->needs_reconciliation = false;
+    BQ_PREP_CHECK(unlinkat(queue->directory_fd, name, 0) == 0 &&
+                  bq_record_write(queue, name, genuine, genuine_bytes, false) == BQ_OK);
+    /* The gates: the compiled profile, a missing seam and a blocked status
+     * refuse; the complete seams admit; the queue's own gate never does. */
+    char blocked[4096];
+    BQ_PREP_CHECK(bq_prep_worker_unit_status(fixture->profile, "status=blocked\n", blocked, sizeof(blocked)));
+    BqRetirementWorkerUnitSeams refused = *seams;
+    refused.profile = string_from_pointer(blocked);
+    BqRequest const* request = &attempt->job.request;
+    BQ_PREP_CHECK(!bq_request_valid(request) && !bq_retirement_request_valid_pinned(request, installed.profile) &&
+                  !bq_retirement_request_valid_pinned(request, refused.profile) &&
+                  bq_retirement_request_valid_pinned(request, seams->profile) &&
+                  bq_retirement_request_valid_pinned(&smoke.request, installed.profile));
+    BqRequest malformed = *request;
+    malformed.size -= 1;
+    BQ_PREP_CHECK(!bq_retirement_request_valid_pinned(&malformed, seams->profile));
+    BqRetirementWorkerUnitSeams const* const gated[] = {NULL, &installed, &refused, seams};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(gated); index += 1)
+    {
+        BqWorkerFinalization gate = {.result_directory = -1, .retirement = gated[index]};
+        bool admitted = bq_worker_finalization_recipe(&attempt->job, &gate);
+        /* The launch gate on a bound retirement recipe decides by itself. */
+        BqWorkerFinalization launch = {.result_directory = -1, .retirement = gated[index]};
+        BQ_PREP_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &launch.recipe));
+        BQ_PREP_CHECK(admitted == (index == 3) && bq_worker_recipe_launchable(&launch) == (index == 3) &&
+                      (index != 3 || !strcmp(gate.recipe.name, "native-retirement-performance-v1")));
+        BqWorkerFinalization plain = {.result_directory = -1, .retirement = gated[index]};
+        BQ_PREP_CHECK(bq_worker_finalization_recipe(&smoke, &plain) && bq_worker_recipe_launchable(&plain));
+    }
+}
+
+/* The composed job's result through the coordinator's remaining gates: the
+ * retirement manifest (bq_worker_result_validate), then the queue binding
+ * (bq_worker_result_binding_validate_pinned), which admits the retirement
+ * recipe only through the complete seams: the unpinned entry, the compiled
+ * profile and a blocked status refuse the same bound result. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_bound(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, BqPrepWorkerUnitComposed* composed)
+{
+    BqJob const* queued = bq_job(&fixture->queue.state, attempt->job.id);
+    BqWorkerFinalization* finalization = &composed->finalization;
+    BQ_PREP_CHECK(queued && bq_worker_result_validate(&composed->config, queued, finalization) == BQ_OK &&
+                  finalization->result_bound);
+    BqJob bound = queued ? *queued : attempt->job;
+    bound.result_bound = true;
+    snprintf(bound.result_root, sizeof(bound.result_root), "%s", composed->result_root);
+    memcpy(bound.result_manifest_digest, finalization->result_digest, SHA256_HEX_CAPACITY);
+    memcpy(bound.result_bundle_digest, finalization->bundle_digest, SHA256_HEX_CAPACITY);
+    memcpy(bound.result_full_digest, finalization->full_digest, SHA256_HEX_CAPACITY);
+    char blocked[4096];
+    BqRetirementWorkerUnitSeams refused = *seams, installed = bq_retirement_worker_unit_installed();
+    BQ_PREP_CHECK(bq_prep_worker_unit_status(fixture->profile, "status=blocked\n", blocked, sizeof(blocked)));
+    refused.profile = string_from_pointer(blocked);
+    int directory = composed->result_directory;
+    BQ_PREP_CHECK(bq_worker_result_binding_validate_pinned(&bound, directory, seams) == BQ_OK &&
+                  bq_worker_result_binding_validate_at(&bound, directory) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, &installed) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_worker_result_binding_validate_pinned(&bound, directory, &refused) == BQ_CONFIGURATION_MISMATCH);
+    BqJob other = bound;
+    bq_prep_worker_unit_flip(other.result_full_digest);
+    BQ_PREP_CHECK(bq_worker_result_binding_validate_pinned(&other, directory, seams) == BQ_CONFIGURATION_MISMATCH);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
@@ -1210,11 +2101,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         for (u32 row = 0; row < projection->prepared.rows; row += 1) eligible += projection->rows[row].compiler_eligible;
         BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
         bq_check_test_specs(specs, projection->prepared.object_rows, eligible, projection->prepared.native_target);
-        char pins[1024] = {0};
+        char pins[2048] = {0};
         ok = bq_check_test_install(fixture->recipes, &reference->attempt.unit.preparation, projection, specs,
                                    BQ_CHECK_TEST_CHECKS, 0, pins, sizeof(pins)) &&
              bq_prep_worker_unit_authorities(fixture, projection, &reference->attempt.unit.job, &row_plan, pins,
                                              sizeof(pins), &timed_groups) &&
+             bq_prep_worker_unit_composition(fixture, projection, pins, sizeof(pins)) &&
              strlen(fixture->profile) + strlen(pins) + strlen(BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "\n") <
              sizeof(fixture->profile);
         if (ok)
@@ -1230,14 +2122,17 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         .profile = string_from_pointer(fixture ? fixture->profile : ""), .census_profile = S8("self-test"),
         .installed_root = fixture ? fixture->installed : NULL, .driver = fixture ? fixture->driver : NULL,
         .toolchain_root = fixture ? fixture->toolchain_root : NULL, .broker = fixture ? fixture->broker : NULL,
-        .broker_workspaces = fixture ? fixture->workspaces : NULL, .candidate_uid = geteuid(), .supplied = &observed};
+        .broker_workspaces = fixture ? fixture->workspaces : NULL, .candidate_uid = geteuid(),
+        .adapter = bq_prep_worker_unit_self, .supplied = &observed};
     if (ok) bq_prep_worker_unit_profiles(fixture->profile);
+    bq_prep_test_timing("worker-unit-setup");
 
-    /* (b) and (a): refused with the compiled profile, then through the ready
-     * record, SETTLING, MEASURING, A/A (every runtime launch on the program
-     * retained from the stage's own compile), the fixture admission, the
-     * post-A/A document, the freeze, A/B and READY with the complete one,
-     * where the producer stops before composition. */
+    /* (b) and (a): refused with the compiled profile, then, through the real
+     * coordinator path, the ready record, SETTLING, MEASURING, A/A (every
+     * runtime launch on the program retained from the stage's own compile),
+     * the fixture admission, the post-A/A document, the freeze, A/B, READY,
+     * composition, the authority and MEASURED with the complete one (#881
+     * PR 3). */
     u64 measuring_ms = 0;
     ok = ok && bq_prep_test_unit_attempt(&fixture->queue, &fixture->job, BQ_PREP_WORKER_UNIT_SUCCESS,
                                          fixture->installed_fd, fixture->workspaces_fd, &fixture->preparation,
@@ -1248,28 +2143,54 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         bq_prep_worker_unit_refused(fixture, attempt, &seams);
         observed.job_id = attempt->job.id;
         observed.attempt_token = attempt->job.token;
-        BqPrepWorkerUnitResult result = {0};
-        BqPrepWorkerUnitRun run = bq_prep_worker_unit_drive(fixture, attempt, &seams, BQ_PREP_WORKER_UNIT_RUN,
-                                                            BQ_PREP_WORKER_UNIT_MILLISECONDS, &result);
-        BqPrepWorkerUnitFailure failure = {0};
-        bq_prep_worker_unit_campaign_checks(fixture, attempt, &seams, &run, BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED, 4,
-                                            &failure);
+        BqPrepWorkerUnitComposed* composed = calloc(1, sizeof(*composed));
+        u64 started = bq_worker_monotonic_milliseconds();
+        if (composed) bq_prep_worker_unit_coordinate(fixture, attempt, &seams, BQ_PREP_WORKER_UNIT_MILLISECONDS, composed);
+        bq_prep_test_timing("job-82-measured");
+        BqPrepWorkerUnitFailure failure = bq_prep_worker_unit_failure(attempt->attempt);
         if (failure.present)
             fprintf(stderr, "RETIREMENT_PREP worker-unit campaign stopped at stage %lld step %lld sequence %lld "
-                    "kind %lld reason %lld launched %lld status %lld exit %lld after %lld purpose %lld\n", failure.stage,
-                    failure.step, failure.sequence, failure.kind, failure.reason, failure.launched, failure.status,
-                    failure.exit, failure.after, failure.purpose);
-        /* READY: all five documents in the result store at exactly the sizes
-         * retained before timing, the post-sample record and every stream
-         * kind of both stages published there (each an unchanged staged
-         * stream, nothing else), and every stream staged in index order. */
+                    "kind %lld reason %lld launched %lld status %lld exit %lld after %lld purpose %lld result %lld\n",
+                    failure.stage, failure.step, failure.sequence, failure.kind, failure.reason, failure.launched,
+                    failure.status, failure.exit, failure.after, failure.purpose, failure.result);
+        if (composed && (composed->joined != BQ_OK || composed->status != BQ_OK))
+            fprintf(stderr, "RETIREMENT_PREP worker-unit job %" PRIu64 " joined %d exited %d\n",
+                    (uint64_t)attempt->job.id, (int)composed->joined, composed->status);
+        /* MEASURED: the coordinator acknowledged every BQPHASE2 phase in
+         * order (each durable record equal to its result-root receipt), kept
+         * the ready digest the published record has, and handed off the
+         * authority MEASURED named, whose journalled copy is complete; the
+         * unit exited 0 with its keeper stopped and no failure retained. */
+        BqJob const* queued = composed ? bq_job(&fixture->queue.state, attempt->job.id) : NULL;
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(composed && composed->joined == BQ_OK && composed->status == BQ_OK && !failure.present &&
+                      composed->phases.sequence == BQ_PHASE_MEASURED && queued && queued->phase == BQ_MEASURING &&
+                      bq_worker_phases_validate(&fixture->queue, queued, &composed->finalization) == BQ_OK &&
+                      bq_prep_worker_unit_keeper_gone(fixture, &attempt->job) &&
+                      bq_prep_worker_unit_ready(attempt->attempt, digest) &&
+                      !strcmp(digest, composed->finalization.retirement_ready_sha256) &&
+                      composed->finalization.retirement_authority_sha256[0]);
+        bool measured = composed && composed->joined == BQ_OK && queued;
+        /* The finalization: the replay, the journalled authority and its
+         * derivation (M1). */
+        BQ_PREP_CHECK(measured && bq_worker_retirement_finalize(&fixture->queue, queued, &composed->finalization) ==
+                                  BQ_OK);
+        bq_prep_test_timing("job-82-finalized");
+        /* The result root: all five documents at exactly the sizes retained
+         * before timing, the post-sample record and every stream kind of
+         * both stages published unchanged, every composer output, the
+         * binding and admission receipt, the five worker-phase receipts and
+         * the manifest and bundle, and nothing else. */
+        BqPrepWorkerUnitResult result = measured ? bq_prep_worker_unit_result(composed->result_root, attempt->attempt) :
+                                        (BqPrepWorkerUnitResult){0};
         u32 counts[BQ_PREP_WORKER_UNIT_STREAM_KINDS];
         bool documented = true;
         for (u32 index = 0; index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
             documented = documented && result.document_bytes[index];
         BQ_PREP_CHECK(documented && bq_prep_worker_unit_sized(attempt->attempt, result.document_bytes));
         BQ_PREP_CHECK(result.record_bytes && result.untimed_records == 1 && result.untimed_metrics == 1u &&
-                      result.published_kinds == (1u << BQ_PREP_WORKER_UNIT_STREAM_KINDS) - 1u && !result.unmatched);
+                      result.published_kinds == (1u << BQ_PREP_WORKER_UNIT_STREAM_KINDS) - 1u && !result.unmatched &&
+                      result.outputs == (1u << BQ_PREP_WORKER_UNIT_OUTPUTS) - 1u);
         BQ_PREP_CHECK(bq_prep_worker_unit_streams(attempt->attempt, counts) && counts[0] == 1 && counts[1] >= 1 &&
                       counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1 &&
                       counts[7] >= 1 && counts[8] >= 1 && counts[9] >= 1);
@@ -1283,10 +2204,44 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                       launches[2] == launches[1]);
         /* Every successful runtime launch retired its step directory. */
         BQ_PREP_CHECK(bq_prep_worker_unit_steps_left(attempt->attempt) == 0);
-        measuring_ms = run.measuring_ms > run.started_ms ? run.measuring_ms - run.started_ms : 0;
-        /* #881 PR 4: the coordinator's side over the ready digest the
-         * channel carried. */
-        bq_prep_worker_unit_coordinator(fixture, attempt, &seams, run.ready_sha256);
+        /* When MEASURING was acknowledged, from the coordinator's record. */
+        char record_name[48], body[512] = {0};
+        u32 size = 0;
+        char const* observed_at = measured && bq_record_name(record_name, "worker-phase-3", attempt->job.id) &&
+                                  bq_record_read(&fixture->queue, record_name, (u8*)body, sizeof(body) - 1u, &size) ==
+                                  BQ_OK ? strstr(body, "supervisor-observed-monotonic-ns=") : NULL;
+        u64 measuring_ns = observed_at ? strtoull(observed_at + 33, NULL, 10) : 0;
+        measuring_ms = measuring_ns / 1000000u > started ? measuring_ns / 1000000u - started : 0;
+        if (measured)
+        {
+            /* The coordinator's remaining gates over the composed result, the
+             * output the Python checks read, the derivation's refusals, the
+             * binding writer's refusals and the result's refusals. */
+            bq_prep_worker_unit_bound(fixture, attempt, &seams, composed);
+            BQ_PREP_CHECK(bq_prep_worker_unit_export(fixture, composed, &attempt->job));
+            bq_prep_test_timing("job-82-bound-exported");
+            /* One replay, shared by every derivation and binding refusal. */
+            BqRetirementUnitReplayed replayed = {0};
+            BQ_PREP_CHECK(bq_retirement_coordinator_replay(&seams, string_from_pointer(fixture->workspaces),
+                              attempt->job.id, attempt->job.token, attempt->digest,
+                              composed->finalization.retirement_ready_sha256, &replayed) == BQ_OK);
+            if (replayed.kept)
+            {
+                bq_prep_worker_unit_derivation(fixture, attempt, &seams, composed, &replayed);
+                bq_prep_test_timing("job-82-derivation");
+                bq_prep_worker_unit_binding_refusals(fixture, &seams, &replayed);
+                bq_prep_test_timing("job-82-binding-refusals");
+            }
+            BQ_PREP_CHECK(bq_retirement_unit_replayed_release(&replayed));
+            bq_prep_worker_unit_result_refusals(fixture, attempt, composed);
+            bq_prep_test_timing("job-82-result-refusals");
+            /* #881 PR 4: the coordinator's side over the digests the channel
+             * carried. */
+            bq_prep_worker_unit_coordinator(fixture, attempt, &seams, composed);
+            bq_prep_test_timing("job-82-coordinator");
+        }
+        if (composed) bq_prep_worker_unit_composed_close(fixture, composed);
+        free(composed);
         BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
     }
 
@@ -1348,6 +2303,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                           failure.sequence < (long long)compile_launches && gone);
         }
         if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
+        char section[32];
+        snprintf(section, sizeof(section), "job-%" PRIu64, (uint64_t)campaign_jobs[index]);
+        bq_prep_test_timing(section);
     }
 
     /* (c) and (d): SIGTERM to the unit, a failing stage and a killed
@@ -1399,6 +2357,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
             if (escaped > 1 && !gone) kill(escaped, SIGKILL);
         }
         if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
+        char section[32];
+        snprintf(section, sizeof(section), "job-%" PRIu64, (uint64_t)jobs[index]);
+        bq_prep_test_timing(section);
     }
     bq_retirement_row_observed_release(&observed);
     if (row_plan.owned) BQ_PREP_CHECK(bq_retirement_row_plan_release(&row_plan));
@@ -1536,7 +2497,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_store_plan(void)
     u64 payload = BQ_PREP_WORKER_PLAN_OTHER_PAYLOAD + 1u;
     bool planned = root >= 3 && bq_prep_worker_plan(root, files, &capacity, &layout, &declared, &plan);
     BQ_PREP_CHECK(planned &&
-                  plan.external_entries == 3u + 5u + BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS &&
+                  plan.external_entries == BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS &&
                   plan.entries == plan.owned_files + plan.external_entries && plan.entries <= BQ_WORKER_BUNDLE_ENTRY_CAP &&
                   plan.owned_files > payload);
     /* The largest campaign that fits fills the store exactly, the control

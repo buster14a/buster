@@ -1,6 +1,12 @@
 /* Dedicated #1018 fixture. Compile against tools/throughput/shared.c; this
  * intentionally does not change the shared service test registration owned by
  * the #923 integrator. It uses the real descriptor-backed materializer.
+ *
+ * Entry point: main. With no argument it runs every fixture
+ * (bq_prep_test_suite); `worker-unit` runs only the worker-unit fixtures;
+ * `retirement-replay --input I --output O` is the worker-unit composition's
+ * adapter stand-in (bq_prep_worker_unit_adapter), which the composer executes
+ * from this binary by its pinned digest (#881 PR 3).
  */
 #define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 /* The worker-unit campaign fixture (retirement_worker_unit_tests.h) admits
@@ -24,6 +30,20 @@ BUSTER_GLOBAL_LOCAL u32 bq_retirement_failures;
 #define BQ_PREP_CHECK(expr) do { bq_retirement_tests += 1; if (!(expr)) { \
     bq_retirement_failures += 1; fprintf(stderr, "RETIREMENT_PREP failure line=%d: %s\n", __LINE__, #expr); \
 } } while (0)
+
+/* The wall time of each fixture section, for CI's time budget: the section's
+ * milliseconds since the previous mark and since the first. */
+BUSTER_GLOBAL_LOCAL u64 bq_prep_timing_first, bq_prep_timing_last;
+BUSTER_GLOBAL_LOCAL void bq_prep_test_timing(char const* section)
+{
+    struct timespec now = {0};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    u64 ms = (u64)now.tv_sec * 1000u + (u64)now.tv_nsec / 1000000u;
+    if (!bq_prep_timing_first) bq_prep_timing_first = bq_prep_timing_last = ms;
+    fprintf(stderr, "RETIREMENT_PREP_TIMING %s ms=%" PRIu64 " total_ms=%" PRIu64 "\n", section,
+            (uint64_t)(ms - bq_prep_timing_last), (uint64_t)(ms - bq_prep_timing_first));
+    bq_prep_timing_last = ms;
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_write(char const* path, char const* text)
 {
@@ -3276,17 +3296,25 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 #include "retirement_unit_campaign_tests.h"
 #include "retirement_worker_unit_tests.h"
 
-int main(void)
+/* Every fixture of this runner (the default mode). */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_suite(void)
 {
+    bq_prep_test_timing("start");
     bq_test_worker_budget_crosscheck();
     bq_check_test_runner();
+    bq_prep_test_timing("check-runner");
     bq_row_test_runner();
+    bq_prep_test_timing("row-runner");
     bq_prep_test_support_population();
     bq_prep_test_raw_census_boundary();
+    bq_prep_test_timing("population");
     bq_prep_test_unit_oracle();
+    bq_prep_test_timing("unit-oracle");
     bq_prep_test_unit_campaign();
+    bq_prep_test_timing("unit-campaign");
     bq_prep_test_worker_store_plan();
     bq_prep_test_worker_unit();
+    bq_prep_test_timing("worker-unit");
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};
     BqRequest request = {0};
@@ -3474,8 +3502,32 @@ int main(void)
         bq_prep_test_cleanup(workspaces);
         bq_prep_test_cleanup(installed);
     }
+    bq_prep_test_timing("preflight");
     bq_prep_test_large_manifest();
-    printf("RETIREMENT_PREP_TEST assertions=%u failures=%u\n", bq_retirement_tests, bq_retirement_failures);
-    int result = bq_retirement_failures ? 1 : 0;
+    bq_prep_test_timing("large-manifest");
+}
+
+/* Modes: no argument runs every fixture; `worker-unit` runs only the
+ * worker-unit fixtures (bq_prep_test_worker_store_plan and
+ * bq_prep_test_worker_unit); `retirement-replay --input I --output O` is the
+ * worker-unit fixture's composer adapter (bq_prep_worker_unit_adapter), which
+ * the composer executes from this binary. */
+int main(int argc, char** argv)
+{
+    bool adapter = argc == 6 && !strcmp(argv[1], "retirement-replay") && !strcmp(argv[2], "--input") &&
+                   !strcmp(argv[4], "--output");
+    int result = 0;
+    if (adapter) result = bq_prep_worker_unit_adapter(argv[3], argv[5]);
+    else
+    {
+        if (argc == 2 && !strcmp(argv[1], "worker-unit"))
+        {
+            bq_prep_test_worker_store_plan();
+            bq_prep_test_worker_unit();
+        }
+        else bq_prep_test_suite();
+        printf("RETIREMENT_PREP_TEST assertions=%u failures=%u\n", bq_retirement_tests, bq_retirement_failures);
+        result = bq_retirement_failures ? 1 : 0;
+    }
     return result;
 }

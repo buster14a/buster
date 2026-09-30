@@ -470,7 +470,13 @@ validator's size patched to match) that spans several shards; tampering with
 the manifest or a shard is refused.
 Given the throughput self-test directory it also composes lane D's own
 C-encoded full-invocation fixture (CI runs this after `bench_throughput
-self-test` on Linux). None of this is service admission or performance
+self-test` on Linux). After `bench_service self-test`, whose preparation
+runner drives the worker unit's job 82 to MEASURED and exports its result
+beside itself, it reads that result (#881 PR 3): the binding the producer
+wrote passes the validator structurally and mutations of it are refused, the
+receipt's context is the validator's `_execution_context` over the bundle's
+raw digest, and the authority, context chain, manifest and bundle index bind
+the result root's files. None of this is service admission or performance
 evidence, and the recipe stays blocked.
 
 **The #619 statistics adapter input (#1880).**

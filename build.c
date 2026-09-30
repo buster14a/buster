@@ -40354,6 +40354,23 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             *run = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
                                 .working_directory = S8("."),
                                 .spawn_options = {.use_process_environment = 1, .search_path = index == 3}};
+            if (index == 0)
+            {
+                /* The worker unit's composed result, which the preparation
+                 * runner exported beside itself, through lane F's replay CLI
+                 * path (#881 PR 3). */
+                ProcessRun* join = run_add(arena, step_add(arena));
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, S8("python3"));
+                os_argument_builder_append(&builder, S8("-W"));
+                os_argument_builder_append(&builder, S8("error"));
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_export_replay_real_test.py"));
+                os_argument_builder_append(&builder, S8("--worker-unit"));
+                os_argument_builder_append(&builder, S8("build/bench-service-tools/retirement-worker-unit-result"));
+                *join = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                     .working_directory = S8("."),
+                                     .spawn_options = {.use_process_environment = 1, .search_path = 1}};
+            }
             if (index == 5)
             {
                 /* The composed sealed result through the #511 validator. */
