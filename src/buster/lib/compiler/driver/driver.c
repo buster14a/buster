@@ -3813,6 +3813,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+                                                    .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of

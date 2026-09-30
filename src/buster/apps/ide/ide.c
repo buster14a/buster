@@ -992,6 +992,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // Only the source reports below read the spelled-byte sum.
+    invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)

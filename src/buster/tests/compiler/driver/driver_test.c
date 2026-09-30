@@ -2101,6 +2101,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
     return result;
 }
 
+// preprocessed.bytes is read only by the -v source report and the
+// -fsource-metrics file. A driver caller gets it by default; omit_spelled_bytes,
+// which the cc command sets when it prints neither report, skips the sum and
+// leaves it zero while the other preprocessed counts are gathered either way.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_spelled_byte_metrics_on_request(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define WIDE long long\nWIDE value = 12;\n"))));
+    String8 command[] = {S8("-g0"), S8("-fsyntax-only"), input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.omit_spelled_bytes);
+    CompilerDriverResult measured = compiler_driver_execute_invocation(arena, invocation);
+    invocation.omit_spelled_bytes = 1;
+    CompilerDriverResult omitted = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE && omitted.error == COMPILER_DRIVER_ERROR_NONE);
+    // "long" "long" "value" "=" "12" ";"
+    BUSTER_TEST(arguments, measured.preprocessed.bytes == 17 && omitted.preprocessed.bytes == 0);
+    BUSTER_TEST(arguments, measured.preprocessed.tokens == 6 && omitted.preprocessed.tokens == 6);
+    BUSTER_TEST(arguments, measured.preprocessed.spelling_bytes == omitted.preprocessed.spelling_bytes);
+    BUSTER_TEST(arguments, measured.preprocessed.expansions == omitted.preprocessed.expansions);
+    BUSTER_TEST(arguments, measured.source_lexed.bytes == omitted.source_lexed.bytes && measured.source_lexed.tokens == omitted.source_lexed.tokens);
+    // The sum is taken before C23 respelling rewrites `bool` as `_Bool`, so it
+    // counts the spelling the source used: "bool" "b" ";".
+    String8 c23_input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics-c23"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(c23_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("bool b;\n"))));
+    String8 c23_command[] = {S8("-g0"), S8("-std=c23"), S8("-fsyntax-only"), c23_input};
+    CompilerDriverResult c23 = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c23_command)));
+    BUSTER_TEST(arguments, c23.error == COMPILER_DRIVER_ERROR_NONE && c23.preprocessed.tokens == 3 && c23.preprocessed.bytes == 6);
+    scratch_end(temporary);
+    return result;
+}
+
 // Every structured record of a compilation, one line each, with the input's
 // temporary paths replaced by `main` and `header` so the text is stable.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, CompilerDriverResult result, String8 main_path, String8 header_path)
@@ -11301,6 +11336,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
 

@@ -9681,6 +9681,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;
+    if (!options.omit_spelled_bytes)
     {
         // The accumulator and both bases are locals on purpose. c_token_length
         // keeps a call in its oversized arm, so a member accumulator has to be
