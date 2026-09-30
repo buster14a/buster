@@ -16223,6 +16223,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         String8 expression;
         u64 value;
         bool valid;
+        u64 magnitude_high;
+        bool is_negative;
     };
     CTestTypeConstantCase cases[] = {
         {S8("(5)"), 5, true},
@@ -16231,6 +16233,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("0b101"), 5, true},
         {S8("'\\5'"), 5, true},
         {S8("(unsigned char)261"), 5, true},
+        {.expression = S8("(CE)-1"), .value = 1, .valid = true, .is_negative = true},
         {S8("(K) + 5"), 10, true},
         {S8("sizeof \"abcde\""), 6, true},
         {S8("sizeof((int[3]){1,2,3})"), 12, true},
@@ -16264,6 +16267,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("((__int128)1 << 126) + ((__int128)1 << 126)"), 0, false},
         {S8("((__int128)1 << 126) * 2"), 0, false},
         {S8("((unsigned __int128)-1) + 1"), 0, true},
+        {.expression = S8("(unsigned __int128)-1"), .value = UINT64_MAX, .valid = true, .magnitude_high = UINT64_MAX},
+        {.expression = S8("-((__int128)1 << 126) - ((__int128)1 << 126)"), .valid = true,
+            .magnitude_high = UINT64_C(1) << 63, .is_negative = true},
         {S8("((__int128)1 << 64) || 0"), 1, true},
         {S8("!((__int128)1 << 64)"), 0, true},
         {S8("!1.0L"), 0, true},
@@ -16280,6 +16286,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"),
             S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
                " typedef int V16 __attribute__((vector_size(16)));"
+               " enum E; typedef const enum E CE; enum E { N = -1 };"
                " typedef char UnsafeArray[sizeof(int __attribute__((vector_size(4 * sizeof(int)))) *)];"
                " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = "),
             test.expression, S8("; return probe; }"));
@@ -16359,7 +16366,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                         test.expression, variant, (u32)test.valid, (u32)query.constant.valid));
                 if (query.constant.valid && test.valid)
                 {
-                    BUSTER_TEST(arguments, !query.constant.is_negative && query.constant.magnitude_high == 0);
+                    BUSTER_TEST(arguments, query.constant.is_negative == test.is_negative);
+                    BUSTER_TEST(arguments, query.constant.magnitude_high == test.magnitude_high);
                     BUSTER_TEST(arguments, query.constant.magnitude == test.value);
                 }
             }
