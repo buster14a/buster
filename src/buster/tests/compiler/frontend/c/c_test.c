@@ -27189,7 +27189,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
     String8 definitions[CONSTANT_COUNT + PREDICATE_COUNT + 1];
     definitions[0] = S8("static const int zero = 0, nonzero = -7;\n"
         "static const double fzero = -0.0, fraction = 0.25;\n"
-        "static const long double widezero = -0.0L, widefraction = 0.25L;\n"
+        // Binary128 scalar storage initialization is still refused. Exercise
+        // its literal truth here and pin that refusal separately below.
+        "#if __LDBL_MANT_DIG__ == 113\n"
+        "#define widezero (-0.0L)\n#define widefraction 0.25L\n"
+        "#else\nstatic const long double widezero = -0.0L, widefraction = 0.25L;\n#endif\n"
         "static int object, array[2], mutable = 5;\n"
         "static const int *const null_object = 0;\n"
         "static const int *const address_object = &object;\n"
@@ -27232,6 +27236,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             {
                 Arena* conflicts[] = {arguments->arena, sources.arena};
                 TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                if (target_data_layout(target.target).long_double_type.bit_width == 128)
+                {
+                    CPreprocessResult unsupported_tokens = c_preprocess(temporary.arena,
+                        S8("static const long double unsupported_zero = -0.0L;"),
+                        (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParseResult unsupported_parse = c_parse(temporary.arena, unsupported_tokens);
+                    CIRLowerResult unsupported = c_lower_to_ir_with_options(temporary.arena, S8("binary128-storage-control.c"), unsupported_tokens,
+                        unsupported_parse, target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, !unsupported_tokens.diagnostic_count && !unsupported_parse.diagnostic_count);
+                    if (BUSTER_REQUIRE(arguments, unsupported.diagnostic_count != 0))
+                    {
+                        BUSTER_STRING_TEST(arguments, unsupported.diagnostics[0].message, S8("C IR lowering: cannot fold '-' in a static initializer"));
+                    }
+                }
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target), .dialect = C_PREPROCESS_DIALECT_GNU17});
                 CParseResult parsed = c_parse(temporary.arena, tokens);
@@ -27347,6 +27365,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static volatile int u; static int bad = !u;"),
         S8("static volatile int u; static int bad = u ? 3 : 4;"),
         S8("static const volatile int u = 0; static int bad = !u;"),
+        S8("static const int u = 0; static int bad = !*(const volatile int *)&u;"),
+        S8("static const int u = 0; static int bad = *(const volatile int *)&u ? 3 : 4;"),
         S8("struct S { int x; }; static struct S u; static int bad = !u;"),
         S8("struct S { int x; }; static struct S u; static int bad = u ? 3 : 4;"),
     };
