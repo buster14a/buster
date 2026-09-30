@@ -3899,6 +3899,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_rollback_growth(UnitTestArg
     return result;
 }
 
+// A frame that can abandon a partial parse -- an aggregate segment, a typeof or
+// _Atomic operand -- snapshots the parse result into the machine's row for its
+// own slot, and every frame of a run shares the root query's token stream, so a
+// push copies neither. The seam holds up to 512 rows live at once and rolls
+// each back to exactly its own. The parses then run the same storage through
+// the production paths: every level of a typeof chain takes a snapshot while
+// the next one runs, inside aggregates and _Atomic too, and `struct Broken`'s
+// rejected member, abandoned with its declaration, leaves no record behind.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_snapshot_rows(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_type_parse_frame_bytes() < sizeof(CParseResult));
+    u32 depths[] = {1, 2, 8, 64, 512};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        TemporalArena rows = scratch_begin(0, 0);
+        BUSTER_TEST(arguments, c_test_type_parse_snapshot_rows_restore(rows.arena, depths[depth_index]));
+        scratch_end(rows);
+    }
+    s64 first_residue[5] = {0};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        u32 depth = depths[depth_index];
+        u32 counts[2][5] = {0};
+        for (u32 broken = 0; broken < 2; broken += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            u64 capacity = (u64)depth * 16 + 64;
+            char8* chain = arena_allocate(temporary.arena, char8, capacity);
+            u64 chain_length = 0;
+            for (u32 level = 1; level < depth; level += 1)
+            {
+                c_test_append_source(chain, capacity, &chain_length, S8("typeof("));
+            }
+            c_test_append_source(chain, capacity, &chain_length, S8("typeof(object + 0)"));
+            for (u32 level = 1; level < depth; level += 1)
+            {
+                c_test_append_source(chain, capacity, &chain_length, S8(" *)"));
+            }
+            String8 chain_text = {chain, chain_length};
+            u64 source_capacity = chain_length * 4 + 512;
+            char8* source = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 length = 0;
+            c_test_append_source(source, source_capacity, &length, S8("long object;\nstruct Node { long value; } node;\ntypedef "));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(" chain;\nstruct Holder { struct Inner { "));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(" member; _Atomic("));
+            c_test_append_source(source, source_capacity, &length, chain_text);
+            c_test_append_source(source, source_capacity, &length, S8(") atomic; } inner; typeof(node.value * 2) tail; };\n"));
+            if (broken)
+            {
+                c_test_append_source(source, source_capacity, &length, S8("struct Broken { _Alignas(8) "));
+                c_test_append_source(source, source_capacity, &length, chain_text);
+                c_test_append_source(source, source_capacity, &length, S8(" member junk; };\n"));
+            }
+            c_test_append_source(source, source_capacity, &length, S8("typedef typeof(object + 0) after;\n"));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, broken || parse.diagnostic_count == 0);
+            u32 resolved = 0;
+            for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+            {
+                String8 name = parse.entities[entity].name;
+                if (!string_equal(name, S8("chain")) && !string_equal(name, S8("after")))
+                {
+                    continue;
+                }
+                u32 pointers = string_equal(name, S8("chain")) ? depth - 1 : 0;
+                CTypeId type = parse.entities[entity].type;
+                for (u32 pointer = 0; pointer < pointers && type.value < parse.type_count; pointer += 1)
+                {
+                    BUSTER_TEST(arguments, parse.types[type.value].kind == C_TYPE_POINTER);
+                    type = parse.types[type.value].element_type;
+                }
+                bool is_long = type.value < parse.type_count && parse.types[type.value].kind == C_TYPE_LONG;
+                BUSTER_TEST(arguments, is_long);
+                resolved += is_long;
+            }
+            BUSTER_TEST(arguments, resolved == 2);
+            u32 table_counts[] = {parse.type_count, parse.member_count, parse.parameter_count, parse.array_bound_count, parse.alignment_count};
+            memcpy(counts[broken], table_counts, sizeof(table_counts));
+            scratch_end(temporary);
+        }
+        // Types, members, parameters, array bounds, alignment records.
+        for (u32 table = 0; table < 5; table += 1)
+        {
+            s64 residue = (s64)counts[1][table] - (s64)counts[0][table];
+            if (depth_index == 0)
+            {
+                first_residue[table] = residue;
+            }
+            BUSTER_TEST_RAW(arguments, residue == first_residue[table] && (table != 4 || residue == 0),
+                            string_format(arguments->arena, S8("depth={u32} table={u32}: the abandoned declaration left {s64}, at depth 1 {s64}"), depth, table,
+                                          residue, first_residue[table]));
+        }
+    }
+    return result;
+}
+
 // A member reached through anonymous structs and unions is found by a
 // breadth-first search over those aggregates, whose queue is its own visited
 // set: a search that reaches a few of them must not touch a flag per row of the
@@ -16103,6 +16204,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
 // Geometric depths exercise the whole typeof task machine and the direct
 // base/postfix continuation independently. A separate scratch arena exposes
 // released storage too, so a correct type cannot hide suffix-sized retention.
+// A lone numeric or character literal is answered without the type machine.
+// The machine path is the oracle: for every literal token of a valid and of an
+// invalid source, in both checking modes, with and without published scalar
+// types, alone, under an outer frame and against a seeded cache slot, both
+// answers and every piece of machine and result state they leave must agree.
+// A whole compile through the driver must also produce identical objects and
+// diagnostics in both modes.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("static const unsigned long long table[] = {0, 1, 42, 0x7f, 0XFFFFFFFF, 4294967296, 18446744073709551615u, 077, 1u, 1U, 1l, 1L,\n"
+           "    1ul, 1LU, 1ll, 1ULL, 0b101, 1'000, 'a', '\\n', '\\x41', 'ab', L'x', u'y', U'z', u8'q'};\n"
+           "static const double reals[] = {0x1p3, 1.5, 1.5f, 1.5L, 1e10, .5e-3, 1.0f16, 0x1.8p-1f};\n"
+           "int f(int x) { return x + 1 + (int)sizeof(2.0) + 'c' + (int)sizeof(2.0i) + (int)sizeof(3.0fi); }\n"),
+        S8("int a = 08; int b = 1e; int c = 0x; int d = 1.2.3; int e = 1uu; int g = 99999999999999999999999; int h = 1.0q;\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[source_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        u32 literal_count = 0;
+        for (u32 token = 0; token < tokens.token_count; token += 1)
+        {
+            CTokenKind kind = tokens.tokens[token].kind;
+            if (kind != C_TOKEN_PREPROCESSING_NUMBER && kind != C_TOKEN_CHARACTER_LITERAL)
+            {
+                continue;
+            }
+            literal_count += 1;
+            for (u32 variant = 0; variant < 24; variant += 1)
+            {
+                bool checked = (variant & 1) != 0;
+                bool scalars = (variant & 2) != 0;
+                bool nested = (variant & 4) != 0;
+                u32 cache_mode = variant >> 3;
+                CTypeId cached = cache_mode == 0 ? C_TYPE_ID_INVALID : cache_mode == 1 ? (CTypeId){.value = 0} : (CTypeId){.value = parse.type_count};
+                u32 type_count = parse.type_count;
+                u32 diagnostic_count = parse.diagnostic_count;
+                Arena* probe = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+                CTestExpressionQuery fast = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, false);
+                u32 fast_type_count = parse.type_count;
+                parse.type_count = type_count;
+                parse.diagnostic_count = diagnostic_count;
+                CTestExpressionQuery oracle = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, true);
+                BUSTER_TEST(arguments, fast_type_count == parse.type_count);
+                parse.type_count = type_count;
+                parse.diagnostic_count = diagnostic_count;
+                BUSTER_TEST(arguments, arena_destroy(probe, 1));
+                bool same = fast.valid == oracle.valid && fast.type.value == oracle.type.value && fast.kind == oracle.kind &&
+                            fast.type_count_delta == oracle.type_count_delta && fast.diagnostic_delta == oracle.diagnostic_delta &&
+                            fast.result_type.value == oracle.result_type.value && fast.result_index == oracle.result_index &&
+                            fast.result_valid == oracle.result_valid && fast.failed == oracle.failed && fast.frame_count == oracle.frame_count &&
+                            fast.mutation_count == oracle.mutation_count && fast.mutation_type_limit == oracle.mutation_type_limit &&
+                            fast.expression_task_count == oracle.expression_task_count && fast.scratch_delta == oracle.scratch_delta &&
+                            fast.published_end == oracle.published_end && fast.published_type.value == oracle.published_type.value &&
+                            fast.published_flags == oracle.published_flags;
+                BUSTER_TEST_RAW(arguments, same,
+                                string_format(temporary.arena, S8("source={u32} token='{S8}' variant={u32} fast valid={u32} kind={u32} types+{u32} oracle valid={u32} kind={u32} types+{u32}"),
+                                              source_index, c_token_spelling(tokens.spelling_base, tokens.tokens[token]), variant, (u32)fast.valid,
+                                              (u32)fast.kind, fast.type_count_delta, (u32)oracle.valid, (u32)oracle.kind, oracle.type_count_delta));
+            }
+        }
+        BUSTER_TEST(arguments, literal_count >= (source_index == 0 ? 30u : 7u));
+        scratch_end(temporary);
+    }
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-literal-queries"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
+        ByteSlice objects[2] = {0};
+        String8 diagnostics[2] = {0};
+        CompilerDriverError errors[2] = {0};
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-literal-queries-{u32}-{u32}"), source_index, mode), S8(".o"));
+            String8 command[] = {S8("-nostdinc"), S8("-g"), S8("-std=gnu23"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+            c_test_set_literal_query_machine_only(mode == 1);
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            c_test_set_literal_query_machine_only(false);
+            errors[mode] = compiled.error;
+            diagnostics[mode] = compiled.diagnostic;
+            objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        }
+        BUSTER_TEST(arguments, errors[0] == errors[1]);
+        BUSTER_TEST(arguments, (errors[0] == COMPILER_DRIVER_ERROR_NONE) == (source_index == 0));
+        BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
+        BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
+                                   (!objects[0].length || memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -26878,6 +27077,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
@@ -26956,6 +27156,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
     BUSTER_TEST_FIXTURE(arguments, c_test_promoted_member_search);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);

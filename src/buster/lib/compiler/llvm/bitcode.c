@@ -1428,9 +1428,10 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function
     return llvm_bc_alignment(alignment);
 }
 
-static u32 llvm_bc_linkage(IrSymbol* symbol)
+// LLVM accepts only external or extern_weak linkage on a declaration.
+static u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
 {
-    return symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
+    return !declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
 }
 
 static u32 llvm_bc_calling_convention(IrCallingConvention convention)
@@ -1728,16 +1729,61 @@ static bool llvm_bc_add_integer_count(LlvmBcContext* context, IrFunction* functi
     return !llvm_bc_failed(context);
 }
 
+// Marks every symbol a lowered instruction or a global initializer names.
+static void llvm_bc_mark_referenced_symbols(LlvmBcContext* context, u8* referenced)
+{
+    u32 symbol_count = context->program->symbols.count;
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrSymbolId symbol = function->instructions[instruction_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            if (global->initializer_symbol.value < symbol_count)
+            {
+                referenced[global->initializer_symbol.value] = 1;
+            }
+            for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
+            {
+                IrSymbolId symbol = global->relocations[relocation_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+    }
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
     u32 symbol_count = context->program->symbols.count;
     context->symbol_value_ids = arena_allocate(context->arena, u32, symbol_count ? symbol_count : 1);
     context->symbol_seen = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    u8* referenced = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
     for (u32 index = 0; index < symbol_count; index += 1)
     {
         context->symbol_value_ids[index] = LLVM_BC_INVALID_ID;
         context->symbol_seen[index] = 0;
+        referenced[index] = 0;
     }
+    llvm_bc_mark_referenced_symbols(context, referenced);
 
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
@@ -1747,6 +1793,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             IrGlobal* global = module->globals + global_index;
             IrSymbol* symbol = llvm_bc_ir_symbol(context, global->symbol);
             bool declaration = !symbol || !symbol->is_definition || global->initializer_kind == IR_GLOBAL_INITIALIZER_NONE;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_global_entity(context, global, symbol, declaration))
             {
                 return false;
@@ -1767,6 +1817,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             }
             IrSymbol* symbol = llvm_bc_ir_symbol(context, function->symbol);
             bool declaration = function->state == IR_FUNCTION_DECLARATION || !symbol || !symbol->is_definition;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_function_entity(context, function, symbol, declaration))
             {
                 return false;
@@ -4665,7 +4719,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             global->storage_type_id,
             2 | (global->read_only ? 1 : 0), // explicit storage type, optionally constant
             initializer,
-            llvm_bc_linkage(global->symbol),
+            llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
             section_ids[index],
             0, // visibility
@@ -4680,7 +4734,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->type_id,
             function->calling_convention,
             function->declaration,
-            llvm_bc_linkage(function->symbol),
+            llvm_bc_linkage(function->symbol, function->declaration),
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
             section_ids[context->global_count + index],
