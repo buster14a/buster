@@ -227,6 +227,8 @@ TargetDataLayout target_data_layout(Target target)
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
     u32 pointer_size = wasm32 ? 4 : 8;
     u32 long_size = llp64 || wasm32 ? 4 : 8;
+    bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
+                                (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
     bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
@@ -264,7 +266,7 @@ TargetDataLayout target_data_layout(Target target)
         .abi_stack_alignment = bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
-        .plain_char_is_signed = !arm_plain_char_unsigned,
+        .plain_char_is_signed = plain_char_is_signed,
         .has_128_bit_integer = !wasm && !bpfel,
     };
     return layout;
