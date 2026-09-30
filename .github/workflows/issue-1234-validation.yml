@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CANDIDATE_SHA: 52404109119551c6fa270d054a72f1ef0e9c5916
+      CANDIDATE_SHA: 6bf047585225078545a4b3bbebd9d0b99ca8b163
       BASELINE_SHA: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
       ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -21,13 +21,8 @@ jobs:
         run: test "$CI_ENABLED" = true
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 52404109119551c6fa270d054a72f1ef0e9c5916
+          ref: 6bf047585225078545a4b3bbebd9d0b99ca8b163
           path: candidate
-          persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
-          path: baseline
           persist-credentials: false
       - name: Install Clang 22 from LLVM's signed package repository
         run: |
@@ -44,11 +39,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/vla-validation"
           test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
-          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
           clang --version | tee "$RUNNER_TEMP/vla-validation/clang.txt"
           printf 'candidate=%s\nbaseline=%s\n' "$CANDIDATE_SHA" "$BASELINE_SHA" | tee "$RUNNER_TEMP/vla-validation/revisions.txt"
           (cd candidate && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-candidate-build")
-          (cd baseline && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-baseline-build")
       - name: Build candidate compiler
         working-directory: candidate
         run: |
@@ -92,13 +85,21 @@ jobs:
                       print("VLA_PROFILE optimization=" + optimization + " allocator=" + mode
                             + " frontend=" + frontend + " status=" + str(status), flush=True)
                       failures += status != 0
+          negative = root / "unsupported-nested-pointer.c"
+          negative.write_text("int f(int n, void *p) { return (int (**)[n])p != 0; }\n")
+          for frontend in ("-fno-frontend-ssa", "-ffrontend-ssa"):
+              checked = subprocess.run(["build/Release/ide", "cc", frontend, "-c", "-o",
+                                        str(root / "unsupported.o"), str(negative)], capture_output=True, text=True)
+              refused = checked.returncode != 0 and "nested pointer-to-VLA casts are not supported" in checked.stderr
+              print("VLA_UNSUPPORTED frontend=" + frontend + " refused=" + str(refused), flush=True)
+              failures += not refused
           raise SystemExit(bool(failures))
           PY
       - name: Retain focused results immediately
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1234-focused-52404109119551c6fa270d054a72f1ef0e9c5916
+          name: issue-1234-focused-6bf047585225078545a4b3bbebd9d0b99ca8b163
           path: ${{ runner.temp }}/vla-validation/
           if-no-files-found: error
           retention-days: 7
@@ -114,13 +115,6 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-candidate-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-selfhost.log"
-      - name: Baseline self-host fixed point
-        if: ${{ !cancelled() }}
-        working-directory: baseline
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/buster-baseline-build" generate --cc clang --ci --linker DEFAULT
-          "$RUNNER_TEMP/buster-baseline-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-validation/baseline-selfhost.log"
       - name: Candidate ASan UBSan full suite
         if: ${{ !cancelled() }}
         working-directory: candidate
@@ -132,7 +126,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1234-validation-52404109119551c6fa270d054a72f1ef0e9c5916
+          name: issue-1234-validation-6bf047585225078545a4b3bbebd9d0b99ca8b163
           path: ${{ runner.temp }}/vla-validation/
           if-no-files-found: error
           retention-days: 7

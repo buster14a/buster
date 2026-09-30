@@ -5895,6 +5895,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    calls = 0;\n"
         "    fail |= sizeof(__typeof__(*(pv + one()))) != 12 || calls != 1;\n"
         "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
+        "    calls = 0;\n"
+        "    __typeof__(*(pv + one())) copy, other;\n"
+        "    fail |= sizeof copy != 12 || sizeof other != 12 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    __typeof__((one(), pv)) q = pv;\n"
+        "    fail |= sizeof(*q) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    typedef __typeof__(*(pv + one())) Row, SameRow;\n"
+        "    Row r; SameRow s;\n"
+        "    fail |= sizeof r != 12 || sizeof s != 12 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    __typeof__(one()) no_eval[n];\n"
+        "    fail |= sizeof no_eval != 12 || calls != 0;\n"
         "    n = 7;\n"
         "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
         "    calls = 0;\n"
@@ -5992,6 +6005,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
 #endif
                     scratch_end(temporary);
                 }
+            }
+        }
+        String8 unsupported = S8("int f(int n, void *p) { return (int (**)[n])p != 0; }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(unsupported))))
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object = buster_test_temporary_path(temporary.arena, S8("buster-vla-unsupported"), S8(".o"));
+                String8 command[] = {frontends[frontend], S8("-c"), S8("-o"), object, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic,
+                    S8("nested pointer-to-VLA casts are not supported")) < compiled.diagnostic.length, compiled.diagnostic);
+                scratch_end(temporary);
             }
         }
         BUSTER_TEST(arguments, os_file_delete(input));

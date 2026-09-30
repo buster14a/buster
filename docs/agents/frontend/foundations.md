@@ -568,6 +568,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
   row casts at O0/O2 in both frontend forms and all four allocators. It also
   checks nested call arguments and the effects of VLA-valued `typeof` operands.
+  Object and typedef declarations evaluate VLA-valued `typeof` operands before
+  capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
+  until their indirect shape can be retained.
   A saved size does not suppress evaluation of a VLA-typed operand. The
   sizeof continuation evaluates its operand once through the existing
   expression machine, discards the row address, and retains that size.
