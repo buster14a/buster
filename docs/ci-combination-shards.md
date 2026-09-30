@@ -201,3 +201,37 @@ The existing desktop artifact also retains [versioned native phase records](ci-m
 Their consumer joins every tree to this authoritative coverage manifest and
 fails the desktop result on missing or inconsistent evidence. Scheduling and
 row ownership remain unchanged; alternative-order predictions are diagnostic.
+
+## Isolated module process experiment
+
+The opt-in `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`.
+CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
+native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
+driver runs `compiler_driver_tests` and the remaining enabled modules in
+separate processes, shares one built executable, divides its supplied test
+budget between the children, and replays their captured output in stable order.
+It rejects missing/duplicate module evidence, failed assertions/processes,
+timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
+remain owned by the original tree policy. Each child retains at least two test
+workers. A single-threaded driver or a budget below four uses the ordinary full
+invocation, preserving the existing concurrency assertions.
+
+The [diagnostic workflow](../.github/workflows/ci-unit-partitions.yml) runs only
+on its owning experiment branch or explicit dispatch. Both arms use the same
+sanitized Debug binary and independent complete registry query. The baseline
+uses two test workers; the candidate uses two children with two workers each,
+within a four-worker available budget. One-worker children would omit three
+OS concurrency assertions relative to the standard two-worker invocation.
+Retained native phase intervals include identical CMake/Ninja launch scope.
+The [postprocessor](../tools/ci_unit_tests_campaign.py) verifies every phase
+and submits the exact inventories, binary/source identities and module counts
+to the [comparison helper](../tools/ci_unit_tests_measure.py).
+
+A single alternating pair is screening evidence. Formal diagnostic review
+requires three alternating pairs. Neither result replaces ordinary CI
+completion or proves a full-workflow speedup. Production matrix rows still
+share the four-worker quota with other builds and tests; enabling this option
+there requires explicit admission that prevents oversubscription. See the
+[current observations and research](research/2026-09-30-ci-throughput.md),
+[#1826](https://github.com/buster14a/buster/issues/1826), and
+[#709](https://github.com/buster14a/buster/issues/709).

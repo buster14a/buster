@@ -122,6 +122,7 @@ if ((C_COMPILER_NAME STREQUAL "zig" OR C_COMPILER_NAME STREQUAL "zig.exe") AND "
 endif()
 
 option(BUSTER_CI "Enable CI mode" OFF)
+option(BUSTER_TEST_PROCESS_PARTITIONS "Run CI unit modules in isolated processes within the test quota" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
 option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized Clang configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
@@ -2267,6 +2268,26 @@ else()
         COMMENT "Run unit tests"
         VERBATIM
     )
+    if (BUSTER_CI)
+        # The native driver owns child quotas, completion proof and cleanup.
+        # These opt-in targets reuse ide and the authoritative sanitizer env.
+        add_custom_target(test_units_partitioned
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>"
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run isolated unit-test module partitions"
+            VERBATIM
+        )
+        add_custom_target(test_unit_inventory
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "BUSTER_TEST_MODULE_GROUP=inventory" "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Query the unit-test module inventory without executing modules"
+            VERBATIM
+        )
+    endif()
     # Native observer only; this prefix does not change dependencies or test policy.
     set(BUSTER_MATRIX_TEST_OBSERVER)
     if (BUSTER_MATRIX_PHASE_DRIVER)
@@ -2278,10 +2299,14 @@ else()
             "${BUSTER_MATRIX_PHASE_EPOCH}" 0 --)
     endif()
     if (BUSTER_CI)
+        set(BUSTER_CI_TEST_COMMAND "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS})
+        if (BUSTER_TEST_PROCESS_PARTITIONS)
+            set(BUSTER_CI_TEST_COMMAND "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>")
+        endif()
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            ${BUSTER_MATRIX_TEST_OBSERVER} "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            ${BUSTER_MATRIX_TEST_OBSERVER} ${BUSTER_CI_TEST_COMMAND}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             COMMENT "Run all compiler and library tests"

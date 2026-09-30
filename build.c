@@ -34,6 +34,7 @@
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
 //   tools/source_size.c                         source-size report and ratchet
+//   tools/ci_unit_tests.c                       isolated test-module partitions
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
@@ -134,6 +135,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
+    BUILD_COMMAND_TEST_UNITS_PARTITIONED,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -22910,6 +22912,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     switch (command)
     {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
+        case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
@@ -40406,6 +40409,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 
 #include "tools/production_profile.c"
 #include "tools/source_size.c"
+#include "tools/ci_unit_tests.c"
 
 ProcessResult process_arguments(void)
 {
@@ -40471,6 +40475,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
+        [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -40558,6 +40563,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         switch (command)
         {
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
@@ -41734,6 +41740,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         }
         break;
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
+        case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
