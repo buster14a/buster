@@ -19,7 +19,8 @@
  *              bq_retirement_campaign_plan_commands, both stages allocated
  *              and bound after the acknowledgement
  *              (bq_retirement_worker_stages_open), the store-based bind, the
- *              documents sized (bq_retirement_unit_campaign_documents_measure),
+ *              documents sized (bq_retirement_unit_campaign_documents_measure,
+ *              retained as documents-sized.txt, bq_retirement_worker_sized_write),
  *              lane E's store plan (bq_retirement_worker_store_plan), attach,
  *              documents, A/A, admission, post-A/A document, freeze, A/B and
  *              READY on the post-sample record stream

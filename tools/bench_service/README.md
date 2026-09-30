@@ -706,10 +706,10 @@ oracle/reference-producer caller, correctness gate and ready record in
 in `retirement_worker_unit.c`, which `worker-unit` admits only with a complete
 profile (`bq_retirement_profile_complete`); the compiled blocked profile is
 refused before the lease handoff. After the ready record the producer runs the
-in-unit campaign (`retirement_worker_campaign.c`) through lane D's READY, but
-the job still fails closed because composition and MEASURED are not wired,
-and no fixture reaches READY while lane B's runtime template and lane D's
-launch layout disagree (see
+in-unit campaign (`retirement_worker_campaign.c`) through lane D's READY
+(runtime rows run lane B's `./{{output}}` program in a fresh step directory
+where its compile step reproduced it), but the job still fails closed because
+composition and MEASURED are not wired (see
 [the producer](RETIREMENT_PREPARATION.md#worker-unit-producer-881)). The runner
 sends both subjects' build stages through typed broker `start-stage`
 requests. The broker

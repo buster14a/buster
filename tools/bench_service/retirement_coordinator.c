@@ -19,21 +19,36 @@
  *   bq_retirement_coordinator_handoff    before the MEASURED acknowledgement:
  *                                        the producer's receipt authority,
  *                                        named by the digest the MEASURED
- *                                        packet carried, copied and journalled
+ *                                        packet carried and bound by its
+ *                                        context chain to the coordinator's
+ *                                        own facts, copied and journalled
  *                                        into the queue-private root
  *                                        (tp_retirement_store_authority_handoff)
  *   bq_retirement_coordinator_replay     at finalization: bq_retirement_unit_
  *                                        replay_pinned over the attempt
  *                                        workspace with the ready digest the
  *                                        RETIREMENT_READY packet carried
+ *   bq_retirement_coordinator_authority_complete
+ *                                        at finalization: the journalled copy
+ *                                        of the authority MEASURED named,
+ *                                        classified COMPLETE
  *
  * Map: bq_retirement_coordinator_authority_read parses the producer's
  * canonical BQ-RETIREMENT-AUTHORITY-V3 record from
  * job-<id>-attempt-<token>/retirement-authority/ and requires its bytes to
  * hash to the channel's digest and to re-format byte for byte; the handoff
  * then reopens the receipt, its shards and the retained manifest itself.
+ * bq_retirement_context_chain_format is the canonical
+ * BQ-RETIREMENT-CONTEXT-CHAIN-V1 record (job, attempt, A digest, ready
+ * digest, row-plan pin, plan, context) PR 3's producer writes beside the
+ * authority; bq_retirement_coordinator_chain_check requires the stored chain
+ * to equal the one the coordinator formats from its own A digest, the
+ * channel's ready digest and the profile's row-plan pin. The chain names
+ * those facts; it does not yet prove the plan and context were derived from
+ * them, which needs PR 3's authority content (RETIREMENT_PREPARATION.md).
+ * bq_retirement_coordinator_authority_root opens the producer's root and
  * bq_retirement_coordinator_queue_root opens (creating once, 0700, fsynced)
- * the queue directory's retirement-authority/.
+ * the queue directory's retirement-authority/, only after the chain check.
  *
  * Production passes the compiled profile (bq_retirement_worker_unit_installed),
  * which bq_retirement_profile_complete refuses and which pins no campaign
@@ -56,6 +71,9 @@
 /* The authority record: magic, job label, attempt and five digests. */
 #define BQ_RETIREMENT_COORDINATOR_AUTHORITY_LINES 8u
 #define BQ_RETIREMENT_COORDINATOR_AUTHORITY_CAP 640u
+/* The context chain (bq_retirement_context_chain_format). */
+#define BQ_RETIREMENT_COORDINATOR_CHAIN_MAGIC "BQ-RETIREMENT-CONTEXT-CHAIN-V1"
+#define BQ_RETIREMENT_COORDINATOR_CHAIN_CAP 512u
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_request_valid_pinned(BqRequest const* request, String8 profile)
 {
@@ -183,38 +201,133 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_coordinator_queue_root(int queue_directory
     return root;
 }
 
-/* Called by bq_worker_phase_accept for a version-2 MEASURED, before its
- * acknowledgement. result_directory is the attempt's result root (the
- * composer's store root); the authority digest is the one the packet
- * carried. BQ_WORKER_MISMATCH: no record hashes to it, or the handoff refuses
- * (another identity, a changed receipt or retained file, an earlier copy or
- * journal). BQ_IO: a root cannot be opened. */
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_handoff(int result_directory, String8 workspace_root,
-    int queue_directory, u64 job_id, u64 attempt_token, char const authority_sha256[SHA256_HEX_CAPACITY])
+/* The canonical BQ-RETIREMENT-CONTEXT-CHAIN-V1 record binding the
+ * authority's plan and final context to facts the coordinator holds itself:
+ * the job and attempt, its own A digest (preparation), the ready digest the
+ * RETIREMENT_READY packet carried, and the pinned row-plan authority (which
+ * the replayed ready record's row-plan= also names). PR 3's producer writes
+ * exactly these bytes as `context-chain-job-<id>-<token>.txt` (0400) in its
+ * private authority root beside the authority record. Returns the length, or
+ * 0 when a field is not a lowercase digest. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_context_chain_format(char chain[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP],
+    u64 job_id, u64 attempt_token, char const* preparation_sha256, char const* ready_sha256,
+    char const* row_plan_sha256, char const* plan_sha256, char const* context_sha256)
+{
+    char const* digests[] = {preparation_sha256, ready_sha256, row_plan_sha256, plan_sha256, context_sha256};
+    bool ok = chain && job_id && attempt_token;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(digests); index += 1)
+        ok = digests[index] && bq_retirement_hex(string_from_pointer(digests[index]), 64);
+    int length = ok ? snprintf(chain, BQ_RETIREMENT_COORDINATOR_CHAIN_CAP, BQ_RETIREMENT_COORDINATOR_CHAIN_MAGIC
+                               "\njob=job-%" PRIu64 "\nattempt=%" PRIu64 "\npreparation=%s\nready=%s\nrow-plan=%s"
+                               "\nplan=%s\ncontext=%s\n", (uint64_t)job_id, (uint64_t)attempt_token,
+                               preparation_sha256, ready_sha256, row_plan_sha256, plan_sha256, context_sha256) : -1;
+    u32 result = length > 0 && length < (int)BQ_RETIREMENT_COORDINATOR_CHAIN_CAP ? (u32)length : 0;
+    return result;
+}
+
+/* The producer's authority record, named by the channel's digest, and its
+ * context chain, which must be byte for byte the chain the coordinator
+ * formats from its own A digest, the channel's ready digest and the profile's
+ * row-plan pin together with that authority's plan and context. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_chain_check(int authority, u64 job_id, u64 attempt_token,
+    String8 profile, char const* preparation_sha256, char const* ready_sha256,
+    char const authority_sha256[SHA256_HEX_CAPACITY], TpRetirementReceiptAuthority* trusted)
+{
+    char row_plan[SHA256_HEX_CAPACITY] = {0}, name[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    char expected[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP], stored[BQ_RETIREMENT_COORDINATOR_CHAIN_CAP];
+    bool ok = bq_retirement_coordinator_authority_read(authority, job_id, attempt_token, authority_sha256, trusted) &&
+              bq_retirement_profile_sha(profile, S8("row-plan-sha256="), row_plan);
+    u32 length = ok ? bq_retirement_context_chain_format(expected, job_id, attempt_token, preparation_sha256,
+                                                         ready_sha256, row_plan, trusted->plan_sha256,
+                                                         trusted->context_sha256) : 0;
+    int named = length ? snprintf(name, sizeof(name), "context-chain-job-%" PRIu64 "-%" PRIu64 ".txt",
+                                  (uint64_t)job_id, (uint64_t)attempt_token) : -1;
+    int file = named > 0 && (size_t)named < sizeof(name) ?
+               openat(authority, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    u32 read_length = 0;
+    ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+         info.st_uid == geteuid() && (info.st_mode & 0777) == 0400 && (u64)info.st_size == length &&
+         bq_read_file(file, (u8*)stored, length, &read_length) && read_length == length &&
+         !memcmp(stored, expected, length);
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (!ok && trusted) *trusted = (TpRetirementReceiptAuthority){0};
+    return ok;
+}
+
+/* The attempt's private authority root, opened read-only. */
+BUSTER_GLOBAL_LOCAL int bq_retirement_coordinator_authority_root(String8 workspace_root, u64 job_id, u64 attempt_token)
 {
     char attempt_name[64];
-    TpRetirementReceiptAuthority trusted = {0};
-    TpRetirementAuthorityJournal journal = {0};
-    bool named = result_directory >= 0 && workspace_root.length && workspace_root.pointer[0] == '/' &&
+    bool named = workspace_root.length && workspace_root.pointer[0] == '/' &&
                  bq_workspace_name(attempt_name, job_id, attempt_token);
     int workspaces = named ? bq_open_absolute_directory(workspace_root) : -1;
     int attempt = workspaces >= 0 ? openat(workspaces, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) :
                   -1;
     int authority = attempt >= 0 ? openat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY,
                                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int queue_root = authority >= 0 ? bq_retirement_coordinator_queue_root(queue_directory) : -1;
-    BqError result = queue_root >= 0 ? BQ_OK : BQ_IO;
-    if (result == BQ_OK &&
-        !bq_retirement_coordinator_authority_read(authority, job_id, attempt_token, authority_sha256, &trusted))
+    if (attempt >= 0) close(attempt);
+    if (workspaces >= 0) close(workspaces);
+    return authority;
+}
+
+/* Called by bq_worker_phase_accept for a version-2 MEASURED, before its
+ * acknowledgement and before its receipt. result_directory is the attempt's
+ * result root (the composer's store root); authority_sha256 is the digest the
+ * packet carried; profile, preparation_sha256 and ready_sha256 are the
+ * coordinator's own (bq_retirement_coordinator_chain_check). A missing or
+ * foreign chain refuses before the queue-private root exists and before any
+ * copy or journal. BQ_WORKER_MISMATCH: no authority or chain matches, or the
+ * store's handoff refuses (another identity, a changed receipt or retained
+ * file, an earlier copy or journal). BQ_IO: a root cannot be opened. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_handoff(int result_directory, String8 workspace_root,
+    int queue_directory, u64 job_id, u64 attempt_token, String8 profile, char const* preparation_sha256,
+    char const* ready_sha256, char const authority_sha256[SHA256_HEX_CAPACITY])
+{
+    TpRetirementReceiptAuthority trusted = {0};
+    TpRetirementAuthorityJournal journal = {0};
+    int authority = result_directory >= 0 ? bq_retirement_coordinator_authority_root(workspace_root, job_id,
+                                                                                     attempt_token) : -1;
+    BqError result = authority >= 0 ? BQ_OK : BQ_IO;
+    if (result == BQ_OK && !bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile,
+                                                                  preparation_sha256, ready_sha256, authority_sha256,
+                                                                  &trusted))
         result = BQ_WORKER_MISMATCH;
+    int queue_root = result == BQ_OK ? bq_retirement_coordinator_queue_root(queue_directory) : -1;
+    if (result == BQ_OK && queue_root < 0) result = BQ_IO;
     if (result == BQ_OK &&
         !tp_retirement_store_authority_handoff(result_directory, authority, queue_root, job_id, attempt_token,
                                                trusted.plan_sha256, trusted.context_sha256, &trusted, &journal))
         result = BQ_WORKER_MISMATCH;
     if (queue_root >= 0 && close(queue_root) != 0 && result == BQ_OK) result = BQ_IO;
     if (authority >= 0 && close(authority) != 0 && result == BQ_OK) result = BQ_IO;
-    if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
-    if (workspaces >= 0 && close(workspaces) != 0 && result == BQ_OK) result = BQ_IO;
+    return result;
+}
+
+/* At finalization: the authority the MEASURED packet named is still the one
+ * the coordinator copied and journalled. Its queue-private copy must hash to
+ * authority_sha256, the producer's chain must still bind it to the
+ * coordinator's facts, and tp_retirement_store_authority_state must classify
+ * the handoff COMPLETE against the result. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_authority_complete(int result_directory,
+    String8 workspace_root, int queue_directory, u64 job_id, u64 attempt_token, String8 profile,
+    char const* preparation_sha256, char const* ready_sha256, char const authority_sha256[SHA256_HEX_CAPACITY])
+{
+    TpRetirementReceiptAuthority trusted = {0}, copied = {0};
+    int authority = result_directory >= 0 ? bq_retirement_coordinator_authority_root(workspace_root, job_id,
+                                                                                     attempt_token) : -1;
+    int queue_root = queue_directory >= 0 ? openat(queue_directory, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY,
+                                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BqError result = authority >= 0 && queue_root >= 0 ? BQ_OK : BQ_WORKER_MISMATCH;
+    if (result == BQ_OK &&
+        !(bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile, preparation_sha256,
+                                                ready_sha256, authority_sha256, &trusted) &&
+          bq_retirement_coordinator_authority_read(queue_root, job_id, attempt_token, authority_sha256, &copied) &&
+          tp_retirement_store_authority_state(result_directory, queue_root, job_id, attempt_token, copied.plan_sha256,
+                                              copied.context_sha256, &copied) == TP_RETIREMENT_AUTHORITY_COMPLETE))
+        result = BQ_WORKER_MISMATCH;
+    if (queue_root >= 0 && close(queue_root) != 0 && result == BQ_OK) result = BQ_IO;
+    if (authority >= 0 && close(authority) != 0 && result == BQ_OK) result = BQ_IO;
     return result;
 }
 

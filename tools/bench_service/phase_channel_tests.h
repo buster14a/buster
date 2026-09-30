@@ -15,6 +15,7 @@
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 #include <signal.h>
 #include <sys/time.h>
+#include "retirement_coordinator_fixture.h"
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void);
@@ -192,7 +193,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
     bq_test_phase_exchange_until_failures();
     bq_test_phase_v2_packets();
     bq_test_phase_ack_window();
-    for (unsigned defect = 0; defect <= 5; ++defect) bq_test_phase_retirement(defect);
+    for (unsigned defect = 0; defect <= 9; ++defect) bq_test_phase_retirement(defect);
 }
 
 #define BQ_TEST_PHASE_READY_HEX "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -381,52 +382,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_ack_window(void)
     close(pair[1]);
 }
 
-/* A receipt authority for job/token issued into the attempt's
- * retirement-authority/ over a one-shard receipt in the result directory, as
- * the producer's tp_retirement_store_receipt_authority will (#881 PR 3). */
-BUSTER_GLOBAL_LOCAL bool bq_test_phase_authority(int result_directory, int attempt, u64 job, u64 token,
-                                                 char authority_sha256[SHA256_HEX_CAPACITY])
-{
-    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY], shard_digest[SHA256_HEX_CAPACITY], receipt_digest[SHA256_HEX_CAPACITY];
-    char receipt[1024];
-    TpRetirementStore store;
-    TpRetirementStoredFile files[4];
-    TpRetirementReceiptAuthority issued = {0};
-    bool ok = tp_retirement_store_job_label(label, job) &&
-              mkdirat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, 0700) == 0;
-    int authority = ok ? openat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    bool opened = authority >= 0 && tp_retirement_store_open(&store, result_directory, files, 4);
-    ok = opened && tp_retirement_store_plan(&store, 2, 2048, 3, 1024);
-    char const* bodies[2] = {"{}\n", receipt};
-    char const* paths[2] = {"shard.jsonl", TP_RETIREMENT_EXECUTION_RECEIPT_PATH};
-    for (u32 index = 0; ok && index < 2; index += 1)
-    {
-        if (index == 1)
-        {
-            int length = snprintf(receipt, sizeof(receipt),
-                "{\"attempt\":%" PRIu64 ",\"boot_id\":\"boot-1\",\"bound_at_ns\":1000,\"completed_at_ns\":2000,"
-                "\"context_sha256\":\"%s\",\"execution_plan_sha256\":\"%s\",\"invocations\":1,"
-                "\"job_id\":\"%s\",\"schema\":\"buster-native-retirement-execution-receipt-v1\","
-                "\"shards\":[{\"bytes\":3,\"path\":\"shard.jsonl\",\"records\":1,\"sha256\":\"%s\"}],\"version\":1}\n",
-                (uint64_t)token, BQ_TEST_PHASE_OTHER_HEX, BQ_TEST_PHASE_READY_HEX, label, shard_digest);
-            ok = length > 0 && (size_t)length < sizeof(receipt);
-        }
-        TpRetirementPending pending = {0};
-        size_t length = strlen(bodies[index]);
-        char* digest = index ? receipt_digest : shard_digest;
-        ok = ok && tp_retirement_store_begin(&store, paths[index], 1024, &pending) &&
-             fwrite(bodies[index], 1, length, pending.stream) == length;
-        if (ok) bq_digest(bodies[index], (u32)length, (char8*)digest);
-        if (ok) ok = tp_retirement_store_publish(&store, &pending, length, digest);
-        else if (pending.stream) tp_retirement_store_abort(&store, &pending);
-    }
-    ok = ok && tp_retirement_store_receipt_authority(&store, authority, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, label,
-                                                     token, BQ_TEST_PHASE_READY_HEX, BQ_TEST_PHASE_OTHER_HEX, &issued);
-    if (opened) tp_retirement_store_close(&store);
-    if (authority >= 0) close(authority);
-    if (ok) memcpy(authority_sha256, issued.authority_sha256, SHA256_HEX_CAPACITY);
-    return ok;
-}
+/* The coordinator's own facts in the retirement fixture: its A digest and the
+ * seams' row-plan pin. */
+#define BQ_TEST_PHASE_PREPARATION_HEX "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+#define BQ_TEST_PHASE_ROW_PLAN_HEX "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
 
 /* The number of authority copies and journals in the queue-private root, which
  * this also removes. */
@@ -455,7 +414,9 @@ BUSTER_GLOBAL_LOCAL u32 bq_test_phase_queue_authority_drain(int queue_directory)
 /* A stub retirement producer on a BQPHASE2 channel against the coordinator's
  * bq_worker_phase_join. defect: 0 success; 1 a MEASURED digest naming no
  * authority; 2 the execution deadline already reached at MEASURED; 3 reached
- * during the handoff; 4 a BQPHASE1 packet; 5 a zero ready digest. */
+ * during the handoff; 4 a BQPHASE1 packet; 5 a zero ready digest; and a
+ * self-consistent authority whose context chain names 6 another ready digest,
+ * 7 another A digest or 8 another row plan, or 9 has no chain. */
 BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
 {
     BqWorkerFixture fixture;
@@ -467,15 +428,20 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
         BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
                  bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
         BqJob* job = bq_job(&queue->state, id);
+        BqRetirementWorkerUnitSeams seams = {.profile = S8("row-plan-sha256=" BQ_TEST_PHASE_ROW_PLAN_HEX "\n")};
         BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1,
-                                             .execution_deadline = 1000, .phase_version = BQ_PHASE_VERSION_2};
+                                             .execution_deadline = 1000, .phase_version = BQ_PHASE_VERSION_2,
+                                             .retirement = &seams};
+        memcpy(finalization.retirement_preparation_sha256, BQ_TEST_PHASE_PREPARATION_HEX, SHA256_HEX_CAPACITY);
         BQ_CHECK(bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
         char name[64], authority_sha256[SHA256_HEX_CAPACITY] = {0};
         int workspaces = open(fixture.material.workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         int attempt = workspaces >= 0 && bq_workspace_name(name, id, token) ?
                       openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-        BQ_CHECK(attempt >= 0 && bq_test_phase_authority(finalization.result_directory, attempt, id, token,
-                                                         authority_sha256));
+        BQ_CHECK(attempt >= 0 && bq_coordinator_fixture_authority(finalization.result_directory, attempt, id, token,
+                     defect == 7 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_PREPARATION_HEX,
+                     defect == 6 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_READY_HEX,
+                     defect == 8 ? BQ_TEST_PHASE_OTHER_HEX : BQ_TEST_PHASE_ROW_PLAN_HEX, defect != 9, authority_sha256));
         int pair[2] = {-1, -1};
         BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
         BqPhaseChannel phases;
@@ -537,8 +503,34 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
         BQ_CHECK(ready_kept == (defect != 4 && defect != 5) &&
                  (finalization.retirement_authority_sha256[0] != 0) == (defect == 0) &&
                  (defect != 0 || !strcmp(finalization.retirement_authority_sha256, authority_sha256)));
+        /* The durable records recovery reloads: READY's once acknowledged,
+         * MEASURED's only after a completed handoff. */
+        char durable[SHA256_HEX_CAPACITY] = {0};
+        BQ_CHECK(bq_worker_phase_record_digest(queue, job, BQ_PHASE_RETIREMENT_READY, durable) == ready_kept &&
+                 (!ready_kept || !strcmp(durable, BQ_TEST_PHASE_READY_HEX)));
+        BQ_CHECK(bq_worker_phase_record_digest(queue, job, BQ_PHASE_MEASURED, durable) == (defect == 0) &&
+                 (defect != 0 || !strcmp(durable, authority_sha256)));
+        /* A record is read only as this attempt's. */
+        BqJob other = *job;
+        other.token += 1;
+        BQ_CHECK(!bq_worker_phase_record_digest(queue, &other, BQ_PHASE_RETIREMENT_READY, durable) && !durable[0]);
         if (defect == 0)
         {
+            /* The finalization check: the journalled authority, bound to the
+             * coordinator's facts, and nothing else. */
+            String8 root = fixture.config.workspace_root;
+            BQ_CHECK(bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
+                         queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
+                         BQ_TEST_PHASE_READY_HEX, authority_sha256) == BQ_OK);
+            BQ_CHECK(bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
+                         queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
+                         BQ_TEST_PHASE_READY_HEX, BQ_TEST_PHASE_OTHER_HEX) != BQ_OK &&
+                     bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
+                         queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_PREPARATION_HEX,
+                         BQ_TEST_PHASE_OTHER_HEX, authority_sha256) != BQ_OK &&
+                     bq_retirement_coordinator_authority_complete(finalization.result_directory, root,
+                         queue->directory_fd, id, token, seams.profile, BQ_TEST_PHASE_OTHER_HEX,
+                         BQ_TEST_PHASE_READY_HEX, authority_sha256) != BQ_OK);
             char body[512] = {0};
             u32 size = 0;
             BQ_CHECK(job && job->phase == BQ_MEASURING && bq_worker_phases_validate(queue, job, &finalization) == BQ_OK &&
@@ -549,9 +541,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_retirement(unsigned defect)
             BQ_CHECK(unlinkat(finalization.result_directory, "worker-phase-5", 0) == 0 &&
                      bq_worker_phases_validate(queue, job, &finalization) != BQ_OK);
         }
-        /* The copy and its journal exist only when the handoff ran. */
+        /* The copy and its journal exist only when the handoff ran; a refused
+         * chain leaves not even the queue-private root. */
+        struct stat info = {0};
+        bool rooted = fstatat(queue->directory_fd, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY, &info, 0) == 0;
         u32 copies = bq_test_phase_queue_authority_drain(queue->directory_fd);
-        BQ_CHECK(copies == (defect == 0 || defect == 3 ? 2u : 0u));
+        BQ_CHECK(copies == (defect == 0 || defect == 3 ? 2u : 0u) && (defect < 6 || !rooted));
         if (attempt >= 0) close(attempt);
         if (workspaces >= 0) close(workspaces);
         close(finalization.result_directory);
