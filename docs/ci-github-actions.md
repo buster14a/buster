@@ -311,10 +311,20 @@ re-reads inconsistent inventories with 1/2/4-second backoff, at most three
 refreshes and a 30-second total metadata budget. A later exact snapshot can
 recover a transient omission; a persistent empty, stale or ambiguous record
 fails closed. It never borrows required-step proof from an older attempt when a
-newer attempt shadows that job. The retained `desktop-partitions.json` records
-the exact run/head, final job attempts, observed required-step status and
-conclusion, refresh count, and any unresolved proof errors. A green job-level
-conclusion alone cannot pass the gate.
+newer attempt shadows that job. A completed job whose API record has
+`steps=[]` is reported as that distinct case and stays unresolved; it is never
+treated as success. Transient API reads (HTTP 5xx or 429, connection loss or a
+timeout) retry inside the same 30-second budget. The run read retries with the
+same backoff. A failed jobs page discards that snapshot and is re-read as a
+pending refresh; after a 5xx, later snapshots request 30 jobs per page instead
+of 100. Any other HTTP status, and every identity, pagination or consistency
+violation, still fails immediately. The retained `desktop-partitions.json`
+records the exact run/head, final job attempts, observed required-step status
+and conclusion, refresh count, the final page size, the outcome of every API
+read, and any unresolved proof errors. An unsuccessful verdict also prints
+those errors, with run, attempt, head, snapshot and refresh counts, to the job
+log and step summary; a raised read or input error prints `CI timing failed:`
+instead. A green job-level conclusion alone cannot pass the gate.
 
 A hosted runner that stops reporting cannot run its own summary or upload
 steps, so the gate also records controller-visible interruption evidence. For
