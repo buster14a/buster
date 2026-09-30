@@ -3128,6 +3128,7 @@ BUSTER_C_INTERNAL bool c_ir_query_request(CIntegerIrBuilder* builder, CIrQueryFr
 
 BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFrame root, CIrQueryFrame* result_out)
 {
+    WORK_LEDGER_RECORD(REDERIVE_LOWER_QUERY_ROOTS, 1);
     CIrQueryMachine* machine = builder->queries;
     if (!machine || machine->frame_count >= machine->frame_capacity)
     {
@@ -12326,6 +12327,8 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
         C_CENSUS_PHASE_RECORD(STRING_DECODE_OUTPUT_BYTES, spelling.length);
     }
 #endif
+    WORK_LEDGER_RECORD(LITERAL_STRING_DECODE_CALLS, 1);
+    WORK_LEDGER_RECORD(LITERAL_STRING_DECODE_BYTES, spelling.length);
     u64 opening = 0;
     while (opening < spelling.length && spelling.pointer[opening] != delimiter)
     {
@@ -12385,6 +12388,8 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
 BUSTER_C_INTERNAL bool c_ir_count_quoted(String8 spelling, u8 delimiter, u64* count_out)
 {
     C_CENSUS_FACT(STRING_COUNT, spelling.pointer, spelling.length);
+    WORK_LEDGER_RECORD(LITERAL_STRING_COUNT_CALLS, 1);
+    WORK_LEDGER_RECORD(LITERAL_STRING_COUNT_BYTES, spelling.length);
     u64 opening = 0;
     while (opening < spelling.length && spelling.pointer[opening] != delimiter)
     {
@@ -33223,6 +33228,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
+    WORK_LEDGER_RECORD(REDERIVE_LOWER_TYPE_PREDICTIONS, 1);
     CIrQueryFrame result = {0};
     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) || !result.success)
     {

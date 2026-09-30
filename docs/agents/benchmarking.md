@@ -530,6 +530,15 @@ metrics. These calling-thread counters do not aggregate persistent lanes,
 time appends, or cover every operand decoder. They do not establish a
 Zen 5 speedup, live memory reduction, or whole-pipeline cost.
 
+## Whole-compiler work ledger
+
+The same diagnostic build also writes `work.*` counters: exact, mechanism-grouped
+work counts (re-derived queries, rollback snapshots, whole-table per-query
+work, literal decoding, interning, target-table preparation, machine records,
+output bytes) and per-phase minor-fault and arena rows. Use them to rank and
+prove removed work, never as timing evidence; see [the work ledger](../work-ledger.md)
+for the key contract and the frozen-corpus runner under `tools/work_ledger/`.
+
 ## Object assembly-printer scaling
 
 `BUSTER_TEST_JOBS=1 BUSTER_OBJECT_ASSEMBLY_BENCH=1 build/Release/ide test --ci=1`

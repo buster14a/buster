@@ -1089,6 +1089,8 @@ BUSTER_C_INTERNAL bool c_type_parse_frame_push(CTypeParseMachine* machine, CType
         frame.task_mark = machine->expression_task_count;
         frame.arena_mark = machine->scratch_arena->position;
     }
+    WORK_LEDGER_RECORD(SNAPSHOT_FRAME_PUSHES, 1);
+    WORK_LEDGER_RECORD(SNAPSHOT_FRAME_BYTES, sizeof(frame));
     machine->frames[machine->frame_count++] = frame;
     return true;
 }
@@ -1186,6 +1188,7 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
 
 BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult const* checkpoint, u32 mutation_mark)
 {
+    WORK_LEDGER_RECORD(SNAPSHOT_ROLLBACKS, 1);
     CType* checkpoint_types = checkpoint->types;
     u32 checkpoint_type_count = checkpoint->type_count;
     *result = *checkpoint;
@@ -3280,6 +3283,15 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
     u32* alignments = arena_allocate(arena, u32, type_count + 1);
     bool* resolved = arena_allocate(arena, bool, type_count + 1);
     bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    // Only this whole-table seeding counts as population work; a settled
+    // c_parse_type_layout_agenda solve touches its request's closure alone.
+    WORK_LEDGER_RECORD(POPULATION_LAYOUT_SOLVES, 1);
+    WORK_LEDGER_RECORD(POPULATION_LAYOUT_ROWS_SEEDED, pending_count);
+    // The copies below (or the clear on the uncached path) plus the
+    // provisional clear and the pending-list copy or fill.
+    WORK_LEDGER_RECORD(POPULATION_LAYOUT_SCRATCH_BYTES, (cache ? (u64)type_count * (sizeof(*sizes) + sizeof(*alignments) + sizeof(*resolved))
+                                                               : (u64)type_count * sizeof(*resolved)) +
+                                                          (u64)type_count * sizeof(*provisional) + (u64)pending_count * sizeof(*pending));
     if (cache)
     {
         memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
@@ -4016,6 +4028,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
         TemporalArena field_search = arena_begin_temporal(arena);
         CTypeId* work = arena_allocate(field_search.arena, CTypeId, result->type_count + 1);
         bool* visited = 0;
+        WORK_LEDGER_RECORD(POPULATION_MEMBER_PROMOTED_SEARCHES, 1);
 #if BUSTER_INCLUDE_TESTS
         c_parse_member_search_counts[0] += 1;
 #endif
@@ -4059,6 +4072,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
                 if (!visited && work_count == C_PARSE_MEMBER_SEARCH_QUEUE_SCAN_LIMIT)
                 {
                     visited = arena_allocate(field_search.arena, bool, result->type_count + 1);
+                    WORK_LEDGER_RECORD(POPULATION_MEMBER_VISITED_BYTES_CLEARED, sizeof(*visited) * (result->type_count + 1));
                     memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
 #if BUSTER_INCLUDE_TESTS
                     c_parse_member_search_counts[1] += 1;
@@ -5793,6 +5807,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
+    WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_ROOTS, 1);
     CParseExpressionQuery* query = !machine->enum_constant_members_active && machine->expression_queries &&
         machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens && !machine->frame_count &&
         start >= machine->expression_query_start && start < end && end <= machine->expression_query_end
@@ -5817,17 +5832,24 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
         (query->flags & flags) == flags && query->type.value < result->type_count)
     {
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
         *type_out = query->type;
         valid = true;
     }
     else if (literal)
     {
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_LITERAL_ANSWERS, 1);
         valid = c_parse_expression_literal_query(machine, arena, preprocess, result, scope, start, end, flags, type_out);
         if (query && valid && !machine->expression_constraint.length)
             *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
     }
     else
     {
+        // One snapshot here; the root finish reads it through a pointer.
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_UNCACHED, 1);
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_UNCACHED_TOKENS, end > start ? end - start : 0);
+        WORK_LEDGER_RECORD(SNAPSHOT_QUERY_CHECKPOINTS, 1);
+        WORK_LEDGER_RECORD(SNAPSHOT_QUERY_CHECKPOINT_BYTES, sizeof(CParseResult));
         u32 frame_start = machine->frame_count;
         CParseResult checkpoint = *result;
         u32 mutation_mark = machine->mutation_count;
@@ -8100,6 +8122,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                                                                     CTypeId element_type, u32 start, u32 end, u64* count_out,
                                                                     CTypeId aggregate_type, CParseInitializerDiagnostic* diagnostic)
 {
+    WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_WALKS, 1);
+    WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_WALK_TOKENS, end > start ? end - start : 0);
     if (start >= end)
     {
         return false;
@@ -11483,6 +11507,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }
+        WORK_LEDGER_RECORD(SNAPSHOT_FRAME_CHECKPOINT_SAVES, 1);
         *c_type_parse_frame_checkpoint(machine, frame) = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
@@ -12421,6 +12446,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
         }
+        WORK_LEDGER_RECORD(SNAPSHOT_FRAME_CHECKPOINT_SAVES, 1);
         *c_type_parse_frame_checkpoint(machine, frame) = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->specifier_index = specifier_index;
@@ -13313,6 +13339,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
 
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
 {
+    WORK_LEDGER_RECORD(REDERIVE_TYPE_MACHINE_RUNS, 1);
     while (machine->frame_count > frame_start && !machine->failed)
     {
         CTypeParseFrame* frame = machine->frames + machine->frame_count - 1;
@@ -15708,9 +15735,11 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         .right = right,
     };
     bool compatible = true;
+    WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
     while (stack_count)
     {
         CTypePair pair = stack[--stack_count];
+        WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_PAIRS, 1);
         if (pair.left.value >= result->type_count || pair.right.value >= result->type_count)
         {
             compatible = false;
@@ -23317,6 +23346,10 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
     }
     CParseLoweringConstraintDiagnostic checked = {.order_token_index = UINT32_MAX, .location_token_index = UINT32_MAX};
     CTypeId source = C_TYPE_ID_INVALID;
+    WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_ELEMENTS, 1);
+    WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_LITERAL_ELEMENTS,
+                       end == start + 1 && (preprocess.tokens[start].kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                                            preprocess.tokens[start].kind == C_TOKEN_CHARACTER_LITERAL));
     if (start < end)
     {
         c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
@@ -27134,6 +27167,7 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
     }
     else
     {
+        WORK_LEDGER_PHASE(LOWER);
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
     }
     if (analysis.type_layout_statistics)

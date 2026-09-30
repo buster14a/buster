@@ -3623,6 +3623,8 @@ BUSTER_C_INTERNAL bool c_symbol_middle_equal(String8 stored, String8 name)
 
 BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
 {
+    WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERNS, 1);
+    WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERN_BYTES_HASHED, name.length);
     CSymbolKey key = c_symbol_key(name);
     u64 length_word = (u64)name.length << 32;
     u32 mask = table->slot_capacity - 1;
@@ -3631,6 +3633,7 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
     C_CENSUS_PHASE_RECORD(INTERN_KEY_BYTES, BUSTER_MIN(name.length, (u64)16));
     for (;;)
     {
+        WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERN_PROBES, 1);
         CSymbolSlot* entry = &table->slots[slot];
         u64 length_and_id = entry->length_and_id;
         C_CENSUS_PHASE_RECORD(INTERN_PROBES, 1);
@@ -5643,6 +5646,7 @@ BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
 BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
 {
     C_CENSUS_FACT(INTEGER, spelling.pointer, spelling.length);
+    WORK_LEDGER_RECORD(LITERAL_NUMBER_CONVERSIONS, 1);
     u32 base = 10;
     u64 index = 0;
     if (spelling.length >= 2 && spelling.pointer[0] == '0')

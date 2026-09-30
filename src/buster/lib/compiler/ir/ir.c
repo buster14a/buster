@@ -26,6 +26,7 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
@@ -35,6 +36,9 @@
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* function);
 
 #if BUSTER_BENCH_ALLOCATIONS
+// getrusage for the work ledger's per-phase minor-fault sample.
+#include <buster/lib/system_headers.h>
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
 
 void ir_construction_record(IrConstructionCounter counter, u64 amount)
@@ -62,6 +66,124 @@ void ir_construction_record(IrConstructionCounter counter, u64 amount)
 IrConstructionCounters ir_construction_counters(void)
 {
     return ir_construction_totals;
+}
+
+// The work ledger's storage and phase accountant; see work_ledger.h. A phase
+// accumulates the difference between two samples of the same monotonic
+// sources -- the process's minor page faults, which count first touches of
+// pages, and the calling thread's arena request totals -- so a phase's rows
+// sum exactly to the invocation's.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerCounters work_ledger_totals;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhase work_ledger_current_phase;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhaseTotals work_ledger_phase_start;
+
+BUSTER_GLOBAL_LOCAL void work_ledger_add(u64* value, u64 amount, bool* overflowed)
+{
+    if (amount > UINT64_MAX - *value)
+    {
+        *value = UINT64_MAX;
+        *overflowed = true;
+    }
+    else
+    {
+        *value += amount;
+    }
+}
+
+void work_ledger_record(WorkLedgerCounter counter, u64 amount)
+{
+    if ((u32)counter < WORK_LEDGER_COUNT)
+    {
+        work_ledger_add(work_ledger_totals.values + counter, amount, &work_ledger_totals.overflowed);
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+// Minor faults are process-wide on the platforms that report them; a compile
+// runs its phases on one thread, so the difference is that thread's touches.
+// Windows reports no minor-fault split and records zero.
+BUSTER_GLOBAL_LOCAL WorkLedgerPhaseTotals work_ledger_phase_sample(void)
+{
+    WorkLedgerPhaseTotals sample = {0};
+#if defined(__linux__) || defined(__APPLE__)
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+    {
+        sample.minor_faults = (u64)usage.ru_minflt;
+    }
+#endif
+    ArenaBenchmarkCounters arena = arena_benchmark_counters();
+    sample.arena_calls = arena.calls;
+    sample.arena_bytes = arena.requested_bytes;
+    sample.arena_zero_written = arena.zero_written;
+    return sample;
+}
+
+BUSTER_GLOBAL_LOCAL void work_ledger_phase_close(void)
+{
+    WorkLedgerPhaseTotals sample = work_ledger_phase_sample();
+    WorkLedgerPhaseTotals* phase = work_ledger_totals.phases + work_ledger_current_phase;
+    bool* overflowed = &work_ledger_totals.overflowed;
+    work_ledger_add(&phase->minor_faults, sample.minor_faults - BUSTER_MIN(sample.minor_faults, work_ledger_phase_start.minor_faults), overflowed);
+    work_ledger_add(&phase->arena_calls, sample.arena_calls - BUSTER_MIN(sample.arena_calls, work_ledger_phase_start.arena_calls), overflowed);
+    work_ledger_add(&phase->arena_bytes, sample.arena_bytes - BUSTER_MIN(sample.arena_bytes, work_ledger_phase_start.arena_bytes), overflowed);
+    work_ledger_add(&phase->arena_zero_written,
+                    sample.arena_zero_written - BUSTER_MIN(sample.arena_zero_written, work_ledger_phase_start.arena_zero_written), overflowed);
+    work_ledger_phase_start = sample;
+}
+
+void work_ledger_phase(WorkLedgerPhase phase)
+{
+    if ((u32)phase < WORK_LEDGER_PHASE_COUNT)
+    {
+        work_ledger_phase_close();
+        work_ledger_current_phase = phase;
+        work_ledger_totals.phases[phase].marks += 1;
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+WorkLedgerCounters work_ledger_counters(void)
+{
+    work_ledger_phase_close();
+    return work_ledger_totals;
+}
+
+String8 work_ledger_counter_mechanism(WorkLedgerCounter counter)
+{
+    String8 const mechanisms[] = {
+#define WORK_LEDGER_MECHANISM(id, mechanism, name) S8(#mechanism),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_MECHANISM)
+#undef WORK_LEDGER_MECHANISM
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? mechanisms[counter] : S8("invalid");
+}
+
+String8 work_ledger_counter_name(WorkLedgerCounter counter)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_NAME(id, mechanism, name) S8(#name),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_NAME)
+#undef WORK_LEDGER_NAME
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? names[counter] : S8("invalid");
+}
+
+String8 work_ledger_phase_name(WorkLedgerPhase phase)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_PHASE_NAME(id, name) S8(#name),
+        WORK_LEDGER_PHASES(WORK_LEDGER_PHASE_NAME)
+#undef WORK_LEDGER_PHASE_NAME
+    };
+    return (u32)phase < WORK_LEDGER_PHASE_COUNT ? names[phase] : S8("invalid");
 }
 
 String8 ir_construction_counter_name(IrConstructionCounter counter)
