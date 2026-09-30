@@ -5894,6 +5894,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_assignment_res
         "    result |= assigned != 1 || accesses != 1;\n"
         "    result |= (ordinary.u = 7) <= -1;\n"
         "    result |= (observed.u += 0) <= -1;\n"
+        "    ordinary.u = 7; observed.u = 7;\n"
+        "    result |= ((ordinary.full = ordinary.u) < -1) != 1;\n"
+        "    result |= ((observed.full = observed.u) < -1) != 1;\n"
         "    return result;\n"
         "}\n");
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-bit-field-assignment-results"), S8(".c"));
@@ -5921,6 +5924,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_assignment_res
         }
     }
     if (written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }

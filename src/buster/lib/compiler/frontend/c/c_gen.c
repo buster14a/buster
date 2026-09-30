@@ -7402,6 +7402,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* b
             }
             result = c_ir_emit_cast(builder, result, result_type, source);
         }
+        // An identity conversion can reuse an RHS bit-field value. Its
+        // promotion fact belongs to the destination field after assignment.
+        if (result.value < builder->unsigned_bit_field_value_capacity)
+        {
+            builder->unsigned_bit_field_values[result.value] = 0;
+        }
         c_ir_mark_unsigned_bit_field_value(builder, result, field);
     }
     return result;
