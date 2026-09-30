@@ -22,6 +22,245 @@ require root-owned installed executables. Signals first inspect the exact unit,
 slice, identity, executable, resource settings and, for the outer unit, the
 recorded invocation and cgroup. A mismatch denies the request. The coordinator
 continues to own the complete cleanup, quarantine and recursive cgroup proof.
+For `Slice=buster-bench.slice`, the effective control-group path is nested
+under `/buster.slice/buster-bench.slice`; both broker and worker verify that
+actual hierarchy.
+The only resume signal is `CONT` for the exact outer instance; stage units
+accept `TERM` or `KILL` only.
+
+The template retains root UID with empty capability sets. Its primary group
+is `buster-bench` and its supplementary group is `buster-bench-candidate`.
+The broker's own request-time check tolerates root's group 0 besides those
+two fixed groups and requires the candidate group. The entry gate below is
+stricter: it admits exactly the service and candidate groups, which is what
+systemd grants with this template (Attempt 23's live readback showed
+`Groups: 65000 65001`). Read back the effective set during review.
+The broker can traverse the service-group-only queue, lease and results
+parents and the candidate-group workspace ancestry. Worker records are
+`0440` service:service, the stable lease is `0640` service:service, and each
+durable result leaf remains `0700` service:service. The broker opens private
+directory components with `O_PATH`, checks the exact owner/group/mode, and
+reads only the named records and manifests. Candidate and runner accounts
+have neither service-group membership nor access to the socket.
+
+### Broker entry enforcement (#1162)
+
+`broker_entry_gate.c` implements the same-PID entry criterion selected in
+#1162 (comment 5858483525). `bench_service_broker` builds the separate static
+`build/bench-service-tools/broker-entry-gate`; `self-test` also runs its
+component regressions. Install it root-owned `0755` as
+`/usr/local/libexec/buster-bench-broker-entry-gate`: it is the template's
+only `ExecStart`, and it `fexecve`s the installed broker's fixed
+`serve-connection` entry in the same PID. The payload credential gate below
+remains unchanged.
+
+The new entry executable accepts no arguments. It reads the canonical numeric
+account receipt and the local `/etc/passwd`, `/etc/group` and `/etc/nsswitch.conf`
+through root-owned, group/world-nonwritable nonsymlink ancestry. Each local
+source must be a regular single-link root-owned file without group/world write
+permission on a read-only covered mount, at most 64 KiB, with a stable
+device/inode/mode/owner/link/size/mtime/ctime tuple before and after the read.
+The gate checks all six receipt IDs against exactly one named local passwd and
+group entry for `buster-bench`, `buster-bench-candidate` and
+`buster-github-runner`. Duplicate dedicated names or a different name using
+any dedicated UID/GID fail before PASS. It also checks all four inherited root
+UIDs and service GIDs. Its complete expected
+supplementary set is **exactly** the receipt's service GID and its candidate
+GID, once each, in any kernel order; root's group 0 or any other group fails.
+The template pins `Group=buster-bench` and
+`SupplementaryGroups=buster-bench-candidate`; a changed NSS membership that
+adds a group is rejected before PASS rather than silently inherited.
+Effective NSS `passwd` and `group` directives must each occur once and contain
+exactly `files` or `files systemd` in that order, with default success-return
+semantics and no inline comment; `[SUCCESS=merge]`, action overrides, cache or additional sources
+fail. `initgroups`, if specified, must be exactly `files`. The gate verifies
+`/var/run` is the root-owned symlink to `/run`, `/var` is covered read-only,
+and neither `/run/nscd/socket` nor its `/var/run` alias exists. Its parent
+`/run/nscd`, if present, must be a root-owned non-group/world-writable
+directory. The installation must independently confirm nscd is disabled or
+absent throughout the lease; a pre-exec socket absence check cannot prevent
+later trusted-root reconfiguration. The receipt remains installation authority.
+This static gate performs no NSS lookup. The broker's existing request-time
+NSS/receipt and complete role-membership checks still apply. Changing account
+files, NSS policy or cache configuration requires the disabled/drained
+installation procedure and a new authenticated inventory.
+
+Before executing the broker, the gate requires empty effective, permitted,
+inheritable, bounding and ambient capabilities, NNP=1 and seccomp mode 2.
+It checks the read-only root mount and read-only mounts at `/usr`, `/etc/buster-bench`,
+`/opt/buster-bench/installed` and `/var/lib/buster-bench`, including every
+descendant mount listed in the bounded kernel mount inventory. It requires
+FD0 to be a connected, non-listening AF_UNIX SOCK_SEQPACKET socket at the
+fixed control pathname with CLOEXEC clear. Peer and request authorization
+remain in the broker; a root peer is still expected to pass the gate and
+then be denied before request polling or receipt.
+
+The gate opens the fixed installed broker through root-owned nonsymlink
+ancestry. Both its own static executable and the held broker must be regular,
+single-link, root-owned, non-suid, capless files on read-only mounts, with no
+group/world write permission. Bounded native ELF64 inspection rejects an
+executable stack, writable executable load segment, invalid program bounds
+or foreign machine. A successful gate emits one bounded
+`BQ-BROKER-ENTRY-V1 PASS` line to the inherited journal socket; a short or
+failed nonblocking send prevents exec. It then calls `fexecve` on the held
+broker descriptor with only `serve-connection` and a fixed PATH, locale and
+validated invocation ID. PID, start ticks and FD0 are preserved. An exec
+failure exits 126; a PASS without the matching broker records cannot pass
+the eventual evidence consumer.
+
+The receipt binds boot ID, PID/start ticks, invocation ID, broker-unit cgroup,
+FD0 device/inode, gate/broker/account-file device/inode/size/mtime/ctime,
+the six canonical numeric account values, and `passwd`, `group`, `nsswitch`
+file tuples and SHA-256 byte hashes. The new fields use
+`passwd=<dev>:<ino>:<size>:<mtime_sec>:<mtime_nsec>:<ctime_sec>:<ctime_nsec>`
+(likewise `group` and `nsswitch`) and `passwd-sha256=<64 lowercase hex>`
+(likewise `group-sha256` and `nsswitch-sha256`). The evidence consumer must
+bind all fields to the same activation and independent installation readback.
+Outside the unit, read the installed source bytes and metadata before and
+after the read-only mount operation and compare their hashes/tuples with the
+gate PASS; independently bind the named account mapping, exact NSS directives,
+nscd-disabled contract, reviewed binaries, receipt bytes and unit/filter
+hashes. A mismatched file or policy fails the entire attempt. Seccomp mode 2 does not identify a
+filter. Trusted installation and the verified immutable systemd filter are
+mandatory parts of the claim, as are the existing namespace and mount policy.
+
+Acceptance evidence for every activated instance is the exact join checked by
+`.github/scripts/issue1162_broker_entry_evidence.py`: PID 1's start job and
+terminal record for one invocation; one observer lifecycle whose manager
+signals report the same MainPID, then removal or a completed retained-failed
+`systemctl show` naming the same invocation and PID; exactly one gate PASS
+whose trusted journald PID/unit/invocation/stream equal the broker's, whose
+start ticks and FD0 equal the broker diagnostic and which precedes the broker's
+first record; its installed file tuples, hashes and accounts equal to the root
+readback taken outside the unit before activation and after the job; and one
+complete allowlisted broker diagnostic whose outcome agrees with PID 1.
+Missing, duplicate or inconsistent evidence rejects the whole attempt.
+External process captures are retained and every complete one must agree with
+the joined identity; they are no longer required to win each millisecond race.
+Rejected entry is proven by the disposable real-systemd component workflow
+`broker-entry-gate-systemd.yml`: account/receipt rebinding, groups (including
+root's group 0), capability sets, NNP/seccomp and mount weakening, FD0, ELF
+tampering, NSS actions/cache and a failed PASS send each produce zero broker
+entry. Component fixtures use a synthetic broker, and synthetic capability
+queries in the unit tests; the full-service slice exercises the real broker.
+Attempt 23 remains failed; this criterion does not upgrade it.
+
+### Effective credentials before each transient payload
+
+An independent installation receipt fixes the six numeric service, candidate
+and runner UID/GID values. The broker compares current NSS resolution with
+`/etc/buster-bench/systemd-broker-accounts.identity` before START or CONT and
+before private-state inspection. The canonical ASCII form is:
+
+```text
+BQ-ACCOUNTS-V1
+service-uid=<decimal>
+service-gid=<decimal>
+candidate-uid=<decimal>
+candidate-gid=<decimal>
+runner-uid=<decimal>
+runner-gid=<decimal>
+```
+
+Replace each placeholder with the authenticated dedicated account's numeric
+value, using canonical decimal with no sign or leading zero and exactly one
+newline after each line. IDs are nonzero; all three UIDs and all three GIDs
+are distinct. LOCAL installs the regular single-link file as root with exact
+mode `0444` under root-owned, group/world-nonwritable, nonsymlink directory
+ancestry. Missing, unsafe, writable, truncated, extra, noncanonical or
+mismatched bytes, and metadata changes during the read, fail closed. The
+code does not detect trusted-root replacement between separate requests;
+the disabled/drained installation rule owns that boundary. Bind the receipt bytes/SHA-256 to the installation source and
+stable lease device/inode in the operator receipt. Changes require dispatch
+disabled, old units drained and a newly authenticated inventory. The receipt
+must never be regenerated automatically from changed NSS values during a job.
+
+Every new transient start first executes the fixed
+`/usr/local/libexec/buster-bench-credential-gate`. The broker supplies the
+stage and the numeric UID, GID and complete supplementary group set captured
+from the three fixed accounts. Request-time membership is restricted to the
+service and candidate groups for the service account, the candidate group
+alone for the candidate, and the runner group alone for the runner. Extra
+groups fail admission even when they are neither root nor the service group.
+
+The gate runs under PID1's already-dropped unprivileged identity. Before any
+job payload it checks real, effective, saved and filesystem UID/GID, the
+complete supplementary group set, no-new-privileges and empty capability
+sets. A mismatch exits without executing the payload. It performs no NSS
+lookup or privilege transition. After validation it replaces the environment
+with the fixed PATH and locale and executes the existing stage-specific
+absolute executable. The typed broker protocol still owns all payload
+arguments; the helper is not a new request interface.
+
+Build the gate statically with no ELF interpreter or dynamic segment and a
+nonexecutable stack. The installed broker checks the root-owned immutable
+path, file and ELF properties before starting a unit; a dynamic substitute
+fails closed. Root-owned installation paths and the exact protected-source
+binary digest remain mandatory. This prevents a dynamic loader or untrusted
+payload from running before the credential check. The original unit sandbox
+and empty capability settings stay in force.
+
+This is a per-launch enforcement boundary, not whole-host acceptance. The
+operator must retain an authenticated numeric account inventory and actual
+`/proc/PID/status` UID/GID, Groups, Cap* and NoNewPrivs readbacks for the
+long-lived service and runner before admission. Account/authorization changes
+during the whole lease are forbidden by the installation contract; stop
+admission and reconcile any change. A successful transient gate does not
+validate credentials retained by an already-running service or runner.
+Independent service/security disposition and disposable real-systemd
+membership-change evidence are required before this draft can be installed.
+
+For recovery, exact old direct-executable units retain TERM/KILL cleanup.
+CONT requires the new gated outer-unit identity. Drain old units and prove
+their cgroups absent before changing installed source; do not resume an old
+unit into a mixed installation.
+
+These are group-scoped filesystem grants, not per-request capabilities. The
+broker's code restricts which named objects and manager operations a request
+may use; membership can also read other reachable group-readable objects.
+`ProtectSystem=strict` and the explicit read-only state mount keep the broker
+from writing candidate-group staging directories. Cleanup is the trusted
+service's responsibility: the foreign-owner exception requires the resolved
+non-root `buster-bench-candidate` UID and primary GID, the same attempt GID,
+and mode `0770` or `02770`. Another UID with that GID is an identity mismatch,
+not a candidate payload. A missing/aliased candidate account disables this
+exception; service-owned cleanup remains available.
+
+### Per-connection diagnostic evidence
+
+Each `serve-connection` process attempts a bounded, read-only snapshot before
+peer and request checks. It reads its own `/proc/self/{stat,status,mountinfo,cgroup}`,
+the executable link/inode and the inherited socket inode. The existing
+`StandardError=journal` stream receives `BQ-BROKER-DIAG-V1` lines: `BEGIN`,
+hex-encoded `DATA` chunks with field/offset/total length, `SNAPSHOT_END`, then
+`REQUEST` and `OUTCOME`. Every line carries PID and process start ticks.
+`REQUEST` has explicit presence flags for peer, receive and parsed request;
+unparsed bytes are never echoed. The snapshot limits are 4 KiB stat, 16 KiB
+status, 128 KiB mountinfo, 4 KiB cgroup, a 512-byte executable link and a
+256-byte socket identity. Each line is under 1,200 bytes and the per-process
+diagnostic has a 512 KiB output and 500 ms cumulative work bound. Journal
+writes use nonblocking, no-signal `send` on stderr only. A read, bound, short
+write or journal failure leaves an incomplete sequence; it does not change
+peer authorization, manager arguments, the framed response or the business
+exit. There is no producer-side lifetime connection-count assertion: the
+socket's `MaxConnections=8` bounds concurrent connections, not total starts.
+`SNAPSHOT_END` follows the aggregate time check and records `elapsed_ms`
+before its own send, with 25 ms reserved for the line. The 500 ms limit is a
+measured diagnostic work budget, not a guarantee of journal delivery time or
+of no scheduler preemption after the last byte. A collector requires all of
+`SNAPSHOT_END`, `REQUEST` and `OUTCOME`, and treats any observed budget or
+write failure as incomplete. Trusted journal timestamps aid correlation but
+do not prove the absence of a post-send scheduling delay.
+
+For isolated evidence, retain journal export with trusted boot, unit,
+invocation and PID fields and reconcile every accepted socket instance to
+one complete diagnostic sequence, exact installed executable inode/hash and
+the request/manager outcome. Missing, repeated, truncated or ambiguous
+records are incomplete. This is a self-report of kernel `/proc/self` bytes by
+the reviewed broker, not an independent observer of every process. Compare
+overlapping external `/proc/PID` captures. The separate required external
+`systemctl show --all` for every connection unit and the service/security
+owner's residual-authority decision are not supplied by this diagnostic.
 
 ## Build and review
 
@@ -31,16 +270,102 @@ launches and exercises malformed request rejection without manager access.
 Review the broker source, this packet, the socket/template service, tmpfiles,
 and the changed service/build-driver call sites as one transition. Build the
 installed service, build driver, throughput tool and broker from one selected
-protected-main commit. Record SHA-256 of all binaries, dependencies, units and
+protected-main commit. Compile the installed `build.c` recipe driver with
+Clang and check that its ELF `GNU_STACK` program header is `RW` without `E`.
+The TCC bootstrap driver has no such header and fails at stage `posix_spawn`
+under `MemoryDenyWriteExecute=yes` with `EACCES`; it is not an installable
+recipe driver. Record SHA-256 of all binaries, dependencies, units and
 the complete immutable source inventory. The broker must be root-owned,
 executable and unwritable by service, candidate and runner accounts.
+
+One reviewed local build of the installable driver is:
+
+```sh
+clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+  -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build
+readelf -W -l build/buster-bench-build
+```
+
+Read back the `GNU_STACK` line as `RW` with no `E`, then hash the binary that
+is actually installed. This command produces an installation candidate; it
+does not replace the TCC bootstrap used by `build.sh`.
+
+`./build.sh bench_service_broker self-test` also builds
+`build/bench-service-tools/credential-gate` with static linking and runs its
+credential/parser self-test. Retain `readelf -W -l` and SHA-256 readbacks for
+the exact installed gate; require no INTERP or DYNAMIC entry and GNU_STACK
+without execute permission. It also builds
+`build/bench-service-tools/systemd-broker-live-test` from
+`tools/bench_service/systemd_broker_live_test.c` with the broker's warning and
+integer flags. In self-test mode it also builds and runs the deterministic
+`systemd-broker-group-test` source-inclusion fixture, which checks the valid
+seqpacket START path stops contaminated account groups before state inspection.
+This fixture intercepts state access and makes no manager call; it does not
+prove the groups later assigned by PID1. In a disposable, provisioned real-systemd
+container, start the reviewed service, submit one exact fixed-recipe job, and
+run that test as root while its outer unit is active with
+`BUSTER_BROKER_LIVE_TEST=1` and arguments `JOB ATTEMPT BASE_REVISION
+CANDIDATE_REVISION`. It starts the constrained broker socket and makes an
+exact outer `CONT` request. It checks queue/result/lease modes and records,
+then rejects candidate and runner peers, wrong instance, wrong source and
+unlisted signal requests. It offers a valid request as root and requires
+a complete server rejection frame on that same connection, including when
+the broker rejects the peer before reading the request; candidate and
+runner must instead receive `EACCES` or `EPERM` from their own socket
+`connect` calls. A missing endpoint, refused connection or malformed response
+fails the probe. The root preflight verifies the real service-owned socket
+inode and mode `0600`, since an inaccessible parent could otherwise yield
+`EACCES` even when the socket itself is absent. Its container and environment
+gates prevent an ordinary host test invocation.
+
+Account resolution uses the full supplementary membership list, not just
+primary GIDs. Candidate and runner must not have the service or root group;
+the runner must not have the candidate group. Each probe child calls
+`initgroups`, drops all three UID/GID slots, sets `NoNewPrivileges`, and reads
+back its complete effective group set against the captured account inventory.
+A membership change between capture and execution fails the probe.
+Candidate/runner children try read-only, write-only and read-write opens of
+both worker records and the lease; no create, truncate or write is attempted.
+They separately test listing and searching the queue, lease and result
+directories. Before dropping credentials, the probe verifies an existing
+service-owned regular `payload` in the result leaf with mode `0400` and one
+link. Candidate and runner then attempt read, write and read-write opens of
+that exact file without creating, truncating or modifying it. Provision the
+payload as part of the disposable fixture before running either live or
+`--isolation-only`; the probe does not create it. A missing payload fails the
+fixture rather than counting as a denial. Only `EACCES`/`EPERM` counts as
+denial. Remove the transient `payload` through the fixture owner after the
+probe and before worker finalization: the production result-bundle validator
+rejects unindexed extra files. If that cleanup cannot be proved while the
+outer unit is active, use a separate disposable attempt for this probe and
+do not count that attempt as a normal #880 qualification result. Never leave
+the fixture in a protected-host result. Metadata-only `O_PATH` access to a
+leaf is not treated as traversal.
+
+`BUSTER_BROKER_LIVE_TEST=1 systemd-broker-live-test --isolation-only JOB ATTEMPT`
+performs just the account/private-hierarchy checks in a disposable provisioned
+container, without starting the socket or contacting the manager. Repeat with
+an intentionally service-group-member candidate and runner: each must fail.
+This is DAC/credential evidence, not a live broker or materializer/recipe run.
+Before deployment, also read `/proc/PID/status` for the actual service,
+candidate stage and runner processes: account snapshots do not prove that an
+already-running unit has no additional groups from unit-specific settings.
+
+The regular `bench_service_broker self-test` runs the command construction
+test, the probe's unprivileged `--self-test` identity-policy controls, and the
+request-time group fixture. These do not replace the provisioned live regression. On disposable
+root-capable test infrastructure with the three fixed accounts provisioned,
+`build/bench-service-tools/service-tests --cleanup-identity-only` exercises the
+real cleanup traversal under the service UID, including exact candidate
+positives and same-GID foreign-owner negatives. It uses only fresh `/tmp`
+fixtures, not the installed queue or lease.
 
 ## Host installation boundary
 
 Keep dispatch false, the long-lived service stopped and all prior outer/stage
 units and cgroups absent while installing. Preserve the existing lease file;
 never recreate, truncate, rename or replace it. After a fresh no-follow `stat`
-of the single-link service-owned `0600` lease, install a root-owned `0444`
+of the single-link service-owned `0640` lease, install a root-owned `0444`
 regular, single-link `/etc/buster-bench/systemd-broker-lease.identity` in a
 root-owned non-writable directory with exactly these two lines, using the
 host's actual decimal values:
@@ -59,8 +384,9 @@ lease replacement; investigate and quarantine instead.
 Install `buster-bench-systemd-broker.socket` and
 `buster-bench-systemd-broker@.service` with the exact reviewed bytes. The
 runtime directory is `root:buster-bench` `0710`; the socket is
-`buster-bench:buster-bench` `0600`. The template process runs as root with empty
-capability sets, no new privileges, a read-only filesystem view and only local
+`buster-bench:buster-bench` `0600`. The template process runs as root with
+service primary group, candidate supplementary group, empty capability sets,
+no new privileges, a read-only filesystem view and only local
 Unix sockets. The long-lived service requires the broker socket. Apply the
 runtime tmpfiles rule only to the new `/run/buster-bench-systemd-broker`
 directory; do not reapply the state/lease rules to a live queue. Do not enable
