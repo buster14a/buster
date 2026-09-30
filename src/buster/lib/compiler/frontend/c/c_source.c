@@ -7685,6 +7685,9 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
         *map_out = (FileMapRead){0};
     }
     String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
+    // A mapping exists only when bytes do, so a miss owns nothing. A hit
+    // transfers the mapping to `map_out`; a probe without one (feature
+    // queries) releases it here and reports no source bytes.
     FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
     ByteSlice bytes = map.bytes;
     bool result;
@@ -7695,10 +7698,15 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
     else
     {
         *path_out = path;
-        *source_out = BYTE_SLICE_TO_STRING(8, bytes);
         if (map_out)
         {
+            *source_out = BYTE_SLICE_TO_STRING(8, bytes);
             *map_out = map;
+        }
+        else
+        {
+            *source_out = (String8){0};
+            file_map_unmap(map);
         }
         result = true;
     }

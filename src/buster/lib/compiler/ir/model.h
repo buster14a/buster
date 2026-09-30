@@ -443,7 +443,9 @@ struct IrSymbol
     String8 name;
     String8 link_name;
     // Optional object-format section requested by the source declaration.
-    // Direct object backends consume this without frontend-specific parsing.
+    // The ELF object writer places a definition there, the LLVM bitcode
+    // writer records it and eBPF names programs with it; the C frontend
+    // refuses it where the output cannot place it (issue 1276).
     String8 section_name;
     IrSourceRange source;
     IrTypeId type;
