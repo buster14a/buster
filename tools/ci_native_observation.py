@@ -913,6 +913,12 @@ def package(args: argparse.Namespace) -> int:
     """
     pack_command = [args.python, "tools/ci_pack_evidence.py", "--source", args.source, "--output", args.output]
     status = 0
+    if args.root and (args.platform not in PACKAGE_REQUIRED_PHASES or args.expect_complete not in ("0", "1")):
+        raise ObservationError(
+            "package with --root requires --platform "
+            + "|".join(PACKAGE_REQUIRED_PHASES)
+            + " and --expect-complete 0|1"
+        )
     if args.root:
         Path(args.output).mkdir(parents=True, exist_ok=True)
         pack_status = 0
@@ -1405,8 +1411,8 @@ def parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--python", default=sys.executable, help="interpreter recorded in the packing command")
     package_parser.add_argument("--source", required=True)
     package_parser.add_argument("--output", required=True)
-    package_parser.add_argument("--platform", choices=tuple(PACKAGE_REQUIRED_PHASES), required=True)
-    package_parser.add_argument("--expect-complete", choices=("0", "1"), required=True)
+    package_parser.add_argument("--platform", default="", help="lane platform; required with --root")
+    package_parser.add_argument("--expect-complete", default="", help="0 or 1; required with --root")
     package_parser.set_defaults(function=package)
 
     enrich_parser = subparsers.add_parser("enrich", help="join immutable job-log/API identity for an audit")

@@ -287,6 +287,13 @@ class NativeObservationTest(unittest.TestCase):
         self.assertNotIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["windows"])
         self.assertIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["unix"])
 
+    def test_package_with_root_requires_platform_and_completion(self):
+        self.initialize()
+        for platform, complete in (("", "1"), ("unix", ""), ("macos", "1"), ("windows", "2")):
+            with self.subTest(platform=platform, complete=complete):
+                with self.assertRaisesRegex(observation.ObservationError, "requires --platform"):
+                    self.package(platform, complete=complete)
+
     def test_package_missing_phase_fails_closed(self):
         self.initialize()
         self.run_phase("configuration", 10)
