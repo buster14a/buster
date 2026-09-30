@@ -12,8 +12,8 @@ for l in text[i+1:]:
     if l.startswith('-- Auto-annotated source:') or l.startswith('--------------------------------------------------------------------------------'):
         if line_no > 0: pass
     m = re.match(r'^\s*([\d,]+|\.)\s(.*)$', l)
-    if not m: 
-        if l.startswith('-- '): 
+    if not m:
+        if l.startswith('-- '):
             if 'Auto-annotated' in l: break
         continue
     count, rest = m.groups()
