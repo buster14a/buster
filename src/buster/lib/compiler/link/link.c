@@ -21,6 +21,11 @@
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
 //
+// link_objects places every input section of its own name that is spelled as
+// a C identifier after the ordinary sections of its kind, one name at a time,
+// and defines the `__start_NAME`/`__stop_NAME` references GNU `ld` would
+// (link_section_sets_define, issue 1276); its output is one section per kind.
+//
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
 // a **hosted** stub calls the C runtime's `exit` and lets it terminate the
@@ -506,6 +511,63 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             plan->destructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_FINI_ARRAY, plan->destructors, true);
             ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
             memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+            // An array a symbol is defined inside keeps its bytes, appended to
+            // the writable data, so a read through that symbol sees the entries
+            // GNU ld would have laid out; the stub still makes the calls.
+            bool retained[2] = {0};
+            u64 retained_base[2] = {0};
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                u32 section = object->symbols[index].section;
+                if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && object->sections[section].data.length)
+                {
+                    retained[section - OBJECT_SECTION_INIT_ARRAY] = true;
+                }
+            }
+            if (retained[0] || retained[1])
+            {
+                ObjectSection* data_section = &sections[OBJECT_SECTION_DATA];
+                u64 data_length = BUSTER_MAX(data_section->data.length, data_section->virtual_size);
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        retained_base[slot] = align_forward(data_length, OBJECT_INITIALIZER_ENTRY_SIZE);
+                        data_length = retained_base[slot] + object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data.length;
+                    }
+                }
+                u8* data = arena_allocate_zeroed(arena, u8, data_length);
+                if (data_section->data.length)
+                {
+                    memcpy(data, data_section->data.pointer, data_section->data.length);
+                }
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        ByteSlice array = object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data;
+                        memcpy(data + retained_base[slot], array.pointer, array.length);
+                    }
+                }
+                data_section->data = (ByteSlice){.pointer = data, .length = data_length};
+                if (data_section->virtual_size)
+                {
+                    data_section->virtual_size = data_length;
+                }
+                data_section->alignment = BUSTER_MAX(data_section->alignment, OBJECT_INITIALIZER_ENTRY_SIZE);
+                ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+                for (u32 index = 0; index < object->symbol_count; index += 1)
+                {
+                    u32 section = symbols[index].section;
+                    if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && retained[section - OBJECT_SECTION_INIT_ARRAY])
+                    {
+                        symbols[index].section = OBJECT_SECTION_DATA;
+                        symbols[index].value += retained_base[section - OBJECT_SECTION_INIT_ARRAY];
+                    }
+                }
+                stripped->symbols = symbols;
+            }
             sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){0};
             sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = 0;
             sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
@@ -515,10 +577,20 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             stripped->relocation_count = 0;
             for (u32 index = 0; index < object->relocation_count; index += 1)
             {
-                u32 section = object->relocations[index].section;
-                if (section != OBJECT_SECTION_INIT_ARRAY && section != OBJECT_SECTION_FINI_ARRAY)
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == OBJECT_SECTION_INIT_ARRAY || relocation.section == OBJECT_SECTION_FINI_ARRAY)
                 {
-                    relocations[stripped->relocation_count++] = object->relocations[index];
+                    u32 slot = relocation.section - OBJECT_SECTION_INIT_ARRAY;
+                    if (retained[slot])
+                    {
+                        relocation.section = OBJECT_SECTION_DATA;
+                        relocation.offset += retained_base[slot];
+                        relocations[stripped->relocation_count++] = relocation;
+                    }
+                }
+                else
+                {
+                    relocations[stripped->relocation_count++] = relocation;
                 }
             }
             stripped->relocations = relocations;
@@ -1774,7 +1846,8 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
+BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64 const* section_offsets,
+                                                    ObjectSectionKind const* output_kinds, Arena* arena)
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
@@ -1785,7 +1858,7 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
         {
             return false;
         }
-        ObjectSectionKind kind = object->sections[source->section].kind;
+        ObjectSectionKind kind = output_kinds[source->section];
         if (kind >= OBJECT_SECTION_COUNT)
         {
             return false;
@@ -1922,6 +1995,83 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
     }
 }
 
+// One linker set of a merge: every input section named `name`, a C
+// identifier, placed together at [start, end) of the merged section of `kind`
+// (link_objects, issue 1276).
+typedef struct LinkSectionSet LinkSectionSet;
+struct LinkSectionSet
+{
+    String8 name;
+    u64 start;
+    u64 end;
+    ObjectSectionKind kind;
+    u32 reserved;
+};
+
+// Whether an input section is a member of a linker set: a section of its own
+// past the kinds, named by a C identifier.
+BUSTER_GLOBAL_LOCAL bool link_section_is_set(ObjectFile* object, u32 section_index)
+{
+    ObjectSection* section = object->sections + section_index;
+    return section_index >= OBJECT_SECTION_COUNT && object_section_kind_can_be_named(section->kind) && object_section_name_is_c_identifier(section->name);
+}
+
+// Appends one input section to the merged section of `kind`, aligned, and
+// hands back where it went.
+BUSTER_GLOBAL_LOCAL bool link_section_place(ObjectSection* section, ObjectSectionKind kind, u64* section_sizes, u32* section_alignments, u64* offset)
+{
+    u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
+    u64 aligned = 0;
+    bool result = align_forward_checked(section_sizes[kind], section->alignment, &aligned) && section_size <= UINT64_MAX - aligned;
+    if (result)
+    {
+        *offset = aligned;
+        section_sizes[kind] = aligned + section_size;
+        section_alignments[kind] = BUSTER_MAX(section_alignments[kind], section->alignment);
+    }
+
+    return result;
+}
+
+// GNU `ld` defines `__start_NAME` and `__stop_NAME` at the two ends of every
+// output section named by a C identifier, for the references that ask and for
+// no others, and so does this merge: an undefined reference, weak or strong,
+// to the bound of a set some input placed becomes a hidden definition there.
+// A name no input placed stays undefined, strong references to it are refused
+// and weak ones resolve to zero, as under `ld`. A program's own definition of
+// the name is left alone.
+BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count)
+{
+    String8 start_prefix = S8("__start_");
+    String8 stop_prefix = S8("__stop_");
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count && set_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool start = string_starts_with_sequence(symbol->name, start_prefix);
+        bool stop = !start && string_starts_with_sequence(symbol->name, stop_prefix);
+        if (symbol->section != OBJECT_SECTION_UNDEFINED || (!start && !stop))
+        {
+            continue;
+        }
+        String8 prefix = start ? start_prefix : stop_prefix;
+        String8 set_name = string_slice(symbol->name, prefix.length, symbol->name.length);
+        for (u32 set = 0; set < set_count; set += 1)
+        {
+            if (string_equal(sets[set].name, set_name))
+            {
+                symbol->section = (u32)sets[set].kind;
+                symbol->value = start ? sets[set].start : sets[set].end;
+                symbol->size = 0;
+                symbol->kind = OBJECT_SYMBOL_DATA;
+                symbol->weak = false;
+                symbol->hidden = true;
+                symbol->thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                break;
+            }
+        }
+    }
+}
+
 LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
 {
     LinkObjectResult result = {0};
@@ -1942,12 +2092,18 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     u64 total_symbols = 0;
     u64 total_relocations = 0;
     u64 total_debug_modules = 0;
-    u64 offset_count = (u64)object_count * OBJECT_SECTION_COUNT;
-    u64* section_offsets = arena_allocate(arena, u64, offset_count);
+    // Every input section's slot in `section_offsets` and `output_kinds`. An
+    // object's slots start at `section_slots[object_index]`, and it has at
+    // least OBJECT_SECTION_COUNT of them however few sections it carries, so a
+    // kind-indexed read through its slice stays inside it. The sections past
+    // OBJECT_SECTION_COUNT are the named ones (issue 1276).
+    u64* section_slots = arena_allocate(arena, u64, (u64)object_count + 1);
+    u64 set_section_count = 0;
+    section_slots[0] = 0;
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        if (object->error != OBJECT_ERROR_NONE || !object->sections || object->section_count > OBJECT_SECTION_COUNT ||
+        if (object->error != OBJECT_ERROR_NONE || !object->sections ||
             (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
             (object->comdat_count && !object->comdats) || (object->debug_module_count && !object->debug_modules))
         {
@@ -1976,17 +2132,97 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            u32 alignment = section->alignment;
-            u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = 0;
-            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
+            set_section_count += link_section_is_set(object, section_index);
+        }
+        section_slots[object_index + 1] = section_slots[object_index] + BUSTER_MAX(object->section_count, (u32)OBJECT_SECTION_COUNT);
+    }
+    u64* section_offsets = arena_allocate(arena, u64, section_slots[object_count]);
+    memset(section_offsets, 0, sizeof(*section_offsets) * section_slots[object_count]);
+    ObjectSectionKind* output_kinds = arena_allocate(arena, ObjectSectionKind, section_slots[object_count]);
+    // Every ordinary section is laid out first, in input order, and each
+    // linker set after them, whole: `__start_NAME` and `__stop_NAME` bound one
+    // contiguous range, so every input section of one name goes in together,
+    // sets in the order their names first appear. A set's members share one
+    // kind: their own when they agree, and otherwise writable data, which is
+    // where `ld`'s one output section of mixed flags would be writable too;
+    // code cannot share a set with data. link_section_sets_define gives the
+    // bounds to the references that ask for them.
+    LinkSectionSet* sets = arena_allocate(arena, LinkSectionSet, set_section_count ? set_section_count : 1);
+    u32 set_count = 0;
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
             {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
+                ObjectSection* section = &object->sections[section_index];
+                bool set_member = link_section_is_set(object, section_index);
+                if (pass == 0)
+                {
+                    output_kinds[section_slots[object_index] + section_index] = section->kind;
+                }
+                if (pass == 0 && !set_member)
+                {
+                    if (!link_section_place(section, section->kind, section_sizes, section_alignments,
+                                            &section_offsets[section_slots[object_index] + section_index]))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                }
+                if (pass == 1 && set_member)
+                {
+                    u32 set = 0;
+                    while (set < set_count && !string_equal(sets[set].name, section->name))
+                    {
+                        set += 1;
+                    }
+                    if (set == set_count)
+                    {
+                        sets[set_count++] = (LinkSectionSet){
+                            .name = section->name,
+                            .kind = section->kind,
+                        };
+                    }
+                    else if (sets[set].kind != section->kind)
+                    {
+                        if (sets[set].kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
+                        {
+                            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                            result.symbol = link_string_copy(arena, section->name);
+                            return result;
+                        }
+                        sets[set].kind = OBJECT_SECTION_DATA;
+                    }
+                }
             }
-            section_offsets[(u64)object_index * OBJECT_SECTION_COUNT + section_index] = aligned;
-            section_sizes[section->kind] = aligned + section_size;
-            section_alignments[section->kind] = BUSTER_MAX(section_alignments[section->kind], alignment);
+        }
+    }
+    for (u32 set = 0; set < set_count; set += 1)
+    {
+        LinkSectionSet* current = sets + set;
+        bool first = true;
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+            {
+                ObjectSection* section = &object->sections[section_index];
+                if (link_section_is_set(object, section_index) && string_equal(section->name, current->name))
+                {
+                    u64* offset = &section_offsets[section_slots[object_index] + section_index];
+                    output_kinds[section_slots[object_index] + section_index] = current->kind;
+                    if (!link_section_place(section, current->kind, section_sizes, section_alignments, offset))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                    current->start = first ? *offset : current->start;
+                    current->end = section_sizes[current->kind];
+                    first = false;
+                }
+            }
         }
     }
     LinkComdatPlan comdat_plan = {0};
@@ -2010,7 +2246,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* section = object->sections + section_index;
-            ObjectSectionKind kind = section->kind;
+            ObjectSectionKind kind = output_kinds[section_index];
             if (!aliased_sections[kind])
             {
                 aliased_sections[kind] = section;
@@ -2086,7 +2322,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = objects + object_index;
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule source = object->debug_modules[module_index];
@@ -2101,29 +2337,37 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* source = &object->sections[section_index];
-            if (source->data.length && !alias_section_data[source->kind])
+            if (source->data.length && !alias_section_data[kinds[section_index]])
             {
-                memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
+                memcpy(result.object.sections[kinds[section_index]].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
             }
             // The priorities of an initializer array travel with its entries.
             // An offset that is not a whole number of entries cannot name one,
             // and only an input section aligned under
-            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.
+            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.  The kinds'
+            // sections carry them in initializer_priorities; a named one past
+            // OBJECT_SECTION_COUNT -- a section attribute's `.init_array.101`
+            // or `.preinit_array` (issue 1276) -- spells one priority for all
+            // of its entries in its name.
             u32 slot = source->kind == OBJECT_SECTION_FINI_ARRAY;
             u32* merged = source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
                               ? result.object.initializer_priorities[slot]
                               : 0;
-            u32* priorities = merged ? object->initializer_priorities[slot] : 0;
-            if (priorities && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            bool kind_section = section_index < OBJECT_SECTION_COUNT;
+            u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
+            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                         : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
                 {
-                    merged[first + entry] = priorities[entry];
+                    merged[first + entry] = priorities ? priorities[entry] : named_priority;
                 }
             }
         }
@@ -2201,7 +2445,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             {
                 destination_index = result.object.symbol_count++;
                 if (!link_symbol_definition_set(&result.object.symbols[destination_index], source, object,
-                                                section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                                                section_offsets + section_slots[object_index], output_kinds + section_slots[object_index], arena))
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
@@ -2263,7 +2507,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                                                    : source_thread_local_state;
                 if (source_replaces)
                 {
-                    if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                    if (!link_symbol_definition_set(destination, source, object, section_offsets + section_slots[object_index],
+                                                    output_kinds + section_slots[object_index], arena))
                     {
                         result.error = LINK_ERROR_INVALID_INPUT;
                         return result;
@@ -2282,7 +2527,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation source = object->relocations[relocation_index];
@@ -2300,8 +2546,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            ObjectSectionKind kind = object->sections[source.section].kind;
-            source.section = (u32)kind;
+            source.section = (u32)kinds[source.section];
             source.offset += offsets[object->relocations[relocation_index].section];
             source.symbol = symbol_maps[object_index][source.symbol];
             source.comdat = 0;
@@ -2309,6 +2554,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     link_initializer_arrays_order(arena, &result.object);
+    link_section_sets_define(&result.object, sets, set_count);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)
@@ -3361,6 +3607,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             {
                 size = BUSTER_MAX(size, layout.copy_zero_size);
             }
+            if (!size)
+            {
+                continue;
+            }
             u64 offset = section_offsets[kind];
             bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
@@ -3369,8 +3619,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .name = object_section_name_for_kind(kind),
                 .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
                          (thread_local_section ? UINT64_C(0x400) : 0),
-                .address = size ? image_base + offset : 0,
-                .offset = size ? offset : 0,
+                .address = image_base + offset,
+                .offset = offset,
                 .size = size,
                 .alignment = section->alignment,
                 .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
@@ -5093,13 +5343,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* 
     }
 }
 
+// `layout_section_offsets`, when given, receives the image offset of every
+// object section, so the AArch64 writer that overlays this layout can place
+// its own relocations against the same addresses.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports)
+                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports,
+                                                                                           u64* layout_section_offsets)
 {
     NativeExecutableLinkResult result = {0};
     enum
     {
-        ELF_BASE_PROGRAM_HEADER_COUNT = 7,
+        ELF_BASE_PROGRAM_HEADER_COUNT = 6,
     };
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
@@ -5256,7 +5510,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
-    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + (eh_frame_header_size != 0);
+    has_thread_local_data =
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
+    u32 program_header_count = (u32)ELF_BASE_PROGRAM_HEADER_COUNT + (u32)has_thread_local_data + (u32)(eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 image_base = ELF_IMAGE_BASE;
@@ -5909,19 +6165,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_PROGRAM_HEADER(1, 6, section_offsets[OBJECT_SECTION_DATA], image_base + section_offsets[OBJECT_SECTION_DATA],
                                file_size - section_offsets[OBJECT_SECTION_DATA], writable_memory_end - section_offsets[OBJECT_SECTION_DATA], ELF_PAGE_SIZE);
     BUSTER_LINK_PROGRAM_HEADER(2, 6, dynamic_offset, dynamic_address, dynamic_size, dynamic_size, 8);
-    u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
-    u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
-                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
-    link_write_u32(bytes, program_header, 7);
-    link_write_u32(bytes, program_header + 4, 4);
-    link_write_u64(bytes, program_header + 8, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 16, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 24, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 32, thread_local_file_size);
-    link_write_u64(bytes, program_header + 40, thread_local_memory_size);
-    link_write_u64(bytes, program_header + 48,
-                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
-    program_header += ELF_PROGRAM_HEADER_SIZE;
+    if (has_thread_local_data)
+    {
+        u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
+        u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
+                                       object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+        BUSTER_LINK_PROGRAM_HEADER(7, 4, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA],
+                                   thread_local_file_size, thread_local_memory_size,
+                                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment,
+                                              object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
+    }
     if (eh_frame_header_size)
     {
         BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, image_base + eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
@@ -5960,6 +6213,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
+    if (layout_section_offsets)
+    {
+        memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
+    }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -7427,7 +7684,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             u32 patched = 0;
             if (section->alignment < 4 ||
@@ -7599,7 +7856,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -7642,7 +7899,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // stub slot this overlay has to reproduce.  Everything below reads the
     // stripped copy, whose relocations no longer name sections the image does
     // not carry.
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports);
+    u64 staged_section_offsets[OBJECT_SECTION_COUNT] = {0};
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
@@ -7653,11 +7911,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 entry_stub_offset = align_forward(header_end, 16);
+    // Data sections sit where the staging writer placed them.
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    memcpy(section_offsets, staged_section_offsets, sizeof(section_offsets));
     // The layout below has to be the one the x86-64 dynamic writer produced,
     // so the stub slot is that writer's hosted stub size, not this stub's.
     section_offsets[OBJECT_SECTION_TEXT] =
         align_forward(entry_stub_offset + link_elf_entry_stub_slot(x86_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
+    if (section_offsets[OBJECT_SECTION_TEXT] != staged_section_offsets[OBJECT_SECTION_TEXT])
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 import_count = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -7829,12 +8094,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+            !object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             continue;
         }
-        bool page_relocation = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
-                               relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+        bool page_relocation = object_relocation_kind_is_aarch64_elf_page(relocation->kind);
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
@@ -13148,7 +13412,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     NativeExecutableLinkResult result = {0};
     if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports)
+        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
@@ -13351,7 +13615,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             }
             else if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
-                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports)
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports, 0)
                                        : link_native_executable_elf64_x86_64(arena, object, options);
             }
             else

@@ -26,7 +26,10 @@ On GitHub-hosted machines, bootstrap `build/build` with the image's Clang as
 place of `./build.sh`. Canonical local bootstrapping still uses TCC. On Windows
 use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
-all three. Hardware counters currently have a Linux implementation only.
+all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
+it runs weekly, on demand, and for ready pull requests that change a harness
+input, so the Linux comparison never waits for a macOS runner. Hardware
+counters currently have a Linux implementation only.
 
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
@@ -414,6 +417,10 @@ nothing. No extra arena storage or whole-function row stream is retained.
   visits, incoming nodes examined including matches, and emitted copy
   sources. Direct/non-native consumers do not call this builder: zero
   means no work at this hook, not absence of all CFG work.
+- `debug_value_blocks` counts blocks walked for `-g` locals without a single
+  place, and `debug_value_local_visits` the per-block entries loaded, filled,
+  reset or emitted for them: every unresolved local twice per block only when
+  blocks carry `local_values`, otherwise three per parameter-filled entry.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
 

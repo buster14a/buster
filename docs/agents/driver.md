@@ -18,6 +18,12 @@ captured stderr diagnostics separately; the retirement census reads its
 reporting a failed compiler invocation. A `-v -E` invocation also prints the
 requested statistics on stdout; use plain `-E` when piping preprocessed C.
 
+With several inputs, only a native link copies each unit's in-memory object
+out of its translation-unit arena into the result arena for `link_objects`.
+Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
+`-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
+nothing per unit and leave `CompilerDriverResult.object` unset.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -447,6 +453,17 @@ Buster PIE for an object that reads library data and `environ` with rel32s
 headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
 and Mach-O dylibs have no writer yet.
 
+## Object output (`-c`)
+
+`-c` writes the object through `object_write`. The ELF64 writer plans the
+whole file with checked arithmetic, then stores each byte once; it refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds the object writer's limits (...)`,
+and leaves an existing output file untouched. `-v` prints the writer's exact
+work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
+`-c`. See [object emission](../object-emission.md).
+
 ## External ELF debug information
 
 The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,
@@ -504,3 +521,44 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+## Response files
+
+`compiler_driver_parse_arguments` expands `@path` arguments before it reads
+any option, so `ide cc` and embedding callers share one behavior. An argument
+whose first byte is `@` is replaced, in place, by the arguments held in the
+file `path` names; a relative path resolves against the current directory.
+Expansion applies after `--` as well, as in GCC and Clang. An argument that
+contains `@` elsewhere (`a@b.c`, `-Wl,@x`) is not a response file. With no
+argument beginning with `@`, the argument slice is used unchanged and neither
+bound below applies.
+
+The file's text follows GCC's `expandargv` and Clang's GNU tokenizer:
+
+- space, tab, newline, carriage return, vertical tab and form feed separate
+  arguments; there is no comment syntax;
+- single and double quotes group bytes, including whitespace, and are
+  removed, so `a"b c"d` is one argument and `""` or `''` is an empty one;
+- a backslash takes the next byte literally inside or outside either quote,
+  so `\"`, `\'`, `\\`, `\ ` and a backslash-newline pair each yield that
+  byte. Write Windows paths with `/` or doubled backslashes.
+
+Where those compilers accept malformed text in different ways, this driver
+refuses it with a `driver.argument` error naming the file: a quote still open
+at the end of the file, a trailing backslash, a NUL byte, and a bare `@`.
+Nesting is not supported: an expanded argument that itself begins with `@`,
+quoted or escaped, is refused rather than expanded, so one file never
+includes another. Name an input that begins with `@` as `./@name`.
+
+`COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT` (4 MiB) bounds the bytes read from
+all response files of one invocation together, and
+`COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
+expanded command line; exceeding either is a `driver.argument` error. The
+reader requests one byte past the remaining budget, so a pipe or device is
+bounded too. A file that cannot be opened or read (missing, a directory) is a
+`driver.file-read` error, `could not read response file <path>`, which
+`ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
+are NUL-terminated copies in the invocation arena.
+`compiler_driver_test_response_file_arguments` covers the grammar and bounds;
+`compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
+writes the same objects through `@file` as on the command line.

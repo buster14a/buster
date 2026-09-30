@@ -1,0 +1,44 @@
+name: Native retirement automation tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/native-retirement-automation.json'
+      - '.github/workflows/native-retirement-automation*.yml'
+      - '.github/workflows/native-retirement-catch-up.yml'
+      - '.github/workflows/native-retirement-integration.yml'
+      - 'tools/native_retirement_automation*.py'
+      - 'tools/native_retirement_controller*.py'
+      - 'tools/native_retirement_integration.py'
+      - 'tools/native_retirement_merge_gate.py'
+      - 'tools/merge_conflict_preflight.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: native-retirement-automation-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Retirement authorization and controller regressions
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the candidate without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test request provenance, revocation, deduplication and recovery
+        run: |
+          python3 tools/native_retirement_automation_test.py -v
+          python3 tools/native_retirement_controller_test.py -v
+      - name: Preserve existing integration and admission regressions
+        run: |
+          python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_integration_security_test.py -v
+          python3 tools/native_retirement_merge_gate_test.py -v
+          python3 tools/merge_conflict_preflight_test.py -v
