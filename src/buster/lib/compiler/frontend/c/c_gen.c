@@ -48,6 +48,10 @@
 //   one is left unprepared, and whichever child expression owns the operand
 //   prepares it inside the block that actually runs.
 //
+// c_ir_type_identity_query consumes the retained semantic C answer for
+// generic selections and the GNU compatibility predicate. Canonical types
+// represent the selected value; they never decide source type identity.
+//
 // Layout, in file order; each anchor is a definition to search for:
 //   c_declaration_binding                         __attribute__((weak)) and
 //                                                 __attribute__((alias))

@@ -36,11 +36,12 @@ jobs:
         run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
       - run: |
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
-      - run: |
+      - id: compiler
+        run: |
           "$RUNNER_TEMP/buster-build" build --config Release -t ide
       - name: Independent reference compilers
         run: |
-          clang -std=gnu17 -Wno-generic-qual-type src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-clang
+          clang -std=gnu17 -Wno-unreachable-code-generic-assoc -Wno-unevaluated-expression src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-clang
           /tmp/generic-clang
           gcc -std=gnu17 src/buster/tests/compiler/frontend/c/fixtures/type_identity.c -o /tmp/generic-gcc
           /tmp/generic-gcc
@@ -53,11 +54,16 @@ jobs:
               /tmp/generic-buster
             done
           done
-      - run: |
+      - if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
           "$RUNNER_TEMP/buster-build" test_self_host --config Release
-      - run: |
+      - if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
           "$RUNNER_TEMP/buster-build" build --config Release -t test_all
-      - run: |
+      - id: sanitizer
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
           "$RUNNER_TEMP/buster-build" generate --cc clang --sanitize --no-fuzz --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
-      - run: |
+      - if: ${{ !cancelled() && steps.sanitizer.outcome == 'success' }}
+        run: |
           "$RUNNER_TEMP/buster-build" build --config Release -t test_all

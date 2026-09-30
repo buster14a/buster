@@ -2464,6 +2464,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(volatile int v) { return _Generic(v, int: 1, volatile int: 2); }\n"), true},
         {S8("int g(void (*fp)(int *)) { return _Generic(fp, void (*)(int *): 1); }\n"), true},
         {S8("int g(const char *p) { return _Generic(p, char *: 1); }\n"), false},
+        {S8("int g(void) { int a = 0; typeof(_Generic(a, default: (char)0)) c = 0; _Static_assert(sizeof c == 1, \"selected type\"); return c; }\n"), true},
         {S8("volatile int v; _Static_assert(_Generic(v, int: 1, default: 0), \"conversion\");\n"), true},
         {S8("const char *p; _Static_assert(!_Generic(p, char *: 1, default: 0), \"pointee\");\n"), true},
         {S8("_Static_assert(!__builtin_types_compatible_p(const char *, char *), \"identity\");\n"), true},

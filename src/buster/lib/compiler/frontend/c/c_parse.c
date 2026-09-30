@@ -13474,6 +13474,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_context(CTypeParseMachine
                                                                  CScopeId scope, u32 start, u32 end, bool tag_only_declaration,
                                                                  u32* declarator_start)
 {
+    // Specifiers can contain typeof(_Generic(...)). Settle its answer before
+    // entering the machine, so its expression child uses the same task path.
+    c_parse_type_identity_prepare(machine, machine->scratch_arena, preprocess, result, scope, start, end);
     u32 frame_start = machine->frame_count;
     CParseResult checkpoint = *result;
     u32 mutation_mark = machine->mutation_count;

@@ -465,8 +465,17 @@ static volatile int qualified_result(void)
 static int identity_conversions(void)
 {
     volatile int v = 3;
+    volatile int *pointer = &v;
+    struct { volatile int m; _Atomic int a; } fields = {0};
     int failed = _Generic((v = 5), int: 0, default: 1);
+    failed |= _Generic((v += 1), int: 0, default: 1);
+    failed |= _Generic(++v, int: 0, default: 1);
+    failed |= _Generic(fields.m, int: 0, default: 1);
+    failed |= _Generic(fields.a, int: 0, default: 1);
+    failed |= _Generic(*pointer, int: 0, default: 1);
     failed |= _Generic((0, v), int: 0, default: 1);
+    failed |= _Generic(1 ? v : v, int: 0, default: 1);
+    failed |= _Generic((volatile int)0, int: 0, default: 1);
     failed |= _Generic(({ v; }), int: 0, default: 1);
     failed |= _Generic(qualified_result(), int: 0, default: 1);
     failed |= v != 3;
