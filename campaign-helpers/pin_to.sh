@@ -1,15 +1,33 @@
 #!/bin/bash
-# usage: pin_to.sh <main-or-queue-commit M>
+# usage: pin_to.sh <main-or-queue-commit M> [REVIEW-URL]
 # Re-pins the #1162 exact-systemd slice to M in a detached worktree at $WEXEC.
-# Afterwards: set INTEGRATED_REVIEW if build.c changed (see README), run the
-# frozen-tree self-test, commit, and push to codex/1162-exact-systemd-slice-20260925.
+# INTEGRATED_REVIEW is always written explicitly: REVIEW-URL must name the
+# recorded technical review of M's exact build.c blob. It may be omitted only
+# when that blob equals the currently pinned INTEGRATED_BUILD_BLOB, in which
+# case the pinned review is kept. A changed blob without a review URL is
+# refused, so a stale review can never be carried onto an unreviewed blob.
+# Afterwards: run the frozen-tree self-test, commit, and push to
+# codex/1162-exact-systemd-slice-20260925.
 set -euo pipefail
-M=$1; W=${WEXEC:-$HOME/wexec}; REPO=${REPO:-$(git rev-parse --show-toplevel)}
+M=$1; R=${2-}; W=${WEXEC:-$HOME/wexec}; REPO=${REPO:-$(git rev-parse --show-toplevel)}
 cd "$REPO" && git fetch -q origin main
 git worktree remove --force $W 2>/dev/null || true
 git worktree add -q --detach $W $M
 cd $W
 T=$(git rev-parse $M^{tree}); B=$(git rev-parse $M:build.c)
+PINNED_BLOB=$(sed -n 's/^INTEGRATED_BUILD_BLOB = "\([0-9a-f]\{40\}\)"$/\1/p' .github/scripts/issue1162_frozen_tree_evidence.py)
+PINNED_REVIEW=$(sed -n 's/^INTEGRATED_REVIEW = "\(.*\)"$/\1/p' .github/scripts/issue1162_frozen_tree_evidence.py)
+if [[ -z $R ]]; then
+    if [[ $B != "$PINNED_BLOB" ]]; then
+        echo "error: build.c blob $B differs from pinned $PINNED_BLOB; pass the review URL recorded for $B" >&2
+        exit 2
+    fi
+    R=$PINNED_REVIEW
+fi
+if [[ ! $R =~ ^https://github\.com/buster14a/buster/(pull|issues)/[0-9]+(#issuecomment-[0-9]+)?$ ]]; then
+    echo "error: review must be a buster14a/buster pull/issue URL, optionally with #issuecomment-N: $R" >&2
+    exit 2
+fi
 tmp=$(mktemp -d); git archive $M -- src cmake CMakeLists.txt | tar -x -C $tmp
 read NF NB SHA < <(REV=$M ROOT=$tmp python3 - <<'PY'
 import hashlib, os
@@ -24,9 +42,9 @@ print(len(files), len(m), hashlib.sha256(m).hexdigest())
 PY
 )
 rm -rf $tmp
-python3 - "$M" "$T" "$B" "$NF" "$NB" "$SHA" <<'PY'
+python3 - "$M" "$T" "$B" "$NF" "$NB" "$SHA" "$R" <<'PY'
 import re, sys
-M,T,B,NF,NB,SHA = sys.argv[1:]
+M,T,B,NF,NB,SHA,R = sys.argv[1:]
 p='.github/scripts/issue1162_exact_systemd_slice.sh'; s=open(p).read()
 s=re.sub(r'^subject=[0-9a-f]{40}$', f'subject={M}', s, count=1, flags=re.M)
 s=re.sub(r'^subject_tree=[0-9a-f]{40}$', f'subject_tree={T}', s, count=1, flags=re.M)
@@ -41,7 +59,9 @@ p='.github/scripts/issue1162_frozen_tree_evidence.py'; s=open(p).read()
 s=re.sub(r'INTEGRATED_HEAD = "[0-9a-f]{40}"', f'INTEGRATED_HEAD = "{M}"', s)
 s=re.sub(r'INTEGRATED_TREE = "[0-9a-f]{40}"', f'INTEGRATED_TREE = "{T}"', s)
 s=re.sub(r'INTEGRATED_BUILD_BLOB = "[0-9a-f]{40}"', f'INTEGRATED_BUILD_BLOB = "{B}"', s)
+s, n = re.subn(r'^INTEGRATED_REVIEW = ".*"$', f'INTEGRATED_REVIEW = "{R}"', s, count=1, flags=re.M)
+assert n == 1, "INTEGRATED_REVIEW line not found"
 open(p,'w').write(s)
 PY
 git diff --stat
-echo "M=$M T=$T B=$B manifest=$NF/$NB/$SHA"
+echo "M=$M T=$T B=$B review=$R manifest=$NF/$NB/$SHA"

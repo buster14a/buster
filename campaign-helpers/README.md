@@ -27,12 +27,17 @@ The campaign state is on GitHub, not here:
 The workflow is `.github/workflows/issue1162-exact-systemd-slice.yml`. It runs on every push to
 `codex/1162-exact-systemd-slice-20260925`. The execution commit is the subject plus one pin commit.
 
-1. `REPO=<checkout> WEXEC=<worktree> campaign-helpers/pin_to.sh <commit>` pins it:
+1. `REPO=<checkout> WEXEC=<worktree> campaign-helpers/pin_to.sh <commit> [<review-url>]` pins it:
    - it sets `subject`, `subject_tree`, `subject_build_blob` and the closure manifest entry in
      `.github/scripts/issue1162_exact_systemd_slice.sh`;
-   - it sets `INTEGRATED_*` in `.github/scripts/issue1162_frozen_tree_evidence.py`.
-2. If `build.c`'s blob is unchanged since the last admitted one, set `INTEGRATED_REVIEW` to that
-   review's PR. It was `pull/1739` for blob `a016a487`.
+   - it sets every `INTEGRATED_*` value in `.github/scripts/issue1162_frozen_tree_evidence.py`,
+     including `INTEGRATED_REVIEW`.
+2. `<review-url>` names the recorded technical review of the commit's exact `build.c` blob. Omit it
+   only when that blob equals the pinned `INTEGRATED_BUILD_BLOB`; the pinned review is then kept.
+   If the blob changed and no URL is given, the script refuses, so a stale review is never carried
+   onto an unreviewed blob.
+   - Reviews on record: `pull/1739` for blob `a016a487`. The blob `bc460880` review is recorded on
+     #1964.
 3. Run `python3 .github/scripts/issue1162_frozen_tree_evidence.py self-test`, commit, and push with
    `--force-with-lease`.
 4. **Pin to the merge-queue group commit** (`gh-readonly-queue/main/pr-N-<base>`) to save time.
