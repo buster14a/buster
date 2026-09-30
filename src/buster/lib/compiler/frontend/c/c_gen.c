@@ -368,7 +368,8 @@ BUSTER_C_INTERNAL String8 c_entity_section_name(Arena* arena, CPreprocessResult 
 // the COFF and Mach-O writers, which have one section per kind and nowhere to
 // put a named one, refuse it rather than drop it. The non-native emitters
 // answer for themselves: eBPF's program sections are the attribute's own
-// spelling, and Wasm is not decided here.
+// spelling, and Wasm names a data definition's segment (issue 1717) and,
+// as Clang does, accepts a function's without effect.
 BUSTER_C_INTERNAL String8 c_section_attribute_unsupported_output(Target target)
 {
     String8 result = {0};
@@ -1257,24 +1258,6 @@ BUSTER_C_INTERNAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWide
     return cache->state[root_type.value] == C_IR_WIDE_FLOAT_UNSUPPORTED;
 }
 
-// The C frontend only exposes the canonical x87 spelling on a target whose
-// selected ABI actually carries it.  The target layout is the frontend's
-// source of truth for the spelling; the ABI classifier below is the source of
-// truth for how a value with that spelling crosses a function boundary.
-// Android uses the ELF System V convention too, but its x86-64 target layout
-// selects sixteen-byte IEEE binary128 long double. The exact representation
-// checks below therefore keep Android off this x87 path.
-BUSTER_C_INTERNAL bool c_ir_target_supports_f80(Target target)
-{
-    TargetDataLayout layout = target_data_layout(target);
-    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
-                         target.os == OPERATING_SYSTEM_IOS;
-    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
-           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
-           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
-           layout.long_double_type.alignment == 16;
-}
-
 // A wide value is safe for the canonical x86 backend only when the existing
 // SysV classifier proves the complete value is the two-part x87 return shape.
 // This intentionally asks the classifier rather than walking fields here:
@@ -1455,7 +1438,9 @@ BUSTER_C_INTERNAL bool c_ir_signature_body_supported(IrProgram* program, CIrWide
         IrType* parameter = ir_type_from_id(&program->types, parameter_types[parameter_index]);
         bool binary128 = parameter && parameter->kind == IR_TYPE_FLOAT && parameter->bit_width == 128 && !parameter->is_atomic &&
                          c_ir_target_supports_f128_transport(target);
-        if (is_variadic && !binary128 && c_ir_type_contains_wide_float(program, wide_float_cache, parameter_types[parameter_index]))
+        bool x87 = parameter && parameter->kind == IR_TYPE_FLOAT && parameter->bit_width == 80 && !parameter->is_atomic &&
+                   c_ir_target_supports_f80(target);
+        if (is_variadic && !binary128 && !x87 && c_ir_type_contains_wide_float(program, wide_float_cache, parameter_types[parameter_index]))
         {
             return false;
         }
