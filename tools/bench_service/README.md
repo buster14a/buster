@@ -363,6 +363,12 @@ Other architectures print `unsupported-architecture` and do not count as
 sandbox coverage. These tests do not reproduce the full systemd sandbox or
 qualify a dedicated host.
 
+The sanitized service build adds `-fno-inline-functions`: AddressSanitizer
+keeps a distinct stack slot for every inlined callee's locals, so the inlined
+`bq_test_*` cases previously grew `bq_test_run_all` past the default 8 MiB
+main-thread stack. The TCC bootstrap lane runs the sanitized self-test with
+`ulimit -S -s 8192` so a larger runner stack cannot hide a frame regression.
+
 `test_all_combinations` runs the normal service self-test beside the existing
 throughput self-test on each desktop lane, and also runs its AddressSanitizer
 and UndefinedBehaviorSanitizer variant on POSIX hosts. Existing compiler,
