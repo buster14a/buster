@@ -289,6 +289,79 @@ class AdmissionWorkflowTests(unittest.TestCase):
                 else:
                     self.assertIn("reserved materialization root 'external'", result.stderr)
 
+    def test_main_advancing_between_candidate_and_trusted_checkouts_is_admitted(self):
+        # candidate/ is fetched before trusted/ resolves main. A push landing
+        # between the two checkouts leaves trusted/ equal to live main, so the
+        # re-resolution loop never runs, yet the gate resolves that main inside
+        # candidate/ (#2010). The stub gate performs exactly that resolution.
+        gate = textwrap.dedent("""\
+            import json, subprocess, sys
+            arguments = sys.argv[2:]
+            value = dict(zip(arguments[::2], arguments[1::2]))
+            subprocess.run(["git", "-C", value["--repo-root"], "rev-parse", "--verify",
+                            value["--base"] + "^{commit}"], check=True, capture_output=True)
+            assert value["--base"] == value["--current-main"], value
+            print(json.dumps({"status": "admitted", "mode": "trusted-integration", "base": value["--base"]}))
+            """)
+        steps = (
+            (WORKFLOW, "Enforce trusted native-retirement integration"),
+            (ROOT / ".github/workflows/native-retirement-rebind.yml",
+             "Reject feature-owned generated state and classify trust transitions"),
+        )
+        for path, name in steps:
+            block = path.read_text().split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
+            script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+            for advanced in (True, False):
+                with self.subTest(workflow=path.name, advanced=advanced), \
+                        tempfile.TemporaryDirectory() as directory:
+                    workspace = Path(directory)
+                    origin = workspace / "origin"
+                    git(workspace, "init", "-q", "-b", "main", str(origin))
+                    git(origin, "config", "user.name", "Admission Test")
+                    git(origin, "config", "user.email", "test@example.invalid")
+                    (origin / "source.txt").write_text("base\n")
+                    git(origin, "add", ".")
+                    git(origin, "commit", "-q", "-m", "base")
+                    git(origin, "checkout", "-q", "-b", "feature")
+                    (origin / "source.txt").write_text("feature\n")
+                    git(origin, "commit", "-q", "-am", "feature")
+                    head = git(origin, "rev-parse", "HEAD")
+                    git(origin, "checkout", "-q", "main")
+                    candidate = workspace / "candidate"
+                    git(workspace, "clone", "-q", "--no-checkout", str(origin), str(candidate))
+                    git(candidate, "checkout", "-q", "--detach", head)
+                    if advanced:
+                        (origin / "other.txt").write_text("landed meanwhile\n")
+                        git(origin, "add", ".")
+                        git(origin, "commit", "-q", "-m", "landed between checkouts")
+                    main = git(origin, "rev-parse", "main")
+                    trusted = workspace / "trusted"
+                    git(workspace, "clone", "-q", "--branch", "main", str(origin), str(trusted))
+                    (trusted / "tools").mkdir()
+                    (trusted / "tools/native_retirement_merge_gate.py").write_text(gate)
+                    bin_directory = workspace / "bin"
+                    bin_directory.mkdir()
+                    (bin_directory / "gh").write_text("#!/bin/sh\nprintf '[[]]\\n'\n")
+                    (bin_directory / "gh").chmod(0o755)
+                    temp = workspace / "temp"
+                    temp.mkdir()
+                    result = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                        cwd=workspace,
+                        env={**os.environ, "PATH": str(bin_directory) + os.pathsep + os.environ["PATH"],
+                             "GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(temp),
+                             "GITHUB_OUTPUT": str(temp / "output"),
+                             "GITHUB_REPOSITORY": "owner/repo", "EVENT_NAME": "pull_request",
+                             "HEAD_SHA": head, "CANDIDATE_HEAD": head},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('"base": "' + main + '"', result.stdout)
+                    self.assertNotIn("re-resolving trusted PR policy", result.stdout)
+                    self.assertEqual(git(trusted, "rev-parse", "HEAD"), main)
+                    self.assertEqual(git(candidate, "rev-parse", "HEAD"), head)
+                    self.assertEqual(git(candidate, "status", "--porcelain"), "")
+
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
         repo = root / "repo"
         git(root, "init", "-b", "main", str(repo))

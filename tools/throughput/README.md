@@ -66,6 +66,14 @@ integration tests, including fixed-seed corpus hashes, rejected sample paths,
 deliberately invalid result bundles and timed-out children. Their expected error
 diagnostics are not compiler failures.
 
+The fixtures write fixed paths that the tool refuses to reuse, so `build.c`
+deletes `build/throughput-tool-tests` (or `build/throughput-tool-tests-sanitized`)
+before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
+directly, pass an absent or empty directory. If a child exit-code check fails,
+it prints the exit code, signal, timeout, launch error and wall time, followed by
+the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
+test root, which the harness artifacts upload.
+
 A direct standalone build is useful when diagnosing the harness:
 
 ```sh
@@ -767,6 +775,7 @@ clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
   -fwrapv -fno-strict-aliasing -funsigned-char \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   tools/throughput/tests.c -lm -o build/throughput-tests-sanitized
+rm -rf build/throughput-tool-tests-sanitized
 ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   build/throughput-tests-sanitized build/throughput-tool-tests-sanitized

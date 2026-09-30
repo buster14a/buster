@@ -109,8 +109,12 @@ advances; this recovery does not grant automated dispatcher authority.
 Pull-request admission (the `Native retirement merge admission` check and the
 rebind job's policy step) evaluates against the trusted main checkout. If main
 advances after that checkout, the step re-fetches the new main into the trusted
-and candidate checkouts and re-evaluates, up to three attempts in total, rather
-than failing the candidate. It fails only if main keeps advancing throughout.
+checkout and re-evaluates, up to three attempts in total, rather than failing
+the candidate. It fails only if main keeps advancing throughout. The candidate
+checkout is fetched first, so a push landing between the two checkouts leaves
+the admitted main missing from it; the step then fetches that exact main commit
+into the candidate before running the gate (#2010). Policy still comes only
+from the trusted checkout.
 
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at
@@ -249,6 +253,26 @@ bytes intact. Once trusted, a separate policy transition may change the test,
 its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
+
+For #1007, the current support declaration digest
+`50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` and both
+earlier declaration digests remain accepted for historical evidence. The
+trusted-reader bootstrap admits the exact proposed successor digest
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932`
+(`PROPOSED_SUPPORT_*`): the current declaration with only the
+`tests/basic_c_f80_machine.c` row changed to 7,233 bytes and SHA-256
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`; the
+declaration stays 79,744 bytes. The same bootstrap admits the successor
+applicability ledger digest
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` (65,467
+bytes) next to the current
+`934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa` in the
+full-census validator: the same 374 identities with only the four
+`tests/basic_c_f80_machine.c` `fixture_sha256` cells updated. After that
+bootstrap is trusted, a separate policy transition may update only that
+fixture, its support byte/hash row, those four applicability cells, the
+census producer's applicability-ledger pin, and the benchmark-service support
+pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
 
 ### Solo-maintainer authorization
 
