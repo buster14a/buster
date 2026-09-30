@@ -17398,7 +17398,9 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
 BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 start, u32 end, CTypeIdentityQuery* answer)
 {
     CScopeId scope = c_parse_scope_for_token(&builder->parse, c_ir_current_scope(builder), start);
-    bool valid = c_semantic_type_identity_query(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, answer);
+    String8 message = {0};
+    bool valid = c_semantic_type_identity_query(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, answer, &message);
+    if (!valid && message.length) builder->failure_message = message;
     return valid;
 }
 

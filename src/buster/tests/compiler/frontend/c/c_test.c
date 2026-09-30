@@ -788,7 +788,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* ar
                 {
                     CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
                                                                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                     {
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
@@ -851,6 +853,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_and_wide_enumerator_types(UnitTe
             {
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
                                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
                 if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
@@ -961,6 +965,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
                     {
                         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-successors.c"), preprocess, parsed, target,
                                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                            BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
                         if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                         {
                             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
@@ -20444,7 +20450,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         {
             CDiagnostic invalid_generic_diagnostic =
                 invalid_generic_parse.diagnostic_count ? invalid_generic_parse.diagnostics[0] : invalid_generic_ir.diagnostics[0];
-            BUSTER_STRING_TEST(arguments, invalid_generic_diagnostic.message, invalid_generic_cases[case_index].message);
+            BUSTER_TEST_RAW(arguments, string_equal(invalid_generic_diagnostic.message, invalid_generic_cases[case_index].message), invalid_generic_diagnostic.message);
         }
         scratch_end(invalid_generic_temporary);
     }

@@ -226,7 +226,7 @@ BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* m
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
-                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer);
+                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.

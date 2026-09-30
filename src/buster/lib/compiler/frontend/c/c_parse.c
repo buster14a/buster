@@ -6199,7 +6199,7 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_range(CTypeParseMachine* machin
 // They use this same semantic resolver for a missing answer, on private scratch
 // machine storage; no canonical type is created to answer a C identity query.
 BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
-                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer)
+                                                   CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message)
 {
     CTypeIdentityQuery* cached = c_parse_type_identity_find(result, start);
     if (!cached && start < end && end <= preprocess.token_count)
@@ -6216,6 +6216,14 @@ BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessR
         };
         c_parse_type_identity_prepare(&machine, scratch, preprocess, result, scope, start, end);
         cached = c_parse_type_identity_find(result, start);
+        if (!cached && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")))
+        {
+            u32 location = start;
+            machine.type_identity_queries_active = true;
+            c_parse_generic_selection_one(&machine, scratch, preprocess, result, scope, start, end, message, &location);
+            cached = c_parse_type_identity_find(result, start);
+        }
         arena_set_position(scratch, mark);
     }
     bool valid = cached && cached->token_end <= end;
@@ -11237,13 +11245,27 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         c_type_parse_frame_complete(machine, frame->type, frame->end, true);
         return;
     }
-    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD || frame->stage == C_TYPE_PARSE_STAGE_FALLBACK)
     {
         CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
-        u32 type_index = machine->result_index;
+        u32 type_index = frame->stage == C_TYPE_PARSE_STAGE_FALLBACK ? frame->close : machine->result_index;
         if (type.value != C_ID_UNDERLYING_INVALID && type_index < frame->close)
         {
             type = c_parse_pointer_chain(frame->result, *frame->preprocess, type, &type_index, frame->close);
+            if (type_index < frame->close && c_token_is_punctuator(&frame->preprocess->tokens[type_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                // Abstract function/array pointer casts use the same explicit
+                // declarator frames as declarations, without nesting a run.
+                u32 name_index = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, type_index);
+                frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
+                if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                    .result = frame->result, .preprocess = frame->preprocess, .scope = frame->scope,
+                    .type = type, .start = type_index, .end = frame->close,
+                    .declarator_start = type_index, .name_index = name_index,
+                    .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED}))
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
             type = c_parse_array_suffixes(frame->result, *frame->preprocess, type, &type_index, frame->close);
         }
         if (type.value != C_ID_UNDERLYING_INVALID && type_index == frame->close)
