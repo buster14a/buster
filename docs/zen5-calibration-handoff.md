@@ -101,6 +101,102 @@ accepted A/B result from this same job is never an input to its preceding A/A
 decision. The existing #619/#511 consumer then assesses complete candidate
 samples only after the independent post-A/A decision and service phase receipt.
 
+## A/A policy evaluator (#426 plan step 4)
+
+`tools/zen5_aa_evaluator.py` turns retained `zen5-calibration-v1` attempt
+bundles into the canonical A/A policy document that a later
+`aa-policy-sha256=` recipe-profile pin binds. It implements the family
+proposed by #1188 with the inputs decided on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5919407135):
+q = 0.90, a 42-member family with 0.05 Bonferroni allocation (so a finite bound
+needs at least 64 confirmatory attempts), and #881 current-job P = 60 with
+runtime rows (U = R). It changes no threshold. It carries no approved limit,
+and no policy digest is pinned anywhere.
+
+There are two inputs and two digests:
+
+- **Protocol** (`buster-zen5-aa-protocol-v1`). The reviewer writes it from
+  exploratory pilots, then freezes and publishes it before the first
+  confirmatory attempt. `template` writes the unapproved skeleton. The decided
+  inputs are fixed, and each reviewer choice starts as `null`: the 42 practical
+  limits, the stationarity alpha, permutation count and seed, the applicability
+  identities, the pilot list, the current-job A/A equivalence band and the
+  approval. The evaluator records the protocol's SHA-256. Nothing offline can
+  prove that the protocol was published before window 2.
+- **Ledger** (`buster-zen5-aa-attempt-ledger-v1`). It lists every retained
+  attempt in execution order, so job/attempt tokens must strictly increase,
+  and pilots come first. Each entry has its role, its bundle directory and the
+  plan and capture digests that the authenticated service channel supplied.
+  Those digests are never copied from the bundle.
+- **Policy document** (`buster-zen5-aa-policy-v1`). The canonical JSON bytes
+  are hashed, and that SHA-256 is the future `aa-policy-sha256=` value. The
+  document embeds the protocol, the method, every attempt with its validity
+  reasons, the family result, and the evaluator source digests and Python
+  minor version.
+
+```sh
+python3 -B tools/zen5_aa_evaluator.py template --output protocol.json
+python3 -B tools/zen5_aa_evaluator.py evaluate --protocol protocol.json \
+  --ledger ledger.json --policy-output aa-policy.json --report-output aa-policy.md
+python3 -B tools/zen5_aa_evaluator.py verify --protocol protocol.json \
+  --ledger ledger.json --policy aa-policy.json
+```
+
+Each attempt is replayed from its exported result root:
+
+- the final manifest must show a succeeded, complete, `pmu-qualified`,
+  oracle-consistent attempt with `ab-authorized=false`;
+- the `BQ-BUNDLE-V1` index must list every file, with matching sizes and
+  digests, and no unlisted file;
+- `zen5_calibration_handoff.replay` runs against the authenticated digests;
+- every capture must have `ab_authorized` false and match the ledger's
+  job/attempt;
+- the PMU record must replay, and its digest must match the plan and the
+  manifest.
+
+A failed, incomplete or tampered attempt is kept as `invalid` with its reasons,
+and it contributes no values. Each valid attempt contributes the 42 members:
+7 checks for each metric and control, computed by the existing analyzers. An
+undefined value, such as the lag-one correlation of a constant series, stays
+unavailable and is never zero.
+
+The status follows #1188's precedence:
+
+- **`invalid`**: an invalid confirmatory attempt, more attempts than the fixed
+  count, or ledger pilots that differ from the protocol's list.
+- **`unavailable`**: an unset reviewer choice, or an attempt outside the
+  declared applicability.
+- **`inconclusive`**: insufficient evidence (fewer attempts than the
+  predeclared count), an unavailable or unbounded member, a bound above its
+  limit, or across-attempt dependence.
+- **`eligible`**: none of the above.
+
+Confirmatory statistics are withheld unless a complete, valid, fixed-count set
+is evaluated under a complete protocol, so they cannot be used to choose
+limits. Pilot attempts get descriptive summaries only and never count toward
+the confirmatory set.
+
+For a complete set, each member's bound is the exact order statistic `T_(k)`,
+where k is the smallest value with `Pr[Binomial(n, 0.9) <= k-1] >= 1 - 0.05/42`.
+Rational arithmetic is used, and ties are kept. The proposed stationarity
+mechanism, which the reviewer approves separately, runs two seeded two-sided
+rank permutation tests on every member in execution order: a Spearman trend
+test and a lag-one serial test. Both use splitmix64 Fisher-Yates orders and
+Bonferroni over all 84 checks. There is no optional stopping and no outlier
+deletion.
+
+The exit status is 0 for `eligible`, 1 for `unavailable` or `inconclusive`,
+and 2 for `invalid` or a refused input. Every output says
+`ab_authorized=false`. The result is not the #881 current-job A/A itself: that
+check applies the band recorded here with #619's intervals.
+
+The synthetic suite, `python3 -B tools/zen5_aa_evaluator.py --self-test`, runs
+in the benchmark-service policy workflow. It covers invalid, tampered,
+incomplete and relabeled bundles, too few and too many attempts, drift within a
+capture and across attempts, serial dependence, unavailable members, pilot and
+applicability mismatches, and refused protocols. It also covers byte replay
+through the CLI. None of its bundles is host evidence.
+
 The real producer is an explicitly authorized, separately admitted #880 service
 qualification phase. Its A/A work must be allowed before any A/B result exists;
 the still-blocked #881 candidate recipe cannot use its own future A/B verdict
