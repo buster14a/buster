@@ -901,6 +901,60 @@ BUSTER_GLOBAL_LOCAL void source_metrics_append_group(Arena* arena, String8* text
     source_metrics_append_field(arena, text, group, S8("tokens"), metrics.tokens);
 }
 
+// The phase-lifetime ledger (docs/compiler-lifetime.md) as `lifetime.*` keys:
+// per-boundary live extents, the preprocessing seal, the semantic query
+// releases, the frontend release and the byte-lifetime integrals. Resident
+// bytes and arena extents vary with the run and the compiler binary, so they
+// have their own file: `-fsource-metrics` output must stay identical across
+// bootstrap generations (self_host_audit_compare in build.c).
+BUSTER_GLOBAL_LOCAL void source_metrics_append_lifetime(Arena* arena, String8* text, CompilerLifetimeLedger const* lifetime)
+{
+    // Static group names: the text grows contiguously in `arena`, so nothing
+    // else may be allocated there between two appended lines.
+    String8 groups[COMPILER_LIFETIME_BOUNDARY_COUNT] = {
+        [COMPILER_LIFETIME_PREPROCESS] = S8("lifetime.preprocess"),
+        [COMPILER_LIFETIME_PARSE] = S8("lifetime.parse"),
+        [COMPILER_LIFETIME_SEMANTIC] = S8("lifetime.semantic"),
+        [COMPILER_LIFETIME_LOWER] = S8("lifetime.lower"),
+        [COMPILER_LIFETIME_FRONTEND_RELEASE] = S8("lifetime.frontend_release"),
+        [COMPILER_LIFETIME_PREPARE] = S8("lifetime.prepare"),
+        [COMPILER_LIFETIME_CODEGEN] = S8("lifetime.codegen"),
+        [COMPILER_LIFETIME_OBJECT] = S8("lifetime.object"),
+        [COMPILER_LIFETIME_EMIT] = S8("lifetime.emit"),
+    };
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("version"), 1);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("units"), lifetime->unit_count);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("failed_units"), lifetime->failed_units);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("peak_live_bytes"), lifetime->peak_live_bytes);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("live_byte_integral"), lifetime->live_byte_integral);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("resident_integral"), lifetime->resident_integral);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("preprocess_released_bytes"), lifetime->preprocess.released_bytes);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("preprocess_sealed_bytes"), lifetime->preprocess.sealed_bytes);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("preprocess_sealed_objects"), lifetime->preprocess.sealed_objects);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("preprocess_references"), lifetime->preprocess.references);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("semantic_released_bytes"), lifetime->semantic_released_bytes);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("semantic_releases"), lifetime->semantic_releases);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("frontend_released_bytes"), lifetime->frontend_released_bytes);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("spelling_references"), lifetime->spelling_references);
+    source_metrics_append_field(arena, text, S8("lifetime"), S8("cleanup_count"), lifetime->cleanup_count);
+    for (u32 boundary = 0; boundary < COMPILER_LIFETIME_BOUNDARY_COUNT; boundary += 1)
+    {
+        CompilerLifetimeSample sample = lifetime->samples[boundary];
+        if (sample.reached)
+        {
+            String8 group = groups[boundary];
+            source_metrics_append_field(arena, text, group, S8("unit_bytes"), sample.unit_bytes);
+            source_metrics_append_field(arena, text, group, S8("preprocess_bytes"), sample.preprocess_bytes);
+            source_metrics_append_field(arena, text, group, S8("resident_bytes"), sample.resident_bytes);
+#if BUSTER_BENCH_ALLOCATIONS
+            source_metrics_append_field(arena, text, group, S8("allocation_calls"), sample.allocation_calls);
+            source_metrics_append_field(arena, text, group, S8("allocation_bytes"), sample.allocation_bytes);
+            source_metrics_append_field(arena, text, group, S8("commit_bytes"), sample.commit_bytes);
+#endif
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String8 unit, CSourceMetrics unique, CSourceMetrics lexed,
                                               CPreprocessedMetrics preprocessed)
 {
@@ -934,6 +988,14 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
                                     construction.values[index]);
     }
 #endif
+    return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
+}
+
+// `-flifetime-metrics=<path>`: the ledger alone, in the source-metrics format.
+BUSTER_GLOBAL_LOCAL bool write_lifetime_metrics(Arena* arena, String8 path, CompilerLifetimeLedger const* lifetime)
+{
+    String8 text = {0};
+    source_metrics_append_lifetime(arena, &text, lifetime);
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
@@ -1039,6 +1101,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;
         }
+    }
+    // Written for failed compiles too: the ledger records how far a unit got
+    // and what it released on the way out.
+    if (invocation.lifetime_metrics_path.length && !write_lifetime_metrics(arena, invocation.lifetime_metrics_path, &compile.lifetime))
+    {
+        compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.lifetime_metrics_path);
+        result = PROCESS_RESULT_FAILED;
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
     {

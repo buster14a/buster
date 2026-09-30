@@ -118,6 +118,10 @@ struct CompilerDriverInvocation
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
     String8 source_metrics_path;
+    // Where to write the phase-lifetime ledger (`lifetime.*` keys). Kept out
+    // of the source metrics because resident sizes and arena extents vary
+    // from run to run and between compiler binaries.
+    String8 lifetime_metrics_path;
     // API-only opt-out from retaining structured records. Legacy diagnostic
     // text and warnings remain available; clean compilation allocates neither.
     bool suppress_diagnostic_records;
@@ -207,9 +211,78 @@ struct CompilerDriverFallbackRecord
     u32 column;
 };
 
+// The phase boundaries of one C unit, in pipeline order; each is sampled after
+// its phase returned, and so after the phase retired its own phase arena.
+// FRONTEND_RELEASE is sampled after compiler_driver_release_frontend retires
+// the token and shape arenas. See docs/compiler-lifetime.md for the lifetime
+// graph.
+typedef enum CompilerLifetimeBoundary
+{
+    COMPILER_LIFETIME_PREPROCESS,
+    COMPILER_LIFETIME_PARSE,
+    COMPILER_LIFETIME_SEMANTIC,
+    COMPILER_LIFETIME_LOWER,
+    COMPILER_LIFETIME_FRONTEND_RELEASE,
+    COMPILER_LIFETIME_PREPARE,
+    COMPILER_LIFETIME_CODEGEN,
+    COMPILER_LIFETIME_OBJECT,
+    COMPILER_LIFETIME_EMIT,
+    COMPILER_LIFETIME_BOUNDARY_COUNT,
+} CompilerLifetimeBoundary;
+
+// What was live when a unit crossed one boundary. Byte counts are logical
+// arena extents (exact, including untouched worst-case reservations);
+// resident_bytes is the process RSS and is sampled only when lifetime
+// metrics were requested (-flifetime-metrics=). The allocation and commit deltas cover
+// the phase that ended here and are nonzero only with BUSTER_BENCH_ALLOCATIONS.
+typedef struct CompilerLifetimeSample CompilerLifetimeSample;
+struct CompilerLifetimeSample
+{
+    // Held by the unit's arena above its position at entry.
+    u64 unit_bytes;
+    // Held by the preprocessor's spelling, token and shape arenas.
+    u64 preprocess_bytes;
+    u64 resident_bytes;
+    u64 allocation_calls;
+    u64 allocation_bytes;
+    u64 commit_bytes;
+    bool reached;
+    u8 reserved[7];
+};
+
+// Exact per-invocation lifetime counters, summed over units except where a
+// field says otherwise. A unit that stops at a failed boundary contributes
+// only the boundaries it reached and sets `failed_units`.
+typedef struct CompilerLifetimeLedger CompilerLifetimeLedger;
+struct CompilerLifetimeLedger
+{
+    CompilerLifetimeSample samples[COMPILER_LIFETIME_BOUNDARY_COUNT];
+    // The preprocessing seal: bytes, arrays/strings and pointer fields copied
+    // into the unit's arena, and the phase-arena bytes released after it.
+    CPhaseBoundaryMetrics preprocess;
+    // Semantic analysis: layout-query tables released from its phase arena
+    // (CParseResult.phase_released_bytes) and the releases that did it.
+    u64 semantic_released_bytes;
+    u64 semantic_releases;
+    // Token and shape bytes retired after lowering.
+    u64 frontend_released_bytes;
+    // Canonical IR names that still reference the retained spelling space.
+    u64 spelling_references;
+    // Arena releases and retirements the driver performed.
+    u64 cleanup_count;
+    // Maximum over units and boundaries of unit + preprocess bytes.
+    u64 peak_live_bytes;
+    // Sums over reached boundaries of those live bytes and of resident bytes.
+    u64 live_byte_integral;
+    u64 resident_integral;
+    u32 unit_count;
+    u32 failed_units;
+};
+
 typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
+    CompilerLifetimeLedger lifetime;
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;

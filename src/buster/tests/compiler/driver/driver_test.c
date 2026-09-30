@@ -2030,13 +2030,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
     return result;
 }
 
-// Preprocessing releases its phase arena before it returns, and semantic
-// analysis releases each layout query's tables. Compile the same sources with
-// every released byte overwritten (arena_test_fill_releases) and without, and
-// require identical results: an error code, a diagnostic, a warning or an
-// object byte that read released memory would differ. -g adds debug
-// information, whose source map, file table and names are the longest-lived
-// references into what preprocessing built.
+// Every frontend phase boundary releases what its phase owned: a phase arena
+// after preprocessing, after each semantic layout query and when semantic
+// analysis returns, and the token and shape arenas once lowering has published
+// canonical IR.
+// Compile the same sources with every released byte overwritten
+// (arena_test_fill_releases) and without, and require identical results: an
+// error code, a diagnostic, a warning or an object byte that read released
+// memory would differ. -g adds debug information, whose source map, file table
+// and names are the longest-lived references into what preprocessing built.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_released_phase_fill(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2096,6 +2098,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_released_phase_fill(Unit
             }
             BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
                                        (!objects[0].length || !memcmp(objects[0].pointer, objects[1].pointer, (size_t)objects[0].length)));
+            // A failed compile releases the frontend too, and its ledger says
+            // where it stopped. The fill changes no arena extent.
+            for (u32 fill = 0; fill < 2; fill += 1)
+            {
+                CompilerLifetimeLedger const* lifetime = &results[fill].lifetime;
+                bool failed = results[fill].error != COMPILER_DRIVER_ERROR_NONE;
+                CompilerLifetimeSample released = lifetime->samples[COMPILER_LIFETIME_FRONTEND_RELEASE];
+                BUSTER_TEST(arguments, lifetime->unit_count == 1 && lifetime->failed_units == (u32)failed);
+                BUSTER_TEST(arguments, lifetime->cleanup_count == 2 && lifetime->frontend_released_bytes != 0 && lifetime->preprocess.sealed_bytes != 0);
+                BUSTER_TEST(arguments, lifetime->samples[COMPILER_LIFETIME_PREPROCESS].reached && (failed || lifetime->samples[COMPILER_LIFETIME_EMIT].reached));
+                BUSTER_TEST(arguments, lifetime->samples[COMPILER_LIFETIME_SEMANTIC].reached == (lifetime->semantic_releases != 0));
+                BUSTER_TEST(arguments, !released.reached || released.preprocess_bytes < lifetime->samples[COMPILER_LIFETIME_LOWER].preprocess_bytes);
+            }
+            BUSTER_TEST(arguments, results[0].lifetime.peak_live_bytes == results[1].lifetime.peak_live_bytes &&
+                                       results[0].lifetime.live_byte_integral == results[1].lifetime.live_byte_integral);
             scratch_end(temporary);
         }
     }
@@ -11526,6 +11543,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-l:libandroid.so"),
         S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
+        S8("-flifetime-metrics=lifetime.txt"),
         S8("-o"),
         S8("output.o"),
         S8("source.c"),
@@ -11569,6 +11587,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
     BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
+    BUSTER_STRING_TEST(arguments, invocation.lifetime_metrics_path, S8("lifetime.txt"));
     BUSTER_TEST(arguments, invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
 
     String8 bitfield_options[][2] = {

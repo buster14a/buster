@@ -24,6 +24,11 @@
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
+// compiler_driver_execute_c_single retires the preprocessor's token and shape
+// arenas once lowering has published (compiler_driver_release_frontend; the
+// frontend phases retire their own phase arenas), and
+// compiler_driver_lifetime_sample records each boundary into
+// CompilerDriverResult.lifetime (docs/compiler-lifetime.md).
 // compiler_driver_unit_lane owns one private TU arena/collector per stable
 // input slot. Opt-in native C link batches publish in input order only after
 // the gang returns; assembly and archive selection remain serial boundaries.
@@ -505,6 +510,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     else if (invocation->source_metrics_path.length)
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
+    }
+    else if (invocation->lifetime_metrics_path.length)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("lifetime metrics are not supported for GPU target: {S8}"), invocation->lifetime_metrics_path);
     }
     else if (compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_C) ||
              compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT))
@@ -1617,6 +1626,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (value.length)
         {
             invocation.source_metrics_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("-flifetime-metrics="));
+        if (value.length)
+        {
+            invocation.lifetime_metrics_path = value;
             continue;
         }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
@@ -3752,6 +3767,180 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length});
 }
 
+// Samples one unit's live memory at each phase boundary into its
+// CompilerLifetimeLedger. Arena extents are a few loads; the resident size is
+// a file read and is taken only when the invocation asked for measurements.
+typedef struct CompilerLifetimeRecorder CompilerLifetimeRecorder;
+struct CompilerLifetimeRecorder
+{
+    CompilerLifetimeLedger* ledger;
+    Arena* unit_arena;
+    u64 unit_start;
+    bool sample_resident;
+#if BUSTER_BENCH_ALLOCATIONS
+    ArenaBenchmarkCounters allocations;
+    ArenaBenchmarkCounters commits;
+#endif
+};
+
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_arena_extent(Arena const* arena)
+{
+    return arena ? arena->position - arena_minimum_position : 0;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerLifetimeRecorder compiler_driver_lifetime_begin(CompilerLifetimeLedger* ledger, Arena* unit_arena, CompilerDriverInvocation const* invocation)
+{
+    CompilerLifetimeRecorder result = {
+        .ledger = ledger,
+        .unit_arena = unit_arena,
+        .unit_start = unit_arena->position,
+        .sample_resident = invocation->lifetime_metrics_path.length != 0,
+    };
+#if BUSTER_BENCH_ALLOCATIONS
+    result.allocations = arena_benchmark_counters();
+    result.commits = arena_benchmark_kind_counters(ARENA_BENCHMARK_OS_COMMIT);
+#endif
+    ledger->unit_count = 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_lifetime_sample(CompilerLifetimeRecorder* recorder, CompilerLifetimeBoundary boundary,
+                                                         CPreprocessResult const* preprocess)
+{
+    CSourceMapRecovery const* recovery = preprocess->recovery;
+    CompilerLifetimeSample sample = {
+        .unit_bytes = recorder->unit_arena->position - recorder->unit_start,
+        .preprocess_bytes = recovery ? compiler_driver_arena_extent(recovery->spelling_arena) + compiler_driver_arena_extent(recovery->token_arena) +
+                                           compiler_driver_arena_extent(recovery->token_shape_arena)
+                                     : 0,
+        .resident_bytes = recorder->sample_resident ? os_get_resident_memory_size() : 0,
+        .reached = true,
+    };
+#if BUSTER_BENCH_ALLOCATIONS
+    ArenaBenchmarkCounters allocations = arena_benchmark_counters();
+    ArenaBenchmarkCounters commits = arena_benchmark_kind_counters(ARENA_BENCHMARK_OS_COMMIT);
+    sample.allocation_calls = allocations.calls - recorder->allocations.calls;
+    sample.allocation_bytes = allocations.requested_bytes - recorder->allocations.requested_bytes;
+    sample.commit_bytes = commits.requested_bytes - recorder->commits.requested_bytes;
+    recorder->allocations = allocations;
+    recorder->commits = commits;
+#endif
+    CompilerLifetimeLedger* ledger = recorder->ledger;
+    ledger->samples[boundary] = sample;
+    u64 live = sample.unit_bytes + sample.preprocess_bytes;
+    ledger->peak_live_bytes = BUSTER_MAX(ledger->peak_live_bytes, live);
+    ledger->live_byte_integral += live;
+    ledger->resident_integral += sample.resident_bytes;
+}
+
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_string_in_arena(String8 string, Arena const* arena)
+{
+    return string.pointer && arena_range_contains(arena, arena_minimum_position, arena->position, string.pointer);
+}
+
+// The references canonical IR keeps into the one frontend arena it outlives:
+// the spelling space its symbol, type, field, enumerator, function and
+// debug-local names borrow instead of copying.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_spelling_references(IrProgram const* program, Arena const* spelling_arena)
+{
+    u64 result = 0;
+    if (spelling_arena)
+    {
+        for (u32 index = 0; index < program->symbols.count; index += 1)
+        {
+            IrSymbol const* symbol = &program->symbols.symbols[index];
+            result += compiler_driver_string_in_arena(symbol->name, spelling_arena) + compiler_driver_string_in_arena(symbol->link_name, spelling_arena) +
+                      compiler_driver_string_in_arena(symbol->section_name, spelling_arena);
+        }
+        for (u32 index = 0; index < program->types.count; index += 1)
+        {
+            IrType const* type = &program->types.types[index];
+            result += compiler_driver_string_in_arena(type->name, spelling_arena);
+            for (u32 field = 0; type->fields && field < type->field_count; field += 1)
+            {
+                result += compiler_driver_string_in_arena(type->fields[field].name, spelling_arena);
+            }
+            for (u32 member = 0; type->enum_members && member < type->enum_member_count; member += 1)
+            {
+                result += compiler_driver_string_in_arena(type->enum_members[member].name, spelling_arena);
+            }
+        }
+        for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+        {
+            IrModule const* module = &program->modules[module_index];
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction const* function = &module->functions[index];
+                result += compiler_driver_string_in_arena(function->name, spelling_arena);
+                for (u32 local = 0; function->debug_locals && local < function->debug_local_count; local += 1)
+                {
+                    result += compiler_driver_string_in_arena(function->debug_locals[local].name, spelling_arena);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Folds one unit's ledger into an invocation's: counters and integrals add,
+// the peak is the maximum, and the per-boundary samples are those of the unit
+// with the largest peak.
+BUSTER_GLOBAL_LOCAL void compiler_driver_lifetime_add(CompilerLifetimeLedger* total, CompilerLifetimeLedger const* unit)
+{
+    if (unit->peak_live_bytes >= total->peak_live_bytes)
+    {
+        memcpy(total->samples, unit->samples, sizeof(total->samples));
+    }
+    total->preprocess.released_bytes += unit->preprocess.released_bytes;
+    total->preprocess.sealed_bytes += unit->preprocess.sealed_bytes;
+    total->preprocess.sealed_objects += unit->preprocess.sealed_objects;
+    total->preprocess.references += unit->preprocess.references;
+    total->semantic_released_bytes += unit->semantic_released_bytes;
+    total->semantic_releases += unit->semantic_releases;
+    total->frontend_released_bytes += unit->frontend_released_bytes;
+    total->spelling_references += unit->spelling_references;
+    total->cleanup_count += unit->cleanup_count;
+    total->peak_live_bytes = BUSTER_MAX(total->peak_live_bytes, unit->peak_live_bytes);
+    total->live_byte_integral += unit->live_byte_integral;
+    total->resident_integral += unit->resident_integral;
+    total->unit_count += unit->unit_count;
+    total->failed_units += unit->failed_units;
+}
+
+// The frontend's end-of-life boundary. Once lowering has published canonical
+// IR, nothing downstream reads a token or a token shape: canonical IR keeps
+// only the spelling space (symbol names) and the source map c_preprocess
+// sealed into the unit's arena. Retiring them on this thread keeps #1265's
+// pairing of creation and destruction, and leaves null handles behind so a
+// stale use faults at the null instead of reading reused memory. The phase
+// arenas are not the driver's: preprocessing and semantic analysis each
+// retire their own before returning. Idempotent; every exit of
+// compiler_driver_execute_c_single after preprocessing reaches it.
+BUSTER_GLOBAL_LOCAL void compiler_driver_release_frontend(CPreprocessResult* preprocess, CompilerLifetimeLedger* ledger)
+{
+    CSourceMapRecovery* recovery = preprocess->recovery;
+    if (recovery)
+    {
+        if (recovery->token_arena)
+        {
+            ledger->frontend_released_bytes += compiler_driver_arena_extent(recovery->token_arena);
+            ledger->cleanup_count += 1;
+            arena_retire(recovery->token_arena, C_PHASE_ARENA_RETAINED_SIZE);
+            recovery->token_arena = 0;
+        }
+        if (recovery->token_shape_arena)
+        {
+            ledger->frontend_released_bytes += compiler_driver_arena_extent(recovery->token_shape_arena);
+            ledger->cleanup_count += 1;
+            arena_retire(recovery->token_shape_arena, C_PHASE_ARENA_RETAINED_SIZE);
+            recovery->token_shape_arena = 0;
+            recovery->token_shapes = 0;
+        }
+    }
+    preprocess->tokens = 0;
+    preprocess->token_count = 0;
+}
+
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
                                                              CompilerDriverDiagnosticCollector* warnings)
 {
@@ -3760,6 +3949,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         .diagnostic = invocation.diagnostic,
     };
     FileMapRead source_file = {0};
+    CPreprocessResult preprocess = {0};
+    CompilerLifetimeRecorder lifetime = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -3793,7 +3984,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
-    CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
+    lifetime = compiler_driver_lifetime_begin(&result.lifetime, arena, &invocation);
+    preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
@@ -3815,6 +4007,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // measured by then, and a failing compile is exactly when the size of
     // what it read is worth knowing.
     CPreprocessDetail const* preprocess_detail = c_preprocess_detail(preprocess);
+    result.lifetime.preprocess = preprocess_detail->boundary;
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_PREPROCESS, &preprocess);
     result.source_lexed = preprocess_detail->source_lexed;
     result.source_unique = preprocess_detail->source_unique;
     result.lexed_files = preprocess_detail->lexed_files;
@@ -3859,6 +4053,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
     }
     CParserResult syntax = c_parse_ast(arena, preprocess);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_PARSE, &preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {
@@ -3886,9 +4081,24 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
-                                                  (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+    // c_analyze_with_options, split so each half is its own boundary.
+    CIRLowerResult lowered = {0};
+    CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+    result.lifetime.semantic_released_bytes = analysis.phase_released_bytes;
+    result.lifetime.semantic_releases = analysis.phase_releases;
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_SEMANTIC, &preprocess);
+    if (analysis.diagnostic_count || !analysis.analysis_complete)
+    {
+        lowered.diagnostics = analysis.diagnostics;
+        lowered.diagnostic_count = analysis.diagnostic_count;
+    }
+    else
+    {
+        lowered = c_lower_to_ir_with_options(arena, invocation.input_paths[0], preprocess, analysis, invocation.target,
+                                             (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
+                                                               .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+        compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_LOWER, &preprocess);
+    }
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     if (!lowered.program || lowered.diagnostic_count)
@@ -3901,6 +4111,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
+    if (lifetime.sample_resident)
+    {
+        result.lifetime.spelling_references = compiler_driver_spelling_references(lowered.program, preprocess.recovery ? preprocess.recovery->spelling_arena : 0);
+    }
+    compiler_driver_release_frontend(&preprocess, &result.lifetime);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_FRONTEND_RELEASE, &preprocess);
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
@@ -3908,6 +4124,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_PREPARE, &preprocess);
     result.local_promotion = module->local_promotion;
     result.fast = module->fast;
     if (validation.error != IR_VALIDATION_NONE)
@@ -3985,6 +4202,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                .register_allocator = invocation.register_allocator,
                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
                                                            }, invocation.bootstrap_trace_prefix.length ? &mir_trace : 0);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_CODEGEN, &preprocess);
     if (invocation.bootstrap_trace_prefix.length)
     {
         if (!bootstrap_trace_close(&mir_trace))
@@ -4113,6 +4331,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         goto end;
     }
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_OBJECT, &preprocess);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
     {
@@ -4125,7 +4344,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.object = object;
     result.has_object = true;
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
+    compiler_driver_lifetime_sample(&lifetime, COMPILER_LIFETIME_EMIT, &preprocess);
 end:
+    compiler_driver_release_frontend(&preprocess, &result.lifetime);
+    result.lifetime.failed_units = result.error != COMPILER_DRIVER_ERROR_NONE;
     file_map_unmap(source_file);
     return result;
 }
@@ -4734,6 +4956,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.diagnostic = S8("could not allocate C translation-unit arena");
             goto finish;
         }
+        compiler_driver_lifetime_add(&result.lifetime, &unit.lifetime);
         result.tokenizer_error_count += unit.tokenizer_error_count;
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;

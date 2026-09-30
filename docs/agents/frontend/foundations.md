@@ -299,7 +299,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   phase allocates what only it reads there and releases it before returning,
   so no result may reference it. `c_preprocess_seal` copies the preprocessing
   result out of it; semantic layout queries keep their tables there and
-  release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
+  release them on return; each phase retires its own arena as it returns,
+  and the driver retires the token and shape arenas after lowering. See
+  [compiler phase lifetimes](../../compiler-lifetime.md).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin

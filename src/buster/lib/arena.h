@@ -128,11 +128,12 @@ BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 // for that next phase and the dirty high-water mark covers them, exactly as
 // arena_set_position leaves them. Returns the number of bytes released.
 BUSTER_F_DECL u64 arena_release_to_position(Arena* arena, u64 position);
-// Ends an arena's use by the thread that created it: rewinds it, returns
-// every committed page beyond `retained_size` bytes of buffer to the OS and
-// destroys it, which parks a pool-eligible mapping for the next creation of
-// the same shape on this thread. A transient peak therefore neither stays
-// resident nor forces the next user to reserve and fault a fresh mapping.
+// Ends an arena's use by the thread that created it: releases everything it
+// holds as arena_release_to_position does, returns every committed page
+// beyond `retained_size` bytes of buffer to the OS and destroys it, which
+// parks a pool-eligible mapping for the next creation of the same shape on
+// this thread. A transient peak therefore neither stays resident nor forces
+// the next user to reserve and fault a fresh mapping.
 BUSTER_F_DECL void arena_retire(Arena* arena, u64 retained_size);
 // True when `pointer` lies in [start, end) of `arena`'s byte space: the test a
 // phase uses to prove its result keeps no reference into what it releases.
@@ -149,10 +150,11 @@ BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void arena_test_fail_next_reserve(void);
 BUSTER_F_DECL void arena_test_fail_next_commit(void);
-// While enabled, arena_release_to_position also overwrites what it releases
-// with ARENA_TEST_RELEASE_FILL, so a reference that outlives its phase reads
-// a recognizable pattern in builds without AddressSanitizer. Process-wide,
-// because a unit's phases can run on a compile lane; tests toggle it serially.
+// While enabled, arena_release_to_position (and arena_retire through it) also
+// overwrites what it releases with ARENA_TEST_RELEASE_FILL, so a reference
+// that outlives its phase or its arena reads a recognizable pattern in builds
+// without AddressSanitizer. Process-wide, because a unit's phases can run on
+// a compile lane; tests toggle it serially.
 BUSTER_F_DECL void arena_test_fill_releases(bool enabled);
 #define ARENA_TEST_RELEASE_FILL 0xa5
 #endif
