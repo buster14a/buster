@@ -169,23 +169,105 @@ with its output directory, drives real A1 output (metrics shards, untimed
 batches, the two-shard execution receipt and numeric samples) through these
 readers and the publication path, including reordered, missing, truncated and
 forged inputs. With the real binding validator the CLI chain stops there,
-because its minimal join record is no complete binding. With a validator test
-double, the CLI's `authenticated_attempt_join` accepts the genuine receipt and
-refuses a wrong attempt or a forged receipt. `--worker-unit DIRECTORY`, which
+because its minimal join record is no complete binding; the CLI reports the
+validator's own diagnostic as the refusal. With a validator test double, the
+CLI's `authenticated_attempt_join` accepts the genuine receipt and refuses a
+wrong attempt or a forged receipt. `--worker-unit DIRECTORY`, which
 `bench_service self-test` runs right after the preparation runner, reads the
-worker unit's composed job-82 result: the whole CLI (publication, separate
-retrieval, unpack stand-in, lane F import and final-binding check, validator
-double, join) accepts it with lane F's final binding and refuses a final
-binding that changes anything else; the join accepts the producer authority's
-receipt digest and refuses another job, attempt or trust root and a tampered
-receipt. The archive and the unpacker in that test
-are Python stand-ins. The native `unpack-export` needs a receipt the service
+worker unit's composed job-82 result and runs lane F's production writer and
+the real validator over it, with no validator double (see below); the whole
+CLI (publication, separate retrieval, unpack stand-in, lane F import and
+final-binding check, validator) refuses it explicitly for missing context
+evidence and refuses a final binding that changes anything else before the
+validator; the join accepts the producer authority's receipt digest and
+refuses another job, attempt or trust root and a tampered receipt. The
+archive and the unpacker in that test are Python stand-ins. The native `unpack-export` needs a receipt the service
 itself sealed for a finalized service result, and the worker's full-result
 binding; the blocked retirement recipe cannot finalize such a result. A failed, interrupted or
 invalid exported attempt can be unpacked and retained but exits before the
 performance replay. A verified replay reports
 `verified-without-admission`; it cannot admit the recipe or invent a performance
 pass.
+
+### Lane F: final binding and independent replay
+
+`tools/bench_service/retirement_lane_f.py` is lane F's production writer. Its
+input is the unpacked, sealed and composed service result; it writes the
+lane F directory that `--lane-f` names and never edits the result. The
+composed record's two late phases are the composer's pending descriptors;
+lane F fills them from the unpacked bytes only:
+
+```sh
+python3 tools/bench_service/retirement_lane_f.py bundle /private/new-result \
+    /private/replay-bundle.tar --publication-id PUBLICATION_ID
+# publish replay-bundle.tar, then fetch a fresh copy and the publisher's digest
+python3 tools/bench_service/retirement_lane_f.py bind /private/new-result /private/lane-f \
+    --downloaded-bundle /private/fresh/replay-bundle.tar \
+    --published-bundle-sha256 PUBLISHED_SHA --publication-id PUBLICATION_ID \
+    --release RELEASE --run-id RUN_ID --repository-root /private/pinned-checkout
+python3 tools/bench_service/retirement_lane_f.py replay /private/new-result /private/lane-f \
+    /private/clean-replay --repository-root /private/pinned-checkout \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA \
+    --verdict /private/lane-f-verdict.json
+```
+
+- `bundle` checks every file the sealed result's seal enumerates against its
+  descriptor and the seal root, then writes the independent-replay archive:
+  a tar whose first member is `bundle-manifest.json`
+  (`buster-native-retirement-independent-bundle-manifest-v1`), followed by
+  the sealed closure and the sealed result in bytewise path order, with fixed
+  member metadata. The archive depends only on the result bytes and the
+  publication ID, so two runs produce identical bytes. Durable publication
+  (#510) of that archive is the operator's separate step.
+- `bind` requires the downloaded copy to equal the publisher's digest (an
+  operator input, never read from the file) and the archive it re-derives
+  from the result. It extracts the downloaded copy with the validator's own
+  reader, rebuilds the reviewed `bench_throughput retirement-replay` adapter
+  from the pinned checkout at the record's harness commit and tree (a dirty
+  checkout or another commit is refused), reruns it over the downloaded
+  adapter input and requires the sealed adapter result byte for byte. It then
+  writes, in a `LANE_F.pending` directory, the downloaded archive
+  (`retirement-downloaded-independent.bundle.tar`), the publication receipt
+  (`retirement-performance-publication.json`), the replay bundle
+  (`retirement-independent-replay.bundle`), the
+  `buster-native-retirement-independent-replay-v1` phase record at the path
+  the composer fixed (`retirement-independent-replay.json`) and
+  `retirement-final-binding.json`: the composed record with the sealed-result
+  phase set to the sealed result's own descriptor and the independent-replay
+  phase to the phase record's. It checks the final binding with
+  `final_binding_check` and only then renames the directory to `LANE_F`. A
+  failure leaves the pending directory as evidence; an existing lane F
+  directory is never replaced. The replay bundle's measurement, family and
+  code-byte fields restate the sealed result bundle; the validator recomputes
+  each of them from the evidence.
+- `replay` pins the validator by path and SHA-256, by default the profile's
+  `binding-validator` and `binding-validator-sha256`, before running
+  anything. It copies the result into a new clean directory, imports the
+  lane F directory there (`lane_f_import`), checks the final binding and runs
+  the real validator. It writes a verdict record
+  (`buster-native-retirement-lane-f-replay-verdict-v1`) with the validator's
+  path and digest, the final binding and phase-record descriptors, the
+  trusted execution-receipt digest, and either the validator's result or its
+  refusal (the evidence root written as `EVIDENCE_ROOT`), and exits 0 only for
+  `independent-evidence-and-receipts-checked` with every check performed. The
+  phase record's fields are fixed by the validator, so the validator identity
+  and verdict are this separate record.
+
+The worker unit's job-82 result is not yet a replayable retirement result.
+Its sealed adapter result comes from the preparation runner's stand-in
+adapter (`bq_prep_worker_unit_adapter`) and its harness commit is a
+placeholder, so `bind` refuses it. Over a lane F directory written with the
+adapter replay replaced, the real validator refuses the final binding because
+the binding names context evidence the result does not contain, starting
+with `census/support.tsv` (`support.files[0]`). The `--worker-unit` tests
+assert each refusal.
+
+The native `unpack-export` still refuses the retirement recipe: its receipt
+check in `export.c` (`bq_export_receipt_valid`) admits only recipes
+`bq_recipe_service` accepts. Retirement export and native
+unpack follow the separate change that admits the recipe; until then the
+unpacker in these tests is a Python stand-in, and lane F needs no
+unpack-specific path of its own.
 
 ## Immutability, persistence and retention
 
