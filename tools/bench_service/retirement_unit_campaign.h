@@ -1386,10 +1386,14 @@ static inline int bq_retirement_unit_campaign_alone(BqRetirementUnitCampaign con
  * compile the budget already counts. Before each runtime launch, outside the
  * timer, the service copies it into a fresh step directory
  * `runtime-<stage>-<sequence>` in the work directory (O_CREAT | O_EXCL,
- * mode 0700, fsync), re-verifies the hash from the new descriptor and takes
- * the launch's identity by fstat of that same descriptor
+ * mode 0700), re-verifies the hash from the new descriptor and takes the
+ * launch's identity by fstat of that same descriptor
  * (bq_retirement_unit_campaign_program); the directory then holds only the
- * program, which the launch requires. A label-1 runtime command must also be
+ * program, which the launch requires. The copy is not fsync'ed: the rehash
+ * and the exec both read the page cache, and the step directory is retired
+ * after its launch with no later step or attempt reading it, so durability
+ * would buy nothing for two disk flushes on every runtime launch. A label-1
+ * runtime command must also be
  * the gate's sealed runtime command for its side (the A/A second label's is
  * not sealed, like its compiler command). A refusal or failure is recorded
  * with purpose BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM and the step
@@ -1499,12 +1503,11 @@ static inline int bq_retirement_unit_campaign_program(BqRetirementUnitCampaign* 
     }
     char digest[65];
     uint64_t bytes = 0;
-    ok = ok && fchmod(copy, 0700) == 0 && fsync(copy) == 0 && tp_retirement_file_hash(copy, digest, &bytes) &&
+    ok = ok && fchmod(copy, 0700) == 0 && tp_retirement_file_hash(copy, digest, &bytes) &&
         bytes && !strcmp(digest, gate->facts[runtime->unit].side[side].artifact_sha256) && fstat(copy, &info) == 0;
     if (ok) program->program = (TpProcessProgram){leaf, info.st_dev, info.st_ino, info.st_size, info.st_ctim};
     if (copy >= 0 && close(copy) != 0) ok = 0;
     if (source >= 0) close(source);
-    ok = ok && fsync(program->step) == 0;
     if (!ok) bq_retirement_unit_campaign_record(driver, &coordinates);
     return ok;
 }
