@@ -3203,8 +3203,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(
                     variant == 4 ? S8(".section .text.wrapper,\"ax\",@progbits\n") : S8(""),
                     variant == 1 ? actual_definition : wrappers, variant == 2 ? binding : S8(""));
                 String8 main_source = string_format(arena, S8("typedef int (*ChosenFunction)(void);\nextern int chosen(void);\nextern int via_call(void);\n"
-                    "extern ChosenFunction via_address(void);\nint main(void) { ChosenFunction p = via_address();\n"
-                    "return chosen() != 29 || via_call() != {u32} || p() != {u32} || (p == chosen) != {u32}; }\n"),
+                    "extern ChosenFunction via_address(void);\nint main(void) {{ ChosenFunction p = via_address();\n"
+                    "return chosen() != 29 || via_call() != {u32} || p() != {u32} || (p == chosen) != {u32}; }}\n"),
                     variant == 5 ? 11u : 29u, variant == 5 ? 11u : 29u, variant == 5 ? 0u : 1u);
                 bool written = file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(caller, BUSTER_SLICE_TO_BYTE_SLICE(main_source));
                 if (BUSTER_REQUIRE(arguments, written))

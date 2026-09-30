@@ -12,10 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: baseline
-            revision: adf3e62f9fa732186a14ad95d2a7d23ff7d04b61
           - label: candidate
-            revision: 6d1902bc402a14eb577c4ff269378ecba5accf83
+            revision: 0a3554cf1cadb4fd6349da453a185f810723911c
     env:
       BUSTER_TEST_JOBS: 4
     steps:
