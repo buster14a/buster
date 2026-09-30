@@ -49,6 +49,35 @@ SETUP_PHASES = frozenset(
     }
 )
 CORPUS_PHASE = "differential_corpus"
+# Phases each native lane must record before `package` may report a complete
+# observation. Unix lanes also run the configuration differential corpus.
+PACKAGE_SEQUENCE = 85
+PACKAGE_REQUIRED_PHASES = {
+    "windows": (
+        "calibration_cpu",
+        "calibration_filesystem",
+        "bootstrap_driver",
+        "configuration",
+        "producer_build",
+        "mode_payload",
+        "evidence_packing",
+        "upload_handoff",
+    ),
+    "unix": (
+        "calibration_cpu",
+        "calibration_filesystem",
+        "bootstrap_driver",
+        "configuration",
+        "producer_build",
+        "mode_payload",
+        "differential_driver_refresh",
+        "differential_preparation",
+        "differential_producer_check",
+        CORPUS_PHASE,
+        "evidence_packing",
+        "upload_handoff",
+    ),
+}
 REQUIRED_IDENTITY_PATHS = (
     "source.commit",
     "source.tree",
@@ -876,6 +905,44 @@ def finalize(args: argparse.Namespace) -> int:
                 )
     return 0
 
+def package(args: argparse.Namespace) -> int:
+    """Pack native evidence, then finalize the observation when one exists.
+
+    A packing failure never skips finalization: the observation is published
+    as incomplete beside the unpacked fallback, and the pack status wins.
+    """
+    pack_command = [args.python, "tools/ci_pack_evidence.py", "--source", args.source, "--output", args.output]
+    status = 0
+    if args.root:
+        Path(args.output).mkdir(parents=True, exist_ok=True)
+        pack_status = 0
+        try:
+            pack_status = run_command(
+                argparse.Namespace(root=args.root, phase="evidence_packing", sequence=PACKAGE_SEQUENCE, command=pack_command)
+            )
+        except ObservationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            pack_status = 1
+        finalize_status = 0
+        try:
+            finalize_status = finalize(
+                argparse.Namespace(
+                    root=args.root,
+                    artifact_directory=args.output,
+                    expect_complete=args.expect_complete if pack_status == 0 else "0",
+                    required_phase=list(PACKAGE_REQUIRED_PHASES[args.platform]),
+                    handoff_sequence=90,
+                )
+            )
+        except ObservationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            finalize_status = 1
+        status = pack_status if pack_status != 0 else finalize_status
+    else:
+        status = subprocess.run(pack_command, check=False).returncode
+    return status
+
+
 def parse_job_log_preamble(log_text: str) -> dict[str, str]:
     result: dict[str, str] = {}
     group = ""
@@ -1332,6 +1399,15 @@ def parser() -> argparse.ArgumentParser:
     finalize_parser.add_argument("--required-phase", action="append", required=True)
     finalize_parser.add_argument("--handoff-sequence", type=int, default=90)
     finalize_parser.set_defaults(function=finalize)
+
+    package_parser = subparsers.add_parser("package", help="pack native evidence and finalize its observation")
+    package_parser.add_argument("--root", default="", help="observation root; empty packs without an observation")
+    package_parser.add_argument("--python", default=sys.executable, help="interpreter recorded in the packing command")
+    package_parser.add_argument("--source", required=True)
+    package_parser.add_argument("--output", required=True)
+    package_parser.add_argument("--platform", choices=tuple(PACKAGE_REQUIRED_PHASES), required=True)
+    package_parser.add_argument("--expect-complete", choices=("0", "1"), required=True)
+    package_parser.set_defaults(function=package)
 
     enrich_parser = subparsers.add_parser("enrich", help="join immutable job-log/API identity for an audit")
     enrich_parser.add_argument("--observation", required=True)

@@ -568,62 +568,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$BUSTER_CI_PYTHON" - <<'PYTHON'
-          import os
-          import shutil
-          import stat
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "buster-ci"
-          source = root.with_name("buster-ci-unsanitized")
-          if source.is_symlink() or source.is_file():
-              source.unlink()
-          elif source.is_dir():
-              shutil.rmtree(source, ignore_errors=True)
-          if root.is_symlink() or root.is_file():
-              root.unlink()
-          elif root.is_dir():
-              root.rename(source)
-          root.mkdir(parents=True, exist_ok=True)
-
-          skipped = []
-          if source.is_dir():
-              for directory, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
-                  current = Path(directory)
-                  relative = current.relative_to(source)
-                  retained_directories = []
-                  for name in dirnames:
-                      entry = current / name
-                      try:
-                          mode = entry.lstat().st_mode
-                      except OSError as error:
-                          skipped.append(f"{relative / name}: {error}")
-                          continue
-                      if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
-                          retained_directories.append(name)
-                          (root / relative / name).mkdir(parents=True, exist_ok=True)
-                      else:
-                          skipped.append(f"{relative / name}: non-directory or symbolic link")
-                  dirnames[:] = retained_directories
-                  for name in filenames:
-                      entry = current / name
-                      destination = root / relative / name
-                      try:
-                          mode = entry.lstat().st_mode
-                          if not stat.S_ISREG(mode):
-                              skipped.append(f"{relative / name}: non-regular file")
-                              continue
-                          destination.parent.mkdir(parents=True, exist_ok=True)
-                          with entry.open("rb") as input_file, destination.open("wb") as output_file:
-                              shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
-                      except OSError as error:
-                          destination.unlink(missing_ok=True)
-                          skipped.append(f"{relative / name}: {error}")
-
-          report = root / "artifact-sanitization.txt"
-          report.write_text("\n".join(skipped) + ("\n" if skipped else ""), encoding="utf-8")
-          shutil.rmtree(source, ignore_errors=True)
-          PYTHON
+          "$BUSTER_CI_PYTHON" tools/ci_sanitize_logs.py --root "$RUNNER_TEMP/buster-ci"
 
       - name: Retain desktop logs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -942,7 +887,11 @@ jobs:
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
           BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
-        run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py package --root "${BUSTER_CI_OBSERVATION_ROOT-}" \
+            --python "$BUSTER_CI_PYTHON" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" \
+            --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}

@@ -171,7 +171,9 @@ every test had finished. On this layout's first hosted run,
 still spent 123 s in `Retain native logs` at the end of the longest lane
 (25-34 s on the other three native lanes).
 
-After the native summary, `Pack native logs` runs `tools/ci_pack_evidence.py`,
+After the native summary, `Pack native logs` runs
+`tools/ci_native_observation.py package`, which invokes `tools/ci_pack_evidence.py`
+and then finalizes the lane's observation with its platform's required phases,
 also after failed tests but never after cancellation. The `native-*` artifact
 then holds `native-ci-logs.tar.gz` plus copies of `result.json` and
 `summary.md`, so the verdict is readable without unpacking. It is uploaded
