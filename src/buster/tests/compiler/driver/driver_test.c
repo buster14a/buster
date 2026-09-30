@@ -7004,7 +7004,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
         .deadline_microseconds = deadline_microseconds,
         .attempts = 1,
         .readiness_files_ok = true,
-        .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")),
+        .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")) ||
+                              string_equal(oracle, S8("bit-field-aggregate")),
     };
     SliceString8 keys = {0};
     SliceString8 values = {0};
@@ -10145,7 +10146,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
         "    return failures;\n}\n");
     String8 script = S8(
         "\"use strict\";\n"
-        "const bytes = require(\"fs\").readFileSync(process.argv[2]);\n"
+        "const fs = require(\"fs\");\n"
+        "fs.writeSync(process.stdout.fd, `WASM_NODE_READY startup_ms=${Date.now()}\\n`);\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
         "const probe = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.probe;\n"
         "const values = [0n, 1n, 127n, 128n, -1n, -9223372036854775808n, 9223372036854775807n, 0x0123456789abcdefn];\n"
         "let checks = 0;\n"
@@ -10215,8 +10218,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
                 if (node.length && BUSTER_REQUIRE(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script))))
                 {
                     String8 node_arguments[] = {node, script_path, output};
-                    CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
-                        arguments, arena, S8("bit-field-aggregate"), forms[form], (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                    CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
+                        arguments, arena, S8("bit-field-aggregate"), forms[form], forms[form], (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
                         S8("64 independent Wasm bit-field aggregate executions passed"), compiler_driver_test_wasm_node_deadline_microseconds());
                     BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
                 }
