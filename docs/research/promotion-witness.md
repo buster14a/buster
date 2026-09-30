@@ -24,6 +24,8 @@ Ian P. Gent, [*Optimal Implementation of Watched Literals and More General Techn
 
 The author-maintained [Princeton zChaff distribution page](https://www.princeton.edu/~chaff/zchaff.html) was checked as an implementation reference: its listed 2007.3.12 release is a C++ distribution with its own usage conditions. Only the distribution metadata was inspected; no external implementation source was audited, copied or vendored.
 
+License: **unverified**. The record names no SPDX identifier or license file for zChaff, and the 2026-09-30 update could not reach the distribution page (the executor's egress policy denied it). Treat zChaff's terms as unknown; nothing here depends on them because no zChaff code is used. The two papers are cited as literature only.
+
 ### Mathematical objects mapped to Buster
 
 For a live promotion-created parameter with value ID `p`, define
