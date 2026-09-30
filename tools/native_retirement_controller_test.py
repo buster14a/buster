@@ -6,6 +6,7 @@ candidate execution occurs while exercising request lifecycle decisions.
 """
 import base64
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -195,6 +196,62 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.plan()["status"], "disabled")
         self.assertEqual(self.api.comments, [])
 
+    def test_writer_refused_candidates_are_blocked_not_fatal(self):
+        # #1933: the real resolve_candidate -> gate.source_candidate path raises
+        # the merge gate's IntegrationError; plan() must record it per PR.
+        import native_retirement_merge_gate as gate
+        self.assertIs(gate.integration, i)
+        split_head, generated_head = "e" * 40, "f" * 40
+        heads = {1791: HEAD, 1796: split_head, 1696: generated_head}
+        ordinary_pr = self.api.pr
+        pulls = [ordinary_pr]
+        for number in (1796, 1696):
+            pr = copy.deepcopy(ordinary_pr)
+            pr["number"], pr["head"]["sha"] = number, heads[number]
+            pulls.append(pr)
+        classifications = {
+            HEAD: i.classify_paths(["tools/native_retirement_rebind.py"]),
+            split_head: i.Classification(
+                "split-required",
+                ("docs/native-retirement-support-v1.tsv", "tools/native_retirement_contract.py"),
+                (), ("tools/native_retirement_contract.py",), ("docs/native-retirement-support-v1.tsv",)),
+            generated_head: i.Classification(
+                "ordinary", ("tools/native_retirement_dependency_binding.generated.h",),
+                ("tools/native_retirement_dependency_binding.generated.h",), (), ()),
+        }
+        fixture_all = self.api.all
+
+        def all_pages(path, **query):
+            if path == "pulls":
+                return copy.deepcopy(pulls)
+            if path in ("issues/1796/comments", "issues/1696/comments"):
+                return []
+            return fixture_all(path, **query)
+
+        def commit(repo, revision):
+            prefix = "refs/remotes/origin/native-retirement-controller-"
+            if revision.startswith(prefix):
+                return heads[int(revision[len(prefix):])]
+            return BASE if revision == "HEAD" else revision
+
+        self.api.all = all_pages
+        with mock.patch.object(i, "_git"), \
+                mock.patch.object(i, "_commit", side_effect=commit), \
+                mock.patch.object(i, "classify_candidate",
+                                  side_effect=lambda repo, base, head: classifications[head]), \
+                mock.patch.object(gate, "integration_record", return_value=((), {})), \
+                mock.patch.object(gate, "clean_merge_tree", return_value="a" * 40):
+            result = c.plan(self.api, ROOT, BASE, 100)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["request"]["number"], 1791)
+        statuses = {entry["number"]: entry for entry in result["observations"]}
+        self.assertEqual(statuses[1791]["status"], "eligible")
+        self.assertEqual(statuses[1796]["status"], "blocked")
+        self.assertIn("split it into a backwards-compatible bootstrap", statuses[1796]["detail"])
+        self.assertEqual(statuses[1696]["status"], "blocked")
+        self.assertIn("generated artifacts were edited manually", statuses[1696]["detail"])
+        self.assertEqual(len(self.api.comments), 1)
+
     def test_bot_catch_up_request_needs_no_prerequisite_ci(self):
         self.api.ci_success = False
         self.assertEqual(self.plan()["status"], "idle")
@@ -217,7 +274,7 @@ class CatchUpDetectionTests(unittest.TestCase):
                        check=True, capture_output=True)
         git(self.repo, "config", "user.name", "Catch-up Test")
         git(self.repo, "config", "user.email", "test@example.invalid")
-        self.fresh = git(ROOT, "rev-parse", "HEAD")
+        self.fresh = self.fresh_snapshot(git(ROOT, "rev-parse", "HEAD"))
 
     def commit(self, parent: str, path: str, content: bytes) -> str:
         blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
@@ -230,6 +287,27 @@ class CatchUpDetectionTests(unittest.TestCase):
         tree = subprocess.run(["git", "-C", str(self.repo), "write-tree"], env=env,
                               capture_output=True, text=True, check=True).stdout.strip()
         return git(self.repo, "commit-tree", tree, "-p", parent, "-m", "change " + path)
+
+    def fresh_snapshot(self, head: str) -> str:
+        """Base the tests on a commit whose snapshot matches its sources.
+
+        The checkout's own snapshot can lag its sources: after an ordinary merge
+        until its catch-up lands, and on a trust transition until the writer
+        publishes (its self-tests run on that candidate's commit).
+        """
+        import native_retirement_dependency_binding as authority
+        policy_raw = c._blob(self.repo, head, authority.POLICY_PATH)
+        policy = authority.parse_policy(policy_raw)
+
+        def identity(source: str) -> tuple[int, str]:
+            data = c._blob(self.repo, head, source)
+            return len(data), hashlib.sha256(data).hexdigest()
+
+        rendered, _records = authority.render_snapshot(policy_raw, policy, identity)
+        fresh = head
+        if rendered != c._blob(self.repo, head, authority.SNAPSHOT_PATH):
+            fresh = self.commit(head, authority.SNAPSHOT_PATH, rendered)
+        return fresh
 
     def test_snapshot_staleness_tracks_admitted_source_bytes_only(self):
         self.assertFalse(c.snapshot_stale(self.repo, self.fresh))
