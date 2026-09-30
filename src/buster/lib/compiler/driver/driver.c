@@ -3368,12 +3368,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 
 // A failed native link names its reason and symbol. A relocation refused in
 // a position-independent image is almost always an object compiled for a
-// fixed address, so the diagnostic says what the image needs instead.
+// fixed address, so the diagnostic says what the image needs instead. A
+// failed artifact write names the operating-system error that refused it.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
 {
     String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
                        ? S8(" (a position-independent image needs objects compiled with -fPIC)")
-                       : S8("");
+                   : link.error == LINK_ERROR_FILE_WRITE && link.write_error.v ? string_format(arena, S8(" ({EOs})"), link.write_error)
+                                                                               : S8("");
     return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
 }
 
