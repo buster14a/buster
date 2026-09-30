@@ -5,6 +5,8 @@
 // ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
 // input, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
+// ir_validate_promotion_output leaves out of the promotion-output check any
+// function whose certified input already failed the strict validator.
 #include <buster/lib/time.h>
 
 String8 ir_fast_pass_name(IrFastPass pass)
@@ -480,6 +482,42 @@ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 }
 #endif
 
+#define IR_PROMOTION_INPUT_INVALID 1u
+#define IR_PROMOTION_CHANGED 2u
+
+// The promotion-output check for certified input in a checked build. It skips
+// functions that failed the strict validator before promotion, and a function
+// promotion left unchanged that fails now had the same defect before it ran.
+// Both count in `excluded`; only a changed function that was valid fails.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* program, IrModule* module, u8 const* attribution, u32* excluded)
+{
+    IrValidationResult result = ir_validate_canonical_scope(program, module);
+    for (u32 index = 0; result.error == IR_VALIDATION_NONE && index < module->function_count; index += 1)
+    {
+        IrFunction* function = module->functions + index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            if (attribution[index] & IR_PROMOTION_INPUT_INVALID)
+            {
+                *excluded += 1;
+            }
+            else
+            {
+                IrValidationResult checked = ir_validate_canonical_function(program, function);
+                if (checked.error != IR_VALIDATION_NONE && (attribution[index] & IR_PROMOTION_CHANGED))
+                {
+                    result = checked;
+                }
+                else if (checked.error != IR_VALIDATION_NONE)
+                {
+                    *excluded += 1;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
 {
     IrValidationResult result = ir_validation_ok();
@@ -507,13 +545,46 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {
             module->local_promotion = (IrLocalPromotionStatistics){0};
+            // Certified input has had no strict scan, so a checked build
+            // records which functions already fail the validator before
+            // promotion can rewrite them (only functions with LOCAL rows can
+            // change). The output check leaves those out: promotion did not
+            // cause their defects, and an unchecked build accepts them.
+            TemporalArena scratch = scratch_begin(&program->arena, 1);
+            u8* attribution = 0;
+            bool ownership_checked = false;
+            if (input_certified && BUSTER_IR_TRANSFORM_CHECKS && module->function_count)
+            {
+                attribution = arena_allocate(scratch.arena, u8, module->function_count);
+                memset(attribution, 0, module->function_count);
+            }
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
                 if (function->state == IR_FUNCTION_LOWERED)
                 {
+                    if (attribution && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)))
+                    {
+                        if (!ownership_checked)
+                        {
+                            // Function validation walks chains that only the
+                            // module ownership proof bounds. Without it no
+                            // function can be attributed; check the module whole.
+                            ownership_checked = true;
+                            attribution = ir_validate_module_ownership(module).error == IR_VALIDATION_NONE ? attribution : 0;
+                        }
+                        if (attribution && ir_validate_canonical_function(program, function).error != IR_VALIDATION_NONE)
+                        {
+                            attribution[index] |= IR_PROMOTION_INPUT_INVALID;
+                        }
+                    }
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
+                    u64 promoted_before = module->local_promotion.promoted_locals;
                     ir_promote_function(program, function, &module->local_promotion);
+                    if (attribution && module->local_promotion.promoted_locals != promoted_before)
+                    {
+                        attribution[index] |= IR_PROMOTION_CHANGED;
+                    }
                 }
             }
             if (module->local_promotion.promoted_locals)
@@ -523,14 +594,17 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 // the producer's certificate. Debug/test/sanitizer consumers
                 // check the transformed rows before publication instead.
                 bool checked = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+                u32 excluded = 0;
                 if (checked)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module(program, module);
+                    result = attribution ? ir_validate_promotion_output(program, module, attribution, &excluded)
+                                         : ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
-                validated = checked && result.error == IR_VALIDATION_NONE;
+                validated = checked && result.error == IR_VALIDATION_NONE && !excluded;
             }
+            scratch_end(scratch);
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
         }
         if (result.error == IR_VALIDATION_NONE && program->fast_passes && !module->fast_complete)
