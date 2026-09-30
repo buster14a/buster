@@ -9302,6 +9302,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     return result;
 }
 
+#include <buster/tests/compiler/frontend/c/c_integer_semantics_test.c>
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27996,6 +27998,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
     BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);

@@ -51,11 +51,15 @@
 //                                                 and the null-pointer-
 //                                                 constant rule a conditional
 //                                                 picks a pointer type with)
-//   c_parse_constant_expression_evaluate          shared original-token-range
-//   c_parse_static_assert_evaluate                evaluator and _Static_assert
-//                                                 deferral past unresolved bounds
-//   c_parse_token_range_text,                     the one-line source quote a
-//   c_parse_static_assert_check                   non-constant assertion prints
+//   c_parse_constant_expression_evaluate          legacy original-token-range
+//   c_parse_static_assert_evaluate                retokenizer; _Static_assert
+//                                                 is decided by the typed
+//                                                 evaluator first
+//                                                 (c_parse_static_assert_check)
+//                                                 and deferred past unresolved
+//                                                 bounds
+//   c_parse_token_range_text                      the one-line source quote a
+//                                                 non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
@@ -3500,6 +3504,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                            CTypeId requested, u64* size_out, u32* alignment_out)
 {
+    IR_SEMANTIC_RECORD(LAYOUT_QUERIES, 1);
     return c_parse_type_layout_core(machine, arena, preprocess, result, requested, size_out, alignment_out, UINT32_MAX, 0);
 }
 
@@ -6248,6 +6253,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
                                                              CParseResult* result, CScopeId scope, u32 expression_start,
                                                              u32 expression_end, u64* value_out, bool* requires_typed_evaluation_out)
 {
+    IR_SEMANTIC_RANGE(PARSE_LEGACY, preprocess.tokens, expression_start, expression_end);
     if (requires_typed_evaluation_out)
     {
         *requires_typed_evaluation_out = false;
@@ -6656,6 +6662,25 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_has_unresolved_array(CPreprocessRes
     return false;
 }
 
+typedef struct CParseConstant CParseConstant;
+struct CParseConstant
+{
+    u64 integer;
+    u64 integer_high;
+    f64 floating;
+    CTypeId type;
+    bool is_float;
+    u8 float_width;
+    bool valid;
+    // An evaluated operation had no value under C's rules -- a division by
+    // zero or a shift count outside the promoted width -- as opposed to an
+    // operand shape this evaluator does not model.
+    bool faulted;
+};
+
+BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                         CParseResult* result, CScopeId scope, u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
 BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
 {
     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
@@ -6984,9 +7009,37 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     u64 value = 0;
     String8 message = {0};
     bool requires_typed_evaluation = false;
-    bool evaluated = expression_is_integer &&
-                     c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value, &message,
-                                                    &requires_typed_evaluation);
+    // An integer constant expression has one value: the one C's types,
+    // promotions and conversions give it (C17 6.6), which the typed
+    // evaluator computes through the shared integer semantics. The legacy
+    // retokenizer's preprocessing arithmetic (intmax_t, casts erased) is a
+    // different rule (6.10.1p4): it still decides which assertions wait for
+    // the deferred typed check, and answers only shapes the typed evaluator
+    // does not model. A typed fault (division by zero, a shift count outside
+    // the promoted width) is final, as it is in lowering.
+    bool legacy = expression_is_integer && c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value,
+                                                                          &message, &requires_typed_evaluation);
+    CParseConstant typed = {.type = C_TYPE_ID_INVALID};
+    if (!requires_typed_evaluation && machine && expression_is_integer && expression_end > expression_start)
+    {
+        // The caller's arena, as the legacy route uses: nested type parses may
+        // grow machine state in the scratch arena mid-declaration, so it is not
+        // rewound here.
+        typed = c_parse_typed_constant(machine, arena, preprocess, result, scope, expression_start, expression_end);
+    }
+    bool typed_answer = typed.valid && !typed.is_float;
+    bool evaluated = typed_answer || (!typed.faulted && legacy);
+    if (typed_answer)
+    {
+        value = c_parse_constant_truth(typed);
+        // The message is the string literal after the expression's comma.
+        if (expression_end + 1 < declaration.token_start + declaration.token_count &&
+            c_token_is_punctuator(&preprocess.tokens[expression_end], C_PUNCTUATOR_COMMA) &&
+            preprocess.tokens[expression_end + 1].kind == C_TOKEN_STRING_LITERAL)
+        {
+            message = c_token_spelling(preprocess.spelling_base, preprocess.tokens[expression_end + 1]);
+        }
+    }
     if (requires_typed_evaluation)
     {
         c_parse_defer_static_assert(preprocess, result, declaration, scope);
@@ -7538,20 +7591,6 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     return found && !ambiguous;
 }
 
-typedef struct CParseConstant CParseConstant;
-struct CParseConstant
-{
-    u64 integer;
-    u64 integer_high;
-    f64 floating;
-    CTypeId type;
-    bool is_float;
-    u8 float_width;
-    bool valid;
-};
-
-BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                         CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                         CScopeId scope, u32 start, u32 end, u32* alignment);
 BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMachine* machine, Arena* arena,
@@ -14292,7 +14331,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                     return C_TYPE_ID_INVALID;
                 }
                 u32 expression_start = enum_value_index + 1;
-                TemporalArena temporary = scratch_begin(0, 0);
+                // The evaluator may build the parse's lazy position index,
+                // which lives in result->arena; a scratch arena that is the
+                // same arena would rewind it away at scratch_end.
+                TemporalArena temporary = scratch_begin(&result->arena, 1);
                 u32 previous_member_start = machine->enum_constant_member_start;
                 bool previous_members_active = machine->enum_constant_members_active;
                 machine->enum_constant_member_start = aggregate->enum_member_start;
@@ -20932,6 +20974,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value)
 
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, Target target, CParseConstant value, CTypeId destination)
 {
+    IR_SEMANTIC_RECORD(PARSE_CONVERSIONS, 1);
     IrType source = c_parse_constant_scalar_type(result, target, value.type);
     IrType scalar = c_parse_constant_scalar_type(result, target, destination);
     CIrConstantValue numeric = c_parse_constant_numeric_value(value);
@@ -20987,85 +21030,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     return value;
 }
 
-BUSTER_C_INTERNAL CParseConstant c_parse_constant_wide_binary(CParseResult* result, CToken token, CParseConstant left, CParseConstant right)
-{
-    CIrWideInteger a = {.low = left.integer, .high = left.integer_high};
-    CIrWideInteger b = {.low = right.integer, .high = right.integer_high};
-    CIrWideInteger bits = {0};
-    CParseConstant value = {.type = left.type, .valid = left.valid && right.valid};
-    bool sign = left.type.value < result->type_count && result->types[left.type.value].kind == C_TYPE_INT128;
-    bool less = sign && ((a.high ^ b.high) >> 63) ? (s64)a.high < (s64)b.high : c_ir_wide_less(a, b);
-    bool equal = a.low == b.low && a.high == b.high;
-    bool comparison = false;
-    switch (token.punctuator)
-    {
-    case C_PUNCTUATOR_PLUS: bits.low = a.low + b.low; bits.high = a.high + b.high + (bits.low < a.low); break;
-    case C_PUNCTUATOR_MINUS: bits = c_ir_wide_subtract(a, b); break;
-    case C_PUNCTUATOR_STAR: bits = c_ir_wide_multiply(a, b); break;
-    case C_PUNCTUATOR_SLASH:
-    case C_PUNCTUATOR_PERCENT:
-    {
-        bool negative_a = sign && (a.high >> 63);
-        bool negative_b = sign && (b.high >> 63);
-        value.valid &= b.low || b.high;
-        value.valid &= !(sign && a.low == 0 && a.high == (1ull << 63) && b.low == UINT64_MAX && b.high == UINT64_MAX);
-        if (value.valid)
-        {
-            CIrWideInteger quotient = {0};
-            CIrWideInteger remainder = {0};
-            c_ir_wide_divide(negative_a ? c_ir_wide_negate(a) : a, negative_b ? c_ir_wide_negate(b) : b, &quotient, &remainder);
-            if (negative_a != negative_b) quotient = c_ir_wide_negate(quotient);
-            if (negative_a) remainder = c_ir_wide_negate(remainder);
-            bits = token.punctuator == C_PUNCTUATOR_SLASH ? quotient : remainder;
-        }
-    }
-    break;
-    case C_PUNCTUATOR_SHIFT_LEFT:
-    {
-        value.valid &= !b.high && b.low < 128;
-        u32 shift = (u32)(b.low & 127);
-        if (shift >= 64) bits.high = a.low << (shift - 64);
-        else if (shift) bits = (CIrWideInteger){.low = a.low << shift, .high = (a.high << shift) | (a.low >> (64 - shift))};
-        else bits = a;
-    }
-    break;
-    case C_PUNCTUATOR_SHIFT_RIGHT:
-    {
-        value.valid &= !b.high && b.low < 128;
-        u32 shift = (u32)(b.low & 127);
-        if (shift >= 64)
-        {
-            bits.low = sign ? (u64)((s64)a.high >> (shift - 64)) : a.high >> (shift - 64);
-            bits.high = sign && (a.high >> 63) ? UINT64_MAX : 0;
-        }
-        else if (shift)
-        {
-            bits.low = (a.low >> shift) | (a.high << (64 - shift));
-            bits.high = sign ? (u64)((s64)a.high >> shift) : a.high >> shift;
-        }
-        else bits = a;
-    }
-    break;
-    case C_PUNCTUATOR_AMPERSAND: bits = (CIrWideInteger){.low = a.low & b.low, .high = a.high & b.high}; break;
-    case C_PUNCTUATOR_PIPE: bits = (CIrWideInteger){.low = a.low | b.low, .high = a.high | b.high}; break;
-    case C_PUNCTUATOR_CARET: bits = (CIrWideInteger){.low = a.low ^ b.low, .high = a.high ^ b.high}; break;
-    case C_PUNCTUATOR_EQUAL: bits.low = equal; comparison = true; break;
-    case C_PUNCTUATOR_NOT_EQUAL: bits.low = !equal; comparison = true; break;
-    case C_PUNCTUATOR_LESS: bits.low = less; comparison = true; break;
-    case C_PUNCTUATOR_LESS_EQUAL: bits.low = less || equal; comparison = true; break;
-    case C_PUNCTUATOR_GREATER: bits.low = !less && !equal; comparison = true; break;
-    case C_PUNCTUATOR_GREATER_EQUAL: bits.low = !less; comparison = true; break;
-    default: value.valid = false; break;
-    }
-    value.integer = bits.low;
-    value.integer_high = bits.high;
-    if (comparison) value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
-    return value;
-}
-
+// One binary operator of an integer constant expression, after C's
+// conversions: the usual arithmetic conversions for most operators, and for
+// a shift the left and right operands promoted separately (C17 6.5.7p3), so
+// a wide count is never narrowed to the shifted type before the range check.
+// Integer arithmetic is c_integer_constant_binary's, shared with
+// preprocessing and lowering; only the floating operators remain here.
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, Target target, CToken token, CParseConstant left, CParseConstant right)
 {
-    CParseConstant value = {.valid = left.valid && right.valid, .type = C_TYPE_ID_INVALID};
+    CParseConstant value = {.valid = left.valid && right.valid, .type = C_TYPE_ID_INVALID, .faulted = left.faulted || right.faulted};
     u32 precedence = c_parse_expression_operator_precedence(token);
     bool logical = precedence == 4 || precedence == 5;
     bool comparison = precedence == 9 || precedence == 10;
@@ -21077,25 +21050,28 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
     }
     else
     {
+        bool shift = precedence == 11;
         CTypeId common = c_parse_expression_arithmetic_type(result, target, left.type, right.type, 0, 0);
-        if (precedence == 11 && left.type.value < result->type_count)
+        CTypeId count_type = common;
+        if (shift && left.type.value < result->type_count)
         {
             common = c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, left.type)));
+            count_type = right.type.value < result->type_count
+                             ? c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, right.type)))
+                             : C_TYPE_ID_INVALID;
         }
         left = c_parse_constant_convert(result, target, left, common);
-        right = c_parse_constant_convert(result, target, right, common);
-        value.valid &= left.valid && right.valid;
+        right = c_parse_constant_convert(result, target, right, count_type);
+        value.valid &= left.valid && right.valid && !(shift && (left.is_float || right.is_float));
         value.type = common;
         value.is_float = left.is_float;
-        bool sign = common.value < result->type_count && c_parse_expression_signed_kind(result->types[common.value].kind);
-        bool wide = common.value < result->type_count &&
-                    (result->types[common.value].kind == C_TYPE_INT128 || result->types[common.value].kind == C_TYPE_UNSIGNED_INT128);
+        CConditionalOperator operation = C_CONDITIONAL_OPEN;
+        bool operator_known = c_conditional_operator(token, false, &operation);
         if (left.is_float && left.float_width > 64)
         {
             IrType scalar = c_parse_constant_scalar_type(result, target, common);
-            CConditionalOperator operation = C_CONDITIONAL_OPEN;
             CIrConstantValue folded = {0};
-            value.valid &= c_conditional_operator(token, false, &operation) &&
+            value.valid &= operator_known &&
                            c_ir_constant_wide_float_binary(IR_TYPE_ID_INVALID, operation, c_parse_constant_numeric_value(left),
                                                           c_parse_constant_numeric_value(right), &scalar, &folded);
             value.integer = folded.integer;
@@ -21104,58 +21080,27 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
             value.float_width = comparison ? 0 : left.float_width;
             if (comparison) value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
         }
-        else if (wide)
+        else if (left.is_float)
         {
-            value = c_parse_constant_wide_binary(result, token, left, right);
-        }
-        else
-        {
-            u64 a = left.integer;
-            u64 b = right.integer;
             f64 x = left.floating;
             f64 y = right.floating;
             switch (token.punctuator)
             {
-            case C_PUNCTUATOR_PLUS: value.integer = a + b; value.floating = x + y; break;
-            case C_PUNCTUATOR_MINUS: value.integer = a - b; value.floating = x - y; break;
-            case C_PUNCTUATOR_STAR: value.integer = a * b; value.floating = x * y; break;
-            case C_PUNCTUATOR_SLASH:
-            case C_PUNCTUATOR_PERCENT:
-            {
-                value.valid &= left.is_float ? true : b != 0 && !(sign && a == (1ull << 63) && b == UINT64_MAX);
-                if (value.valid)
-                {
-                    bool remainder = token.punctuator == C_PUNCTUATOR_PERCENT;
-                    value.valid &= !remainder || !left.is_float;
-                    if (left.is_float)
-                    {
-                        value.floating = x / y;
-                    }
-                    else if (sign)
-                    {
-                        value.integer = remainder ? (u64)((s64)a % (s64)b) : (u64)((s64)a / (s64)b);
-                    }
-                    else
-                    {
-                        value.integer = remainder ? a % b : a / b;
-                    }
-                }
-            }
-            break;
-            case C_PUNCTUATOR_SHIFT_LEFT: value.valid &= b < 64; value.integer = a << (b & 63); break;
-            case C_PUNCTUATOR_SHIFT_RIGHT: value.valid &= b < 64; value.integer = sign ? (u64)((s64)a >> (b & 63)) : a >> (b & 63); break;
-            case C_PUNCTUATOR_AMPERSAND: value.integer = a & b; break;
-            case C_PUNCTUATOR_PIPE: value.integer = a | b; break;
-            case C_PUNCTUATOR_CARET: value.integer = a ^ b; break;
-            case C_PUNCTUATOR_EQUAL: value.integer = left.is_float ? x == y : a == b; break;
-            case C_PUNCTUATOR_NOT_EQUAL: value.integer = left.is_float ? x != y : a != b; break;
-            case C_PUNCTUATOR_LESS: value.integer = left.is_float ? x < y : sign ? (s64)a < (s64)b : a < b; break;
-            case C_PUNCTUATOR_LESS_EQUAL: value.integer = left.is_float ? x <= y : sign ? (s64)a <= (s64)b : a <= b; break;
-            case C_PUNCTUATOR_GREATER: value.integer = left.is_float ? x > y : sign ? (s64)a > (s64)b : a > b; break;
-            case C_PUNCTUATOR_GREATER_EQUAL: value.integer = left.is_float ? x >= y : sign ? (s64)a >= (s64)b : a >= b; break;
+            case C_PUNCTUATOR_PLUS: value.floating = x + y; break;
+            case C_PUNCTUATOR_MINUS: value.floating = x - y; break;
+            case C_PUNCTUATOR_STAR: value.floating = x * y; break;
+            // IEEE defines a floating quotient by zero; only `%` has no
+            // floating form.
+            case C_PUNCTUATOR_SLASH: value.floating = x / y; break;
+            case C_PUNCTUATOR_EQUAL: value.integer = x == y; break;
+            case C_PUNCTUATOR_NOT_EQUAL: value.integer = x != y; break;
+            case C_PUNCTUATOR_LESS: value.integer = x < y; break;
+            case C_PUNCTUATOR_LESS_EQUAL: value.integer = x <= y; break;
+            case C_PUNCTUATOR_GREATER: value.integer = x > y; break;
+            case C_PUNCTUATOR_GREATER_EQUAL: value.integer = x >= y; break;
             default: value.valid = false; break;
             }
-            if (value.is_float && x == x && y == y && value.floating != value.floating)
+            if (x == x && y == y && value.floating != value.floating)
             {
                 u64 quiet_nan = UINT64_C(0x7ff8000000000000);
                 memcpy(&value.floating, &quiet_nan, sizeof(quiet_nan));
@@ -21163,6 +21108,28 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
             if (comparison)
             {
                 value.is_float = false;
+                value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+            }
+            else
+            {
+                value = c_parse_constant_convert(result, target, value, common);
+            }
+        }
+        else
+        {
+            IrType scalar = c_parse_constant_scalar_type(result, target, common);
+            IrType count = c_parse_constant_scalar_type(result, target, count_type);
+            CIntegerConstantResult computed = operator_known ? c_integer_constant_binary(operation, (IrInteger){.low = left.integer, .high = left.integer_high},
+                                                                                        (IrInteger){.low = right.integer, .high = right.integer_high},
+                                                                                        scalar.bit_width, scalar.is_signed, count.bit_width)
+                                                             : (CIntegerConstantResult){0};
+            value.valid &= computed.constant;
+            value.faulted |= operator_known && !computed.constant && !(computed.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+            value.integer = computed.bits.low;
+            value.integer_high = computed.bits.high;
+            if (computed.comparison)
+            {
+                value.integer_high = 0;
                 value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
             }
             else
@@ -21389,7 +21356,14 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             operand_start += 1;
             operand_end -= 1;
             u32 cursor = operand_start;
-            if (!machine->enum_constant_members_active)
+            // A lone identifier the scope binds to an object is that object,
+            // whatever typedef shares the spelling further out; the legacy
+            // route (c_parse_constant_expression_evaluate) applies the same rule.
+            CEntityId shadow = operand_start + 1 == operand_end && preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER
+                                   ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[operand_start])
+                                   : C_ENTITY_ID_INVALID;
+            bool shadowed_object = shadow.value < result->entity_count && result->entities[shadow.value].kind != C_ENTITY_TYPEDEF;
+            if (!machine->enum_constant_members_active && !shadowed_object)
             {
                 type = c_parse_type_name_specifiers(machine, result, preprocess, scope, operand_start, operand_end, &cursor);
             }
@@ -21438,6 +21412,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
+    IR_SEMANTIC_RANGE(PARSE_TYPED, preprocess.tokens, start, end);
     CParseConstant last = {.type = C_TYPE_ID_INVALID};
     u32 capacity = end > start ? end - start + 1 : 1;
     CParseConstantTask* tasks = arena_allocate(arena, CParseConstantTask, capacity);
@@ -21448,6 +21423,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
         CParseConstantTask* task = tasks + count - 1;
         if (!task->state)
         {
+            IR_SEMANTIC_RECORD(PARSE_TYPED_NODES, 1);
             u32 begin = task->start;
             u32 limit = task->end;
             if (begin >= limit)
@@ -21621,25 +21597,28 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     CTypeKind kind = c_parse_expression_value_kind(result, last.type);
                     last = c_parse_constant_convert(result, preprocess.target, last,
                                                     c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(kind)));
-                    if (c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS))
+                    bool minus = c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS);
+                    bool complement = c_token_is_punctuator(&operation, C_PUNCTUATOR_TILDE);
+                    if (last.is_float && minus)
                     {
-                        if (last.is_float && last.float_width > 64)
+                        if (last.float_width > 64)
                         {
                             last.integer_high ^= last.float_width == 80 ? UINT64_C(0x8000) : UINT64_C(0x8000000000000000);
                         }
                         else
                         {
-                            CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = last.integer, .high = last.integer_high});
-                            last.integer = negated.low;
-                            last.integer_high = negated.high;
                             last.floating = -last.floating;
                         }
                     }
-                    else if (c_token_is_punctuator(&operation, C_PUNCTUATOR_TILDE))
+                    else if (minus || complement)
                     {
-                        last.valid &= !last.is_float;
-                        last.integer = ~last.integer;
-                        last.integer_high = ~last.integer_high;
+                        IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, last.type);
+                        CIntegerConstantResult computed =
+                            c_integer_constant_unary(minus ? C_CONDITIONAL_UNARY_MINUS : C_CONDITIONAL_BITWISE_NOT,
+                                                     (IrInteger){.low = last.integer, .high = last.integer_high}, scalar.bit_width);
+                        last.valid &= !last.is_float && computed.constant;
+                        last.integer = computed.bits.low;
+                        last.integer_high = computed.bits.high;
                     }
                     last = c_parse_constant_convert(result, preprocess.target, last, last.type);
                 }
