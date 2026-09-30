@@ -1,0 +1,13 @@
+repository_old bodies=297 body_bytes=1702420 hits=264 prefix=205144734 braces=457311 markers=126226519 tokens=194310925 recognition=4738240 walk=0
+repository_new bodies=297 body_bytes=1702420 hits=264 prefix=0 braces=5372 markers=989009 tokens=1502271 recognition=0 walk=1702420
+generated n=256 old bodies=1 body_bytes=7170 hits=256 prefix=914176 braces=256 markers=0 tokens=21466 recognition=21466 walk=0
+new bodies=1 body_bytes=7170 hits=256 prefix=0 braces=1 markers=0 tokens=256 recognition=0 walk=7170
+generated n=512 old bodies=1 body_bytes=14338 hits=512 prefix=3663360 braces=512 markers=0 tokens=42970 recognition=42970 walk=0
+new bodies=1 body_bytes=14338 hits=512 prefix=0 braces=1 markers=0 tokens=512 recognition=0 walk=14338
+generated n=1024 old bodies=1 body_bytes=28674 hits=1024 prefix=14666752 braces=1024 markers=0 tokens=85978 recognition=85978 walk=0
+new bodies=1 body_bytes=28674 hits=1024 prefix=0 braces=1 markers=0 tokens=1024 recognition=0 walk=28674
+generated n=2048 old bodies=1 body_bytes=57346 hits=2048 prefix=58693632 braces=2048 markers=0 tokens=171994 recognition=171994 walk=0
+new bodies=1 body_bytes=57346 hits=2048 prefix=0 braces=1 markers=0 tokens=2048 recognition=0 walk=57346
+generated n=4096 old bodies=1 body_bytes=114690 hits=4096 prefix=234827776 braces=4096 markers=0 tokens=344026 recognition=344026 walk=0
+new bodies=1 body_bytes=114690 hits=4096 prefix=0 braces=1 markers=0 tokens=4096 recognition=0 walk=114690
+differential: every repository/generated/control hit matched

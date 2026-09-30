@@ -78,7 +78,12 @@ typedef enum ObjectSectionKind
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
+BUSTER_F_DECL bool object_section_name_is_c_identifier(String8 name);
+BUSTER_F_DECL bool object_section_kind_can_be_named(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
+// The GNU priority an ELF initializer array section's name spells, or
+// IR_INITIALIZER_PRIORITY_NONE; see the definition for `.preinit_array`.
+BUSTER_F_DECL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind);
 bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                   CodegenFunctionDescriptor* descriptor);
 
@@ -292,6 +297,10 @@ struct ObjectDebugModule
     u64 types_size;
 };
 
+// `sections` holds one section per ObjectSectionKind, indexed by its kind,
+// and past OBJECT_SECTION_COUNT any sections of their own name: the ones
+// `__attribute__((section))` places and the C-identifier-named ones an ELF
+// object carries (issue 1276). Only ELF objects have those.
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {

@@ -1,21 +1,34 @@
 name: Buster CI merge-group watcher
 run-name: >-
-  Merge-group watch ${{ github.event.workflow_run.head_branch }}@${{ github.event.workflow_run.head_sha }}
-  (Buster CI ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}; handler ${{ github.sha }})
+  ${{ github.event_name == 'workflow_run' &&
+      format('Merge-group review {0}@{1} (upstream {2} attempt {3}; handler {4})',
+             github.event.workflow_run.head_branch, github.event.workflow_run.head_sha,
+             github.event.workflow_run.id, github.event.workflow_run.run_attempt, github.sha) ||
+      format('Merge-group sweep {0} (handler {1})', github.run_id, github.sha) }}
 
 on:
   workflow_run:
-    workflows: [Buster CI]
-    types: [in_progress]
+    workflows:
+      - Buster CI
+      - Self-host fixed point
+      - TCC bootstrap
+      - GPU toolchain acceptance
+      - Benchmark service workflow policy
+      - API migration policy
+      - Main integration admission
+    types: [in_progress, completed]
     # The Buster CI merge_group source uses this GitHub queue branch prefix.
     branches:
       - 'gh-readonly-queue/main/**'
+  schedule:
+    - cron: '13-59/15 * * * *'
+  workflow_dispatch:
 
 permissions: {}
 
 # Same key as ci-recovery.yml: never race two handlers for one upstream run.
 concurrency:
-  group: ci-recovery-${{ github.event.workflow_run.id }}
+  group: ci-recovery-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -23,10 +36,16 @@ jobs:
     if: >-
       ${{ github.server_url == 'https://github.com' &&
           vars.GH_ACTIONS_CI_ENABLED == 'true' &&
-          github.event.workflow_run.event == 'merge_group' &&
-          github.event.workflow_run.head_repository.full_name == github.repository }}
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'merge_group' &&
+            github.event.workflow_run.head_repository.full_name == github.repository &&
+            (github.event.action == 'completed' ||
+             (github.event.action == 'in_progress' &&
+              (github.event.workflow_run.path == '.github/workflows/ci.yml' ||
+               startsWith(github.event.workflow_run.path, '.github/workflows/ci.yml@')))))) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 305
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: write
@@ -39,7 +58,7 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Cancel a doomed merge group on first required failure
+      - name: Reconcile failed exact-head checks once
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/recover-ci.py watch
