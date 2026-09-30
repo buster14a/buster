@@ -12140,6 +12140,18 @@ struct ObjectElfPlan
     u64 size;
 };
 
+// st_info's type nibble for a symbol-table entry: STT_OBJECT 1, STT_FUNC 2,
+// STT_TLS 6. An undefined data symbol no input typed -- an undeclared
+// assembly reference, or an STT_NOTYPE one read from another toolchain --
+// stays STT_NOTYPE 0: stamping STT_OBJECT would invent the claim that makes a
+// linker copy a library function into the executable (GitHub #1242). Both ELF
+// writers share this so their bytes agree.
+BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
+{
+    bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+    return is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
     return section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
@@ -12407,7 +12419,7 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectImageRange* slot = source->global ? &globals : &locals;
         symbol_indices[symbol] = source->global ? next_global++ : next_local++;
         object_image_u32(slot, name);
-        object_image_u8(slot, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1)));
+        object_image_u8(slot, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_image_u8(slot, source->hidden ? 2 : 0);
@@ -12856,12 +12868,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64_with_capacity(Ar
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
-        // An undefined data symbol no input typed -- an undeclared assembly
-        // reference, or an STT_NOTYPE one read from another toolchain -- stays
-        // STT_NOTYPE: stamping STT_OBJECT would invent the claim that makes a
-        // linker copy a library function into the executable.
-        bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
-        object_write_u8_at(&buffer, offset + 4, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1)));
+        object_write_u8_at(&buffer, offset + 4, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_write_u8_at(&buffer, offset + 5, source->hidden ? 2 : 0);
