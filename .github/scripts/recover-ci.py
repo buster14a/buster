@@ -40,9 +40,13 @@ REQUIRED_WORKFLOW_PATHS = {
     "Native retirement merge admission": "api-migration-policy.yml",
     "Main integration admission": "merge-queue-admission.yml",
 }
-# #1810's short-lived publisher uses this exact-head marker without a workflow
-# check suite. A check with the same name and an unrelated marker is ignored.
-RECONCILED_CHECK_MARKERS = {"Main integration admission": "buster-merge-queue-admission-v1:"}
+# The event-driven admission reconciler (#1807) publishes this check through the
+# Checks API, outside any workflow-run check suite. It is bound instead by an
+# exact-head external ID; see check_marker in tools/merge_queue_admission.py.
+RECONCILED_CHECK_MARKERS = {
+    "Main integration admission": "buster-merge-queue-admission-v1:",
+    "Native retirement merge admission": "buster-native-retirement-admission-v1:",
+}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 # #1866: run 36571009755 left this step in progress for over 30 minutes past
 # its 5-minute timeout. Budgets mirror the step's ci.yml timeout-minutes for
