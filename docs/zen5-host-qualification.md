@@ -53,7 +53,7 @@ python3 -B tools/zen5_host_qualification.py capture \
   -- "$TRUSTED_COMPILER" ...
 ```
 
-The service recipe, not a request, selects the command, CPU, inputs, output contract, and environment identities. The result retains:
+The service recipe, not a request, selects the command, CPU, inputs, output contract, and environment identities. A service-materialized snapshot has no `.git`, so the recipe passes `--repository-identity FILE` (exactly `revision`, `tree` and `status`) instead of querying Git; the record keeps `identity_source: service-snapshot` and the identity file's digest; a malformed revision, tree or dirty status is an invalidity reason and a malformed file stops the capture. The result retains:
 
 - exact repository revision/tree and clean-checkout state;
 - executable, input, output, profile, and external-environment hashes;

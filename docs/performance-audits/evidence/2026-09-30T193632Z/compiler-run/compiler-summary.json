@@ -1,0 +1,36 @@
+{
+  "baseline": {
+    "wall_seconds": {
+      "median": 3.29,
+      "min": 3.28,
+      "max": 3.33
+    },
+    "user_seconds": {
+      "median": 2.745,
+      "min": 2.71,
+      "max": 2.78
+    },
+    "peak_rss_kib": {
+      "median": 1017118.0,
+      "min": 1017008,
+      "max": 1017516
+    }
+  },
+  "candidate": {
+    "wall_seconds": {
+      "median": 3.285,
+      "min": 3.27,
+      "max": 3.36
+    },
+    "user_seconds": {
+      "median": 2.715,
+      "min": 2.69,
+      "max": 2.78
+    },
+    "peak_rss_kib": {
+      "median": 1017106.0,
+      "min": 1016992,
+      "max": 1017176
+    }
+  }
+}

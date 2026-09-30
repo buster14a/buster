@@ -7,6 +7,17 @@ This contract complements the [frontend guide](agents/frontend/foundations.md),
 for machine metadata work (#45). Dense canonical finalization is described in
 [canonical CFG publication](canonical-cfg-publication.md).
 
+## Integer constant rows
+
+A `CONSTANT_INTEGER` row spells a signed number as `immediates[0]` plus
+`immediate_is_negative`; its value is that number reduced modulo 2^width
+(`ir_integer_constant_decode`). The validator requires the spelled number to
+lie in `[-2^(width-1), 2^width)` (`ir_integer_constant_canonical`), so a
+reader that materializes the magnitude unreduced -- the native emitters do --
+sees the same bits as one that reduces it. The C producer's single row
+emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
+a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
+
 ## A certificate describes one input
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's
@@ -42,6 +53,19 @@ editing, reacquire any builder-node pointers, discard its certificate and supply
 `input_certified=false`. Preparation validates the current representation even
 when the pass-completion marker is already set. A failed result must not be
 consumed by code generation or retried with the stale input certificate.
+
+Every canonical consumer also calls preparation itself, so a direct caller that
+never prepared its module still gets a validated one. When the driver has just
+prepared the same unchanged module, that call would be a second whole-module
+scan, not a new boundary. The driver therefore hands its preparation to every
+consumer it selects: native code generation through
+`CodegenModuleOptions.assume_validated`, LLVM bitcode through
+`LlvmBitcodeOptions.validate_ir = false`, and the Wasm and eBPF emitters
+through `WasmOptions.assume_validated` and `EbpfOptions.assume_validated`.
+Each of these makes the consumer's own preparation certified, which is a no-op
+on a prepared module. A zero-initialized Wasm or eBPF options structure keeps
+the validating default for direct callers; `-fverify-codegen`, which makes the
+driver prepare uncertified, is refused for these non-native targets.
 
 `IrValidationResult.boundary` identifies the last preparation scan, on both
 success and failure: `CANONICAL_INPUT` or `LOCAL_PROMOTION_OUTPUT`. Raw verifier

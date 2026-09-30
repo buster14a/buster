@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install a checksum-verified Zig archive, never a cached executable/build tree.
 
-The reviewed manifest owns the version and all six target digests. Both cache
+The reviewed manifest owns the version and all five CI target digests. Both cache
 hits and downloads cross the same verification boundary before tar or Zig runs.
 Its per-target compressed sizes mirror the official Zig release index
 (https://ziglang.org/download/index.json) for the pinned version and are the
@@ -23,7 +23,8 @@ import urllib.error
 import urllib.request
 
 TARGETS = frozenset(f"{arch}-{system}" for arch in ("x86_64", "aarch64")
-                    for system in ("linux", "macos", "windows"))
+                    for system in ("linux", "macos", "windows")
+                    if (arch, system) != ("x86_64", "macos"))
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
@@ -36,9 +37,9 @@ def load_pin(manifest, target):
     digests = data.get("sha256")
     sizes = data.get("size")
     if target not in TARGETS or not isinstance(digests, dict) or set(digests) != TARGETS:
-        raise ValueError("Zig manifest must cover exactly the six supported targets")
+        raise ValueError("Zig manifest must cover exactly the five CI targets")
     if not isinstance(sizes, dict) or set(sizes) != TARGETS:
-        raise ValueError("Zig manifest must provide sizes for exactly the six supported targets")
+        raise ValueError("Zig manifest must provide sizes for exactly the five CI targets")
     version = data["version"]
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Zig version must be an exact release")

@@ -1,0 +1,211 @@
+{
+  "proof": "offline-evidence-replay",
+  "production_default_admitted": false,
+  "samples": [
+    {
+      "sample": 0,
+      "jobs": 2,
+      "eligible": 107,
+      "elapsed_us": 636554243,
+      "children_cpu_us": 1232969767,
+      "run_elapsed_us": 636554229,
+      "peak_pending_workers": 2,
+      "peak_live_processes": 5,
+      "sampled_peak_tree_rss_bytes": 764616704,
+      "shard_wall_us": [
+        157536433,
+        78528022,
+        401636079,
+        179706539,
+        31659238,
+        112050514,
+        155940595,
+        115481641
+      ],
+      "sum_unit_wall_us": 1232538241,
+      "inventory_sha256": "4ba5134fe62043d8987659faee4d7b527e1239b215eb802bfa8b88b7a373eddc"
+    },
+    {
+      "sample": 1,
+      "jobs": 4,
+      "eligible": 107,
+      "elapsed_us": 563117840,
+      "children_cpu_us": 1904812115,
+      "run_elapsed_us": 563117831,
+      "peak_pending_workers": 4,
+      "peak_live_processes": 9,
+      "sampled_peak_tree_rss_bytes": 1222815744,
+      "shard_wall_us": [
+        265844492,
+        129637514,
+        562884137,
+        297301892,
+        53976975,
+        188570851,
+        241073579,
+        182421253
+      ],
+      "sum_unit_wall_us": 1921709779,
+      "inventory_sha256": "4ba5134fe62043d8987659faee4d7b527e1239b215eb802bfa8b88b7a373eddc"
+    },
+    {
+      "sample": 2,
+      "jobs": 4,
+      "eligible": 107,
+      "elapsed_us": 588400715,
+      "children_cpu_us": 1916259643,
+      "run_elapsed_us": 588400707,
+      "peak_pending_workers": 4,
+      "peak_live_processes": 9,
+      "sampled_peak_tree_rss_bytes": 1227812864,
+      "shard_wall_us": [
+        263890579,
+        133897007,
+        588149653,
+        296961292,
+        54218049,
+        187766159,
+        220322847,
+        187600749
+      ],
+      "sum_unit_wall_us": 1932805400,
+      "inventory_sha256": "4ba5134fe62043d8987659faee4d7b527e1239b215eb802bfa8b88b7a373eddc"
+    },
+    {
+      "sample": 3,
+      "jobs": 2,
+      "eligible": 107,
+      "elapsed_us": 639766078,
+      "children_cpu_us": 1246156606,
+      "run_elapsed_us": 639766067,
+      "peak_pending_workers": 2,
+      "peak_live_processes": 5,
+      "sampled_peak_tree_rss_bytes": 777461760,
+      "shard_wall_us": [
+        160399979,
+        80129470,
+        409236826,
+        179305789,
+        31672190,
+        111529991,
+        156214211,
+        117175981
+      ],
+      "sum_unit_wall_us": 1245663619,
+      "inventory_sha256": "4ba5134fe62043d8987659faee4d7b527e1239b215eb802bfa8b88b7a373eddc"
+    }
+  ],
+  "diagnostic_sha256": "f8ae0fc297e85d170ef8602ed42e89aa51a30aed83fb98e8f84e849369f1d33a",
+  "host_before": {
+    "logical_cpus": 4,
+    "affinity_cpus": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "meminfo": "MemTotal:       16366700 kB\nMemFree:        12804324 kB\nMemAvailable:   15224060 kB\nBuffers:           61476 kB\nCached:          2648676 kB\nSwapCached:            0 kB\nActive:           843044 kB\nInactive:        2141680 kB\nActive(anon):     364544 kB\nInactive(anon):        0 kB\nActive(file):     478500 kB\nInactive(file):  2141680 kB\nUnevictable:       12444 kB\nMlocked:            9372 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            155560 kB\nWriteback:             0 kB\nAnonPages:        287472 kB\nMapped:           336128 kB\nShmem:             82812 kB\nKReclaimable:     121772 kB\nSlab:             203412 kB\nSReclaimable:     121772 kB\nSUnreclaim:        81640 kB\nKernelStack:        4192 kB\nPageTables:         6512 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329072 kB\nCommitted_AS:    2056360 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42684 kB\nVmallocChunk:          0 kB\nPercpu:             2304 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1462272 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      154752 kB\nDirectMap2M:     5083136 kB\nDirectMap1G:    13631488 kB\n",
+    "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+    "cgroup_limits": {
+      "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+        "cpu.max": "max 100000\n",
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 9029157\nuser_usec 7219138\nsystem_usec 1810018\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": "max\n",
+        "memory.current": "617975808\n",
+        "memory.peak": "740794368\n",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.max": "max\n"
+      },
+      "/sys/fs/cgroup/system.slice": {
+        "cpu.max": "max 100000\n",
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 35712238\nuser_usec 18253891\nsystem_usec 17458347\nnice_usec 72000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": "max\n",
+        "memory.current": "3117723648\n",
+        "memory.peak": "3240542208\n",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.max": "max\n"
+      },
+      "/sys/fs/cgroup": {
+        "cpu.max": null,
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 42421000\nuser_usec 20191000\nsystem_usec 22230000\nnice_usec 72000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": null,
+        "memory.current": null,
+        "memory.peak": null,
+        "memory.events": null,
+        "memory.swap.current": null,
+        "memory.swap.max": null
+      }
+    },
+    "cpu_pressure": "some avg10=6.85 avg60=8.39 avg300=2.58 total=9924987\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+    "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+    "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 7763 64-Core Processor\nCPU family:                              25\nModel:                                   1\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                4890.86\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                1 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "uname": [
+      "Linux",
+      "runnervmlx9pb",
+      "7.0.0-1012-azure",
+      "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+      "x86_64"
+    ]
+  },
+  "host_after": {
+    "logical_cpus": 4,
+    "affinity_cpus": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "meminfo": "MemTotal:       16366700 kB\nMemFree:        12914964 kB\nMemAvailable:   15362656 kB\nBuffers:           65868 kB\nCached:          2676372 kB\nSwapCached:            0 kB\nActive:           871688 kB\nInactive:        2153184 kB\nActive(anon):     378652 kB\nInactive(anon):        0 kB\nActive(file):     493036 kB\nInactive(file):  2153184 kB\nUnevictable:       12444 kB\nMlocked:            9372 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:                16 kB\nWriteback:             0 kB\nAnonPages:        295448 kB\nMapped:           343900 kB\nShmem:             88856 kB\nKReclaimable:     125608 kB\nSlab:             208444 kB\nSReclaimable:     125608 kB\nSUnreclaim:        82836 kB\nKernelStack:        4144 kB\nPageTables:         6720 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329072 kB\nCommitted_AS:    2109708 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42604 kB\nVmallocChunk:          0 kB\nPercpu:             2352 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1476608 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      154752 kB\nDirectMap2M:     5083136 kB\nDirectMap1G:    13631488 kB\n",
+    "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+    "cgroup_limits": {
+      "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+        "cpu.max": "max 100000\n",
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 6349782569\nuser_usec 6222944360\nsystem_usec 126838208\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": "max\n",
+        "memory.current": "655159296\n",
+        "memory.peak": "1542848512\n",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.max": "max\n"
+      },
+      "/sys/fs/cgroup/system.slice": {
+        "cpu.max": "max 100000\n",
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 6429764675\nuser_usec 6240241947\nsystem_usec 189522728\nnice_usec 90000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": "max\n",
+        "memory.current": "3158224896\n",
+        "memory.peak": "4044554240\n",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.max": "max\n"
+      },
+      "/sys/fs/cgroup": {
+        "cpu.max": null,
+        "cpuset.cpus.effective": "0-3\n",
+        "cpu.stat": "usage_usec 6435525000\nuser_usec 6237366000\nsystem_usec 198159000\nnice_usec 90000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+        "memory.max": null,
+        "memory.current": null,
+        "memory.peak": null,
+        "memory.events": null,
+        "memory.swap.current": null,
+        "memory.swap.max": null
+      }
+    },
+    "cpu_pressure": "some avg10=0.00 avg60=0.00 avg300=1.43 total=255125412\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+    "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+    "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 7763 64-Core Processor\nCPU family:                              25\nModel:                                   1\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                4890.86\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                1 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "uname": [
+      "Linux",
+      "runnervmlx9pb",
+      "7.0.0-1012-azure",
+      "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+      "x86_64"
+    ]
+  }
+}

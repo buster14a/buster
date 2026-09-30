@@ -1108,6 +1108,14 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86Me
 // envelope length and all bytes outside it. These operations are transactional
 // on failure. Call prewarm_all_forms before arbitrary worker-lane use; otherwise
 // the first TLS recipe preparation, like ordinary form preparation, is serial.
+//
+// Local dynamic is read from foreign objects only: `lea rdi, [rip + x@tlsld]`
+// then either `call __tls_get_addr@PLT` (LD_SIZE) or, under -fno-plt,
+// `call [rip + __tls_get_addr@GOTPCREL]` (LD_INDIRECT_SIZE). It has no
+// padding of its own, so relax_tls_local_dynamic picks the envelope from the
+// call opcode and answers with its size; the local-exec replacement is
+// `mov rax, fs:0` behind data16 prefixes and has no offset field, because
+// each variable's DTPOFF32 names its own offset from the block.
 typedef enum BusterX86MetadataTlsModel
 {
     BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC,
@@ -1121,9 +1129,17 @@ enum
     BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET = 12,
     BUSTER_X86_METADATA_TLS_IE_SIZE = 7,
     BUSTER_X86_METADATA_TLS_IE_OFFSET = 3,
+    BUSTER_X86_METADATA_TLS_LD_SIZE = 12,
+    BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE = 13,
+    BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET = 3,
+    BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET = 8,
+    BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET = 9,
 };
 BUSTER_F_DECL bool buster_x86_metadata_emit_tls_general_dynamic(u8* output, u32 capacity);
 BUSTER_F_DECL bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86MetadataTlsModel model, s32 thread_pointer_offset);
+// Rewrites a local-dynamic envelope at `sequence` into local exec and returns
+// the envelope size it matched, or 0 with `sequence` unchanged.
+BUSTER_F_DECL u32 buster_x86_metadata_relax_tls_local_dynamic(u8* sequence, u32 capacity);
 
 // Fixed forwarding envelopes shared by ELF/UCRT runtime-object producers.
 // Ordinary XOR/JMP forms own the bytes. The symbolic branch is always PC32,

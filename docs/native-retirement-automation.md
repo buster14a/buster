@@ -104,16 +104,28 @@ The catch-up is fully automatic:
    read from Git objects, with no pinned closure needed. It only does the following:
    - When the snapshot is stale and no request is open, it creates one empty
      commit on `main`, points the bot-owned `native-retirement/catch-up` branch
-     at it, opens the PR and enables auto-merge. Its token has `contents: write`
-     and `pull-requests: write` for exactly this. It publishes no generated state
-     and cannot merge.
+     at it and opens the PR. Its token has `contents: write` and
+     `pull-requests: write` for exactly this. It publishes no generated state,
+     cannot merge and does not enable auto-merge: GitHub starts no workflows
+     for events caused by `GITHUB_TOKEN`, including the `merge_group` event of
+     a queue entry that token enqueued, so every required check would wait
+     forever (seen on #1966).
    - When `main` is current, it closes any open catch-up request.
 2. The controller treats that bot-owned PR as an ordinary request with an empty
    classification. It skips prerequisite CI, because nothing on a bot-created
    empty head needs testing. It dispatches the existing writer through the
    standing grant. The writer regenerates the pair for current `main` and
    publishes the usual two-parent integration head; that push starts PR CI.
-3. Auto-merge queues the published head. The merge gate treats it as a
+   The controller records its claim as a comment on the PR, so its job needs
+   `pull-requests: write`; with `pull-requests: read` the issues API refuses
+   the comment with 403 and the whole reconciliation aborts.
+3. In the same publication step, and with the same
+   `NATIVE_RETIREMENT_PUBLICATION_TOKEN`, the writer enables auto-merge on the
+   bot-owned catch-up. It first disables any enablement already present, such
+   as one made by the built-in token, so the queue entry belongs to the
+   credential and its `merge_group` CI runs. Without the secret, the writer
+   fails after publication rather than leaving an unqueued head. Auto-merge
+   queues the published head. The merge gate treats it as a
    catch-up: it stays admissible after other ordinary-bound PRs land first, as
    long as `main` has published no newer generated state since its recorded
    base. So it cannot fail because it lost a race, and it never evicts other
@@ -123,9 +135,10 @@ The catch-up is fully automatic:
 
 Prerequisites beyond the standing-grant activation below:
 - Settings -> Actions -> General must allow GitHub Actions to create pull
-  requests.
+  requests (verified: #1966 was opened by `github-actions[bot]`).
 - Auto-merge must be allowed in the repository.
-- Both are unverified on the live repository.
+- `NATIVE_RETIREMENT_PUBLICATION_TOKEN` needs Pull requests read/write to
+  enable auto-merge, in addition to its publication permissions.
 
 ## Claim, sealed request and one dispatch
 

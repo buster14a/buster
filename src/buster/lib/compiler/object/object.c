@@ -79,6 +79,10 @@
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
 //                                                  in ObjectWriteStatistics
+//   object_write_borrowing,                        the -c form: the planned
+//   object_artifact_slices                         ELF image names large
+//                                                  payloads in place instead
+//                                                  of copying them
 
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/object/object_internal.h>
@@ -740,6 +744,7 @@ void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatis
     total->image_bytes_zeroed += unit->image_bytes_zeroed;
     total->image_bytes_patched += unit->image_bytes_patched;
     total->payload_bytes_copied += unit->payload_bytes_copied;
+    total->payload_bytes_borrowed += unit->payload_bytes_borrowed;
     total->scratch_bytes += unit->scratch_bytes;
     total->retained_bytes += unit->retained_bytes;
     total->output_bytes += unit->output_bytes;
@@ -1375,7 +1380,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    return kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : object_relocation_kind_width(kind);
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -1707,6 +1712,12 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
         case OBJECT_RELOCATION_X86_64_PC32:
         case OBJECT_RELOCATION_X86_64_PLT32:
         case OBJECT_RELOCATION_AARCH64_PREL32:
@@ -1725,6 +1736,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSGD"));
             object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TLSLD:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSLD"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
@@ -2379,6 +2405,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
     {
         object_assembly_append_string(buffer, S8("@TLSGD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+    {
+        object_assembly_append_string(buffer, S8("@TLSLD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+    {
+        object_assembly_append_string(buffer, S8("@DTPOFF"));
     }
     else if (relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32)
     {
@@ -4515,17 +4549,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     return result;
 }
 
-// The families this reader does not carry, by name, so a refusal says which
-// one it met. The supported vocabulary is deliberately absent: R_X86_64_64,
-// PC32, PLT32, 32, 32S, TPOFF32 and the three GOTPCREL spellings all read,
-// and the ones left here are the thread-local models -- general dynamic,
-// local dynamic and initial exec -- which this compiler neither emits nor
-// resolves.
 // The x86-64 ELF relocation vocabulary this file knows by name, which the
-// refusal above uses to say which one it met. Most of these read: the GOT
-// families and the initial-exec and general-dynamic thread-local pairs all
-// have a kind. R_X86_64_TLSLD is the one named here that has none -- local
-// dynamic is a model this compiler neither emits nor resolves.
+// refusal below uses to say which one it met.  Every one named here reads;
+// the table is what keeps a refusal of an unnamed type (TLSDESC, ...)
+// from being a bare number next to names the reader accepts.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
     switch (type)
@@ -4542,10 +4569,14 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32");
     case 11:
         return S8("R_X86_64_32S");
+    case 17:
+        return S8("R_X86_64_DTPOFF64");
     case 19:
         return S8("R_X86_64_TLSGD");
     case 20:
         return S8("R_X86_64_TLSLD");
+    case 21:
+        return S8("R_X86_64_DTPOFF32");
     case 22:
         return S8("R_X86_64_GOTTPOFF");
     case 23:
@@ -5587,6 +5618,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // facts pick the instruction the linker may write
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
+                                   : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
@@ -5594,7 +5626,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 43                        ? OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
                                    : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 17 ? OBJECT_RELOCATION_X86_64_DTPOFF64
                                    : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 20 ? OBJECT_RELOCATION_X86_64_TLSLD
+                                   : relocation_type == 21 ? OBJECT_RELOCATION_X86_64_DTPOFF32
                                    : relocation_type == 22 ? OBJECT_RELOCATION_X86_64_GOTTPOFF
                                    : relocation_type == 23 ? OBJECT_RELOCATION_X86_64_TPOFF32
                                                            : OBJECT_RELOCATION_COUNT;
@@ -5607,6 +5642,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         {
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
+                                   : relocation_type == 260                           ? OBJECT_RELOCATION_AARCH64_PREL64
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                                    : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
                                    : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
@@ -5626,19 +5662,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        relocation_width = object_relocation_kind_width(kind);
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
                     {
                         target_section_data = &result.sections[section_kinds[target_section]];
-                        if (kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-                            (target_section_data->alignment < 4 || source_offset > UINT64_MAX - section_bases[target_section] ||
-                             ((section_bases[target_section] + source_offset) & 3)))
-                        {
-                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                            read_ok = false;
-                        }
                     }
                     if (read_ok)
                     {
@@ -5722,7 +5751,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
+                                kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -5752,6 +5782,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                                     kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
@@ -9714,6 +9745,11 @@ bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
 }
 
+u32 object_relocation_kind_width(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : 4;
+}
+
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -10800,6 +10836,8 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     {
         case OBJECT_RELOCATION_ABSOLUTE32:
         case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: *width = 4; return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
         case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
         default: *width = 4; return true;
     }
@@ -11737,13 +11775,17 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 {
     if (arch == CPU_ARCH_X86_64)
     {
-        return kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
+        return kind == OBJECT_RELOCATION_X86_64_PC64            ? 24
+               : kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
                : kind == OBJECT_RELOCATION_X86_64_PLT32         ? 4
                : kind == OBJECT_RELOCATION_X86_64_GOTPCREL      ? 9
                : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
                : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? 42
                : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? 43
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF64         ? 17
                : kind == OBJECT_RELOCATION_X86_64_TLSGD            ? 19
+               : kind == OBJECT_RELOCATION_X86_64_TLSLD            ? 20
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF32         ? 21
                : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF      ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32       ? 23
                : kind == OBJECT_RELOCATION_ABSOLUTE64           ? 1
@@ -11753,6 +11795,7 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     }
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
+           : kind == OBJECT_RELOCATION_AARCH64_PREL64               ? 260
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
            : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
@@ -12041,6 +12084,22 @@ BUSTER_GLOBAL_LOCAL void object_image_zero_to(ObjectImageRange* range, u64 offse
     else if (range->valid)
     {
         object_image_zero(range, offset - range->position);
+    }
+}
+
+// A payload the image names in place instead of storing: the range stays
+// reserved but unwritten, so its pages are never touched, and the file writer
+// takes the section's own bytes for it (object_artifact_slices).
+BUSTER_GLOBAL_LOCAL void object_image_borrow(ObjectImageRange* range, u64 size)
+{
+    if (range->valid && size > range->end - range->position)
+    {
+        range->valid = false;
+    }
+    else if (range->valid)
+    {
+        range->position += size;
+        range->statistics->payload_bytes_borrowed += size;
     }
 }
 
@@ -12337,8 +12396,20 @@ BUSTER_GLOBAL_LOCAL void object_elf64_section_header(ObjectImageRange* range, u3
 // ELF index for the relocations, and `relocation_ranges` holds one cursor per
 // input section; both are scratch sized by the plan. Each relocation is
 // placed by `moves` as it is written, as the plan placed it when counting.
+// A payload this large costs more to copy and fault into the image than to
+// hand to the file writer as one more write.
+#define OBJECT_BORROWED_PAYLOAD_MINIMUM 4096
+
+BUSTER_GLOBAL_LOCAL bool object_elf64_payload_borrowable(ObjectSection const* section)
+{
+    return !object_section_kind_is_zero_fill(section->kind) && section->data.length >= OBJECT_BORROWED_PAYLOAD_MINIMUM;
+}
+
+// `borrowed` is null unless the caller borrows payloads; it then has room for
+// every borrowable payload, which the emitter records in file order.
 BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
-                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectWriteStatistics* statistics)
+                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectBorrowedPayload* borrowed,
+                                           u32* borrowed_count, ObjectWriteStatistics* statistics)
 {
     u32 input_count = object->section_count;
     u64 symbol_table = plan->offsets[plan->symbol_section];
@@ -12384,7 +12455,15 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
         object_image_zero_to(&payloads, plan->offsets[section + 1]);
-        if (!object_section_kind_is_zero_fill(source->kind))
+        if (borrowed && object_elf64_payload_borrowable(source))
+        {
+            borrowed[(*borrowed_count)++] = (ObjectBorrowedPayload){
+                .offset = payloads.position,
+                .bytes = source->data,
+            };
+            object_image_borrow(&payloads, source->data.length);
+        }
+        else if (!object_section_kind_is_zero_fill(source->kind))
         {
             object_image_store(&payloads, source->data.pointer, source->data.length);
             statistics->payload_bytes_copied += source->data.length;
@@ -12525,13 +12604,19 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+// With `borrow_payloads`, each payload of at least
+// OBJECT_BORROWED_PAYLOAD_MINIMUM bytes is named in place (object_image_borrow)
+// rather than copied. The split's payloads are ranges of `object`'s own, so
+// they outlive this call's scratch arena; the borrowed table lives in `arena`
+// with the image, and only when some payload qualifies.
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, bool borrow_payloads, ObjectWriteStatistics* statistics)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
     // The plan, its tables and the priority split live only as long as this
-    // call; the image is the one allocation the caller's arena keeps.
+    // call; the caller's arena keeps the image and, when payloads are
+    // borrowed, their table.
     Arena* conflicts[] = {
         arena,
     };
@@ -12557,17 +12642,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         result.error =
             symbol_indices && relocation_ranges && object_reader_arena_can_allocate_bytes(arena, plan.size, 1) ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
+    u32 borrowable_count = 0;
+    for (u32 section = 0; borrow_payloads && result.error == OBJECT_ERROR_NONE && section < split_object.section_count; section += 1)
+    {
+        statistics->section_visits += 1;
+        borrowable_count += object_elf64_payload_borrowable(split_object.sections + section);
+    }
+    if (borrowable_count && !object_reader_arena_can_allocate_bytes(arena, (u64)borrowable_count * sizeof(ObjectBorrowedPayload) + plan.size,
+                                                                     BUSTER_ALIGN_OF(ObjectBorrowedPayload)))
+    {
+        result.error = OBJECT_ERROR_CAPACITY;
+    }
     if (result.error == OBJECT_ERROR_NONE)
     {
         u64 image_position = arena->position;
+        ObjectBorrowedPayload* borrowed = borrowable_count ? arena_allocate(arena, ObjectBorrowedPayload, borrowable_count) : 0;
+        u32 borrowed_count = 0;
         u8* image = arena_allocate(arena, u8, plan.size);
         statistics->image_bytes_reserved += plan.size;
-        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, statistics))
+        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, borrowed, &borrowed_count, statistics) &&
+            borrowed_count == borrowable_count)
         {
             result.bytes = (ByteSlice){
                 .pointer = image,
                 .length = plan.size,
             };
+            result.borrowed_payloads = borrowed;
+            result.borrowed_payload_count = borrowed_count;
         }
         else
         {
@@ -13785,8 +13886,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 }
 
 // Validates the object for `format` and dispatches to its writer. `reference`
-// selects the pre-plan ELF64 writer, which exists only in test builds.
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference)
+// selects the pre-plan ELF64 writer, which exists only in test builds;
+// `borrow_payloads` lets the planned ELF64 writer name large payloads in
+// place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference, bool borrow_payloads)
 {
     ObjectArtifact result = {
         .format = format,
@@ -13849,7 +13952,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         }
         if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
-            if ((source->offset & 3) || object->sections[source->section].alignment < 4)
+            if (format != OBJECT_FORMAT_ELF64 && ((source->offset & 3) || object->sections[source->section].alignment < 4))
             {
                 return result;
             }
@@ -14015,7 +14118,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 #endif
     if (format == OBJECT_FORMAT_ELF64)
     {
-        result = object_write_elf64(arena, object, &statistics);
+        result = object_write_elf64(arena, object, borrow_payloads, &statistics);
     }
     else if (format == OBJECT_FORMAT_COFF)
     {
@@ -14026,7 +14129,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         result = object_write_mach_o64(arena, object, &statistics);
     }
     // Whatever the writer took from the caller's arena beyond the image it
-    // reserved is scratch left behind; the planned writer takes none.
+    // reserved is scratch left behind; the planned writer takes none except
+    // a borrowing write's table of borrowed payloads.
     statistics.retained_bytes = arena->position - arena_start;
     statistics.scratch_bytes += statistics.retained_bytes - statistics.image_bytes_reserved;
     statistics.output_bytes = result.error == OBJECT_ERROR_NONE ? result.bytes.length : 0;
@@ -14036,13 +14140,48 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false);
+    return object_write_core(arena, object, format, false, false);
+}
+
+// The file-output form of object_write. Only an ELF image currently borrows
+// its section payloads; COFF and Mach-O images stay contiguous, so their
+// artifacts carry no borrowed ranges and yield one slice.
+ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format)
+{
+    return object_write_core(arena, object, format, false, true);
+}
+
+// The artifact's file in order: the image's own ranges interleaved with the
+// borrowed payloads, which ascend by offset because the writer placed them.
+// Empty image ranges are omitted; a contiguous artifact is one slice.
+ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out)
+{
+    u32 capacity = artifact.borrowed_payload_count * 2 + 1;
+    ByteSlice* slices = arena_allocate(arena, ByteSlice, capacity);
+    u32 count = 0;
+    u64 cursor = 0;
+    for (u32 index = 0; index < artifact.borrowed_payload_count; index += 1)
+    {
+        ObjectBorrowedPayload payload = artifact.borrowed_payloads[index];
+        if (payload.offset > cursor)
+        {
+            slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = payload.offset - cursor};
+        }
+        slices[count++] = payload.bytes;
+        cursor = payload.offset + payload.bytes.length;
+    }
+    if (artifact.bytes.length > cursor)
+    {
+        slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = artifact.bytes.length - cursor};
+    }
+    *slice_count_out = count;
+    return slices;
 }
 
 #if BUSTER_INCLUDE_TESTS
 ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* object)
 {
-    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true);
+    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true, false);
 }
 
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
@@ -14143,7 +14282,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 relocation_size = object_relocation_kind_width(relocation->kind);
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
@@ -14284,6 +14423,9 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                  relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                  relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)

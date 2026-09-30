@@ -15,6 +15,7 @@ on:
       - 'src/buster/lib/*'
       - 'src/buster/lib/compiler/assembly/**'
       - 'src/buster/lib/compiler/driver/codegen_configurations.h'
+      - 'src/buster/lib/compiler/work_ledger.h'
       - 'tools/*.c'
       - 'tools/*.h'
       - 'tools/allocation_census.py'

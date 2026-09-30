@@ -18,11 +18,21 @@
   `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
   module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
-  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  `python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
   corrupt/incomplete entries, failure propagation, argument forwarding and
-  concurrent immutable publication. CI runs it on every desktop OS/architecture
-  lane before installing optional tools.
+  concurrent immutable publication. Each desktop Release shard owns this suite;
+  the checks shard retains the required lifecycle step without repeating it.
+  Windows runs the same tests through
+  `python tools/bootstrap_wrapper_cases.py --jobs 2`: two independent scenarios
+  at once, with the existing six-writer publication scenario running alone.
+  All within-scenario cache transitions stay ordered. The policy step executes
+  `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
+  covering deadlines, launch/startup failures, cancellation, descendant cleanup,
+  failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
+  The whole original suite's obsolete workflow assertions remain tracked by
+  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
+  CI contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -44,14 +54,14 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
-- CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
-  opt-in GitHub-hosted desktop capacity uses the source-free broker template in
-  `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
-  runs the same coverage as the Forgejo matrix — combination matrix, execution-mode
-  matrix, Android and iOS — on GitHub's standard runners for the migration
-  described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
-  desktop OS at both x86-64 and AArch64; three independent mobile shards retain
-  the Android and iOS suites without repeating desktop work. The independent
+- Active CI is defined under `.github/workflows/`; the current tree has no
+  Forgejo workflow definitions. The historical source-free broker contract is
+  documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
+  runs the combination matrix, execution-mode matrix, Android and iOS on
+  GitHub standard runners. Its five desktop lanes cover Linux and Windows at
+  x86-64 and AArch64, plus macOS AArch64; two independent mobile shards retain
+  Android x86-64 and iOS AArch64. Apple x86-64 is best-effort source/target
+  compatibility, outside routine CI; see [Apple CI policy](../apple-ci-policy.md). The independent
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
   Require the
@@ -63,9 +73,11 @@
   The aggregate's independent desktop inventory checks exact-run job attempts
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
-  a 30-second total metadata budget. A later exact snapshot may recover a
-  transient omission; a persistent empty, stale or ambiguous record fails
-  closed. It never borrows step proof from an older attempt when a newer attempt
+  a 30-second total metadata budget. Transient 5xx/429/transport reads retry
+  in that budget, falling back to smaller jobs pages after a 5xx; a 4xx fails
+  immediately. A later exact snapshot may recover a transient omission; a
+  persistent empty, stale or ambiguous record fails closed, and its errors are
+  printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
@@ -88,7 +100,7 @@
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
   supported-platform coverage when changing build orchestration or the
-  compiler pipeline. The GitHub workflow keeps the six existing platform check
+  compiler pipeline. The GitHub workflow keeps the five retained platform check
   names, runs full PR/main/tag/merge-group coverage without duplicate feature
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
@@ -210,13 +222,26 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. A process-state query that loses the PID after
-  an initial `kill -0` is reconciled with one more liveness probe: confirmed
-  disappearance is stopped while persistent ambiguity remains fail-closed.
-  Once teardown observes a terminal state it is monotonic for that ownership
-  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
-  bounded stop verification; sending SIGKILL alone is not a failure, but an
-  owned process that remains live after it is.
+  this path deterministically. The numeric PID marker stays compatible with
+  existing callers; its `.identity` sidecar records the launch identity before
+  the PID marker is published. The Linux Android lane compares boot ID and
+  kernel start ticks from `/proc/<pid>/stat`, reading state and identity in one
+  snapshot. The portable/macOS fake-tool path uses `LC_ALL=C ps` start time
+  (one-second resolution) and state. These are checked at start reuse, wait,
+  shutdown and immediately before signals; an identity mismatch is a retired
+  owned process, not a new cleanup target. This is a shell snapshot check, not
+  an atomic pidfd signal operation; the portable timestamp also cannot resolve
+  reuse within the same second. Missing/malformed ownership or an unverifiable
+  live PID fails cleanup without targeting that PID, and retains the record
+  for retry. Once cleanup proves the owned process stopped it removes both
+  records, preventing another invocation from resurrecting the ownership.
+  SIGTERM and SIGKILL retain bounded stop verification; sending SIGKILL alone
+  is not a failure, but a surviving owned process is. `android/run_tests_test.sh`
+  also runs `android/emulator_identity_test.py` for independent identity,
+  malformed-record, unavailable-probe and surviving-process controls. Its real
+  workflow-body fixture simulates PID reuse after the payload observes the
+  original emulator terminal, and requires successful structured cleanup with
+  no adb shutdown or signal to the unrelated replacement.
 
 The private OS resource-failure, flood and process-tree child modes dispatch at
 the start of `library_tests`, before compiler prewarming and other test modules.
@@ -298,6 +323,14 @@ uses it. It copies the symbol/relocation view before remapping indices, preservi
 the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
+
+`compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
+with the PATH `clang` at baseline, Haswell and Zen 5. Each row runs only when
+the host CPU can execute it. Buster compiles its half of the Zen 5 row for
+`znver5`, and Clang compiles its half for `x86-64-v4`, which has the same
+64-byte vector ABI. Clang accepts `znver5` only from version 19 (Ubuntu 24.04
+ships 18), but it accepts `x86-64-v4` from version 12, so the row needs no
+host-compiler gate; see the [layout guide](frontend/layout.md).
 
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
@@ -507,6 +540,8 @@ stderr message. This harness regression changes neither assertion totals nor
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
+
+The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. After the oracle returns, it queues `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` on stdout. From Node's `exit` event, which fires only once the event loop has drained, it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors

@@ -18,6 +18,19 @@ struct StringOsListIterator
 
 BUSTER_F_DECL String8 string_from_pointer(const char8* pointer);
 BUSTER_F_DECL bool string_equal(String8 s1, String8 s2);
+#if BUSTER_BENCH_ALLOCATIONS
+// Calling-thread string_equal traffic for the frontend source-fact census
+// (compiler/frontend/c/c_census.h): every call, and the bytes of the
+// same-length, distinct, non-empty pairs that reach the byte comparison.
+// Cumulative since process start; reporting never resets it.
+typedef struct StringEqualCensus StringEqualCensus;
+struct StringEqualCensus
+{
+    u64 calls;
+    u64 compared_bytes;
+};
+BUSTER_F_DECL StringEqualCensus string_equal_census(void);
+#endif
 BUSTER_F_DECL void string_print(String8 format, ...);
 BUSTER_F_DECL String8 string_format(Arena* arena, String8 format, ...);
 BUSTER_F_DECL bool string_ends_with_sequence(String8 string, String8 ending);
@@ -36,6 +49,7 @@ BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String
 // Duplicate and join accept null-empty slices and fail the process on invalid
 // nonempty slices or size overflow, before allocation or copying.
 BUSTER_F_DECL String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
+BUSTER_F_DECL bool string8z_copy_arena(Arena* arena, String8 string, String8Z* result);
 BUSTER_F_DECL bool string_starts_with_sequence(String8 string, String8 sequence);
 BUSTER_F_DECL String8 string_from_pointer_length(const char8* pointer, u64 length);
 BUSTER_F_DECL String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminate);
@@ -103,6 +117,10 @@ BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(String8 string);
 // bound is returned to it.
 BUSTER_F_DECL String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate);
 BUSTER_F_DECL String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate);
+// OS boundary conversions reject null pointers with nonzero lengths and
+// embedded NUL bytes, without reading past the String8 bound. On success the
+// result owns arena storage and has a terminator at pointer[length].
+BUSTER_F_DECL bool string16z_from_string8_arena(Arena* arena, String8 string, String16Z* result);
 
 BUSTER_F_DECL OsArgumentBuilder os_argument_builder_start(Arena* arena);
 BUSTER_F_DECL void os_argument_builder_append(OsArgumentBuilder* builder, String8 string);

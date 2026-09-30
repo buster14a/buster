@@ -152,13 +152,32 @@ jobs:
           if [[ ! -f "$gate" ]]; then
             gate="$GITHUB_WORKSPACE/candidate/tools/native_retirement_merge_gate.py"
           fi
+          # Bind PR admission to the independently checked-out live policy. The
+          # queue lands PRs every few minutes, so main can advance after the
+          # trusted checkout; re-resolve against the new main a bounded number
+          # of times instead of failing the candidate (#1971).
           current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
-          # Bind PR admission to the independently checked-out live policy.
           base=$(git -C trusted rev-parse HEAD)
-          if [[ "$base" != "$current_main" ]]; then
-            echo '::error::Main advanced after trusted PR policy checkout.' >&2
-            exit 1
+          attempts=1
+          while [[ "$base" != "$current_main" ]]; do
+            if (( attempts >= 3 )); then
+              echo '::error::Main kept advancing after trusted PR policy checkout.' >&2
+              exit 1
+            fi
+            attempts=$((attempts + 1))
+            echo "::notice::Main advanced from $base to $current_main; re-resolving trusted PR policy."
+            git -C trusted fetch --quiet --no-tags --depth 1 origin "$current_main"
+            git -C trusted checkout --quiet --force --detach "$current_main"
+            base=$(git -C trusted rev-parse HEAD)
+            current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+            [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          done
+          # candidate/ was fetched before trusted/ resolved main, so a push
+          # landing between the two checkouts leaves that main missing from
+          # candidate/ even when the loop above never runs (#2010).
+          if ! git -C candidate cat-file -e "$base^{commit}" 2>/dev/null; then
+            git -C candidate fetch --quiet --no-tags origin "$base"
           fi
           rows="$RUNNER_TEMP/native-retirement-status-rows.json"
           gh api --paginate --slurp \
