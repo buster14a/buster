@@ -1094,6 +1094,10 @@ BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, C
 // representations a bool may hold, which is what lets c_parse_type_layout
 // seed its resolved column with a copy of the state column.
 BUSTER_CT_CHECK(sizeof(bool) == 1);
+// The query flag occupies padding after the existing final bool; published
+// model copies keep their original size on every supported host ABI.
+BUSTER_CT_CHECK(sizeof(CParseResult) ==
+    ((offsetof(CParseResult, analysis_complete) + sizeof(bool) + BUSTER_ALIGN_OF(CParseResult) - 1) & ~(BUSTER_ALIGN_OF(CParseResult) - 1)));
 
 // Puts `type_index` back on the pending list unless it already stands there.
 // The list holds distinct ids below `capacity`, so it cannot overflow the
@@ -1910,6 +1914,8 @@ BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 
 
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
+BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                               u32* index_out, bool apply_vector_attributes);
 
 BUSTER_C_INTERNAL CTypeId c_parse_type_name_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                          u32 start, u32 end, u32* declarator_start);
@@ -1920,6 +1926,7 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_const
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                                        CScopeId scope, u32 start, u32 end, String8* syntax_error,
                                                                        u32* syntax_token);
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
@@ -10452,6 +10459,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
                                                            u32 end)
 {
     u32 vector_byte_size = 0;
+    bool unsupported = false;
     if (result->position_index && !result->position_index->built)
     {
         c_parse_position_index_build(result, preprocess);
@@ -10467,6 +10475,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
             {
                 break;
             }
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            {
+                unsupported = true;
+                break;
+            }
             if (c_parse_vector_size_argument(result, preprocess, scope, index, end, &vector_byte_size))
             {
                 break;
@@ -10480,40 +10493,37 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
         for (u32 index = start; index + 3 < end; index += 1)
         {
             if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
-                !(c_parse_token_class_compute(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) & C_TOKEN_CLASS_VECTOR_SIZE) ||
-                !c_parse_vector_size_argument(result, preprocess, scope, index, end, &vector_byte_size))
+                !(c_parse_token_class_compute(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) & C_TOKEN_CLASS_VECTOR_SIZE))
             {
                 continue;
             }
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            {
+                unsupported = true;
+                break;
+            }
+            if (!c_parse_vector_size_argument(result, preprocess, scope, index, end, &vector_byte_size)) continue;
             break;
         }
     }
-    if (!vector_byte_size)
+    CTypeId type = unsupported ? C_TYPE_ID_INVALID : base;
+    if (!unsupported && vector_byte_size)
     {
-        return base;
+        // GNU's vector_size accepts integer and floating elements, including
+        // `_Float16` used by Clang's AVX512 intrinsic declarations.
+        CTypeKind base_kind = base.value < result->type_count ? result->types[base.value].kind : C_TYPE_INVALID;
+        bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
+                          base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
+        type = arithmetic ? c_parse_add_type(result, (CType){
+            .element_type = base,
+            .return_type = C_TYPE_ID_INVALID,
+            .array_bound = C_ARRAY_BOUND_INVALID,
+            .vector_byte_size = vector_byte_size,
+            .kind = C_TYPE_VECTOR,
+            .is_complete = true,
+        }) : C_TYPE_ID_INVALID;
     }
-    if (base.value >= result->type_count)
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeKind base_kind = result->types[base.value].kind;
-    // GNU's vector_size accepts any integer or floating element; `_Float16`
-    // joins the ladder because clang's `avx512fp16intrin.h` builds `__m512h`,
-    // `__m256h` and `__m128h` out of it.
-    bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
-                      base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
-    if (!arithmetic)
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    return c_parse_add_type(result, (CType){
-                                        .element_type = base,
-                                        .return_type = C_TYPE_ID_INVALID,
-                                        .array_bound = C_ARRAY_BOUND_INVALID,
-                                        .vector_byte_size = vector_byte_size,
-                                        .kind = C_TYPE_VECTOR,
-                                        .is_complete = true,
-                                    });
+    return type;
 }
 
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
@@ -12290,7 +12300,9 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
                 // pointer and qualifier rows, but it never reaches the core
                 // declaration parser that defines or completes shared tags.
                 u32 cursor = start;
-                CTypeId type = c_parse_machineless_base_type(result, preprocess, frame->scope, start, frame->end, &cursor);
+                // Type-name and typeof owners apply the scalar operand's
+                // attributes after this step, exactly once.
+                CTypeId type = c_parse_machineless_base_type_core(result, preprocess, frame->scope, start, frame->end, &cursor, false);
                 c_type_parse_frame_complete(machine, type, cursor, type.value < result->type_count);
                 return;
             }
@@ -13409,8 +13421,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_declarator_suffixes(CParseResult* 
 // entered, so this is callable from inside one of its steps â which is what
 // lets a sizeof inside an array bound resolve while an enum body is being
 // evaluated (the machine-bearing path uses c_parse_scalar_type instead).
-BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
-                                                          u32* index_out)
+BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                               u32* index_out, bool apply_vector_attributes)
 {
     // The `_Atomic ( T )` levels the walk descended through, outermost first:
     // the qualifier run written ahead of each one, and where its `)` sits.
@@ -13491,8 +13503,22 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
                     u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, base_end);
                     if (name_index < base_end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
                     {
-                        type = c_parse_aggregate_lookup(result, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]), scope);
+                        String8 tag = c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]);
+                        type = c_parse_aggregate_lookup(result, tag_kind, tag, scope);
                         index = c_parse_skip_attributes(preprocess, name_index + 1, base_end);
+                        bool body = index < base_end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+                        if (type.value == C_ID_UNDERLYING_INVALID && result->protected_type_constant_query && !body &&
+                            (tag_kind == C_TYPE_STRUCT || tag_kind == C_TYPE_UNION))
+                        {
+                            // A pointer may name a new incomplete tag. Its
+                            // forward row belongs only to the query copy;
+                            // defining a body still requires the declaration.
+                            type = c_parse_add_type(result, (CType){
+                                .tag = tag, .tag_scope = scope, .kind = tag_kind,
+                                .element_type = C_TYPE_ID_INVALID, .return_type = C_TYPE_ID_INVALID,
+                                .unqualified_type = C_TYPE_ID_INVALID, .array_bound = C_ARRAY_BOUND_INVALID,
+                            });
+                        }
                         type = has_tag_qualifier ? c_parse_add_qualified_type(result, type, tag_qualifiers) : type;
                     }
                 }
@@ -13507,7 +13533,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
     if (!refused && type.value != C_ID_UNDERLYING_INVALID)
     {
         index = c_parse_skip_attributes(preprocess, index, base_end);
-        type = c_parse_apply_vector_attribute(result, preprocess, scope, type, base_start, index);
+        if (apply_vector_attributes) type = c_parse_apply_vector_attribute(result, preprocess, scope, type, base_start, index);
     }
     // Each level's operand is the type name just resolved plus whatever
     // declarator suffixes stand before that level's `)`.  The refusals are the
@@ -13545,6 +13571,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
     }
     *index_out = index;
     return type;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                          u32* index_out)
+{
+    return c_parse_machineless_base_type_core(result, preprocess, scope, start, end, index_out, true);
 }
 // How many elements a brace initializer spells, counted from its tokens
 // alone â for the inferred-length arrays c_parse_infer_file_array_bounds has
@@ -13903,38 +13935,44 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
-    if (start >= end)
-    {
-        return false;
-    }
     // `(T){...}` is a compound literal, and its size is T's. The base-type
     // walk below stops at the `(` and the expression walk after it wants an
     // object name, so without this arm neither answers the shape and the
-    // caller reports the whole constant expression as unfoldable.
-    if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    // caller reports the whole constant expression as unfoldable. Strip the
+    // type range iteratively before any model or scratch allocation.
+    while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 type_close = c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (type_close + 1 < end && c_token_is_punctuator(&preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+        if (type_close < end && type_close + 1 < end && c_token_is_punctuator(&preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
             c_parse_matching_delimiter(preprocess, type_close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)
         {
-            return c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, start + 1, type_close, size_out, alignment_out);
+            start += 1;
+            end = type_close;
+        }
+        else break;
+    }
+    bool resolved = false;
+    if (start < end)
+    {
+        // Resolving an operand can append rows; its copy retains the protected
+        // query flag through every machineless reader it subsequently enters.
+        CParseResult operand_parse = *result;
+        u32 index = start;
+        CTypeId type = c_parse_machineless_base_type(&operand_parse, preprocess, scope, start, end, &index);
+        if (type.value == C_ID_UNDERLYING_INVALID)
+        {
+            resolved = c_parse_sizeof_operand_expression_layout(arena, &operand_parse, preprocess, scope, start, end, size_out, alignment_out);
+        }
+        else
+        {
+            type = c_parse_machineless_declarator_suffixes(&operand_parse, preprocess, type, &index, end);
+            if (type.value != C_ID_UNDERLYING_INVALID && index == end)
+            {
+                resolved = c_parse_type_layout(0, arena, preprocess, &operand_parse, type, size_out, alignment_out);
+            }
         }
     }
-    // Resolving the operand can append pointer, array, and tag records; keep
-    // them in a copy so an operand never mutates the caller's type table.
-    CParseResult operand_parse = *result;
-    u32 index = start;
-    CTypeId type = c_parse_machineless_base_type(&operand_parse, preprocess, scope, start, end, &index);
-    if (type.value == C_ID_UNDERLYING_INVALID)
-    {
-        return c_parse_sizeof_operand_expression_layout(arena, &operand_parse, preprocess, scope, start, end, size_out, alignment_out);
-    }
-    type = c_parse_machineless_declarator_suffixes(&operand_parse, preprocess, type, &index, end);
-    if (type.value == C_ID_UNDERLYING_INVALID || index != end)
-    {
-        return false;
-    }
-    return c_parse_type_layout(0, arena, preprocess, &operand_parse, type, size_out, alignment_out);
+    return resolved;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start)
@@ -21882,6 +21920,16 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
 // The legacy vector-size folder can reenter machineless type reading through
 // sizeof/casts in its argument. Protected queries admit only its literal fast
 // path; prepared vector types remain ordinary published rows to read.
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end)
+{
+    u32 close = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+        ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : UINT32_MAX;
+    u32 value = 0;
+    bool supported = index + 3 < end && close == index + 3 && preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+        c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value;
+    return supported;
+}
+
 BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
     bool supported = true;
@@ -21898,13 +21946,7 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
             CToken token = preprocess.tokens[attribute];
             if (token.kind == C_TOKEN_IDENTIFIER && c_parse_vector_size_word(c_token_spelling(preprocess.spelling_base, token)))
             {
-                u32 close = attribute + 1 < after &&
-                    c_token_is_punctuator(&preprocess.tokens[attribute + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-                        ? c_parse_matching_delimiter_indexed(result, preprocess, attribute + 1) : UINT32_MAX;
-                u32 value = 0;
-                supported = attribute + 3 < after && close == attribute + 3 &&
-                    preprocess.tokens[attribute + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
-                    c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[attribute + 2]), &value) && value;
+                supported = c_parse_type_constant_vector_argument_supported(result, preprocess, attribute, after);
             }
         }
         index = after;
@@ -21934,6 +21976,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         TemporalArena model_temporary = scratch_begin(&arena, 1);
         CParseResult query = *result;
         query.arena = model_temporary.arena;
+        query.protected_type_constant_query = true;
         // Stable indexes contain mutable headers, and spelling caches write
         // shared token rows even during reads. Neither belongs to this query.
         // An incomplete private index requests the scope-aware fallback.

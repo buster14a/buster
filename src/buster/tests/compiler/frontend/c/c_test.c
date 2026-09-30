@@ -16240,6 +16240,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("sizeof(struct G *)"), 8, true},
         {S8("sizeof(struct Missing *)"), 8, true},
         {S8("sizeof(V16)"), 16, true},
+        {S8("sizeof(UnsafeArray)"), 0, false},
         {S8("sizeof(int __attribute__((vector_size(16))))"), 16, true},
         {S8("sizeof(int __attribute__((vector_size(8 * 2))))"), 0, false},
         {S8("sizeof(int __attribute__((__vector_size(8 * 2))))"), 0, false},
@@ -16279,6 +16280,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"),
             S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
                " typedef int V16 __attribute__((vector_size(16)));"
+               " typedef char UnsafeArray[sizeof(int __attribute__((vector_size(4 * sizeof(int)))) *)];"
                " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = "),
             test.expression, S8("; return probe; }"));
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
