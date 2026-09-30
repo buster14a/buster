@@ -950,7 +950,8 @@ class WorkerUnitResultTests(unittest.TestCase):
     its pre-campaign documents, admission receipt and published support files
     bound, its two late phases pending), the execution context over the result bundle's raw
     digest, the producer authority and its context chain, the result manifest
-    and BQ-BUNDLE-V1 index. Mutated bindings are refused by the validator.
+    and BQ-BUNDLE-V1 index, and the validator's executable rule over every
+    A/B invocation. Mutated bindings are refused by the validator.
     Absent that output (CI runs this file without the preparation runner),
     the class is skipped.
     """
@@ -1120,6 +1121,36 @@ class WorkerUnitResultTests(unittest.TestCase):
         finally:
             records.close()
 
+    def test_invocations_name_the_file_they_executed(self):
+        """The validator's executable rule (_check_execution_transcript) over
+        job 82's A/B transcript: a compiler invocation names its variant's
+        subject binary and a runtime invocation its row's frozen artifact,
+        the program the runtime launch executed, never the compiler binary
+        (the recorder's tp_retirement_executed_sha256). Every runtime row of
+        the plan runs, so the check covers real runtime launches."""
+        record = self.record()
+        plan = json.loads((self.result / "retirement-execution-plan.json").read_bytes())
+        contracts = {row["row"]: row for row in plan["rows"]}
+        receipt = json.loads((self.result / "retirement-execution-receipt.json").read_bytes())
+        binaries = {variant: record["subjects"][variant]["binary"]["sha256"] for variant in ("baseline", "candidate")}
+        counts = {"compiler": 0, "runtime": 0}
+        records = binding._execution_trace_records(self.result, receipt["shards"], receipt["invocations"])
+        try:
+            for value in records:
+                variant = value["variant"]
+                if value["kind"] == "compiler":
+                    expected = binaries[variant]
+                else:
+                    expected = contracts[value["row"]][variant]["artifact_sha256"]
+                    self.assertNotIn(value["executable_sha256"], binaries.values())
+                self.assertEqual(value["executable_sha256"], expected,
+                                 f"invocation {value['sequence']} ({value['kind']}) names another executable")
+                counts[value["kind"]] += 1
+        finally:
+            records.close()
+        self.assertGreater(counts["compiler"], 0)
+        self.assertGreater(counts["runtime"], 0)
+
 
 
 def _worker_unit_support_output(evidence, record):
@@ -1201,19 +1232,6 @@ def _gap_header(frame, _context):
                 or (elapsed is not None and header["wall_ns"] > elapsed))
 
 
-def _gap_runtime_executable(frame, _context):
-    """Lane D records a runtime launch's executable as the side's compiler
-    binary (tp_retirement_measurement_run: executable->sha256) where the
-    validator binds the row's program artifact; waived only for a runtime
-    invocation whose output and command match and whose executable is
-    exactly that binary (lane D's codex/881-runtime-identity fixes it)."""
-    value = frame["value"]
-    binary = frame["binding"]["subjects"][frame["variant"]]["binary"]["sha256"]
-    return (not frame["compiler"] and value["kind"] == "runtime" and value["executable_sha256"] == binary
-            and binary != frame["expected_binary"] and value["output_sha256"] == frame["expected_output"]
-            and value["command_sha256"] == frame["expected_command"])
-
-
 def _gap_adapter(frame, context):
     """The fixture's composer adapter is the preparation runner's structural
     stand-in (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
@@ -1233,8 +1251,6 @@ WORKER_UNIT_KNOWN_GAPS = (
     ("untimed header",
      r"untimed batch metrics \d+ header is not one serial continue-on-failure batch of the frozen inputs",
      _gap_header, 576),
-    ("runtime executable", r"execution invocation binary, command, or oracle output is mismatched",
-     _gap_runtime_executable, 488),
     ("stand-in adapter", r"#619 C statistics adapter replay differs from independently downloaded output",
      _gap_adapter, 1),
 )
@@ -1487,17 +1503,6 @@ class WorkerUnitWaiverTests(unittest.TestCase):
         missing = frame()
         del missing["header"]["peak_rss_bytes"]
         self.assertFalse(_gap_header(missing, context))
-        subjects = {"baseline": {"binary": {"sha256": "c" * 64}}}
-        runtime = {"value": {"kind": "runtime", "executable_sha256": "c" * 64, "output_sha256": "d" * 64,
-                             "command_sha256": "e" * 64},
-                   "compiler": False, "variant": "baseline", "binding": {"subjects": subjects},
-                   "expected_binary": "f" * 64, "expected_output": "d" * 64, "expected_command": "e" * 64}
-        self.assertTrue(_gap_runtime_executable(runtime, context))
-        for changed in ({"compiler": True}, {"expected_output": "0" * 64}, {"expected_command": "0" * 64},
-                        {"expected_binary": "c" * 64},
-                        {"value": dict(runtime["value"], executable_sha256="1" * 64)},
-                        {"value": dict(runtime["value"], kind="compiler")}):
-            self.assertFalse(_gap_runtime_executable(dict(runtime, **changed), context), changed)
 
 
 class LaneFWriterEndToEndTests(unittest.TestCase):

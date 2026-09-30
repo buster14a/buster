@@ -320,6 +320,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   still sized by the whole type table (#1502), is allocated only for that
   walk. `c_test_type_self_compatibility` compares the two for every type of a
   type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+- Semantic records keep a `CSourceSite` (mapped offset plus one, and source),
+  never an eager `CSourceLocation`. Recover line, column and physical offset
+  with `c_preprocess_site_location` only where a diagnostic or
+  `c_parse_entity_visible_at` reads them, and build IR ranges from sites with
+  `c_ir_site_source_range`. A location resolved for a failure that has not
+  happened is gated on that failure, as `c_type_parse_root_finish` callers do.
+  See [diagnostics](../../diagnostics.md) for the recovery contract and its
+  frozen equivalence test.
 
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
@@ -416,7 +424,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   The prediction is still the last resort for both words, under the same
   guards: an inline aggregate definition and an object whose array type never
   mapped are refused rather than guessed at. `tests/basic_c_alignof_expression.c`
-  is the fixture, and every value in it was compared against clang.
+  is the fixture, and every value in it was compared against clang. A named
+  object's own `_Alignas`/`aligned` then raises that answer, in constant
+  expressions too (`compiler_driver_tests` compiles and runs that case); see
+  [`_Alignof` over an object](layout.md#_alignof-over-an-object).
 - **`void` is one byte, and an object of it is still refused.** GNU gives
   `void` a size and an alignment of one so that arithmetic on a `void *` steps
   by bytes, and clang and gcc both fold `sizeof(void)`, `sizeof(const void)`

@@ -1,0 +1,11 @@
+case	binary	maxrss_kib(min..max over 5 runs)	rc
+tiny_c	base	27220..27672	[0]
+tiny_c	cand	27296..27540	[0]
+hello_link	base	29500..29992	[0]
+hello_link	cand	29788..30128	[0]
+ops_c	base	29756..29948	[0]
+ops_c	cand	29892..30120	[0]
+string_c	base	40356..40764	[0]
+string_c	cand	40608..40924	[0]
+stage1	base	1130336..1130504	[0]
+stage1	cand	1130568..1130908	[0]

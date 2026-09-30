@@ -121,10 +121,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
+  bits and can still be assigned and read back (issue #710). **A width is
+  evaluated once, where the member is declared**: `c_parse.c` folds a
+  single-token literal (decimal, hex, octal or suffixed) with
+  `c_integer_expression_evaluate` and anything else through
+  `c_parse_typed_integer_constant`, the evaluator enumerators use, and stores
+  it on `CMember.bit_width` with `bit_width_resolved`. The sizeof folding,
+  bit-field promotion, the zero-width check and the IR layout all read that
+  number, so `int b : (5)`, an enumerator, a cast, `0x5` or
+  `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
+  and in the object. An unresolved width holds the layout unresolved instead
+  of reading as zero; lowering still evaluates such a width itself as a
+  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
+  unresolved widths to diagnose a non-integer one.
+  `c_test_bit_field_width_authority` pins clang's answers for each spelling.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
   are one `definition_rejection` slot whose kind travels with the message --
   and the definition still lays out, the way a rejected alignment specifier
@@ -354,6 +365,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   attempts run in, and it has no bound record to count on. It records without
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
+
+## `_Alignof` over an object
+
+GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
+answer the object's alignment rather than its type's: GCC and Clang fold
+`_Alignas(32) int g; _Alignof(g)` to 32 and accept it as an integer constant
+expression (issue #1704). Both layout engines raise the type's answer by the
+same runs, which `c_alignof_object_next_run` names: the entity's own and those
+of every object declaration of it that is complete before the operand, so
+`extern int g; _Alignas(32) int g;` answers 32 after the second declaration.
+`c_parse_alignof_object_alignment` serves the parse-time folds; a file-scope
+static assertion over such an operand is deferred to canonical-IR constant
+evaluation, where `c_ir_alignof_object_alignment` serves both that and the
+lowered value. An enum initializer runs inside the type machine and must not
+mutate it, so there only runs of integer expressions and builtin types fold;
+`_Alignas(struct S)` there is refused as not constant. A run may itself spell
+`_Alignof(object)`, so each engine counts nested evaluations and refuses past
+`C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
+operand, because a record's evaluator otherwise falls back to another fold and
+answers the type's alignment. Member operands (`_Alignof(s.x)` with an
+`_Alignas` member, or a `packed` one) still answer the member type's alignment
+where Clang answers the member's (issue #1249).
 
 ## Padded GNU vectors
 
