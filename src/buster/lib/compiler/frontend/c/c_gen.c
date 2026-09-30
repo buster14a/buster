@@ -42939,7 +42939,25 @@ BUSTER_C_INTERNAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* 
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result)
+// The next row of a lowering result's diagnostics. The table keeps the
+// capacity c_lower_to_ir_with_options derives, but its rows are allocated at
+// the first report instead of before lowering starts, so a successful lowering
+// reserves none. Every report is written by c_lower_to_ir_with_options or by
+// c_ir_infer_incomplete_array_bounds on its behalf, never inside a temporal
+// window over the result arena, so the rows live exactly as long as the
+// result that returns them.
+BUSTER_C_INTERNAL CDiagnostic* c_ir_lower_diagnostic_slot(CIRLowerResult* result, Arena* arena, u64 capacity)
+{
+    if (!result->diagnostics)
+    {
+        C_DIAGNOSTIC_RESERVATION_CENSUS(LOWERING, capacity);
+        result->diagnostics = arena_allocate(arena, CDiagnostic, capacity);
+    }
+    BUSTER_CHECK(result->diagnostic_count < capacity);
+    return result->diagnostics + result->diagnostic_count++;
+}
+
+BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result, Arena* diagnostic_arena, u64 diagnostic_capacity)
 {
     CIrIncompleteArrayInitializerIndex initializer_index = {0};
     c_ir_index_incomplete_array_initializers(builder, &initializer_index);
@@ -43002,7 +43020,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
                                                  ? failure
                                                  : string_format(builder->arena, S8("{S8} for incomplete array type {u32} '{S8}'"), failure, type_index,
                                                                  candidate_name);
-                result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+                *c_ir_lower_diagnostic_slot(result, diagnostic_arena, diagnostic_capacity) = (CDiagnostic){
                     .message = string_format(builder->arena, S8("C IR lowering: {S8}"), diagnostic_message),
                     .location = failure_token < builder->preprocess.token_count ? c_ir_token_location(builder, builder->preprocess.tokens[failure_token]) : (CSourceLocation){0},
                     .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -49243,9 +49261,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
         }
         tokens[token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
     }
-    C_DIAGNOSTIC_RESERVATION_CENSUS(EVALUATION, bound.token_count + 1);
     CPreprocessResult evaluation = {
-        .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
         .target = preprocess.target,
         .dialect = preprocess.dialect,
     };
@@ -49507,10 +49523,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
+    // The rows themselves wait for the first report (c_ir_lower_diagnostic_slot).
     u64 lowering_diagnostic_capacity = 4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
                                        parse.array_bound_count + 2;
-    C_DIAGNOSTIC_RESERVATION_CENSUS(LOWERING, lowering_diagnostic_capacity);
-    result.diagnostics = arena_allocate(arena, CDiagnostic, lowering_diagnostic_capacity);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -49668,7 +49683,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         valid_assembly &= token_index == declaration_end;
         if (!valid_assembly)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("invalid GNU global assembly declaration"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -50034,7 +50049,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                 u32 rejection_token = type_alignment->alignment_start < parse.alignment_count
                                                           ? parse.alignments[type_alignment->alignment_start].token_start
                                                           : (u32)preprocess.token_count;
-                                result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                                *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                                     .message = alias_rejection,
                                     .location = rejection_token < preprocess.token_count
                                                     ? c_preprocess_token_location(&preprocess, preprocess.tokens[rejection_token])
@@ -50372,7 +50387,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 }
                 if (definition_rejection.length)
                 {
-                    result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                    *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                         .message = definition_rejection,
                         .location = definition_rejection_member < c_type->member_count
                                         ? c_preprocess_site_location(&preprocess, parse.members[c_type->member_start + definition_rejection_member].location)
@@ -50573,7 +50588,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (type_mapping_round == 0)
         {
-            c_ir_infer_incomplete_array_bounds(&constant_builder, &result);
+            c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);
         }
     }
     // An array element has to be addressable at its own alignment in every
@@ -50627,7 +50642,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         // where Clang's own caret points, and is a real token even for the
         // empty bound `[]`, whose token_start is the closing bracket.
         u32 bracket = parse.array_bounds[c_type->array_bound].token_start;
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
                                      element_type->layout.size, element_type->layout.alignment),
             .location = bracket && bracket <= preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[bracket - 1])
@@ -50667,7 +50682,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("static assertion expression is not an integer constant expression"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
@@ -50679,7 +50694,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("static assertion expression is not a true integer constant expression"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
@@ -50742,7 +50757,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                                    : C_ENTITY_ID_INVALID;
         if (alias_target.value >= parse.entity_count || alias_target.value == declaration.entity.value)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("alias target '{S8}' is not declared in this translation unit"), binding.alias_target),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -50927,7 +50942,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         String8 unsupported_output = c_section_attribute_unsupported_output(target);
         if (section_name.length && (unsupported_output.length || (is_thread_local && c_attribute_native_binding_target(target))))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = unsupported_output.length
                                ? string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
                                                entity->name, section_name, unsupported_output)
@@ -51192,7 +51207,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (c_ir_type_is_void_object(program, type))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("variable '{S8}' may not have type 'void'"), entity->name),
                 .location = c_preprocess_site_location(&preprocess, entity->location),
                 .kind = C_DIAGNOSTIC_INVALID_VOID_OBJECT,
@@ -51201,7 +51216,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (!type_value || !type_value->layout.resolved)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
                                          c_ir_diagnostic_type_name(arena, type_value)),
                 .location = c_preprocess_site_location(&preprocess, entity->location),
@@ -51248,7 +51263,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (!alignment_valid)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 // The specifier names itself when it was the thing at fault;
                 // "invalid object alignment" is left for the declarations that
                 // disagree with each other, where no single request is wrong.
@@ -51298,7 +51313,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             {
                 failure_location = c_preprocess_token_location(&preprocess, preprocess.tokens[constant_builder.failure_token_index]);
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = constant_builder.failure_message.length
                                ? string_format(arena, S8("C IR lowering: {S8}"), constant_builder.failure_message)
                                : definition->is_constexpr
@@ -51311,7 +51326,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (definition->is_constexpr && !c_ir_constexpr_initializer_valid(type_value, &global))
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("constexpr initializer is not a permitted constant expression"),
                 .location = c_preprocess_site_location(&preprocess, definition->location),
                 .kind = C_DIAGNOSTIC_INVALID_CONSTEXPR,
@@ -51505,7 +51520,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("C IR lowering does not yet support the type of function '{S8}'"), declaration.name),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -51617,7 +51632,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             {
                 continue;
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("C IR lowering could not resolve the type of function '{S8}'"), declaration.name),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -51662,7 +51677,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     Arena* lowering_arena = arena_create((ArenaCreation){0});
     if (!lowering_arena)
     {
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = S8("could not allocate C function lowering arena"),
             .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
             .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -51702,7 +51717,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             preprocess, declaration.token_start, declaration.body_start + declaration.body_token_count, &unsupported_token_index);
         if (unsupported_construct.length)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("in function '{S8}': {S8}"), declaration.name, unsupported_construct),
                 .location = unsupported_token_index < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[unsupported_token_index]) : c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -51713,7 +51728,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (!signatures[declaration_index].body_supported)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message =
                     string_format(arena, S8("C IR lowering does not yet support the parameter or return value types of function '{S8}'"), declaration.name),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
@@ -51783,7 +51798,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {
             scratch_end(lowering_temporary);
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = S8("C function body is too large to lower"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -52041,7 +52056,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 failure_location = c_preprocess_token_location(&preprocess, preprocess.tokens[builder.failure_token_index]);
                 failure_token = c_token_spelling(preprocess.spelling_base, preprocess.tokens[builder.failure_token_index]);
             }
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = builder.failure_message.length ? string_format(arena, S8("in function '{S8}': {S8}"), declaration.name, builder.failure_message)
                            : failure_token.length
                                ? string_format(arena, S8("in function '{S8}': unsupported C function-body statement or expression near '{S8}'"),
@@ -52104,7 +52119,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (!target_defined_here || alias_defined_here)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = alias_defined_here
                                ? string_format(arena, S8("'{S8}' is both defined here and aliased to '{S8}'"), parse.entities[entity_index].name,
                                                parse.entities[alias_target.value].name)
@@ -52151,7 +52166,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         if (!initializer_target)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("'{S8}' is declared __attribute__(({S8})), which {S8} has no initializer array for"), declaration.name,
                                          is_constructor ? S8("constructor") : S8("destructor"),
                                          target.cpu_arch == CPU_ARCH_WASM64 ? S8("wasm64") : S8("eBPF")),
@@ -52190,7 +52205,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                : 0;
         if (symbol && symbol->section_name.length)
         {
-            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
                                          declaration.name, symbol->section_name, section_unsupported_output),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
@@ -52206,7 +52221,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // is the same one, only the spelling that reaches it differs.
     if (over_aligned_array_name.bracket_token_plus_one && over_aligned_array_name.bracket_token_plus_one <= preprocess.token_count)
     {
-        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
             .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
                                      over_aligned_array_name.element_size, over_aligned_array_name.element_alignment),
             .location = c_preprocess_token_location(&preprocess, preprocess.tokens[over_aligned_array_name.bracket_token_plus_one - 1]),

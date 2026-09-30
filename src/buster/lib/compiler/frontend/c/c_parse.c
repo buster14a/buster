@@ -2697,9 +2697,9 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
             }
             else
             {
-                C_DIAGNOSTIC_RESERVATION_CENSUS(EVALUATION, specifier.token_count + 1);
+                // The evaluator reports through c_preprocess_diagnostic_push, which
+                // reserves its own rows; only the count is read here.
                 CPreprocessResult evaluation = {
-                    .diagnostics = arena_allocate(context->arena, CDiagnostic, specifier.token_count + 1),
                     .target = context->preprocess.target,
                     .dialect = context->preprocess.dialect,
                 };
@@ -3082,9 +3082,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     }
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
-                C_DIAGNOSTIC_RESERVATION_CENSUS(EVALUATION, bound.token_count + 1);
                 CPreprocessResult evaluation = {
-                    .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
                     .target = preprocess.target,
                     .dialect = preprocess.dialect,
                 };
@@ -6320,9 +6318,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
     }
     if (valid)
     {
-        C_DIAGNOSTIC_RESERVATION_CENSUS(EVALUATION, token_count + 1);
         CPreprocessResult evaluation = {
-            .diagnostics = arena_allocate(arena, CDiagnostic, token_count + 1),
             .target = preprocess.target,
             .dialect = preprocess.dialect,
         };
