@@ -7065,7 +7065,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         if (dynamic_string_size > UINT32_MAX) result.error = LINK_ERROR_INVALID_INPUT;
     }
     // Layout.  Every offset is also the address.
-    bool has_thread_local = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+    // The input checks above leave `sections` unproven on the error path.
+    bool has_thread_local = result.error == LINK_ERROR_NONE && (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                                                object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size);
     LinkElfEhFrameTable eh_frame_table = {0};
     if (result.error == LINK_ERROR_NONE)
     {
