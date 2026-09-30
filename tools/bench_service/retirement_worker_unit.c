@@ -100,10 +100,9 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
 /* The only admitting status line (queue.h); the compiled profile says
  * status=blocked. */
 #define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS BQ_RECIPE_PROFILE_ADMITTED_STATUS
-/* The queue's profile cap (queue.h) is sized from these pins and the
- * compiled profile, so bq_installed_recipe can read an admitted profile. */
+/* The queue's profile cap (queue.h) is sized from this pin count, so
+ * bq_installed_recipe can read an admitted profile. */
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins) == BQ_RETIREMENT_PROFILE_PINS);
-BUSTER_CT_CHECK(sizeof(bq_native_retirement_blocked_profile) - 1 <= BQ_RECIPE_PROFILE_BASE_CAP);
 
 /* Every digest pin, lane D's frozen campaign values (seed, pairs, resamples
  * and bootstrap members, each canonical and in range:

@@ -33,6 +33,11 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "statistics-sha256=b95349118f14456abb9d85191615c6e0b9cd595e7761081c6bc0dacddb8a34dd\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
 
+/* Every build reads the compiled profile, including its admitted successor
+ * with every worker-unit pin, into a buffer of this cap (bq_installed_recipe). */
+BUSTER_CT_CHECK(sizeof(bq_native_retirement_blocked_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
+BUSTER_CT_CHECK(sizeof(bq_validate_buster_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
+
 #if defined(BUSTER_BENCH_SERVICE_TEST) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
 /* Test-only seam: when nonempty, this profile stands in for the compiled
  * retirement profile everywhere (bq_recipe_profile and the admission
@@ -208,11 +213,14 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     return result;
 }
 
-/* Exactly one newline-terminated line starting with `status=`, and it is
- * BQ_RECIPE_PROFILE_ADMITTED_STATUS byte for byte: blocked, a blocked- prefix,
- * a trailing space or carriage return, a second status line or none refuses.
- * The Linux completeness gate (bq_retirement_profile_complete) applies this
- * same test after its pins. */
+/* A newline-terminated profile with exactly one line starting with
+ * `status=`, and it is BQ_RECIPE_PROFILE_ADMITTED_STATUS byte for byte:
+ * blocked, a blocked- prefix, a trailing space or carriage return, a second
+ * status line, none, or an unterminated final line refuses. The Linux
+ * completeness gate (bq_retirement_profile_complete) applies this same test
+ * after its pins. This portable predicate cannot see the pins; the Linux
+ * service entry points refuse an admitted but incomplete profile
+ * (bq_retirement_compiled_servable, retirement_coordinator.c). */
 bool bq_recipe_profile_admitted(String8 profile)
 {
     String8 const status = S8("status=");
@@ -233,7 +241,7 @@ bool bq_recipe_profile_admitted(String8 profile)
             start = index + 1;
         }
     }
-    admitted = admitted && statuses == 1;
+    admitted = admitted && statuses == 1 && profile.pointer[profile.length - 1] == '\n';
     return admitted;
 }
 

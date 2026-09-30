@@ -1770,11 +1770,16 @@ predicate is true only when the compiled profile carries exactly one
 `status=admitted` line, so a retirement request still cannot be submitted.
 When the compiled profile is admitted, submission, the gateway's
 `submit-retirement`, materialization, dispatch, reconciliation and export all
-open together. The coordinator's gates above still need every pin. Journal
-replay accepts a schema-3 retirement SUBMIT whatever the build admits
+open together. The coordinator's gates above still need every pin, and the
+Linux service refuses an admitted but incomplete compiled profile before any
+reservation (`bq_retirement_compiled_servable`: `serve`, the transport's
+submission check, which also accepts retirement only through the exclusive
+submit, and the worker's check of the queued head job before the lease).
+Journal replay accepts a schema-3 retirement SUBMIT whatever the build admits
 (`bq_recipe_real_journal`), so a journal written under an admitted profile
 stays replayable under a blocked build, with its retirement jobs inert. The
-read-only `recipe-identity` operation reports the profile's status and the
+read-only `recipe-identity` operation reports the profile's status
+(`blocked`, `admitted`, or `incomplete` for admitted without every pin) and the
 SHA-256 of the profile, contract and support declaration.
 `bq_worker_result_binding_validate` accepts a retirement result only through
 its complete-profile seam, and its public entry still refuses one.

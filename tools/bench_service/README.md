@@ -653,7 +653,10 @@ the real transitions (`bq_recipe_real_journal`). So a journal written while the
 retirement profile was admitted still opens under a blocked build. Its
 retirement jobs are then inert, because `bq_recipe_real` refuses them: they are
 never materialized, dispatched or reconciled, `serve` refuses to start while
-one is unfinished, and schema-1 clients see them as unsupported.
+one is unfinished, and schema-1 clients see them as unsupported. `status` and
+`result` of a finished, bound retirement job fail with
+`configuration-mismatch`, because the public result-binding check admits a
+retirement result only through a complete profile.
 Queued work can still be cancelled locally. An active attempt stays
 `reconciliation-required` until an admitting build reconciles it.
 
@@ -718,7 +721,13 @@ exclusive admission, materialization, dispatch, reconciliation and export open
 together when the compiled profile is admitted, and stay closed while it is
 blocked. The Linux coordinator's gates still require the seams'
 profile to pass `bq_retirement_profile_complete` (every pin), whatever the
-predicate says. Only the test builds (`BUSTER_BENCH_SERVICE_TEST`,
+predicate says. The portable predicate cannot see the pins, so the Linux
+service fails closed on an admitted but incomplete compiled profile
+(`bq_retirement_compiled_servable`): `serve` refuses to start
+(`recipe-mismatch`), the transport refuses a retirement submission before
+it is sent or accepted, and the worker refuses the queued head job before
+taking the lease or reserving it. `recipe-identity` reports such a profile as
+`status=incomplete`. Only the test builds (`BUSTER_BENCH_SERVICE_TEST`,
 `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`) can substitute an admitted stand-in
 profile (`bq_retirement_profile_test_override`); the installed service has no
 override. An installed profile may be up to `BQ_RECIPE_PROFILE_CAP` (4352)
@@ -949,11 +958,14 @@ and recipe `validate-buster-v1`; `submit-retirement` fixes
 `native-retirement-performance-v1` instead and is refused before transport
 while the compiled profile is blocked. It accepts full lowercase immutable source
 identities and bounded keys, never a recipe override, path, command, flag,
-sample count, threshold, workload or environment override. The client's own
-`submit` accepts the retirement recipe by name under the same admission.
+sample count, threshold, workload or environment override. A retirement job
+needs an idle host, so the transport accepts the retirement recipe only
+through the gateway's exclusive (idle-only) submit; `client SOCKET submit` of
+the retirement recipe is refused before transport with `unsupported`.
 `recipe-identity` is read-only: it prints the retirement recipe's
-`status=blocked` or `status=admitted` and the SHA-256 of its compiled
-profile, contract and support declaration. It shares `client`'s typed transport and reply validator;
+`status=blocked`, `status=admitted` or `status=incomplete` (admitted but
+missing pins, which the service refuses to serve) and the SHA-256 of its
+compiled profile, contract and support declaration. It shares `client`'s typed transport and reply validator;
 it never opens the queue. Installed-source allowlisting and all materialization
 checks remain service-owned under the host lease.
 
@@ -1035,7 +1047,7 @@ worker payload must also fit the fixed 512-byte body. Operation 12 is the
 gateway's exclusive submit, operation 13 is export ([EXPORT.md](EXPORT.md)).
 Operation 14 is recipe-identity (schema 2, empty request). Its reply is fixed
 text after the error code:
-`schema=1 recipe=native-retirement-performance-v1 status=blocked|admitted`,
+`schema=1 recipe=native-retirement-performance-v1 status=blocked|admitted|incomplete`,
 then `profile-sha256=`, `contract-sha256=` and `support-declaration-sha256=`
 lines, each with 64 lowercase hex digits. Capabilities v2 is unchanged byte for
 byte (the dispatch workflow greps it, and it has no room for digests); it still

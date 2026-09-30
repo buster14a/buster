@@ -20,6 +20,9 @@
  * reopened under the blocked build with its jobs inert, and a schema-2
  * retirement SUBMIT refused (bq_test_retirement_journal); an admitted profile
  * of the full pin shape read by bq_installed_recipe (bq_test_retirement_profile_cap);
+ * an admitted but incomplete compiled profile refused at `serve`, at submission
+ * and before reservation, a complete one served through the exclusive submit
+ * only (bq_test_retirement_servable);
  * the coordinator's gates refusing an incomplete seam profile while the
  * queue's predicate admits (bq_test_retirement_coordinator_gates).
  */
@@ -63,8 +66,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_predicate(void)
         BQ_CHECK(!bq_recipe_profile_admitted(string_from_pointer(refused[index])));
     BQ_CHECK(!bq_recipe_profile_admitted((String8){0}) &&
              bq_recipe_profile_admitted(S8("status=admitted\n")) &&
-             bq_recipe_profile_admitted(S8("schema=1\nstatus=admitted\nrequires=x\n")) &&
-             bq_recipe_profile_admitted(S8("schema=1\nstatus=admitted\ntrailing-unterminated")));
+             bq_recipe_profile_admitted(S8("schema=1\nstatus=admitted\nrequires=x\n")));
+    /* An unterminated final line is refused, whatever it says. */
+    BQ_CHECK(!bq_recipe_profile_admitted(S8("schema=1\nstatus=admitted\ntrailing-unterminated")) &&
+             !bq_recipe_profile_admitted(S8("status=admitted\nstatus=blocked")));
     /* The compiled profile keeps everything closed. */
     bq_test_retirement_admit(false);
     BqRequest request = {0};
@@ -210,6 +215,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_identity(void)
         changed.bytes[BQ_CONTROL_HEADER + 4 + mutated[index]] = 'Z';
         BQ_CHECK(!bq_public_response_valid(&request, &changed));
     }
+    /* One extra byte, or a second status line, after a valid reply. */
+    char const* const appended[] = {"x", "status=admitted\n"};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(appended); index += 1)
+    {
+        u8 longer[BQ_CONTROL_BODY] = {0};
+        u32 extra = (u32)strlen(appended[index]);
+        u32 body_size = response.size - BQ_CONTROL_HEADER;
+        memcpy(longer, response.bytes + BQ_CONTROL_HEADER, body_size);
+        memcpy(longer + body_size, appended[index], extra);
+        BqPacket grown = {0};
+        bq_packet(&grown, BQ_OP_RECIPE_IDENTITY | 0x80000000u, bq_u64(request.bytes + 16), longer, body_size + extra);
+        BQ_CHECK(grown.size == response.size + extra && !bq_public_response_valid(&request, &grown));
+    }
     BqPacket with_body = {0};
     u8 body[4] = {0};
     bq_packet(&with_body, BQ_OP_RECIPE_IDENTITY, 1, body, sizeof(body));
@@ -225,7 +243,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_identity(void)
     memset(text, 0, sizeof(text));
     length = response.size >= BQ_CONTROL_HEADER + 4 ? response.size - BQ_CONTROL_HEADER - 4 : 0;
     memcpy(text, response.bytes + BQ_CONTROL_HEADER + 4, length);
-    BQ_CHECK(strstr(text, " status=admitted\n") && bq_test_retirement_identity_value(text, "profile-sha256=", profile) &&
+#ifdef __linux__
+    /* The stand-in has no worker-unit pins, so the service reports it
+     * incomplete rather than admitted. */
+    BQ_CHECK(strstr(text, " status=incomplete\n") != NULL);
+#else
+    BQ_CHECK(strstr(text, " status=admitted\n") != NULL);
+#endif
+    BQ_CHECK(bq_test_retirement_identity_value(text, "profile-sha256=", profile) &&
              !strcmp(profile, stand_in) && bq_test_retirement_identity_value(text, "contract-sha256=", contract) &&
              !strcmp(contract, contract_file));
     bq_test_retirement_admit(false);
@@ -363,50 +388,73 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_journal(void)
 #endif
 
 #ifdef __linux__
-/* An admitted profile of the full pin shape fits the queue's cap and passes
- * bq_installed_recipe; one byte over the cap is refused. */
-BUSTER_GLOBAL_LOCAL void bq_test_retirement_profile_cap(void)
+/* A private directory under $TMPDIR (absolute) or /tmp. */
+BUSTER_GLOBAL_LOCAL bool bq_test_retirement_private_directory(char path[BQ_PATH_CAP + 1], char const* name)
 {
-    static char profile[BQ_RECIPE_PROFILE_CAP + 2];
+    char const* base = getenv("TMPDIR");
+    base = base && base[0] == '/' ? base : "/tmp";
+    int length = snprintf(path, BQ_PATH_CAP + 1, "%s/%s-XXXXXX", base, name);
+    bool made = length > 0 && (u32)length <= BQ_PATH_CAP && mkdtemp(path) != NULL;
+    if (!made) path[0] = 0;
+    return made;
+}
+
+/* An admitted profile of the full pin shape: the compiled descriptive lines,
+ * one line per worker-unit pin the compiled profile lacks, lane D's four
+ * campaign values in range and status=admitted; about 2.7 KB. */
+BUSTER_GLOBAL_LOCAL bool bq_test_retirement_full_profile(char* profile, u32 capacity, u32* used)
+{
     char const* compiled = bq_native_retirement_blocked_profile;
     char const* status = strstr(compiled, "\nstatus=blocked\n");
-    u32 used = status ? (u32)(status - compiled) + 1u : 0;
-    bool ok = status && used < sizeof(profile);
-    if (ok) memcpy(profile, compiled, used);
+    *used = status ? (u32)(status - compiled) + 1u : 0;
+    bool ok = status && *used < capacity;
+    if (ok) memcpy(profile, compiled, *used);
     char const* after = status ? status + strlen("\nstatus=blocked\n") : "";
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins); index += 1)
     {
         char const* key = bq_retirement_worker_unit_pins[index];
         if (!strstr(compiled, key))
         {
-            int line = snprintf(profile + used, sizeof(profile) - used, "%s%064u\n", key, index);
-            ok = line > 0 && (u32)line < sizeof(profile) - used && (u32)line <= BQ_RECIPE_PROFILE_LINE_CAP;
-            used += ok ? (u32)line : 0;
+            int line = snprintf(profile + *used, capacity - *used, "%s%064u\n", key, index);
+            ok = line > 0 && (u32)line < capacity - *used && (u32)line <= BQ_RECIPE_PROFILE_LINE_CAP;
+            *used += ok ? (u32)line : 0;
         }
     }
-    int tail = ok ? snprintf(profile + used, sizeof(profile) - used,
+    int tail = ok ? snprintf(profile + *used, capacity - *used,
                              "%s" BQ_RETIREMENT_UNIT_CAMPAIGN_SEED_KEY "881\n" BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY
-                             "254\n" BQ_RETIREMENT_UNIT_CAMPAIGN_RESAMPLES_KEY "10000\n"
+                             "254\n" BQ_RETIREMENT_UNIT_CAMPAIGN_RESAMPLES_KEY "100000\n"
                              BQ_RETIREMENT_UNIT_CAMPAIGN_BOOTSTRAP_KEY "64\n" BQ_RECIPE_PROFILE_ADMITTED_STATUS "\n",
                              after) : -1;
-    ok = ok && tail > 0 && (u32)tail < sizeof(profile) - used;
-    used += ok ? (u32)tail : 0;
+    ok = ok && tail > 0 && (u32)tail < capacity - *used;
+    *used += ok ? (u32)tail : 0;
+    return ok;
+}
+
+/* An admitted profile of the full pin shape fits the queue's cap and passes
+ * bq_installed_recipe; one byte over the cap is refused. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_profile_cap(void)
+{
+    static char profile[BQ_RECIPE_PROFILE_CAP + 2];
+    u32 used = 0;
+    bool ok = bq_test_retirement_full_profile(profile, sizeof(profile), &used);
     /* About 2.7 KB, past the former 1024-byte cap and within the new one. */
     BQ_CHECK(ok && used > 2048 && used <= BQ_RECIPE_PROFILE_CAP);
-    char root[] = "/tmp/bq-retirement-profile-XXXXXX";
-    char recipes[64], path[160];
+    char root[BQ_PATH_CAP + 1], recipes[BQ_PATH_CAP + 16], path[BQ_PATH_CAP + 128];
     BqRecipeFiles files = {0};
-    bool made = ok && mkdtemp(root) != NULL && bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &files);
+    bool made = ok && bq_test_retirement_private_directory(root, "bq-retirement-profile") &&
+                bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &files);
     snprintf(recipes, sizeof(recipes), "%s/recipes", root);
     snprintf(path, sizeof(path), "%s/%s", recipes, files.profile);
     BQ_CHECK(made && mkdir(recipes, 0700) == 0);
     for (u32 pass = 0; made && pass < 2; pass += 1)
     {
-        /* Pass 1 pads the same profile to one byte past the cap. */
+        /* Pass 1 pads the same profile with one more terminated line, to one
+         * byte past the cap. */
         u32 size = used;
         if (pass == 1)
         {
-            memset(profile + used, '#', BQ_RECIPE_PROFILE_CAP + 1 - used);
+            memset(profile + used, '#', BQ_RECIPE_PROFILE_CAP - used);
+            profile[BQ_RECIPE_PROFILE_CAP] = '\n';
             size = BQ_RECIPE_PROFILE_CAP + 1;
         }
         profile[size] = 0;
@@ -420,6 +468,65 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_profile_cap(void)
     }
     bq_retirement_profile_test_override = (String8){0};
     BQ_CHECK(!made || (chmod(recipes, 0700) == 0 && unlink(path) == 0 && rmdir(recipes) == 0 && rmdir(root) == 0));
+}
+
+/* #881 P1 fail-closed: the compiled profile is servable (blocked, or admitted
+ * with every pin); an admitted but incomplete profile is refused at `serve`
+ * and at submission, and the worker leaves such a job queued, unreserved and
+ * without the lease; a complete one is served, through the exclusive submit
+ * only. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_servable(void)
+{
+    bq_test_retirement_admit(false);
+    BQ_CHECK(!bq_recipe_retirement_admitted() ||
+             bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)));
+    BQ_CHECK(bq_retirement_compiled_servable());
+    BqRequest request = {0};
+    BqPacket exclusive = {0}, plain = {0};
+    bq_test_retirement_admit(true);
+    BQ_CHECK(bq_test_retirement_request(BQ_EXPORT_PRINCIPAL, "servable", &request));
+    bq_packet(&exclusive, BQ_OP_SUBMIT_EXCLUSIVE, 1, request.bytes, request.size);
+    bq_packet(&plain, BQ_OP_SUBMIT, 2, request.bytes, request.size);
+    /* Admitted but incomplete: refused before transport and at `serve`. */
+    BQ_CHECK(bq_recipe_retirement_admitted() && !bq_retirement_compiled_servable() &&
+             bq_transport_public_request(exclusive.bytes, exclusive.size) == BQ_RECIPE_MISMATCH &&
+             bq_transport_public_request(plain.bytes, plain.size) == BQ_RECIPE_MISMATCH &&
+             bq_transport_serve("/nonexistent-bench-state", "/nonexistent-bench.sock", NULL) == BQ_RECIPE_MISMATCH);
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, true))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest local = {0};
+        u64 id = 0;
+        BQ_CHECK(bq_test_retirement_request("test-principal", "incomplete", &local) &&
+                 bq_submit(queue, &local, &id) == BQ_OK);
+        u64 run = id;
+        BQ_CHECK(bq_worker_run(queue, &fixture.config, &run) == BQ_BAD_REQUEST);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_QUEUED && !job->token && !queue->state.active_id &&
+                 !queue->needs_reconciliation && fixture.quarantine.descriptor < 0 && fixture.fake.starts == 0 &&
+                 !bq_test_worker_probe_locked(fixture.lease));
+        BQ_CHECK(bq_cancel(queue, id) == BQ_OK);
+        bq_test_worker_end(&fixture);
+    }
+    /* Admitted with every pin: served, and only through the exclusive submit. */
+    static char complete[BQ_RECIPE_PROFILE_CAP + 1];
+    u32 used = 0;
+    BQ_CHECK(bq_test_retirement_full_profile(complete, sizeof(complete), &used));
+    bq_retirement_profile_test_override = (String8){(char8*)complete, used};
+    BQ_CHECK(bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
+             bq_retirement_compiled_servable() &&
+             bq_transport_public_request(exclusive.bytes, exclusive.size) == BQ_OK &&
+             bq_transport_public_request(plain.bytes, plain.size) == BQ_UNSUPPORTED);
+    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    BqPacket identity = {0}, response = {0};
+    bq_packet(&identity, BQ_OP_RECIPE_IDENTITY, 3, NULL, 0);
+    BQ_CHECK(bq_dispatch(&queue, identity.bytes, identity.size, &response) == BQ_OK &&
+             bq_public_response_valid(&identity, &response) &&
+             !memcmp(response.bytes + BQ_CONTROL_HEADER + 4,
+                     "schema=1 recipe=native-retirement-performance-v1 status=admitted\n",
+                     strlen("schema=1 recipe=native-retirement-performance-v1 status=admitted\n")));
+    bq_test_retirement_admit(false);
 }
 
 /* #881 N1: with the queue's predicate admitting, every coordinator gate still
@@ -468,6 +575,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_admission(void)
 #endif
 #ifdef __linux__
     bq_test_retirement_profile_cap();
+    bq_test_retirement_servable();
     bq_test_retirement_coordinator_gates();
 #endif
     bq_test_retirement_admit(false);

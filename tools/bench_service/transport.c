@@ -7,6 +7,13 @@
  * client protocol.  A real recipe is started only from that fixed
  * configuration and remains fail-closed until the build-driver handoff adds
  * its reviewed executor.
+ *
+ * Public operations: capabilities, submit, exclusive submit, status, result,
+ * cancel, logs, export and recipe-identity (operation 14, read-only text that
+ * is not redacted like the status receipts). The retirement recipe is
+ * accepted only through the exclusive (idle-only) submit, and only while the
+ * compiled profile is servable (bq_retirement_compiled_servable); `serve`
+ * refuses to start otherwise (#881 P1).
  */
 #ifdef __linux__
 #include <stddef.h>
@@ -200,7 +207,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
         else
         {
             memcpy(request.bytes, input + BQ_CONTROL_HEADER, length);
+            bool retirement = bq_request_recipe(&request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
             error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED :
+                    retirement && !bq_retirement_compiled_servable() ? BQ_RECIPE_MISMATCH :
+                    retirement && operation != BQ_OP_SUBMIT_EXCLUSIVE ? BQ_UNSUPPORTED :
                     !string_equal(bq_field(&request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_EXPORT_UNAUTHORIZED : BQ_OK;
         }
     }
@@ -545,7 +555,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char cons
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqTransportEndpoint endpoint = {.listener = -1, .parent = -1};
-    BqError error = bq_open(&queue, state_path);
+    BqError error = bq_retirement_compiled_servable() ? bq_open(&queue, state_path) : BQ_RECIPE_MISMATCH;
     if (error == BQ_OK && !bq_transport_queue_admissible(&queue))
     {
         error = BQ_UNSUPPORTED;

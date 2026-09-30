@@ -96,6 +96,18 @@ BUSTER_GLOBAL_LOCAL bool bq_recipe_identity_pin(String8 profile, String8 key, ch
     return ok;
 }
 
+/* The status the reply reports: blocked, admitted, or, on Linux where the
+ * completeness gate exists, incomplete for an admitted profile the service
+ * refuses to serve (bq_retirement_compiled_servable). */
+BUSTER_GLOBAL_LOCAL char const* bq_recipe_identity_status(void)
+{
+    char const* status = bq_recipe_retirement_admitted() ? "admitted" : "blocked";
+#ifdef __linux__
+    if (!bq_retirement_compiled_servable()) status = "incomplete";
+#endif
+    return status;
+}
+
 /* Returns the reply text's length, or zero when the compiled profile lacks
  * either pin or the text does not fit. */
 BUSTER_GLOBAL_LOCAL u32 bq_recipe_identity(u8* output, u32 capacity)
@@ -108,7 +120,7 @@ BUSTER_GLOBAL_LOCAL u32 bq_recipe_identity(u8* output, u32 capacity)
     int length = pinned ? snprintf((char*)output, capacity,
                                    BQ_RECIPE_IDENTITY_HEADER "%s\n" BQ_RECIPE_IDENTITY_PROFILE "%s\n"
                                    BQ_RECIPE_IDENTITY_CONTRACT "%s\n" BQ_RECIPE_IDENTITY_SUPPORT "%s\n",
-                                   bq_recipe_retirement_admitted() ? "admitted" : "blocked",
+                                   bq_recipe_identity_status(),
                                    profile_digest, contract, support) : -1;
     u32 result = length > 0 && (u32)length < capacity ? (u32)length : 0;
     return result;
@@ -124,11 +136,15 @@ BUSTER_GLOBAL_LOCAL bool bq_recipe_identity_valid(u8 const* text, u32 length)
     bool ok = length > header.length && !memcmp(text, header.pointer, (size_t)header.length);
     if (ok)
     {
-        u32 blocked = (u32)sizeof("blocked\n") - 1, admitted = (u32)sizeof("admitted\n") - 1;
-        bool is_blocked = length - offset >= blocked && !memcmp(text + offset, "blocked\n", blocked);
-        bool is_admitted = length - offset >= admitted && !memcmp(text + offset, "admitted\n", admitted);
-        ok = is_blocked || is_admitted;
-        offset += is_blocked ? blocked : admitted;
+        char const* const statuses[] = {"blocked\n", "admitted\n", "incomplete\n"};
+        u32 matched = 0;
+        for (u32 index = 0; !matched && index < BUSTER_ARRAY_LENGTH(statuses); index += 1)
+        {
+            u32 size = (u32)strlen(statuses[index]);
+            matched = length - offset >= size && !memcmp(text + offset, statuses[index], size) ? size : 0;
+        }
+        ok = matched != 0;
+        offset += matched;
     }
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(keys); index += 1)
     {

@@ -5138,6 +5138,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_run_pinned(BqQueue* queue, BqWorkerConfig 
     if (error == BQ_OK && recovering)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
+    /* #881 P1: the job the materializer would reserve (the first queued one)
+     * must pass the coordinator's request gate before the lease or any
+     * reservation, so an admitted but incomplete profile leaves it queued
+     * instead of reserving it and holding the lease for reconciliation. */
+    bool head_found = false;
+    for (u32 index = 0; error == BQ_OK && !recovering && !head_found && index < queue->state.job_count; index += 1)
+    {
+        BqJob const* queued = queue->state.jobs + index;
+        head_found = queued->phase == BQ_QUEUED;
+        if (head_found && !bq_retirement_request_valid_pinned(&queued->request, seams->profile)) error = BQ_BAD_REQUEST;
+    }
     if (error == BQ_OK && !recovering && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
     u64 execution_deadline = 0;
     u64 lease_start = error == BQ_OK && !recovering ? backend->clock(backend) : 0;
