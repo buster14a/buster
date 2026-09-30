@@ -1,5 +1,6 @@
 /* Service and control entry points. No caller-selected commands or shell execution.
- * bq_client_arguments owns typed requests; gateway fixes socket/principal/recipe.
+ * bq_client_arguments owns typed requests; gateway fixes socket/principal and
+ * selects only between the two fixed service recipes (submit, submit-retirement).
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
  * Tests include this entry point, as the existing throughput tests do.
  */
@@ -88,20 +89,27 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
     bool valid = false;
     *request = (BqPacket){0};
     *operation = 0;
-    if (argc == 1 && !strcmp(argv[0], "capabilities"))
+    if (argc == 1 && (!strcmp(argv[0], "capabilities") || !strcmp(argv[0], "recipe-identity")))
     {
-        *operation = BQ_OP_CAPABILITIES;
+        *operation = !strcmp(argv[0], "capabilities") ? BQ_OP_CAPABILITIES : BQ_OP_RECIPE_IDENTITY;
         valid = true;
     }
-    else if (argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit"))
+    else if ((argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit")) ||
+             (gateway && argc == 4 && !strcmp(argv[0], "submit-retirement")))
     {
+        /* The gateway's fixed recipes: submit-retirement selects the
+         * retirement recipe, which bq_recipe_service refuses until the
+         * compiled profile is admitted. Every other execution input is the
+         * installed recipe's; nothing here names a command, flag, sample,
+         * threshold, workload or environment. */
         BqRequest submission;
         String8 fields[BQ_FIELD_COUNT];
         if (gateway)
         {
             fields[0] = S8("github-actions");
             fields[1] = string_from_pointer(argv[1]);
-            fields[2] = S8("validate-buster-v1");
+            fields[2] = !strcmp(argv[0], "submit-retirement") ? S8("native-retirement-performance-v1") :
+                                                                 S8("validate-buster-v1");
             fields[3] = string_from_pointer(argv[2]);
             fields[4] = string_from_pointer(argv[3]);
         }
@@ -181,7 +189,7 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
 {
     bool written = true;
     u8 const* data = response->bytes + BQ_CONTROL_HEADER;
-    if (operation == BQ_OP_CAPABILITIES)
+    if (operation == BQ_OP_CAPABILITIES || operation == BQ_OP_RECIPE_IDENTITY)
     {
         written = fwrite(data + 4, 1, response->size - BQ_CONTROL_HEADER - 4, output) == response->size - BQ_CONTROL_HEADER - 4;
     }
@@ -269,9 +277,9 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
-    else if (argc == 2 && !strcmp(argv[1], "capabilities"))
+    else if (argc == 2 && (!strcmp(argv[1], "capabilities") || !strcmp(argv[1], "recipe-identity")))
     {
-        operation = BQ_OP_CAPABILITIES;
+        operation = !strcmp(argv[1], "capabilities") ? BQ_OP_CAPABILITIES : BQ_OP_RECIPE_IDENTITY;
         valid = true;
     }
     else if (argc == 3 && !strcmp(argv[1], "rpc"))
@@ -453,7 +461,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     if (!handled && valid)
     {
-        error = operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
+        error = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_RECIPE_IDENTITY ? BQ_OK : bq_open(&queue, argv[2]);
         if (error == BQ_OK)
         {
             if (raw)
@@ -497,13 +505,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         fprintf(diagnostics, "bench_service: %s; io-uncertain requires retry/reopen, never rollback\n", bq_error_name(error));
         if (!valid)
         {
-            fprintf(diagnostics, "commands: capabilities | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
+            fprintf(diagnostics, "commands: capabilities | recipe-identity | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
-                    "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
-                    "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "client SOCKET capabilities/recipe-identity/submit/status/result/cancel/logs ... | "
+                    "gateway capabilities | gateway recipe-identity | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "gateway export JOB TOKEN FULL_SHA [EXPECTED_RECIPE] | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "

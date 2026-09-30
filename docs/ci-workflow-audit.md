@@ -11,6 +11,10 @@ This change concerns the public repository's GitHub workflows, **not** the
 source-free broker under `.forgejo/github-bridge/`. Broker cache/artifact and
 credential restrictions remain untouched.
 
+> The job inventories and measurements in this audit describe its recorded
+> revisions. Current CI uses the [21-job inventory](ci-combination-shards.md)
+> and [AArch64-only Apple policy](apple-ci-policy.md).
+
 ## Coverage contract and scheduling
 
 The six existing desktop names and runner labels remain. Every desktop lane

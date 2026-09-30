@@ -394,6 +394,40 @@ def parse_bool(value: str) -> bool:
     raise ProvenanceError(f"expected true or false, got {value!r}")
 
 
+def same_revision_skip(event: str, requested: bool, candidate_commit: str, reference_commit: str) -> bool:
+    """Whether policy skips comparison without consulting any manifest."""
+    return not requested and candidate_commit == reference_commit and event in ("push", "workflow_dispatch")
+
+
+def validate_request(event: str, requested_text: str) -> bool:
+    if not SAFE_EVENT.fullmatch(event):
+        raise ProvenanceError(f"invalid event name {event!r}")
+    requested = parse_bool(requested_text)
+    if requested and event != "workflow_dispatch":
+        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
+    return requested
+
+
+def reference_materialization(
+    repository: Path,
+    event: str,
+    requested_text: str,
+    candidate_revision: str,
+    reference_revision: str,
+) -> bool:
+    """Whether CI must build the historical reference driver.
+
+    Only the same-revision skip is known before manifests exist; every other
+    selection needs the reference tree, either to compare or to prove closure
+    equality.
+    """
+    repository = repository.resolve(strict=True)
+    requested = validate_request(event, requested_text)
+    candidate_commit, _ = resolve_revision(repository, candidate_revision)
+    reference_commit, _ = resolve_revision(repository, reference_revision)
+    return not same_revision_skip(event, requested, candidate_commit, reference_commit)
+
+
 def select_campaign(
     repository: Path,
     event: str,
@@ -404,11 +438,7 @@ def select_campaign(
     reference_path: Path,
 ) -> bytes:
     repository = repository.resolve(strict=True)
-    if not SAFE_EVENT.fullmatch(event):
-        raise ProvenanceError(f"invalid event name {event!r}")
-    requested = parse_bool(requested_text)
-    if requested and event != "workflow_dispatch":
-        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
+    requested = validate_request(event, requested_text)
     candidate_commit, candidate_tree = resolve_revision(repository, candidate_revision)
     reference_commit, reference_tree = resolve_revision(repository, reference_revision)
     candidate, candidate_raw = load_manifest(candidate_path)
@@ -420,11 +450,10 @@ def select_campaign(
 
     if requested:
         selection, reason = "compare", "requested"
+    elif same_revision_skip(event, requested, candidate_commit, reference_commit):
+        selection, reason = "skip", "same-revision"
     elif candidate_commit == reference_commit:
-        if event in ("push", "workflow_dispatch"):
-            selection, reason = "skip", "same-revision"
-        else:
-            selection, reason = "compare", "event-requires-comparison"
+        selection, reason = "compare", "event-requires-comparison"
     elif event == "pull_request":
         if not candidate["complete"] or not reference["complete"]:
             selection, reason = "compare", "provenance-uncertain"
@@ -531,6 +560,17 @@ def command_select(arguments: argparse.Namespace) -> None:
     write_atomic(Path(arguments.output), record)
 
 
+def command_materialization(arguments: argparse.Namespace) -> None:
+    required = reference_materialization(
+        Path(arguments.repository),
+        arguments.event,
+        arguments.requested,
+        arguments.candidate_revision,
+        arguments.reference_revision,
+    )
+    print("true" if required else "false")
+
+
 def command_field(arguments: argparse.Namespace) -> None:
     record = load_selection(Path(arguments.record))
     if arguments.field not in SELECTION_KEYS:
@@ -560,6 +600,16 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("--reference-manifest", required=True)
     select.add_argument("--output", required=True)
     select.set_defaults(handler=command_select)
+
+    materialization = subparsers.add_parser(
+        "materialization", help="print whether the historical reference driver must be built"
+    )
+    materialization.add_argument("--repository", required=True)
+    materialization.add_argument("--event", required=True)
+    materialization.add_argument("--requested", required=True)
+    materialization.add_argument("--candidate-revision", required=True)
+    materialization.add_argument("--reference-revision", required=True)
+    materialization.set_defaults(handler=command_materialization)
 
     field = subparsers.add_parser("field", help="read one validated selection-record field")
     field.add_argument("--record", required=True)

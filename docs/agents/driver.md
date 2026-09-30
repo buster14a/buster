@@ -340,6 +340,18 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+## Plain-char signedness
+
+`-fsigned-char` and `-funsigned-char` override the target's implementation-
+defined plain-`char` signedness; the last option wins. With neither option,
+the target ABI default remains in effect. This policy is carried through
+`TargetDataLayout`, so the C frontend uses it consistently for plain-`char`
+typing and promotions, casts, character constants, `__CHAR_UNSIGNED__`, and
+the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
+and `unsigned char` keep their specified behavior. The options apply to C
+frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
+pipelines reject them because their toolchains do not use Buster's C frontend.
+
 ## C input phase selection
 
 A `.c` input and any path under `-x c` begin as raw C source and run the full
@@ -594,8 +606,12 @@ and Mach-O dylibs have no writer yet.
 
 ## Object output (`-c`)
 
-`-c` writes the object through `object_write`. The ELF64 writer plans the
-whole file with checked arithmetic, then stores each byte once; it refuses an
+`-c` writes the object through `object_write_borrowing`. The ELF64 writer
+plans the whole file with checked arithmetic, then stores each byte once,
+except that each section payload of at least 4 KiB is named in place and the
+file is published from the image's ranges and those payloads in order
+(`object_artifact_slices`, `file_publish_slices`), byte-identical to
+`object_write`'s image. It refuses an
 object whose section count reaches `SHN_LORESERVE`, whose string tables need
 offsets past 32 bits, or whose size overflows or exceeds the arena, with the
 diagnostic `native elf64 object exceeds the object writer's limits (...)`,

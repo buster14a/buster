@@ -5,12 +5,16 @@
  * retirement_worker_unit.c. Linked only into the service translation unit,
  * after retirement_worker_unit.c and before worker_linux.c.
  *
- * Entry points (all reached only from worker_linux.c):
+ * Entry points (reached from worker_linux.c; bq_retirement_compiled_servable
+ * also from transport.c and protocol.c):
  *   bq_retirement_request_valid_pinned   the request gate: the portable
  *                                        queue's field checks, and the
  *                                        retirement recipe only when
  *                                        bq_retirement_profile_complete
  *                                        accepts the profile
+ *   bq_retirement_compiled_servable      the compiled profile is blocked, or
+ *                                        admitted and complete (serve,
+ *                                        transport submit, worker dispatch)
  *   bq_retirement_coordinator_budget_load
  *                                        the installed campaign-budget
  *                                        record, read-only, whose bytes must
@@ -93,6 +97,19 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_request_valid_pinned(BqRequest const* req
 {
     bool valid = request && bq_request_valid_admitting(request, bq_retirement_profile_complete(profile));
     return valid;
+}
+
+/* #881 P1: the portable queue admits the recipe on the compiled profile's
+ * status line alone. The service may run with that profile only while it is
+ * blocked, or admitted with every pin; an admitted but incomplete profile
+ * would admit jobs that bq_retirement_request_valid_pinned then refuses after
+ * reservation. `serve`, the transport's submission check and the worker's
+ * dispatch refuse it instead. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_compiled_servable(void)
+{
+    bool servable = !bq_recipe_retirement_admitted() ||
+                    bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED));
+    return servable;
 }
 
 /* Returns BQ_OK with *loaded naming `record`'s bytes, or BQ_RECIPE_MISMATCH
