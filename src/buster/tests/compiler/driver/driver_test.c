@@ -6746,7 +6746,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
                 {
                     String8 source = fixture ? S8("tests/basic_c_aarch64_windows_variadic_boundary.c") : S8("tests/basic_c_aarch64_platform_variadic.c");
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), S8(".o"));
+                    // Every combination links and runs its own images. Windows can
+                    // keep an image that just ran open (loader teardown, Defender)
+                    // and refuse its replacement with ERROR_ACCESS_DENIED (#2089),
+                    // so no iteration relinks a path an earlier one executed.
+                    u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * 2 + fixture;
+                    String8 object_suffix = string_format(temporary.arena, S8("-{u32}.o"), iteration);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), object_suffix);
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
@@ -6760,7 +6766,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
                     bool native_target = target == (BUSTER_WINDOWS ? 1u : 0u);
                     if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-run"), S8(".exe"));
+                        String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-run"), executable_suffix);
                         String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                             S8("-o"), executable, source};
                         CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
@@ -6773,7 +6780,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
                         if (host_compiled && !fixture)
                         {
-                            String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-mixed"), S8(".exe"));
+                            String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-mixed"), executable_suffix);
                             String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                                 S8("-o"), mixed, S8("tests/differential/aarch64_platform_variadic.c"), host_object};
                             CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
@@ -6787,7 +6794,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 #if BUSTER_WINDOWS
                         if (boundary_compiled && fixture)
                         {
-                            String8 boundary = buster_test_temporary_path(temporary.arena, S8("buster-windows-variadic-boundary-run"), S8(".exe"));
+                            String8 boundary = buster_test_temporary_path(temporary.arena, S8("buster-windows-variadic-boundary-run"), executable_suffix);
                             String8 boundary_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                                 S8("-DBUSTER_PLATFORM_VA_ABI_PROBE=1"), S8("-o"), boundary, source, boundary_object};
                             CompilerDriverResult boundary_result = compiler_driver_execute_invocation(temporary.arena,
