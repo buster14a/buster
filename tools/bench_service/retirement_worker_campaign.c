@@ -32,9 +32,13 @@
  *
  * Entry point: bq_retirement_worker_campaign_run. Release in reverse on
  * every path: bq_retirement_worker_campaign_release (store abort, campaign
- * poison, ready record, held binaries, plans, streams, arena); a failure is
- * retained as retirement-campaign/campaign-failure.txt in the attempt
- * (bq_retirement_worker_failure_write).
+ * poison, ready record, held binaries, plans, streams, arena); orphans a
+ * killed launch left reparented to the producer's subreaper are killed and
+ * reaped first (bq_retirement_check_sweep), and a failure is retained as
+ * retirement-campaign/campaign-failure.txt in the attempt
+ * (bq_retirement_worker_failure_write). Launches take the producer's
+ * self-pipe as their cancellation descriptor, so tp_process leaves SIGTERM
+ * to the producer (tools/throughput/platform.h).
  *
  * Map: bq_retirement_worker_budget_load (the reviewed budget record, pinned
  * by campaign-budget-sha256=); BqRetirementWorkerUntimedContract and
@@ -1333,6 +1337,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_run(BqRetirementCampai
                                                          (BqRetirementUnitCampaignFailure){0};
     if (result != BQ_OK && failure.reason) result = bq_retirement_worker_campaign_error(&failure, result);
     if (result != BQ_OK) result = bq_retirement_unit_stop_reason(cancellation_fd, deadline_ns, result);
+    /* A launch killed by its group (cancelled, timed out or refused) can
+     * leave orphans reparented to this subreaper; each is killed and reaped
+     * here so the failure stands as retained. One found after a READY
+     * campaign fails it. */
+    bool lingering = false;
+    bool swept = bq_retirement_check_sweep(&lingering);
+    if (result == BQ_OK && (lingering || !swept)) result = BQ_CLEANUP_FAILED;
     /* A campaign that began keeps its failure (driver or producer). */
     if (result != BQ_OK && campaign && campaign->begun &&
         !bq_retirement_worker_failure_write(campaign->directory, result, &failure))

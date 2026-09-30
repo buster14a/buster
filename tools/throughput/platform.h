@@ -375,6 +375,9 @@ typedef struct TpProcessInputs
     /* Optional (>= 3): a readable or hung-up descriptor, such as the
      * worker's SIGTERM self-pipe, kills the child's process group while it
      * runs. The wait then polls a Linux pidfd, so exit is seen at once.
+     * The caller then owns SIGINT and SIGTERM: the launch installs no
+     * handler of its own for them (without one it installs one that kills
+     * the child's group and exits the caller).
      * Zero means none, which keeps positional initializers unchanged. */
     int cancellation;
     /* Optional canonical child layout (retirement_sandbox.h), used when
@@ -455,8 +458,16 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     memset(&cancel, 0, sizeof(cancel));
     cancel.sa_handler = tp_cancel_handler;
     sigemptyset(&cancel.sa_mask);
-    int int_set = sigaction(SIGINT, &cancel, &previous_int) == 0;
-    int term_set = sigaction(SIGTERM, &cancel, &previous_term) == 0;
+    /* A caller that supplies a cancellation descriptor owns SIGINT/SIGTERM
+     * (typically a self-pipe feeding that descriptor): the wait below kills
+     * the child's group when it becomes readable and reports
+     * TP_PROCESS_CANCELLED, so the caller can retain its failure state.
+     * Installing tp_cancel_handler there would _exit the caller instead. */
+    int own_signals = !(inputs && inputs->cancellation >= 3);
+    int int_owned = own_signals && sigaction(SIGINT, &cancel, &previous_int) == 0;
+    int term_owned = own_signals && sigaction(SIGTERM, &cancel, &previous_term) == 0;
+    int int_set = !own_signals || int_owned;
+    int term_set = !own_signals || term_owned;
     memset(&ignore_pipe, 0, sizeof(ignore_pipe));
     ignore_pipe.sa_handler = SIG_IGN;
     sigemptyset(&ignore_pipe.sa_mask);
@@ -843,8 +854,8 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     {
         close(ready[1]);
     }
-    if (int_set) sigaction(SIGINT, &previous_int, NULL);
-    if (term_set) sigaction(SIGTERM, &previous_term, NULL);
+    if (int_owned) sigaction(SIGINT, &previous_int, NULL);
+    if (term_owned) sigaction(SIGTERM, &previous_term, NULL);
     if (pipe_handler_set)
     {
         sigaction(SIGPIPE, &previous_pipe, NULL);

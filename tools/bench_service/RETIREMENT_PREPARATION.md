@@ -1233,8 +1233,9 @@ honesty. The fixture shows both limits:
 ## Worker-unit producer (#881)
 
 `retirement_worker_unit.c` wires the steps above into `bq_worker_unit`
-(PR 1 of 4 of the #881 worker-unit wiring). It is compiled only into the
-service translation unit, after `retirement_unit.c`.
+(PR 1 of 4 of the #881 worker-unit wiring), and `retirement_worker_campaign.c`
+adds the in-unit campaign through lane D's READY (PR 2). Both are compiled
+only into the service translation unit, after `retirement_unit.c`.
 
 The steps cannot run in the recipe executable, because that binary is also
 the pinned matched-build driver. They cannot run in the unit process either:
@@ -1245,8 +1246,11 @@ and forks a producer.
 **Admission.** `bq_worker_unit_pinned` admits the retirement recipe only when
 `bq_retirement_profile_complete` accepts the profile. That requires every
 integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
-reference-policy, nine census, required-checks, row-plan and campaign-budget
-digests) and exactly one status line, which must be exactly
+reference-policy, nine census, required-checks, row-plan, campaign-budget and
+untimed-commands digests), lane D's frozen campaign values
+(`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
+`campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
+status line, which must be exactly
 `status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`). A missing line, a
 second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
 return each refuse. `bq_worker_unit` passes the compiled
@@ -1288,7 +1292,8 @@ mapped status:
 - An exit status between 1 and `BQ_EXPORT_TIMEOUT` is the producer's
   `BqError`.
 - Exit 0 cannot be a success before MEASURED is wired, so it returns
-  `BQ_WORKER_FAILED`.
+  `BQ_WORKER_FAILED`. (`BQ_OK` is never an exit status: the producer's
+  success is `BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED`, below.)
 - A producer killed by a signal, or at the bound, never proved its
   descendants absent, so it returns `BQ_CLEANUP_FAILED`.
 
@@ -1316,21 +1321,96 @@ A failure sends no
 phase message after PREPARING. Its partial evidence stays in the attempt,
 and the ready record is never written.
 
-**Not wired yet.** After the ready record, PR 1 stops with
-`BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED` (`BQ_UNSUPPORTED`). It does not send
-SETTLING or MEASURED, so the job fails closed. The record's digest appears
-only in the producer's stderr diagnostic. Decision 1 of the design moves it
-to a versioned phase packet (PR 4), never through files, so this PR writes no
-`ready-sha256=` failure-bundle line.
+**The campaign (PR 2).** After the ready record,
+`bq_retirement_worker_campaign_run` (`retirement_worker_campaign.c`) builds
+lane D's caller data from pinned and sealed inputs only and sequences lane
+D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
+`code`, `streams` and `scratch` directories):
 
-The remaining work is split across three PRs:
+1. **SETTLING.** `bq_retirement_unit_campaign_begin`, the store-based import
+   (second holds on both binaries), the row plan re-imported, the reviewed
+   budget record (`native-retirement-performance-v1.campaign-budget`, pinned
+   by `campaign-budget-sha256=`), and the untimed batches. Lane B's row plan
+   compiles untimed object rows singly, so the batch commands of the
+   validator's untimed object groups come from a new pinned authority, the
+   untimed-command contract
+   (`native-retirement-performance-v1.untimed-commands`, pinned by
+   `untimed-commands-sha256=`, `BQ-RETIREMENT-UNTIMED-COMMANDS-V1`: one
+   `group=` line per untimed object group and one `input=` line per member).
+   Untimed singletons use their row-plan compile template, whose digest must
+   be the gate's. `bq_retirement_unit_campaign_untimed` runs them.
+2. **MEASURING.** `bq_retirement_unit_campaign_measuring`, the plan's
+   commands, both stages' arena storage (capped by lane D's limits), the
+   store-based bind, then the documents' exact sizes without writing
+   anything (`bq_retirement_unit_campaign_documents_measure`; the post-A/A
+   binding is sized over a fixed-width placeholder admission digest). Lane
+   E's store plan follows (`bq_retirement_worker_store_plan`): the retained
+   declaration (A/A transcript, sample, batch and metrics shard groups,
+   reserved, plus lane D's two constant entries
+   `bq_retirement_unit_handoff_declared`), D's five documents as prior
+   entries at their measured sizes, and the result root's
+   `BQ_WORKER_BUNDLE_CONTROL_ENTRIES` (3) control entries as external
+   entries, so store files plus control entries stay within
+   `BQ_WORKER_BUNDLE_ENTRY_CAP`. The untimed streams are published, then
+   attach, the documents (their written sizes must equal the measured ones,
+   else `BQ_CORRUPT`), A/A, admission, the post-A/A document, freeze, A/B and
+   READY on the post-sample record.
 
-- **PR 2:** the in-unit campaign through READY.
+The store admits one pending file at a time, so every stream is a private
+staged file under `streams/`, named by its store path (zero-padded indexes)
+and published in index order once complete. At handoff,
+`bq_retirement_unit_handoff_retained_matches` requires lane D's retained
+entries to equal the declared ones field for field.
+
+A failure maps lane D's retained stop to the producer's `BqError`
+(cancelled `BQ_WORKER_CANCEL_SIGNAL`, deadline `BQ_WORKER_TIMEOUT`, channel
+`BQ_WORKER_MISMATCH`, launch `BQ_WORKER_FAILED`, refused step
+`BQ_RECIPE_MISMATCH`) and, once the campaign began, is retained as
+`campaign-failure.txt` (`BQ-RETIREMENT-UNIT-CAMPAIGN-FAILURE-V1`, one key per
+line). Orphans of a killed launch are swept first. Launches take the
+producer's self-pipe as their cancellation descriptor, and `tp_process` then
+leaves SIGINT and SIGTERM to its caller instead of installing its own
+`_exit` handler, so a SIGTERM during A/A ends as a retained cancellation.
+Everything is released in reverse and the store is aborted: an unfinished
+campaign never composes.
+
+Production A/A admission has no authority (#426, #1021) and stays compiled
+out (`BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED`); only the preparation
+fixture compiles the driver's fixture admission and supplies a receipt
+stand-in.
+
+**Not composed yet.** A READY campaign stops with
+`BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED` (`BQ_UNSUPPORTED`) and sends no
+MEASURED, so the job fails closed. The ready record's digest appears only in
+the producer's stderr diagnostic. Decision 1 of the design moves it to a
+versioned phase packet (PR 4), never through files, so no `ready-sha256=`
+failure-bundle line is written.
+
+**Blocker: READY is unreachable.** Lane B's runtime template is
+`./{{output}}` (`retirement_row_plan.c`), but lane D's canonical launch
+layout requires `args[0]` to be the binary slot. The first A/A runtime launch
+is therefore refused before any child
+(`TP_RETIREMENT_MEASUREMENT_PLAN_INVALID` at stage 1, after every A/A
+compiler launch). The admission, post-A/A document, freeze, A/B and READY
+steps are wired but no fixture reaches them until lane B's runtime row and
+lane D's layout agree.
+
+The remaining work is split across two PRs:
+
 - **PR 3:** composition, the authority and MEASURED.
 - **PR 4:** the coordinator's phase packet, the replay at finalization and
   the coordinator-side gates.
 
-A/A admission stays compiled out (#426, #1021).
+**Fixture.** `retirement_worker_unit_tests.h` drives real launches through
+stand-in compilers (`retirement_stand_in_compiler.h`, dash scripts the
+matched-build fixture freezes as the census subjects' compilers). Job 82
+reaches the A/A runtime refusal with SETTLING, MEASURING and every stream
+kind present. Job 85 retains a failing untimed launch, job 86 a SIGTERM
+during A/A, and job 87 the deadline expiring during A/A, each with the
+keeper stopped and nothing left running. `bq_prep_test_worker_store_plan`
+covers the declaration, the retained-entry equality and the control-entry
+reservation at the exact store boundary, and `bq_prep_campaign_documents`
+checks sized bytes against written bytes.
 
 ## Capacity derivation
 

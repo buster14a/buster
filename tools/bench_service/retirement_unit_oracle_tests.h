@@ -115,11 +115,13 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_search_prefix(char const* query, char outp
 }
 
 /* The stand-in compilers' prepared outputs in A's candidate snapshot
- * (retirement_stand_in_compiler.h copies them): an x86-64 executable for
- * every singleton compile, a relocatable object for every batch member, the
- * one-input object metrics record every batch writes and a single-input link
- * record. Every census row names tests/unit.c, so one of each serves every
- * row. Sorted by path, as the manifest lists them. */
+ * (retirement_stand_in_compiler.h copies them): the one-input object metrics
+ * record every batch writes, a single-input link record, and the artifact of
+ * every compile, the same x86-64 relocatable object whether a batch member's
+ * (.o) or a single compile's (.out; lane B's plan compiles untimed object rows
+ * singly while the untimed contract batches them, and a row's artifact is
+ * the same either way). Every census row names tests/unit.c, so one of each
+ * serves every row. Sorted by path, as the manifest lists them. */
 #define BQ_PREP_ORACLE_OUTPUTS 4u
 BUSTER_GLOBAL_LOCAL char const* const bq_prep_oracle_output_names[BQ_PREP_ORACLE_OUTPUTS] = {
     "tests/batch.metrics", "tests/unit.c.metrics", "tests/unit.c.o", "tests/unit.c.out"};
@@ -137,11 +139,11 @@ BUSTER_GLOBAL_LOCAL char* bq_prep_test_oracle_output(u32 index, u32* length)
     else if (bytes && index < BQ_PREP_ORACLE_OUTPUTS)
     {
         /* bq_row_test_elf's layout, in memory: one code section. */
-        char const* code = index == 2 ? "stand-in-object-code" : "stand-in-program-code";
+        char const* code = "stand-in-object-code";
         u32 code_length = (u32)strlen(code), table = (64u + code_length + 7u) & ~7u;
         memset(bytes, 0, table + 128u);
         memcpy(bytes, "\177ELF\2\1\1", 7);
-        bytes[16] = index == 2 ? 1 : 2;
+        bytes[16] = 1;
         bytes[18] = 62;
         bytes[20] = 1;
         for (u32 byte = 0; byte < 8; byte += 1) bytes[40 + byte] = (char)((u64)table >> (byte * 8));

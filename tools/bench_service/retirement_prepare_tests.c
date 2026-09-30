@@ -3285,6 +3285,7 @@ int main(void)
     bq_prep_test_raw_census_boundary();
     bq_prep_test_unit_oracle();
     bq_prep_test_unit_campaign();
+    bq_prep_test_worker_store_plan();
     bq_prep_test_worker_unit();
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};

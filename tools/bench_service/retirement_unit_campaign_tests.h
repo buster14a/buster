@@ -30,8 +30,8 @@
  * pinned performance rows.
  * bq_prep_campaign_driver runs the in-unit driver from its SETTLING
  * acknowledgement through the import to the first untimed launch of the
- * imported held binary, which fails because the census fixture's matched
- * builds are text files: the failure's coordinates and process facts are the
+ * imported held binary, which fails because the census fixture's stand-in
+ * compilers refuse its argv: the failure's coordinates and process facts are the
  * retained evidence; it runs in the canonical layout with the roots the
  * import held. The row observation is a test observation of a test plan and
  * the required checks are B's stand-ins, so the gate is not a #509
@@ -1001,9 +1001,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
 /* SETTLING through the first untimed launch: the driver acknowledges
  * SETTLING, the import runs under it and holds the record's pair and A's
  * roots, and the untimed production batch launches the held baseline in the
- * canonical layout and sandbox. The fixture's matched builds are text files,
- * so the child cannot exec (exit 125): the driver stops with the launch's
- * coordinates and process facts and keeps its log. Refusals, each recorded
+ * canonical layout and sandbox. The fixture's matched builds are the
+ * stand-in compilers (retirement_stand_in_compiler.h), which refuse this
+ * test's argv (exit 2): the driver stops with the launch's coordinates and
+ * process facts and keeps its log. Refusals, each recorded
  * as REFUSED without a hang: trial 1 caps the Landlock ABI below
  * BQ_RETIREMENT_SANDBOX_MIN_ABI, so the ruleset is refused before any child;
  * trial 2 runs on a CPU the process may not use, so the child refuses before
@@ -1093,7 +1094,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
                       spent < 2000000000ull &&
                       (trial == 1 ? !failure.launched : failure.launched && failure.launch_error == EINVAL));
     }
-    else if (ok && failure.exit_code != 125)
+    else if (ok && failure.exit_code != 2)
         fprintf(stderr, "RETIREMENT_PREP campaign driver stop %u status %d exit %d signal %d error %d\n", failure.reason,
                 failure.status, failure.exit_code, failure.signal_number, failure.launch_error);
     if (!trial)
@@ -1101,7 +1102,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
                   failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
                   failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING && !failure.stage && !failure.group &&
                   !failure.variant && failure.purpose == TP_RETIREMENT_UNTIMED_PRODUCTION && !failure.sequence &&
-                  failure.exit_code == 125 && !failure.signal_number && !failure.timed_out && !failure.cancelled &&
+                  failure.exit_code == 2 && !failure.signal_number && !failure.timed_out && !failure.cancelled &&
                   failure.at_ns && !driver.launches[0] && !driver.code_count &&
                   fstatat(logs, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, &kept, AT_SYMLINK_NOFOLLOW) == 0 &&
                   kept.st_size == (off_t)failure.log_bytes && tp_retirement_digest(failure.log_sha256));
@@ -1404,8 +1405,23 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
     driver.code_count = untimed.row_count;
     driver.cancellation_fd = quiet[0];
     driver.deadline_ns = bq_phase_clock() + 300000000000ull;
-    driver.step = BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND;
     BqRetirementUnitCampaignDocumentSources sources = {directory, &population, profile};
+    /* The digest-only sizing pass lane E's store plan takes before attach
+     * (at MEASURING, over the campaign's own plan): every document's exact
+     * size, nothing written, and refused once the driver is bound. */
+    bound.plan = plan;
+    u64 measured[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS] = {0}, refused[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS] = {0};
+    driver.step = BQ_RETIREMENT_UNIT_CAMPAIGN_MEASURING;
+    bool sized = live && bq_retirement_unit_campaign_documents_measure(&driver, &bound, &sources, measured);
+    for (u32 index = 0; sized && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+    {
+        struct stat absent;
+        sized = measured[index] && fstatat(directory, bq_retirement_unit_campaign_document_paths[index], &absent,
+                                           AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+    }
+    driver.step = BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND;
+    BQ_PREP_CHECK(sized && !bq_retirement_unit_campaign_documents_measure(&driver, &bound, &sources, refused) &&
+                  !refused[0] && !refused[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA]);
     static char const aa_admission[] = "abababababababababababababababababababababababababababababababab";
     bool written = live && bq_retirement_unit_campaign_documents(&driver, &sources) &&
         driver.documented == BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA;
@@ -1420,6 +1436,15 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
         !strcmp(driver.source_rows_sha256, rows_pin);
     if (!written) fprintf(stderr, "RETIREMENT_PREP the driver did not write its documents (step %u)\n", driver.step);
     BQ_PREP_CHECK(written);
+    /* Sized bytes are written bytes, the post-A/A binding (sized over a
+     * placeholder admission digest) included. */
+    for (u32 index = 0; written && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; index += 1)
+    {
+        if (measured[index] != driver.documents[index].bytes)
+            fprintf(stderr, "RETIREMENT_PREP document %u sized %" PRIu64 " but wrote %" PRIu64 "\n", index,
+                    (uint64_t)measured[index], (uint64_t)driver.documents[index].bytes);
+        BQ_PREP_CHECK(measured[index] == driver.documents[index].bytes);
+    }
     /* The expected context: the census the rows were pinned from, and the
      * values the driver derived (the test rederives every one it can). */
     static char const* const roles[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS] = {"oracle", "execution_plan",
