@@ -27453,7 +27453,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("mutable ? 7 : 9"), 0}, {S8("mutable + 1"), 0},
         {S8("mutable > 0"), 0}, {S8("-mutable"), 0}, {S8("~mutable"), 0},
         {S8("!qualified"), 0}, {S8("qualified"), 0}, {S8("atomic_object"), 0},
-        {S8("*(const volatile int *)&zero"), 0}, {S8("(_Bool)input"), 0},
+        {S8("*(const volatile int *)&zero"), 0}, {S8("*(int const volatile *)&zero"), 0},
+        {S8("*(const volatile _Atomic int *)&zero"), 0}, {S8("(_Bool)input"), 0},
         {S8("!effect()"), 0}, {S8("effect() ? 7 : 9"), 0},
         {S8("0 ? effect() : 7"), 1}, {S8("!zero"), 1}, {S8("!array"), 1},
     };
@@ -27510,6 +27511,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 CParseResult parsed = c_parse(temporary.arena, tokens);
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-scalar-truth.c"), tokens, parsed, target.target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program,
+                    string_format(temporary.arena, S8("constant truth target={S8} form={u32}: {S8}"), triples[target_index], form,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("")));
                 if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
                 {
                     IrModule* module = lowered.program->modules;

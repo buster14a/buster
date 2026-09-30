@@ -24623,6 +24623,17 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         else if (kind != C_TYPE_INVALID && kind < C_TYPE_COUNT)
         {
             type = c_ir_builder_scalar_type(builder, kind);
+            // The primitive reader consumes interspersed qualifiers as well
+            // as type words. Keep them on the type before adding pointers.
+            for (u32 qualifier_index = start; qualifier_index < index;)
+            {
+                u32 attribute_end = c_parse_skip_attributes(builder->preprocess, qualifier_index, index);
+                if (attribute_end == qualifier_index && builder->preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
+                {
+                    c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[qualifier_index]), &qualifiers);
+                }
+                qualifier_index = attribute_end != qualifier_index ? attribute_end : qualifier_index + 1;
+            }
         }
     }
     if (type.value != IR_ID_UNDERLYING_INVALID)
@@ -24670,7 +24681,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 type = qualified_name;
             }
         }
-        while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
+        IrType* prefix_type = ir_type_from_id(&builder->program->types, type);
+        if (qualifiers.is_volatile && prefix_type && !prefix_type->is_volatile && prefix_type->kind != IR_TYPE_FUNCTION)
+        {
+            bool is_atomic = prefix_type->is_atomic;
+            IrTypeId unqualified = is_atomic ? prefix_type->unqualified_type : type;
+            type = c_ir_add_qualified_type(builder->program, unqualified, is_atomic, true);
+        }
+        while (type.value != IR_ID_UNDERLYING_INVALID && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
             type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
             index = c_parse_skip_attributes(builder->preprocess, index + 1, end);
