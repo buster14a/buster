@@ -157,11 +157,25 @@ jobs:
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$EVENT_NAME" == pull_request ]]; then
             # The PR event's base SHA can predate a successful current-main writer.
+            # The queue lands PRs every few minutes, so main can also advance
+            # after the trusted checkout; re-resolve against the new main a
+            # bounded number of times instead of failing the candidate (#1971).
             BASE_SHA=$(git -C trusted rev-parse HEAD)
-            if [[ "$BASE_SHA" != "$current_main" ]]; then
-              echo '::error::Main advanced after trusted PR policy checkout.' >&2
-              exit 1
-            fi
+            attempts=1
+            while [[ "$BASE_SHA" != "$current_main" ]]; do
+              if (( attempts >= 3 )); then
+                echo '::error::Main kept advancing after trusted PR policy checkout.' >&2
+                exit 1
+              fi
+              attempts=$((attempts + 1))
+              echo "::notice::Main advanced from $BASE_SHA to $current_main; re-resolving trusted PR policy."
+              git -C trusted fetch --quiet --no-tags --depth 1 origin "$current_main"
+              git -C trusted checkout --quiet --force --detach "$current_main"
+              git -C candidate fetch --quiet --no-tags origin "$current_main"
+              BASE_SHA=$(git -C trusted rev-parse HEAD)
+              current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+              [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+            done
           fi
           python3 "$tool" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \

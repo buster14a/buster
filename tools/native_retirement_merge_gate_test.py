@@ -694,7 +694,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "args=p.parse_args()\n"
                         "if args.event=='pull_request':\n"
                         " assert args.status_json\n"
-                        " assert args.base==os.environ['TRUSTED_MAIN_SHA']==args.current_main\n"
+                        " assert args.base==os.environ['EXPECTED_MAIN_SHA']==args.current_main\n"
                         " assert args.base!=os.environ['STALE_EVENT_BASE_SHA']\n"
                         "else:\n"
                         " assert args.repository=='buster14a/buster'\n"
@@ -705,17 +705,37 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "import json\nprint(json.dumps({'status':'base-landed'}))\n")
                     # The PR event still names the old main, while a verified
                     # writer has published a head based on the newer checkout.
-                    prefix = (
-                        'git() { if [[ "$*" == *"rev-parse HEAD"* ]]; then '
-                        'printf "%s\\n" "$TRUSTED_MAIN_SHA"; else '
-                        'printf "%s\\trefs/heads/main\\n" "$REMOTE_MAIN_SHA"; fi; }\n'
-                        'gh() { printf "[[]]\\n"; }\n'
-                    )
+                    # The fake git keeps each checkout's HEAD in a state file so
+                    # a re-resolved trusted checkout is observable; with
+                    # MAIN_KEEPS_MOVING every ls-remote reports a new main.
+                    prefix = r'''
+git() {
+    local dir=$2
+    shift 2
+    case "$1" in
+        rev-parse) cat "$RUNNER_TEMP/$dir-head" ;;
+        ls-remote)
+            if [[ -n "${MAIN_KEEPS_MOVING:-}" ]]; then
+                local count=$(( $(cat "$RUNNER_TEMP/ls-remote-count" 2>/dev/null || echo 0) + 1 ))
+                printf "%s\n" "$count" > "$RUNNER_TEMP/ls-remote-count"
+                printf "%040x\trefs/heads/main\n" "$count"
+            else
+                printf "%s\trefs/heads/main\n" "$REMOTE_MAIN_SHA"
+            fi ;;
+        fetch) printf "%s\n" "${@: -1}" >> "$RUNNER_TEMP/$dir-fetches" ;;
+        checkout) printf "%s\n" "${@: -1}" > "$RUNNER_TEMP/$dir-head" ;;
+        *) return 1 ;;
+    esac
+}
+gh() { printf "[[]]\n"; }
+printf "%s\n" "$TRUSTED_MAIN_SHA" > "$RUNNER_TEMP/trusted-head"
+'''
                     env = {**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
                            "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
                            "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
                            "STALE_EVENT_BASE_SHA": "a" * 40,
                            "TRUSTED_REF": "a" * 40, "TRUSTED_MAIN_SHA": "c" * 40,
+                           "EXPECTED_MAIN_SHA": "c" * 40,
                            "REMOTE_MAIN_SHA": "c" * 40, "HEAD_SHA": "b" * 40,
                            "GITHUB_SHA": "b" * 40, "GITHUB_EVENT_PATH": str(root / "event.json"),
                            "CANDIDATE_HEAD": "b" * 40}
@@ -723,13 +743,29 @@ class WorkflowPolicyTests(unittest.TestCase):
                         env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if event == "pull_request":
+                        self.assertFalse((root / "trusted-fetches").exists())
+                        # Main advancing once re-resolves the trusted policy
+                        # and admits against the new main (#1971).
                         moved = subprocess.run(
                             ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
-                            env={**env, "REMOTE_MAIN_SHA": "d" * 40},
+                            env={**env, "REMOTE_MAIN_SHA": "d" * 40,
+                                 "EXPECTED_MAIN_SHA": "d" * 40},
                             capture_output=True, text=True,
                         )
-                        self.assertNotEqual(moved.returncode, 0)
-                        self.assertIn("Main advanced after trusted PR policy checkout", moved.stderr)
+                        self.assertEqual(moved.returncode, 0, moved.stderr)
+                        self.assertIn("re-resolving trusted PR policy", moved.stdout)
+                        self.assertEqual((root / "trusted-head").read_text(), "d" * 40 + "\n")
+                        self.assertEqual((root / "trusted-fetches").read_text(), "d" * 40 + "\n")
+                        self.assertEqual((root / "candidate-fetches").read_text(), "d" * 40 + "\n")
+                        # A main that never settles is still refused, boundedly.
+                        moving = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
+                            env={**env, "MAIN_KEEPS_MOVING": "1"},
+                            capture_output=True, text=True,
+                        )
+                        self.assertNotEqual(moving.returncode, 0)
+                        self.assertIn("Main kept advancing after trusted PR policy checkout",
+                                      moving.stderr)
 
     def test_admission_and_compatibility_are_independent_required_checks(self):
         workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
