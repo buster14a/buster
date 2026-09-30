@@ -2540,8 +2540,11 @@ void codegen_prewarm_for_target(Target target)
     {
         return;
     }
-    // Exact machine emission reads these tables without ever filling them, so
+    // Exact machine emission reads these tables without filling them, so
     // they are initialized here rather than on first use during emission.
+    // The one exception is the closed shape set, registered here and resolved
+    // per shape on its first serial lookup; a caller about to run a gang uses
+    // machine_x86_64_exact_prewarm_all_shapes instead.
     buster_x86_metadata_prewarm();
     machine_x86_64_exact_prewarm();
 }
@@ -16455,8 +16458,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrType* parameter_type = ir_type_from_id(&program->types, parameter_type_id);
                             if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, parameter_type_id))
                             {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                                return result;
+                                bool named_x87 = parameter_type && parameter_type->kind == IR_TYPE_FLOAT && parameter_type->bit_width == 80 &&
+                                                 !parameter_type->is_atomic;
+                                if (!named_x87)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                stack_parts = (stack_parts + 1u) & ~1u;
+                                stack_parts += 2u;
+                                continue;
                             }
                             u32 parts = 1;
                             bool aggregate = codegen_canonical_integer_aggregate_parts(program, parameter_type_id, &parts);

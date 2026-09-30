@@ -1912,6 +1912,38 @@ BUSTER_GLOBAL_LOCAL void ebpf_fe_copy_bytes(EbpfFunctionEmitter* emitter, u32 si
     }
 }
 
+// ORs a bit-field's value into zeroed little-endian aggregate storage one byte
+// at a time, so packed spans and neighbouring fields need no wider access.
+BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_bit_field_insert(EbpfFunctionEmitter* emitter, IrValueId aggregate, u32 offset, IrValueId operand,
+                                                       IrField* field)
+{
+    u32 first = field->bit_offset / 8;
+    u32 end = field->bit_width ? (field->bit_offset + field->bit_width + 7) / 8 : first;
+    for (u32 byte = first; byte < end; byte += 1)
+    {
+        ebpf_fe_emit_value(emitter, EBPF_REG_1, aggregate);
+        ebpf_fe_alu_imm(emitter, EBPF_OP_ADD, EBPF_REG_1, (s32)(offset + byte));
+        ebpf_fe_emit_value(emitter, EBPF_REG_0, operand);
+        if (field->bit_width < 64)
+        {
+            ebpf_fe_mov_imm(emitter, EBPF_REG_2, (s64)((UINT64_C(1) << field->bit_width) - 1));
+            ebpf_fe_alu_reg(emitter, EBPF_OP_AND, EBPF_REG_0, EBPF_REG_2);
+        }
+        u32 bit = byte * 8;
+        if (bit > field->bit_offset)
+        {
+            ebpf_fe_alu_imm(emitter, EBPF_OP_RSH, EBPF_REG_0, (s32)(bit - field->bit_offset));
+        }
+        else if (bit < field->bit_offset)
+        {
+            ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, EBPF_REG_0, (s32)(field->bit_offset - bit));
+        }
+        ebpf_fe_load_memory(emitter, EBPF_REG_2, EBPF_REG_1, 0, 1);
+        ebpf_fe_alu_reg(emitter, EBPF_OP_OR, EBPF_REG_0, EBPF_REG_2);
+        ebpf_fe_store_memory(emitter, EBPF_REG_1, 0, EBPF_REG_0, 1);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_aggregate(EbpfFunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
 {
     bool valid = ebpf_type_is_local_aggregate(type) && type->layout.size <= 512;
@@ -1935,13 +1967,15 @@ BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_aggregate(EbpfFunctionEmitter* emitter, Ir
         valid = operand_type && operand_type->layout.resolved &&
                 emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
                 (ebpf_type_is_scalar(operand_type) || ebpf_type_is_local_aggregate(operand_type));
+        IrField* bit_field = 0;
         if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
         {
             u64 field_index = instruction->immediates[index];
-            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            valid = field_index < type->field_count;
             if (valid)
             {
                 offset = type->fields[field_index].offset;
+                bit_field = type->fields[field_index].is_bit_field ? type->fields + field_index : 0;
             }
         }
         else if (valid)
@@ -1952,8 +1986,20 @@ BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_aggregate(EbpfFunctionEmitter* emitter, Ir
                 offset = (u64)index * operand_type->layout.size;
             }
         }
-        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
-        if (valid)
+        if (valid && bit_field)
+        {
+            valid = ebpf_type_is_integer(operand_type) && bit_field->bit_width <= 64 && offset <= type->layout.size &&
+                    (bit_field->bit_offset + bit_field->bit_width + 7) / 8 <= type->layout.size - offset;
+            if (valid)
+            {
+                ebpf_fe_emit_bit_field_insert(emitter, instruction->result, (u32)offset, operand, bit_field);
+            }
+        }
+        else if (valid)
+        {
+            valid = offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        }
+        if (valid && !bit_field)
         {
             ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->result);
             ebpf_fe_alu_imm(emitter, EBPF_OP_ADD, EBPF_REG_1, (s32)offset);
