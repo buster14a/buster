@@ -3163,7 +3163,9 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     fields_resolved = false;
                     break;
                 }
-                if (member.is_bit_field && (member.bit_width > member_size * 8 || !member_size))
+                // An unresolved width is not a zero width: folding it as one
+                // moved every later member (CMember.bit_width).
+                if (member.is_bit_field && (!member.bit_width_resolved || member.bit_width > member_size * 8 || !member_size))
                 {
                     fields_resolved = false;
                     break;
@@ -11691,6 +11693,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
     bool is_bit_field = false;
     u32 bit_width = 0;
+    bool bit_width_resolved = false;
     u32 bit_width_token_start = 0;
     u32 bit_width_token_count = 0;
     if (declarator < frame->declarator_end && c_token_is_punctuator(&preprocess.tokens[declarator], C_PUNCTUATOR_COLON))
@@ -11716,6 +11719,16 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
             return;
         }
+        // The width is evaluated here, once, and every reader takes the stored
+        // number (see CMember.bit_width). A single-token literal -- decimal,
+        // hex, octal or suffixed -- goes through the preprocessor's integer
+        // evaluator; anything else -- `(3)`, an enumerator, a cast,
+        // `sizeof(T) * 8 - n` -- goes through the typed evaluator in the mode
+        // enumerators use inside a machine step, where a sizeof operand
+        // resolves machineless and cannot disturb this aggregate's in-progress
+        // records. A width it cannot fold stays unresolved: readers refuse to
+        // lay the aggregate out instead of taking the member for a zero-width
+        // one.
         if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             u64 mark = machine->scratch_arena->position;
@@ -11729,8 +11742,24 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 !evaluation.diagnostic_count && width <= UINT32_MAX)
             {
                 bit_width = (u32)width;
+                bit_width_resolved = true;
             }
             arena_set_position(machine->scratch_arena, mark);
+        }
+        else
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            bool previous_members_active = machine->enum_constant_members_active;
+            machine->enum_constant_members_active = true;
+            CIntegerConstant constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result, frame->scope, bit_width_token_start,
+                                                                       bit_width_token_start + bit_width_token_count);
+            machine->enum_constant_members_active = previous_members_active;
+            scratch_end(temporary);
+            if (constant.valid && !constant.is_negative && !constant.magnitude_high && constant.magnitude <= UINT32_MAX)
+            {
+                bit_width = (u32)constant.magnitude;
+                bit_width_resolved = true;
+            }
         }
         is_bit_field = true;
         declarator = frame->declarator_end;
@@ -11826,6 +11855,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_token_count = bit_width_token_count,
         .is_bit_field = is_bit_field,
         .is_packed = member_packed,
+        .bit_width_resolved = bit_width_resolved,
     };
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -24372,8 +24402,10 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
         if (member.is_bit_field)
         {
             u64 mark = machine->scratch_arena->position;
-            CParseConstant width = {.integer = member.bit_width, .valid = true};
-            if (member.bit_width_token_count)
+            // A resolved width is authoritative; only a width the member
+            // step could not fold is evaluated again, to diagnose it.
+            CParseConstant width = {.integer = member.bit_width, .valid = member.bit_width_resolved};
+            if (!member.bit_width_resolved && member.bit_width_token_count)
             {
                 CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, member.bit_width_token_start);
                 width = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
