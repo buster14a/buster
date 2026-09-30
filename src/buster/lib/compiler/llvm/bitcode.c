@@ -1,6 +1,8 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/hash.h>
 
+#include <buster/lib/string.h>
+
 // Direct canonical-IR serialization: llvm_bc_build_types preserves storage
 // layout, llvm_bc_plan_function assigns SSA ids, and llvm_bc_emit_module writes
 // the records. LLVM's bitstream is LSB-first. The writer intentionally emits
@@ -40,6 +42,7 @@ enum
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
     LLVM_BC_MODULE_DATALAYOUT = 3,
+    LLVM_BC_MODULE_SECTIONNAME = 5,
     LLVM_BC_MODULE_GLOBALVAR = 7,
     LLVM_BC_MODULE_FUNCTION = 8,
     LLVM_BC_MODULE_SOURCE_FILENAME = 16,
@@ -4401,8 +4404,47 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
     }
 }
 
+// The one-based MODULE_CODE_SECTIONNAME index of a definition's requested
+// section (issue 1276), appending the name when it is new; zero, the
+// record's "no section", for a declaration or a definition that names none.
+static u32 llvm_bc_section_id(String8* names, u32* name_count, IrSymbol* symbol, bool declaration)
+{
+    u32 result = 0;
+    String8 name = symbol && !declaration ? symbol->section_name : (String8){0};
+    for (u32 index = 0; index < *name_count && name.length && !result; index += 1)
+    {
+        result = string_equal(names[index], name) ? index + 1 : 0;
+    }
+    if (name.length && !result)
+    {
+        names[*name_count] = name;
+        *name_count += 1;
+        result = *name_count;
+    }
+
+    return result;
+}
+
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
+    // Every section name is recorded ahead of the entities that refer to it,
+    // which is the order a reader resolves them in.
+    String8* section_names = arena_allocate(context->arena, String8, context->global_count + context->function_count + 1);
+    u32* section_ids = arena_allocate(context->arena, u32, context->global_count + context->function_count + 1);
+    u32 section_name_count = 0;
+    for (u32 index = 0; index < context->global_count; index += 1)
+    {
+        section_ids[index] = llvm_bc_section_id(section_names, &section_name_count, context->globals[index].symbol, context->globals[index].declaration);
+    }
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        section_ids[context->global_count + index] =
+            llvm_bc_section_id(section_names, &section_name_count, context->functions[index].symbol, context->functions[index].declaration);
+    }
+    for (u32 index = 0; index < section_name_count; index += 1)
+    {
+        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, section_names[index]);
+    }
     for (u32 index = 0; index < context->global_count; index += 1)
     {
         LlvmBcGlobal* global = context->globals + index;
@@ -4430,7 +4472,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             initializer,
             llvm_bc_linkage(global->symbol),
             alignment,
-            0, // section id
+            section_ids[index],
             0, // visibility
             global->is_thread_local ? 1 : 0,
         };
@@ -4446,7 +4488,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             llvm_bc_linkage(function->symbol),
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
-            0, // section id
+            section_ids[context->global_count + index],
             0, // visibility
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);
