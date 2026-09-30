@@ -1965,7 +1965,6 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_constant_operand_query(Arena* arena, 
                                                                     u32* syntax_token, CConstantOperandFact const* operands, u32 operand_count,
                                                                     CType* expression_type, CType* expression_element);
 BUSTER_C_INTERNAL u32 c_parse_update_prefix_operand_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
-BUSTER_C_INTERNAL CTypeKind c_parse_integer_constant_kind(CIntegerConstant constant);
 
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
