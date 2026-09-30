@@ -69,6 +69,7 @@ struct OsEntity
             HANDLE handle;
             ThreadCallback* callback;
             void* argument;
+            bool untracked;
         } thread;
         // Generation-counting barrier over a mutex and a condition variable:
         // pthread_barrier_t does not exist on Apple platforms, so every
@@ -97,6 +98,7 @@ struct OsEntity
             pthread_t handle;
             ThreadCallback* callback;
             void* argument;
+            bool untracked;
         } thread;
         pthread_mutex_t mutex;
 #if !BUSTER_SINGLE_THREADED
