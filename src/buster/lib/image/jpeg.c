@@ -1714,7 +1714,7 @@ void image_jpeg_process(ImageDecodeContext* context)
     }
     if (valid && context->decode_pixels)
     {
-        valid = image_jpeg_compose(&state);
+        image_jpeg_compose(&state);
     }
     if (state.scratch.arena)
     {

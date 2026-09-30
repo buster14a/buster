@@ -497,7 +497,7 @@ u8* image_decode_allocate(ImageDecodeContext* context, Arena* arena, u64 size, u
         bool valid = image_decode_arena_can_allocate(arena, size, alignment);
         if (valid)
         {
-            result = arena_allocate_bytes(arena, size, alignment);
+            result = (u8*)arena_allocate_bytes(arena, size, alignment);
         }
         else
         {

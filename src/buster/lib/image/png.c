@@ -1802,7 +1802,7 @@ void image_png_process(ImageDecodeContext* context)
         }
         if (ready)
         {
-            ready = png_expand_pixels(context, &png, filtered, filtered_size);
+            png_expand_pixels(context, &png, filtered, filtered_size);
         }
     }
     if (scratch.arena)

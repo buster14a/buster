@@ -89,7 +89,9 @@ BUSTER_GLOBAL_LOCAL u8 image_bmp_mask_sample(u32 value, u32 mask)
     u32 shift = image_bmp_mask_shift(mask);
     u32 shifted_mask = mask >> shift;
     u32 sample = (value & mask) >> shift;
-    u8 result = (u8)(((u64)sample * 255u + shifted_mask / 2u) / shifted_mask);
+    // image_bmp_validate_masks rejects zero masks; the guard keeps the
+    // division visibly safe for callers that bypass header validation.
+    u8 result = shifted_mask ? (u8)(((u64)sample * 255u + shifted_mask / 2u) / shifted_mask) : 0;
     return result;
 }
 
