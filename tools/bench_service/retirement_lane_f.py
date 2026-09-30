@@ -100,13 +100,13 @@ PROOF_FLAGS = ("rows_recomputed", "support_checked", "execution_checked", "bundl
 # The integration-owned profile pins the validator's path and SHA-256.
 PROFILE_PATH = "tools/bench_service/profiles/native-retirement-performance-v1.blocked"
 # The producer publishes every evidence file the binding context names as one
-# flat result-root entry (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, #1998): this
-# prefix, then the named path with each "/" written "--", in [A-Za-z0-9._-]
-# and at most BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP bytes.
+# flat result-root entry (bq_retirement_worker_evidence_map, #1998): this
+# prefix, then the named path's segments joined by "--", in [A-Za-z0-9._-]
+# and at most BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP bytes (evidence_name).
 EVIDENCE_PREFIX = "retirement-evidence-"
 EVIDENCE_SEPARATOR = "--"
 EVIDENCE_PATH_CAP = 128
-EVIDENCE_NAME = re.compile(r"[A-Za-z0-9._-]+\Z")
+EVIDENCE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+\Z")
 # The validator's reviewed closure: the entry file, every repository-local
 # module it imports (transitively, including the #508 validator it runs as a
 # subprocess) and the data files those modules read beside themselves
@@ -188,11 +188,22 @@ def phase_is_pending(phase):
 
 
 def evidence_name(path):
-    """The flat result-root name of the evidence the binding names at PATH,
-    or None when PATH is already flat or cannot be written as one."""
-    name = EVIDENCE_PREFIX + path.replace("/", EVIDENCE_SEPARATOR)
-    valid = "/" in path and len(name) <= EVIDENCE_PATH_CAP and EVIDENCE_NAME.fullmatch(name) is not None
-    return name if valid else None
+    """The flat result-root name of the evidence the binding names at PATH:
+    EVIDENCE_PREFIX, then PATH's segments joined by EVIDENCE_SEPARATOR. None
+    when PATH is a single segment (read where it is) or has no unambiguous
+    flat name: an empty, "." or ".." segment, a segment with a byte outside
+    [A-Za-z0-9._-], containing "--" or beginning or ending with "-" (so every
+    "--" in a name is a separator and the mapping is injective), or a name
+    longer than EVIDENCE_PATH_CAP. The producer's
+    bq_retirement_worker_evidence_map is the same rule; its cross-language
+    table (bq_prep_worker_unit_evidence_names) holds them to it."""
+    segments = path.split("/")
+    valid = len(segments) > 1 and all(
+        segment not in (".", "..") and EVIDENCE_SEGMENT.fullmatch(segment) is not None and
+        EVIDENCE_SEPARATOR not in segment and not segment.startswith("-") and not segment.endswith("-")
+        for segment in segments)
+    name = EVIDENCE_PREFIX + EVIDENCE_SEPARATOR.join(segments)
+    return name if valid and len(name) <= EVIDENCE_PATH_CAP else None
 
 
 def record_descriptors(record):
@@ -221,7 +232,9 @@ def evidence_layout(result, record):
     that is absent and has a flat ``evidence_name`` present is read from it
     and laid out at its path for the validator; one with neither is left for
     the validator to refuse. Returns the sorted layout entries and their
-    digest. A path present both ways, two paths with one flat name, or a flat
+    digest. A path present both ways, a flat name claimed twice (evidence_name
+    is injective, so only by its path and by a descriptor naming the flat
+    entry itself, which a producer never writes but a binding can), or a flat
     evidence entry that no descriptor names is refused."""
     root = Path(result)
     names = set(os.listdir(root))

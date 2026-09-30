@@ -53,8 +53,9 @@
  * and the workflow phases (the composer's and lane F's). Each is published
  * under the result-root name lane F's replay maps its binding path to
  * (bq_retirement_worker_evidence_map: BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX
- * and the path with `/` as `--`), which cannot name a store file, composer
- * output, control file or phase receipt; the composer seals it under its
+ * and a nested path's segments joined by `--`, injectively; a single-segment
+ * path is refused), which cannot name a store file, composer output, control
+ * file or phase receipt; the composer seals it under its
  * binding path (TpRetirementComposeRequest.closure_stored). The
  * store plan reserves their exact count and bytes before timing
  * (bq_retirement_worker_evidence_measure); a file whose bytes differ from
@@ -354,16 +355,19 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_binding_check(BqRetirementWorkerBi
 /* ------------------------------------------------------------- the writers */
 
 /* A new read-only file `name` in `directory` holding `length` bytes; its
- * digest when `digest` is given. Never replaces an entry. */
+ * digest when `digest` is given. Never replaces an entry; a file it created
+ * (O_EXCL: its own) and could not complete is removed again. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_file_write(int directory, char const* name, char const* bytes,
     u64 length, char digest[SHA256_HEX_CAPACITY])
 {
     int file = directory >= 0 && length && length <= UINT32_MAX ?
                openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    bool ok = file >= 0 && bq_write_all(file, (u8 const*)bytes, (u32)length) && fchmod(file, 0400) == 0 &&
+    bool created = file >= 0;
+    bool ok = created && bq_write_all(file, (u8 const*)bytes, (u32)length) && fchmod(file, 0400) == 0 &&
               fsync(file) == 0;
-    if (file >= 0 && close(file) != 0) ok = false;
+    if (created && close(file) != 0) ok = false;
     ok = ok && fsync(directory) == 0;
+    if (created && !ok) unlinkat(directory, name, 0);
     if (ok && digest) bq_digest(bytes, (u32)length, (char8*)digest);
     return ok;
 }
@@ -609,25 +613,21 @@ typedef struct BqRetirementWorkerEvidenceList
 } BqRetirementWorkerEvidenceList;
 
 /* The result-root name of a binding path (lane F's replay layout, #1995's
- * rule in tools/bench_service/retirement_lane_f.py, which must match):
- * BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, then the path with each `/` written
- * as `--`. Refused, so the mapping stays unambiguous and names nothing else
- * in the result root: an empty, `.` or `..` segment, a segment containing
- * `--`, a byte outside [A-Za-z0-9._-] and `/`, a mapped name longer than
- * BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP, and a single-segment path that
- * could name a result-root entry (lane F serves a path the result holds
- * as-is): one beginning `retirement-`, `worker-phase-`, `unit-campaign-` or
- * `native-retirement-performance-v1.`. */
+ * evidence_name in tools/bench_service/retirement_lane_f.py, the same rule;
+ * bq_prep_worker_unit_evidence_names holds the two to one table):
+ * BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, then the path's segments joined by
+ * `--`. Refused, so every `--` in a name is a separator (the mapping is
+ * injective) and nothing else in the result root is named: a single-segment
+ * path (lane F reads one where it is, never under a flat name), an empty,
+ * `.` or `..` segment, a segment containing `--` or beginning or ending
+ * with `-`, a byte outside [A-Za-z0-9._-] and `/`, and a mapped name longer
+ * than BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_map(char const* path, u32 length,
     char stored[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1])
 {
-    static char const* const reserved[] = {"retirement-", "worker-phase-", "unit-campaign-",
-                                           "native-retirement-performance-v1."};
     size_t used = strlen(BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX);
-    bool ok = path && length && length <= BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP;
-    bool nested = ok && memchr(path, '/', length) != NULL;
-    for (u32 index = 0; ok && !nested && index < BUSTER_ARRAY_LENGTH(reserved); index += 1)
-        ok = length < strlen(reserved[index]) || memcmp(path, reserved[index], strlen(reserved[index]));
+    bool ok = path && length && length <= BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP &&
+              memchr(path, '/', length) != NULL;
     if (ok) memcpy(stored, BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, used);
     u32 start = 0;
     for (u32 index = 0; ok && index <= length; index += 1)
@@ -636,7 +636,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_map(char const* path, u32
         if (c == '/')
         {
             u32 segment = index - start;
-            ok = segment && !(segment == 1 && path[start] == '.') &&
+            ok = segment && path[start] != '-' && path[index - 1u] != '-' &&
+                 !(segment == 1 && path[start] == '.') &&
                  !(segment == 2 && path[start] == '.' && path[start + 1] == '.');
             start = index + 1u;
         }

@@ -1436,14 +1436,16 @@ stand-in.
    names the record's own paths (`docs/native-retirement-support-v1.tsv`,
    `tools/throughput/retirement_stats.h`, ...), and each file is published
    under the result-root name lane F's replay maps that path to
-   (`bq_retirement_worker_evidence_map`, #1995's rule: `retirement-evidence-`
-   and the path with each `/` written as `--`); the replay moves it back to
-   its path before validating. A path with an empty, `.` or `..` segment, a
-   segment containing `--`, a byte outside `[A-Za-z0-9._-]` and `/`, a mapped
-   name over 128 bytes, or a single segment beginning `retirement-`,
-   `worker-phase-`, `unit-campaign-` or `native-retirement-performance-v1.`
-   (which could name a result entry lane F would serve as-is) refuses, as
-   does a repeated path or mapped name. The composer seals each under its
+   (`bq_retirement_worker_evidence_map`, lane F's `evidence_name` rule:
+   `retirement-evidence-` and the path's segments joined by `--`); the
+   replay moves it back to its path before validating. A single-segment path
+   (lane F reads one where it is), a path with an empty, `.` or `..`
+   segment, a segment containing `--` or beginning or ending with `-` (so
+   the mapping is injective), a byte outside `[A-Za-z0-9._-]` and `/`, or a
+   mapped name over 128 bytes refuses, as does a repeated path or mapped
+   name. `bq_prep_worker_unit_evidence_names` evaluates one table of paths
+   with both the C rule and lane F's `evidence_name` and requires them to
+   agree. The composer seals each under its
    binding path (`TpRetirementComposeRequest.closure_stored` names where it
    is stored). The subjects' binaries are copied
    from the producer's held descriptors (the gate's pair, whose digests the

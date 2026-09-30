@@ -47,7 +47,11 @@ BUSTER_GLOBAL_LOCAL unsigned assertions, failures;
 #define DRIVER_GROUPS 64u
 #define DRIVER_FILES 64u
 #define DRIVER_PRIOR 128u
-#define DRIVER_CLOSURE 4u
+/* The external closure's capacity: one entry over the composer's cap
+ * (CLOSURE_OVER_CAP). */
+#define DRIVER_CLOSURE (TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES + 1u)
+/* One CLOSURE_OVER_CAP name or path, with its terminator. */
+#define DRIVER_CLOSURE_TEXT 32u
 #define DRIVER_PATH 512u
 #define DRIVER_LINE 4096u
 #define DRIVER_WORDS 16u
@@ -1596,13 +1600,36 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusals(void)
  * a symbolic link, a path leaving the root (stored or sealed), a store
  * file's path, a prior entry's path or name (stored or sealed), a workflow
  * phase's name, a repeated entry, a NULL array and more than
- * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES entries. */
+ * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES entries (each distinct and valid
+ * alone, closure_over_cap, so only the count refuses). */
 typedef enum ClosureCase
 {
     CLOSURE_ACCEPTED, CLOSURE_DIGEST, CLOSURE_MISSING, CLOSURE_SYMLINK, CLOSURE_ESCAPE, CLOSURE_STORE_PATH,
     CLOSURE_PRIOR_PATH, CLOSURE_PRIOR_NAME, CLOSURE_PHASE, CLOSURE_REPEATED, CLOSURE_NULL, CLOSURE_OVER_CAP,
     CLOSURE_MAPPED, CLOSURE_STORED_PRIOR, CLOSURE_MAPPED_ESCAPE, CLOSURE_CASES
 } ClosureCase;
+
+/* CLOSURE_OVER_CAP's closure: DRIVER_CLOSURE entries with distinct names,
+ * paths and evidence files beside the store, every one of which the
+ * per-entry checks accept. */
+BUSTER_GLOBAL_LOCAL int closure_over_cap(Fixture* fixture, char const* body, char const* digest)
+{
+    Driver* driver = fixture->driver;
+    char* text = (char*)tp_retirement_compose_allocate(driver->arena, (uint64_t)DRIVER_CLOSURE * 2u *
+                                                                       DRIVER_CLOSURE_TEXT);
+    int valid = text != NULL;
+    for (unsigned i = 0; valid && i < DRIVER_CLOSURE; ++i)
+    {
+        char* name = text + (size_t)i * 2u * DRIVER_CLOSURE_TEXT;
+        char* path = name + DRIVER_CLOSURE_TEXT;
+        snprintf(name, DRIVER_CLOSURE_TEXT, "measurement.evidence_%04u", i);
+        snprintf(path, DRIVER_CLOSURE_TEXT, "retirement-evidence-%04u", i);
+        valid = fixture_write(fixture->store, path, body, strlen(body));
+        driver->closure[i] = (TpRetirementComposeClosure){name, path, strlen(body), digest};
+        driver->closure_stored[i] = NULL;
+    }
+    return valid;
+}
 
 BUSTER_GLOBAL_LOCAL void test_compose_closure_case(ClosureCase which)
 {
@@ -1656,8 +1683,8 @@ BUSTER_GLOBAL_LOCAL void test_compose_closure_case(ClosureCase which)
         }
         driver->closure[0] = driver->closure[1] = entry;
         driver->closure_stored[0] = driver->closure_stored[1] = stored;
-        driver->closure_count = which == CLOSURE_REPEATED ? 2u :
-                                which == CLOSURE_OVER_CAP ? TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES + 1u : 1u;
+        driver->closure_count = which == CLOSURE_REPEATED ? 2u : which == CLOSURE_OVER_CAP ? DRIVER_CLOSURE : 1u;
+        if (which == CLOSURE_OVER_CAP) CHECK(closure_over_cap(&fixture, body, digest));
         driver->closure_null = which == CLOSURE_NULL;
         int composed = driver_compose(driver);
         struct stat info;

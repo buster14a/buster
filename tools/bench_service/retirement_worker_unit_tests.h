@@ -92,7 +92,9 @@
  * (bq_prep_worker_unit_binding_refusals); the 39 evidence files the binding
  * context names published at their digests and sealed, and the publication's
  * refusals of swapped held binaries, a changed or missing installed file and
- * an unprefixed or slashed path (bq_prep_worker_unit_evidence_refusals); a
+ * an unmappable path (bq_prep_worker_unit_evidence_refusals); one table of
+ * binding paths on which the producer's result-root names and lane F's
+ * evidence_name agree (bq_prep_worker_unit_evidence_names); a
  * tampered manifest or bundle digest
  * and a missing context chain (bq_prep_worker_unit_result_refusals). Each
  * section's wall time is printed (bq_prep_test_timing). */
@@ -1618,8 +1620,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
     if (installed_evidence >= 0) close(installed_evidence);
     /* Binding paths without an unambiguous result-root name refuse at
      * listing: a segment containing `--`, an empty or `..` segment, a byte
-     * outside the mapped set, and a single segment that could name a result
-     * entry. (A leading zero never parses: canonical JSON has none.) */
+     * outside the mapped set, and a single segment (lane F reads one where
+     * it is). (A leading zero never parses: canonical JSON has none.) */
     static char const* const finds[] = {"\"measurement/harness\"", "\"measurement/harness\"",
                                         "\"measurement/harness\"", "\"measurement/harness\"",
                                         "\"measurement/harness\""};
@@ -1662,6 +1664,124 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_refusals(BqPrepOracleFixtu
     free(list);
     free(installed);
     if (arena) arena_destroy(arena, 1);
+}
+
+/* (#881 P4) One table of binding paths through both result-root name rules:
+ * the producer's bq_retirement_worker_evidence_map and lane F's
+ * evidence_name (tools/bench_service/retirement_lane_f.py, imported by
+ * python3 over the same paths as arguments, one name or `-` per line). The
+ * two must agree on every row, and every row's outcome is the pinned one:
+ * nested paths map (a `retirement-` or other reserved first segment
+ * included, and `..b` or `.github`, which are not `.` or `..`); a single
+ * segment, reserved or not, has no flat name; nor has an empty, `.` or `..`
+ * segment, an in-segment `--`, a segment beginning or ending with `-` (the
+ * pairs `a-/b`, `a/-b` and `a--b/c`, `a/b--c` would otherwise share one
+ * name), a byte outside [A-Za-z0-9._-] and `/`, or a mapped name over
+ * BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP (128 bytes maps, 129 does not; a
+ * 128- or 129-byte path never fits). */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_evidence_names(void)
+{
+    typedef struct BqPrepWorkerUnitName
+    {
+        char const* path;
+        char const* name;
+    } BqPrepWorkerUnitName;
+    BqPrepWorkerUnitName table[] = {
+        {"docs/native-retirement-performance-contract.md",
+         BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "docs--native-retirement-performance-contract.md"},
+        {"tools/throughput/retirement_stats.h",
+         BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "tools--throughput--retirement_stats.h"},
+        {"a-b/c-d", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "a-b--c-d"},
+        {"a/..b", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "a--..b"},
+        {".github/x", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX ".github--x"},
+        {"retirement-x/y", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "retirement-x--y"},
+        {"worker-phase-x/y", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX "worker-phase-x--y"},
+        {"contract.md", NULL},
+        {"retirement-oracle.json", NULL},
+        {"retirement-evidence-docs--contract.md", NULL},
+        {"worker-phase-ready", NULL},
+        {"unit-campaign-x", NULL},
+        {"native-retirement-performance-v1.bundle", NULL},
+        {"", NULL},
+        {"/", NULL},
+        {"/a", NULL},
+        {"a/", NULL},
+        {"a//b", NULL},
+        {"./a", NULL},
+        {"a/./b", NULL},
+        {"a/../b", NULL},
+        {"../a", NULL},
+        {"a/.", NULL},
+        {"a--b/c", NULL},
+        {"a/b--c", NULL},
+        {"a/b---c", NULL},
+        {"a-/b", NULL},
+        {"a/-b", NULL},
+        {"-a/b", NULL},
+        {"a/b-", NULL},
+        {"a/-", NULL},
+        {"a/b$c", NULL},
+        {"a/b c", NULL},
+        {"a\\b/c", NULL},
+        {"a/\xc3\xa9", NULL},
+        /* The long rows, generated below: "a/" then `b` bytes, for paths
+         * of 107 and 108 bytes (mapped names of 128 and 129) and of 128 and
+         * 129 bytes. */
+        {NULL, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL},
+    };
+    enum { BQ_PREP_WORKER_UNIT_NAMES = BUSTER_ARRAY_LENGTH(table) };
+    static u32 const long_paths[] = {107u, 108u, 128u, 129u};
+    char paths[BUSTER_ARRAY_LENGTH(long_paths)][BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 2];
+    char fitting[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1];
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(long_paths); row += 1)
+    {
+        memset(paths[row], 'b', long_paths[row]);
+        memcpy(paths[row], "a/", 2);
+        paths[row][long_paths[row]] = 0;
+        table[BQ_PREP_WORKER_UNIT_NAMES - BUSTER_ARRAY_LENGTH(long_paths) + row].path = paths[row];
+    }
+    /* Only the 107-byte path's name (the prefix, "a--", 105 `b`) fits. */
+    int fitted = snprintf(fitting, sizeof(fitting), "%sa--%s", BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, paths[0] + 2);
+    BQ_PREP_CHECK(fitted == (int)BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP);
+    table[BQ_PREP_WORKER_UNIT_NAMES - BUSTER_ARRAY_LENGTH(long_paths)].name = fitting;
+    static char script[] =
+        "import sys\n"
+        "sys.path.insert(0, 'tools/bench_service')\n"
+        "import retirement_lane_f as lane_f\n"
+        "with open(sys.argv[1], 'x') as out:\n"
+        "    for path in sys.argv[2:]:\n"
+        "        out.write((lane_f.evidence_name(path) or '-') + '\\n')\n";
+    char directory[] = "/tmp/bq-worker-unit-names-XXXXXX", output[64];
+    bool made = mkdtemp(directory) != NULL;
+    int named = made ? snprintf(output, sizeof(output), "%s/names", directory) : -1;
+    char* argv[6 + BQ_PREP_WORKER_UNIT_NAMES + 1] = {"python3", "-B", "-W", "error", "-c", script, output};
+    for (u32 index = 0; index < BQ_PREP_WORKER_UNIT_NAMES; index += 1)
+        argv[7u + index] = (char*)table[index].path;
+    bool ran = made && named > 0 && (size_t)named < sizeof(output) && bq_prep_test_run(argv);
+    int opened = ran ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    u32 length = 0;
+    char* lane_f = opened >= 0 ? bq_prep_worker_unit_slurp(opened, "names", &length) : NULL;
+    if (opened >= 0) close(opened);
+    BQ_PREP_CHECK(lane_f != NULL);
+    char* line = lane_f;
+    for (u32 index = 0; lane_f && index < BQ_PREP_WORKER_UNIT_NAMES; index += 1)
+    {
+        char stored[BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP + 1] = {0};
+        bool mapped = bq_retirement_worker_evidence_map(table[index].path, (u32)strlen(table[index].path), stored);
+        char* end = line ? strchr(line, '\n') : NULL;
+        if (end) *end = 0;
+        bool pinned = table[index].name ? mapped && !strcmp(stored, table[index].name) : !mapped;
+        bool agreed = end && (mapped ? !strcmp(line, stored) : !strcmp(line, "-"));
+        if (!pinned || !agreed)
+            fprintf(stderr, "evidence name row %u (%s): C %s, lane F %s\n", index, table[index].path,
+                    mapped ? stored : "-", end ? line : "(missing)");
+        BQ_PREP_CHECK(pinned && agreed);
+        line = end ? end + 1 : NULL;
+    }
+    BQ_PREP_CHECK(line && *line == 0);
+    free(lane_f);
+    if (named > 0 && (size_t)named < sizeof(output)) unlink(output);
+    if (made) rmdir(directory);
 }
 
 /* The digest with its first hex digit changed. */
@@ -2502,6 +2622,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                 bq_prep_test_timing("job-82-evidence-refusals");
             }
             BQ_PREP_CHECK(bq_retirement_unit_replayed_release(&replayed));
+            bq_prep_worker_unit_evidence_names();
+            bq_prep_test_timing("job-82-evidence-names");
             bq_prep_worker_unit_result_refusals(fixture, attempt, composed);
             bq_prep_test_timing("job-82-result-refusals");
             /* #881 PR 4: the coordinator's side over the digests the channel

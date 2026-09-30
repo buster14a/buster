@@ -15,8 +15,8 @@ descriptor. It then publishes every file the context names into the result
 root (bq_retirement_worker_evidence_publish): the subjects' binaries from its
 held descriptors, everything else from the installed evidence directory
 (``native-retirement-performance-v1.evidence`` under recipes/), each under the
-result-root name lane F's replay maps its binding path to (``result_name``:
-``retirement-evidence-`` and the path with each ``/`` as ``--``) and only at
+result-root name lane F's replay maps its binding path to (``result_name``,
+lane F's ``evidence_name``) and only at
 the size and digest the context binds. The context names the record's own
 paths (``docs/native-retirement-support-v1.tsv``,
 ``tools/throughput/retirement_stats.h``, ...), which the replay lays out
@@ -54,13 +54,13 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-import re
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import native_retirement_performance_binding_test as binding_tests  # noqa: E402
+import retirement_lane_f as lane_f  # noqa: E402
 
 binding = binding_tests.binding
 HEADER = "BQ-RETIREMENT-BINDING-CONTEXT-V1"
@@ -68,9 +68,6 @@ SECTIONS = ("contract", "execution", "measurement", "population", "producer", "p
             "requested_work", "rules", "subjects", "support")
 ADMISSION_PATH = "retirement-aa-admission.json"
 PENDING = "0" * 64
-# Every evidence file's flat result-root name starts with this
-# (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX).
-PREFIX = "retirement-evidence-"
 CONTRACT_PATH = ROOT / "docs" / "native-retirement-performance-contract.md"
 STATISTICS_PATH = "tools/throughput/retirement_stats.h"
 # The installed census file of each pinned #508 support role.
@@ -114,25 +111,14 @@ def git_blob(commit, path):
                           capture_output=True).stdout
 
 
-RESERVED = ("retirement-", "worker-phase-", "unit-campaign-", "native-retirement-performance-v1.")
-SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
 def result_name(path):
-    """The result-root name a binding path is published under (lane F's
-    replay layout; #1995's rule in tools/bench_service/retirement_lane_f.py,
-    and bq_retirement_worker_evidence_map, must match): PREFIX, then the path
-    with each `/` written as `--`. Refused like the producer refuses it: an
-    empty, `.` or `..` segment, a segment containing `--` or a byte outside
-    [A-Za-z0-9._-], a single-segment path that could name a result-root
-    entry, and a name longer than 128 bytes."""
-    segments = path.split("/")
-    if any(segment in ("", ".", "..") or "--" in segment or not SEGMENT_RE.fullmatch(segment)
-           for segment in segments) or (len(segments) == 1 and path.startswith(RESERVED)):
+    """The result-root name a binding path is published under: lane F's
+    evidence_name (tools/bench_service/retirement_lane_f.py), the rule the
+    producer's bq_retirement_worker_evidence_map applies too. A path without
+    one (a single segment, or one lane F could not map back) is refused."""
+    name = lane_f.evidence_name(path)
+    if name is None:
         raise ValueError(f"binding path {path!r} has no unambiguous result-root name")
-    name = PREFIX + "--".join(segments)
-    if len(name) > 128 or len(path) > 128:
-        raise ValueError(f"binding path {path!r} is too long")
     return name
 
 

@@ -95,6 +95,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import native_retirement_performance_binding_test as binding_tests  # noqa: E402
 import native_retirement_performance_identity_test as identity_tests  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "bench_service"))
+import retirement_lane_f as lane_f  # noqa: E402
 
 binding = binding_tests.binding
 COMPOSE_BINARY = None
@@ -903,18 +905,17 @@ WORKER_UNIT_CENSUS_ROLES = ("support_declaration", "manifest", "inputs", "rows",
 # Every evidence file the binding context names is published under a
 # result-root name with this prefix (BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX,
 # _lane_f_name); the fixture's context names all 39 of the #511 record.
-WORKER_UNIT_EVIDENCE_PREFIX = "retirement-evidence-"
+WORKER_UNIT_EVIDENCE_PREFIX = lane_f.EVIDENCE_PREFIX
 WORKER_UNIT_EVIDENCE = 39
 WORKER_UNIT_ADMISSION = "retirement-aa-admission.json"
 
 
 def _lane_f_name(path):
     """The result-root entry holding binding path `path` when the result has
-    no such path: lane F's replay layout, #1995's rule in
-    tools/bench_service/retirement_lane_f.py (the producer's
-    bq_retirement_worker_evidence_map must match): the prefix, then the path
-    with each `/` written as `--`. The one place these tests apply it."""
-    return WORKER_UNIT_EVIDENCE_PREFIX + path.replace("/", "--")
+    no such path: lane F's own evidence_name (retirement_lane_f.py, the rule
+    the producer's bq_retirement_worker_evidence_map applies too), None for a
+    path lane F reads where it is. The one place these tests apply it."""
+    return lane_f.evidence_name(path)
 
 
 def _lane_f_layout(root, record):
@@ -923,7 +924,8 @@ def _lane_f_layout(root, record):
     artifacts = binding._all_artifacts(record) + [("contract.source", record["contract"]["source"])]
     for _name, artifact in artifacts:
         target = root.joinpath(*PurePosixPath(artifact["path"]).parts)
-        source = root / _lane_f_name(artifact["path"])
+        flat = _lane_f_name(artifact["path"])
+        source = root / flat if flat else target
         if not target.exists() and source.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             source.rename(target)
@@ -1163,12 +1165,24 @@ def _gap_metrics_reuse(frame, context):
     return frame["metrics_artifact"]["sha256"] == context["stand_in_metrics_sha256"]
 
 
+# The header fields _gap_header's copy of the validator's condition was
+# reviewed against (binding.CC_METRICS_HEADER_FIELDS, written out here so a
+# new validator field ends the waiver instead of being waived unchecked).
+WORKER_UNIT_HEADER_FIELDS = frozenset((
+    "version", "schema", "inputs", "records", "ok", "rejected", "failed", "not_run", "prebuilt", "error",
+    "exit_status", "action", "target", "allocator", "compile_jobs", "compilation_workers", "intervals",
+    "keep_going", "function_sizes", "wall_ns", "peak_rss_bytes"))
+
+
 def _gap_header(frame, _context):
     """That record names allocator=none and target=x86_64-linux whatever the
     batch: timed groups of the three other allocators, and the untimed
     contract's cross-target (aarch64-unknown-linux-gnu) object groups, fail
-    the header check. Waived only when every other header field matches."""
+    the header check. Waived only when the header has exactly the reviewed
+    fields (WORKER_UNIT_HEADER_FIELDS) and every other one matches."""
     header = dict(frame["header"])
+    if set(header) != WORKER_UNIT_HEADER_FIELDS:
+        return False
     configuration = frame["contract"]["configuration"]
     expected_target = binding.TARGET_METRICS_NAMES[frame["target"]]
     if (header["allocator"], header["target"]) == (configuration["allocator"], expected_target):
@@ -1302,7 +1316,7 @@ class WorkerUnitEvidenceTests(unittest.TestCase):
         result = self.export / "result"
         return {artifact["path"]: name for name, artifact in binding._all_artifacts(self.record) + [
                 ("contract.source", self.record["contract"]["source"])]
-                if (result / _lane_f_name(artifact["path"])).is_file()}
+                if _lane_f_name(artifact["path"]) and (result / _lane_f_name(artifact["path"])).is_file()}
 
     def final(self):
         """Lane F's stub over the copy: both late phases, then the final
@@ -1449,11 +1463,14 @@ class WorkerUnitWaiverTests(unittest.TestCase):
         context = {"stand_in_metrics_sha256": stand_in, "composed_replay": b"stand-in\n"}
         self.assertTrue(_gap_metrics_reuse({"metrics_artifact": {"sha256": stand_in}}, context))
         self.assertFalse(_gap_metrics_reuse({"metrics_artifact": {"sha256": "b" * 64}}, context))
-        header = {"schema": binding.CC_METRICS_SCHEMA, "inputs": 1, "records": 1, "ok": 1, "rejected": 0,
-                  "failed": 0, "not_run": 0, "prebuilt": 0, "error": "driver.none", "exit_status": 0,
+        header = {"version": 1, "schema": binding.CC_METRICS_SCHEMA, "inputs": 1, "records": 1, "ok": 1,
+                  "rejected": 0, "failed": 0, "not_run": 0, "prebuilt": 0, "error": "driver.none", "exit_status": 0,
                   "action": "object", "target": "x86_64-linux", "allocator": "none", "compile_jobs": 1,
                   "compilation_workers": 1, "intervals": "serial", "keep_going": 1, "function_sizes": 0,
-                  "wall_ns": 1001}
+                  "wall_ns": 1001, "peak_rss_bytes": 4096}
+        # The reviewed fields are the validator's today.
+        self.assertEqual(WORKER_UNIT_HEADER_FIELDS, frozenset(binding.CC_METRICS_HEADER_FIELDS))
+        self.assertEqual(set(header), WORKER_UNIT_HEADER_FIELDS)
 
         def frame(allocator="fast", target="aarch64-unknown-linux-gnu", **changed):
             return {"header": dict(header, **changed), "contract": {"configuration": {"allocator": allocator}},
@@ -1465,8 +1482,11 @@ class WorkerUnitWaiverTests(unittest.TestCase):
         self.assertTrue(_gap_header(frame(target=binding.NATIVE_TIMED_TARGET), context))
         self.assertFalse(_gap_header(frame(allocator="none", target=binding.NATIVE_TIMED_TARGET), context))
         for field, value in (("inputs", 2), ("exit_status", 1), ("keep_going", 0), ("wall_ns", 3000),
-                             ("error", "driver.io"), ("intervals", "parallel")):
+                             ("error", "driver.io"), ("intervals", "parallel"), ("new_field", 0)):
             self.assertFalse(_gap_header(frame(**{field: value}), context), field)
+        missing = frame()
+        del missing["header"]["peak_rss_bytes"]
+        self.assertFalse(_gap_header(missing, context))
         subjects = {"baseline": {"binary": {"sha256": "c" * 64}}}
         runtime = {"value": {"kind": "runtime", "executable_sha256": "c" * 64, "output_sha256": "d" * 64,
                              "command_sha256": "e" * 64},
@@ -1497,7 +1517,6 @@ class LaneFWriterEndToEndTests(unittest.TestCase):
     @staticmethod
     def _writer(record, evidence, composed, calls):
         import retirement_export_replay as replay
-        import retirement_lane_f as lane_f
         pending = dict(replay.PENDING_DESCRIPTOR)
         composed_record = json.loads(json.dumps(record))
         composed_record["workflow"]["phases"]["sealed_result"] = dict(pending, path=composed["sealed"]["path"])
