@@ -236,7 +236,7 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -245,6 +245,17 @@ describes unwinding rather than bytes. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+Integer data expressions retain `.` as the current field's section-relative
+address, including each separate operand in a comma-separated directive.
+`.long symbol - .` and `.quad symbol - .` use ELF PC32/PC64 on x86-64 and
+PREL32/PREL64 on AArch64; `.quad .` and `label + constant` retain absolute
+address relocations. Quoted names printed by `-S` are accepted. Differences
+between defined, non-weak terms in the same section fold after forward labels
+are known. Cross-section symbol differences, negative undefined addresses,
+multiple positive symbolic terms, and symbolic fields narrower than four
+bytes are diagnosed with the directive and source line. Weak definitions
+retain relocations because a linker can replace their addresses.
 
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary

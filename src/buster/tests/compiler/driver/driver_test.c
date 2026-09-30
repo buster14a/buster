@@ -12969,6 +12969,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
     return result;
 }
 
+// Read ELF records directly, without object_read. The independent regeneration
+// is: as table.s -o table.o; llvm-mc -triple=aarch64-linux-gnu -filetype=obj
+// table.s -o arm.o; readelf -rW table.o arm.o. The expected rows are
+// (offset,type,symbol,addend): (0,PC32/PREL32,ext_target,0),
+// (8,ABS64,.data,8), (16,PC64/PREL64,ext_target,0).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_location_elf(Arena* arena, ByteSlice image, bool aarch64)
+{
+    ByteSlice relocations = compiler_driver_test_elf_section(image, S8(".rela.data"));
+    ByteSlice symbols = compiler_driver_test_elf_section(image, S8(".symtab"));
+    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".strtab"));
+    ByteSlice section_strings = compiler_driver_test_elf_section(image, S8(".shstrtab"));
+    bool valid = image.length >= 64 && relocations.length == 72 && strings.length && section_strings.length;
+    u64 section_table = 0;
+    u16 section_count = 0;
+    if (valid)
+    {
+        memcpy(&section_table, image.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, image.pointer + 60, sizeof(section_count));
+        valid = section_table <= image.length && (u64)section_count * 64 <= image.length - section_table;
+    }
+    for (u32 index = 0; index < 3 && valid; index += 1)
+    {
+        u64 offset;
+        u64 information;
+        s64 addend;
+        memcpy(&offset, relocations.pointer + (u64)index * 24, sizeof(offset));
+        memcpy(&information, relocations.pointer + (u64)index * 24 + 8, sizeof(information));
+        memcpy(&addend, relocations.pointer + (u64)index * 24 + 16, sizeof(addend));
+        u32 expected_type = index == 0 ? (aarch64 ? 261 : 2) : index == 1 ? (aarch64 ? 257 : 1) : (aarch64 ? 260 : 24);
+        u64 symbol = information >> 32;
+        valid = offset == (u64)index * 8 && (u32)information == expected_type && addend == (index == 1 ? 8 : 0) &&
+                symbol < symbols.length / 24;
+        if (valid)
+        {
+            u32 name;
+            u16 section;
+            u64 value;
+            memcpy(&name, symbols.pointer + symbol * 24, sizeof(name));
+            memcpy(&section, symbols.pointer + symbol * 24 + 6, sizeof(section));
+            memcpy(&value, symbols.pointer + symbol * 24 + 8, sizeof(value));
+            ByteSlice names = strings;
+            if (index == 1)
+            {
+                valid = section && section < section_count && !value;
+                if (valid)
+                {
+                    memcpy(&name, image.pointer + section_table + (u64)section * 64, sizeof(name));
+                    names = section_strings;
+                }
+            }
+            String8 expected = index == 1 ? S8(".data") : S8("ext_target");
+            valid = valid && name <= names.length && expected.length < names.length - name &&
+                    !memcmp(names.pointer + name, expected.pointer, expected.length) && !names.pointer[name + expected.length];
+        }
+    }
+    BUSTER_UNUSED(arena);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_location_counter(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 source = S8(".data\n.globl rel_table\nrel_table:\n.long ext_target - .\n.long 0\n"
+                        ".globl self_address\nself_address:\n.quad .\n.globl rel64\nrel64:\n.quad ext_target - .\n");
+    String8 input = buster_test_temporary_path(arena, S8("buster-location"), S8(".s"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux")};
+    for (u32 target = 0; written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 output = buster_test_temporary_path(arena, S8("buster-location-object"), S8(".o"));
+        String8 command[] = {S8("-c"), S8("-target"), targets[target], input, S8("-o"), output};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, compiler_driver_test_location_elf(arena, image, target != 0));
+            ObjectFile read = object_read(arena, image, compiled.object.target);
+            BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.relocation_count == 3);
+            // This exercises the printer's quoted symbol minus-dot spelling.
+            String8 printed = object_print_assembly(arena, &compiled.object);
+            String8 roundtrip = buster_test_temporary_path(arena, S8("buster-location-printer"), S8(".s"));
+            bool printed_ok = file_write(roundtrip, BUSTER_SLICE_TO_BYTE_SLICE(printed));
+            BUSTER_TEST(arguments, printed_ok);
+            if (printed_ok)
+            {
+                command[3] = roundtrip;
+                CompilerDriverResult assembled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, assembled.diagnostic);
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_location_elf(arena, file_read(arena, output, (FileReadOptions){0}), target != 0));
+                }
+            }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+            if (!target)
+            {
+                String8 main_source = S8("int ext_target = 5;\nextern int rel_table[2];\nextern unsigned long long self_address;\n"
+                                         "extern long long rel64;\nint main(void) {\n"
+                                         "return (char *)&rel_table[0] + rel_table[0] != (char *)&ext_target ||\n"
+                                         "self_address != (unsigned long long)&self_address ||\n"
+                                         "(char *)&rel64 + rel64 != (char *)&ext_target;\n}\n");
+                String8 main_input = buster_test_temporary_path(arena, S8("buster-location-main"), S8(".c"));
+                String8 executable = buster_test_temporary_path(arena, S8("buster-location-program"), S8(""));
+                bool main_written = file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(main_source));
+                BUSTER_TEST(arguments, main_written);
+                if (main_written)
+                {
+                    String8 link[] = {main_input, output, S8("-o"), executable};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable));
+                    }
+                    String8 host[8];
+                    u32 count = 0;
+                    host[count++] = S8(BUSTER_HOST_C_COMPILER);
+                    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) host[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                    host[count++] = S8("-no-pie");
+                    host[count++] = main_input;
+                    host[count++] = output;
+                    host[count++] = S8("-o");
+                    host[count++] = executable;
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = host, .length = count}, (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    bool host_linked = spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, host_linked);
+                    if (host_linked) BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable));
+                }
+            }
+#endif
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13032,6 +13174,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_atomic_pair_contention);
 #endif
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_location_counter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);

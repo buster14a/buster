@@ -3529,17 +3529,21 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
 // rather than written without its relocation.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
 {
+    bool valid = true;
     switch (kind)
     {
-    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; return true;
-    default: break;
+    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
+    case ASSEMBLY_RELOCATION_X86_PC64: *object_kind = OBJECT_RELOCATION_X86_64_PC64; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL32: *object_kind = OBJECT_RELOCATION_AARCH64_PREL32; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL64: *object_kind = OBJECT_RELOCATION_AARCH64_PREL64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; break;
+    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
+    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
+    default: valid = false; break;
     }
-    return false;
+    return valid;
 }
 
 // One assembly input, from source text to the same three outputs a C input
