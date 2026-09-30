@@ -3530,6 +3530,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
     switch (kind)
     {
     case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; return true;
+    case ASSEMBLY_RELOCATION_X86_PC64: *object_kind = OBJECT_RELOCATION_X86_64_PC64; return true;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL32: *object_kind = OBJECT_RELOCATION_AARCH64_PREL32; return true;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL64: *object_kind = OBJECT_RELOCATION_AARCH64_PREL64; return true;
     case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; return true;
     case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; return true;
     case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; return true;

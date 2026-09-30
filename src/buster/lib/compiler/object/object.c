@@ -1380,7 +1380,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    return (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -1711,6 +1711,12 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\t.rva "));
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8(" - .\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_PC32:
         case OBJECT_RELOCATION_X86_64_PLT32:
@@ -5592,6 +5598,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // facts pick the instruction the linker may write
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
+                                   : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
@@ -5612,6 +5619,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         {
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
+                                   : relocation_type == 260                           ? OBJECT_RELOCATION_AARCH64_PREL64
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                                    : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
                                    : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
@@ -5631,7 +5639,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        relocation_width = (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
@@ -5727,7 +5735,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -10805,6 +10813,8 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     {
         case OBJECT_RELOCATION_ABSOLUTE32:
         case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: *width = 4; return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
         case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
         default: *width = 4; return true;
     }
@@ -11742,7 +11752,8 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 {
     if (arch == CPU_ARCH_X86_64)
     {
-        return kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
+        return kind == OBJECT_RELOCATION_X86_64_PC64            ? 24
+               : kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
                : kind == OBJECT_RELOCATION_X86_64_PLT32         ? 4
                : kind == OBJECT_RELOCATION_X86_64_GOTPCREL      ? 9
                : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
@@ -11758,6 +11769,7 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     }
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
+           : kind == OBJECT_RELOCATION_AARCH64_PREL64               ? 260
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
            : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
@@ -14232,7 +14244,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 relocation_size = (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64) ? 8 : 4;
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
@@ -14450,3 +14462,4 @@ void object_release_executable(ObjectExecutable executable)
         os_unreserve(executable.address, executable.allocation_size);
     }
 }
+
