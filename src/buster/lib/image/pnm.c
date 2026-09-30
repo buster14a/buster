@@ -6,6 +6,7 @@
 //
 // Layout map:
 //   ImagePnmScanner, image_pnm_token       bounded ASCII tokens/comments
+//   image_pnm_bit                          plain PBM single-character samples
 //   image_pnm_parse_pam                    P7 key/value header grammar
 //   image_pnm_parse_header                 P1--P7 source metadata
 //   image_pnm_read_ascii                   ASCII raster validation/expansion
@@ -125,13 +126,9 @@ BUSTER_GLOBAL_LOCAL ByteSlice image_pnm_token(ImagePnmScanner* scanner)
             }
             else
             {
-                u8 separator = scanner->context->encoded.pointer[scanner->position];
+                // Exactly one byte: after a binary header's final token the
+                // next byte may be raster data, even when this one is '\r'.
                 valid = image_pnm_advance(scanner, 1);
-                if (valid && separator == '\r' && scanner->position < scanner->context->encoded.length &&
-                    scanner->context->encoded.pointer[scanner->position] == '\n')
-                {
-                    valid = image_pnm_advance(scanner, 1);
-                }
             }
         }
     }
@@ -177,6 +174,34 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_token_u32(ImagePnmScanner* scanner, u32* valu
     if (!result && scanner->context->status == IMAGE_DECODE_SUCCESS)
     {
         image_decode_error(scanner->context, token.length ? IMAGE_DECODE_MALFORMED : IMAGE_DECODE_TRUNCATED, offset);
+    }
+    return result;
+}
+
+// Plain PBM samples are single '0'/'1' characters; whitespace between them is
+// optional, so "0110" is four pixels rather than one integer token.
+BUSTER_GLOBAL_LOCAL bool image_pnm_bit(ImagePnmScanner* scanner, u32* value)
+{
+    bool result = image_pnm_skip_space_and_comments(scanner);
+    u64 offset = scanner->position;
+    if (result && offset >= scanner->context->encoded.length)
+    {
+        image_decode_error(scanner->context, IMAGE_DECODE_TRUNCATED, offset);
+        result = false;
+    }
+    u8 byte = result ? scanner->context->encoded.pointer[offset] : 0;
+    if (result && byte != '0' && byte != '1')
+    {
+        image_decode_error(scanner->context, IMAGE_DECODE_MALFORMED, offset);
+        result = false;
+    }
+    if (result)
+    {
+        result = image_pnm_advance(scanner, 1);
+    }
+    if (result)
+    {
+        *value = (u32)(byte - '0');
     }
     return result;
 }
@@ -512,7 +537,7 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_read_ascii(ImageDecodeContext* context, Image
         u32 samples[4] = {0};
         for (u32 channel = 0; result && channel < header->channels; channel += 1)
         {
-            result = image_pnm_token_u32(&scanner, samples + channel);
+            result = header->pbm ? image_pnm_bit(&scanner, samples + channel) : image_pnm_token_u32(&scanner, samples + channel);
             if (result && samples[channel] > header->max_value)
             {
                 image_decode_error(context, IMAGE_DECODE_MALFORMED, scanner.position);

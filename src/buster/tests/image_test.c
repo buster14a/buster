@@ -3054,6 +3054,36 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, p6_trailing_junk_bytes, pnm_options,
                                                                    IMAGE_DECODE_MALFORMED));
 
+    // Plain PBM samples need no separators: "010" is three pixels.
+    u8 p1_packed[] = "P1\n3 1\n010\n";
+    ByteSlice p1_packed_bytes = {.pointer = p1_packed, .length = sizeof(p1_packed) - 1u};
+    u64 p1_packed_position = arguments->arena->position;
+    ImageDecodeResult p1_packed_decode = image_decode(arguments->arena, p1_packed_bytes, pnm_options);
+    u8 const p1_packed_expected[] = {255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255};
+    BUSTER_TEST(arguments, p1_packed_decode.status == IMAGE_DECODE_SUCCESS &&
+                           p1_packed_decode.image.pixels.length == sizeof(p1_packed_expected) &&
+                           !memcmp(p1_packed_decode.image.pixels.pointer, p1_packed_expected, sizeof(p1_packed_expected)));
+    arena_set_position(arguments->arena, p1_packed_position);
+
+    u8 p1_bad_digit[] = "P1\n2 1\n02\n";
+    ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
+    ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);
+    BUSTER_TEST(arguments, p1_bad_digit_probe.status == IMAGE_DECODE_MALFORMED && p1_bad_digit_probe.error_offset == 8);
+
+    // A binary header ends after exactly one whitespace byte, so '\r' followed
+    // by raster byte 0x0A must not be collapsed into a CRLF separator.
+    u8 p5_carriage_return[] = "P5 1 1 255\r\x0a";
+    ByteSlice p5_carriage_return_bytes = {.pointer = p5_carriage_return, .length = sizeof(p5_carriage_return) - 1u};
+    u64 p5_carriage_return_position = arguments->arena->position;
+    ImageDecodeResult p5_carriage_return_decode = image_decode(arguments->arena, p5_carriage_return_bytes, pnm_options);
+    u8 const p5_carriage_return_expected[] = {10, 10, 10, 255};
+    BUSTER_TEST(arguments, p5_carriage_return_decode.status == IMAGE_DECODE_SUCCESS &&
+                           !p5_carriage_return_decode.information.has_more_images &&
+                           p5_carriage_return_decode.image.pixels.length == sizeof(p5_carriage_return_expected) &&
+                           !memcmp(p5_carriage_return_decode.image.pixels.pointer, p5_carriage_return_expected,
+                                   sizeof(p5_carriage_return_expected)));
+    arena_set_position(arguments->arena, p5_carriage_return_position);
+
     // A caller may intentionally raise the ordinary image limits. A declared
     // PAM raster too large for any u64 ByteSlice is still a truncated bounded
     // input, not a configured-limit failure with an unnamed limit identity.
