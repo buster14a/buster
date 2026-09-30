@@ -32,11 +32,19 @@ import urllib.request
 
 
 MODULE_PATH = Path(__file__).with_name("native_retirement_integration.py")
-SPEC = importlib.util.spec_from_file_location("native_retirement_integration", MODULE_PATH)
-integration = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = integration
-SPEC.loader.exec_module(integration)
+# Reuse an already-loaded copy of this exact file so callers such as the
+# controller catch the same IntegrationError class this gate raises (#1933).
+# A module of that name from any other file is replaced, as before.
+_LOADED = sys.modules.get("native_retirement_integration")
+_LOADED_FILE = getattr(_LOADED, "__file__", None)
+if _LOADED is not None and _LOADED_FILE is not None and Path(_LOADED_FILE).resolve() == MODULE_PATH.resolve():
+    integration = _LOADED
+else:
+    SPEC = importlib.util.spec_from_file_location("native_retirement_integration", MODULE_PATH)
+    integration = importlib.util.module_from_spec(SPEC)
+    assert SPEC.loader is not None
+    sys.modules[SPEC.name] = integration
+    SPEC.loader.exec_module(integration)
 
 SCHEMA = "buster-native-retirement-merge-admission-v1"
 STATUS_CONTEXT = "Native retirement trusted integration"
