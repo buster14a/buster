@@ -1232,19 +1232,6 @@ def _gap_header(frame, _context):
                 or (elapsed is not None and header["wall_ns"] > elapsed))
 
 
-def _gap_runtime_executable(frame, _context):
-    """Lane D records a runtime launch's executable as the side's compiler
-    binary (tp_retirement_measurement_run: executable->sha256) where the
-    validator binds the row's program artifact; waived only for a runtime
-    invocation whose output and command match and whose executable is
-    exactly that binary (lane D's codex/881-runtime-identity fixes it)."""
-    value = frame["value"]
-    binary = frame["binding"]["subjects"][frame["variant"]]["binary"]["sha256"]
-    return (not frame["compiler"] and value["kind"] == "runtime" and value["executable_sha256"] == binary
-            and binary != frame["expected_binary"] and value["output_sha256"] == frame["expected_output"]
-            and value["command_sha256"] == frame["expected_command"])
-
-
 def _gap_adapter(frame, context):
     """The fixture's composer adapter is the preparation runner's structural
     stand-in (bq_prep_worker_unit_adapter), not the reviewed bench_throughput
@@ -1264,8 +1251,6 @@ WORKER_UNIT_KNOWN_GAPS = (
     ("untimed header",
      r"untimed batch metrics \d+ header is not one serial continue-on-failure batch of the frozen inputs",
      _gap_header, 576),
-    ("runtime executable", r"execution invocation binary, command, or oracle output is mismatched",
-     _gap_runtime_executable, 488),
     ("stand-in adapter", r"#619 C statistics adapter replay differs from independently downloaded output",
      _gap_adapter, 1),
 )
@@ -1518,17 +1503,6 @@ class WorkerUnitWaiverTests(unittest.TestCase):
         missing = frame()
         del missing["header"]["peak_rss_bytes"]
         self.assertFalse(_gap_header(missing, context))
-        subjects = {"baseline": {"binary": {"sha256": "c" * 64}}}
-        runtime = {"value": {"kind": "runtime", "executable_sha256": "c" * 64, "output_sha256": "d" * 64,
-                             "command_sha256": "e" * 64},
-                   "compiler": False, "variant": "baseline", "binding": {"subjects": subjects},
-                   "expected_binary": "f" * 64, "expected_output": "d" * 64, "expected_command": "e" * 64}
-        self.assertTrue(_gap_runtime_executable(runtime, context))
-        for changed in ({"compiler": True}, {"expected_output": "0" * 64}, {"expected_command": "0" * 64},
-                        {"expected_binary": "c" * 64},
-                        {"value": dict(runtime["value"], executable_sha256="1" * 64)},
-                        {"value": dict(runtime["value"], kind="compiler")}):
-            self.assertFalse(_gap_runtime_executable(dict(runtime, **changed), context), changed)
 
 
 class LaneFWriterEndToEndTests(unittest.TestCase):
