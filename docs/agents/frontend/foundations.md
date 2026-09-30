@@ -157,6 +157,33 @@ duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
 searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
 semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
 
+## Number facts
+
+`c_parse_ast` converts every preprocessing number of the final stream once
+(`c_number_facts_build`) and publishes `CParserResult.number_facts`, which
+semantic analysis borrows into `CParseResult.number_facts` and lowering reads
+through its parse result. A rank index maps a final-stream token index to its
+number ordinal: one bit per token in 64-token windows plus each window's prefix
+count. Each number keeps the `c_conditional_number` value, whether it
+converted, `c_number_is_float`'s class, and the literal's
+`c_semantic_integer_literal_kind` for the stream's data model.
+
+- The facts are immutable after the syntax pass and live in its arena.
+- They answer only for the token array they were built from. Synthesized
+  evaluation tokens and hand-built results convert their spellings as before.
+- A cached kind is reused only when the consumer's `cpu_arch` and `os` match,
+  because literal typing reads the target only through `target_data_layout`.
+  If that dependency ever widens, widen the key in `c_number_fact_kind` too.
+- A failed conversion writes no value. The syntax diagnostic is issued at the
+  same point and in the same order as before.
+- Do not store literal facts in `CToken.symbol`. Several readers treat a nonzero
+  symbol as an identifier without testing the kind.
+
+`c_test_number_facts` covers every fact of an adversarial spelling set slid
+across the rank windows on five data models, and checks lowering with and
+without facts for identical bitcode and diagnostics.
+`c_test_parser_body_frame_storage` counts the facts as published syntax storage.
+
 ## C frontend and canonical IR rules
 
 - [Vector semantics](../../ir-vector-semantics.md) classifies every dedicated
@@ -769,6 +796,33 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   deferred assertions, once per token range however often the definition is
   parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
+
+## String literal memo
+
+Semantic analysis sizes, types and validates a string literal through
+several independent consumers: expression typing, array-bound inference,
+braced string initializers, member initializers and initializer validation.
+Each of them asks `c_ir_count_string_literal_range_for_target`. Lowering then
+needs the same literal's bytes. `CParseResult.string_literals` (a
+`CStringLiteralMemo`) records a narrow fragment's decoded bytes, keyed by
+final-stream token index, the first time semantic analysis sizes it. Later
+semantic queries read the recorded length, and lowering's
+`c_ir_decode_string_literal_range_for_target` reads the recorded bytes.
+
+- Only narrow fragments (plain and `u8`) are recorded, because their bytes do
+  not depend on the target. Wide fragments are decoded every time.
+- Rejected fragments are never recorded.
+- The memo answers only for the token array it was created for.
+- The header, its slots and every recorded buffer live in the never-rewound
+  parse arena, which outlives lowering. Rollback's wholesale `CParseResult`
+  restore therefore keeps a valid pointer.
+- Only semantic analysis records; lowering only reads. Every reader copies
+  the bytes it keeps, so a recorded buffer is never written. Keep it that
+  way: a consumer that edits decoded bytes in place must copy them first.
+
+The decode/count differential checks memoized counts and decodes on a miss
+and on a hit, byte for byte, and `c_test_string_literal_memo` crosses
+several rebuilds.
 
 ## Immutable aggregate and complex construction
 
