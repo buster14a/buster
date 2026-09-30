@@ -185,7 +185,10 @@ class WorkflowTests(unittest.TestCase):
 
     def test_windows_prefers_installed_llvm_over_image_llvm(self):
         self.assertNotIn(r"$env:ProgramFiles\LLVM\bin", self.workflow)
-        self.assertEqual(self.workflow.count('$env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"'), 2)
+        self.assertEqual(self.workflow.count("-LlvmBin $env:BUSTER_CI_LLVM_BIN"), 2)
+        helper = (ROOT / "tools/ci_vs_dev_shell.ps1").read_text(encoding="utf-8")
+        launch = helper.index("Launch-VsDevShell.ps1') -Arch")
+        self.assertGreater(helper.index('$env:PATH = "$LlvmBin;$env:PATH"'), launch)
 
 
 if __name__ == "__main__":
