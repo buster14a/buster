@@ -11,8 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: fc803dce4ddbd04ce0abff3c242a1836409370bc
+          ref: 5e3093a74f56076807ecbf7e637681fa77552bc3
           persist-credentials: false
+      - name: Install repository-standard latest stable LLVM
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: x86_64-linux
+        run: |
+          set -euo pipefail
+          python3 tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"
       - name: Bootstrap hosted build driver and configure Release
         shell: bash
         run: |

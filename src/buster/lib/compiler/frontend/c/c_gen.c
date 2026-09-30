@@ -28176,13 +28176,7 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
             return start;
         }
         CToken primary = builder->preprocess.tokens[index];
-        if (primary.kind == C_TOKEN_IDENTIFIER &&
-            c_token_in_well_known_set(builder->preprocess.spelling_base, primary, C_IR_UNEVALUATED_OPERAND_WORDS))
-        {
-            index = c_ir_unevaluated_operand_end(builder, index + 1, end);
-            need_primary = false;
-        }
-        else if (c_token_is_punctuator(&primary, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (c_token_is_punctuator(&primary, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close >= end)
@@ -40736,8 +40730,18 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
         return false;
     }
     u32 close = c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if (close <= expression_start + 1 || close + 1 >= expression_end ||
-        c_ir_unary_expression_end(builder, close + 1, expression_end) != expression_end)
+    u32 operand_end = close + 1;
+    if (operand_end < expression_end)
+    {
+        CToken operand = builder->preprocess.tokens[operand_end];
+        // Keep an unevaluated operand's postfix operators inside sizeof.
+        // The general expression walker also identifies evaluated updates.
+        operand_end = operand.kind == C_TOKEN_IDENTIFIER &&
+                              c_token_in_well_known_set(builder->preprocess.spelling_base, operand, C_IR_UNEVALUATED_OPERAND_WORDS)
+                          ? c_ir_unevaluated_operand_end(builder, operand_end + 1, expression_end)
+                          : c_ir_unary_expression_end(builder, operand_end, expression_end);
+    }
+    if (close <= expression_start + 1 || close + 1 >= expression_end || operand_end != expression_end)
     {
         return false;
     }
