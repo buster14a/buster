@@ -118,8 +118,12 @@ advances; this recovery does not grant automated dispatcher authority.
 Pull-request admission (the `Native retirement merge admission` check and the
 rebind job's policy step) evaluates against the trusted main checkout. If main
 advances after that checkout, the step re-fetches the new main into the trusted
-and candidate checkouts and re-evaluates, up to three attempts in total, rather
-than failing the candidate. It fails only if main keeps advancing throughout.
+checkout and re-evaluates, up to three attempts in total, rather than failing
+the candidate. It fails only if main keeps advancing throughout. The candidate
+checkout is fetched first, so a push landing between the two checkouts leaves
+the admitted main missing from it; the step then fetches that exact main commit
+into the candidate before running the gate (#2010). Policy still comes only
+from the trusted checkout.
 
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at

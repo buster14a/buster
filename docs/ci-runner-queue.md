@@ -107,12 +107,14 @@ commands above; lower queue depth alone is not a throughput improvement.
    about `50 / 8`, i.e. 6, CI runs; deeper entries cannot hold macOS runners,
    compete with pull requests, and are the first cancelled when an earlier
    entry fails. The maintainer asked for 2 as a conservative start; the source
-   policy now requires 4 (32 of 50 macOS runners, leaving about two CI runs of
-   headroom for pull requests and `main`). The live ruleset changes only after
-   that policy lands (see [merge-queue-admission.md](merge-queue-admission.md)).
-   Compare completed merges per hour, end-to-end latency, macOS wait and runner
-   minutes, not queue depth; move to 2 if macOS starvation persists after
-   dispatched work drains.
+   policy then required 4 (32 of 50 macOS runners at eight jobs per run). After
+   #1986 cut `ci.yml` to four macOS jobs, the maintainer raised it to 6 (24 of
+   50 macOS runners, leaving room for pull requests and `main`). This raise is
+   not measured; the live ruleset changes only after the policy lands (see
+   [merge-queue-admission.md](merge-queue-admission.md)). Compare completed
+   merges per hour, end-to-end latency, macOS wait, cancelled merge-group
+   minutes and runner minutes, not queue depth; move back to 4 if macOS
+   starvation or cancellation waste grows after dispatched work drains.
 2. **Avoid revalidating merge-group heads on `main` pushes** (about 8% of macOS
    minutes here). Push runs may prime `main`-scoped caches and feed other
    workflows; verify those consumers before proposing any change, and never
