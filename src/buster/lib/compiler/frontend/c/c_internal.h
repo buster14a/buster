@@ -793,6 +793,45 @@ typedef struct CTypeParseFrame CTypeParseFrame;
 typedef struct CTypeMutation CTypeMutation;
 typedef struct CParseExpressionTypeTask CParseExpressionTypeTask;
 typedef struct CParsePromotedMemberWork CParsePromotedMemberWork;
+typedef struct CConstantOperandFact CConstantOperandFact;
+typedef struct CConstantOperandWork CConstantOperandWork;
+
+typedef enum CConstantOperandKind
+{
+    C_CONSTANT_OPERAND_TYPE,
+    C_CONSTANT_OPERAND_EXPRESSION,
+    C_CONSTANT_OPERAND_LAYOUT,
+    C_CONSTANT_OPERAND_SCAN,
+    C_CONSTANT_OPERAND_GENERIC,
+} CConstantOperandKind;
+
+// Borrowed only during one isolated value query. A failed leaf is a fact too:
+// a later declaration cannot make an earlier incomplete sizeof valid.
+struct CConstantOperandFact
+{
+    u64 integer;
+    CScopeId scope;
+    CTypeId type;
+    u32 start;
+    u32 end;
+    u32 index;
+    CConstantOperandKind kind;
+    bool valid;
+    bool complete;
+};
+
+struct CConstantOperandWork
+{
+    u32 start;
+    u32 end;
+    u32 index;
+    u32 close;
+    u32 operand_start;
+    u32 operand_end;
+    u32 colon;
+    CConstantOperandKind kind;
+    u8 state;
+};
 
 typedef enum CParseExpressionTypeOperation
 {
@@ -822,6 +861,7 @@ typedef enum CTypeParseFrameKind
     C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
     C_TYPE_PARSE_FRAME_PARENTHESIZED,
     C_TYPE_PARSE_FRAME_PARAMETER,
+    C_TYPE_PARSE_FRAME_CONSTANT_OPERANDS,
 } CTypeParseFrameKind;
 
 typedef enum CTypeParseFrameStage
@@ -831,6 +871,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_FALLBACK,
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
+    C_TYPE_PARSE_STAGE_CONSTANT_OPERANDS,
     C_TYPE_PARSE_STAGE_FINISH,
 } CTypeParseFrameStage;
 
@@ -865,10 +906,18 @@ struct CTypeParseFrame
     // frames ever take one and every push copies the whole row.
     CPreprocessResult const* preprocess;
     Arena* arena;
-    CParseExpressionTypeTask* expression_tasks;
+    union
+    {
+        CParseExpressionTypeTask* expression_tasks;
+        CConstantOperandFact* constant_operands;
+    };
     // Direct members wait here until this range completes. Nested records
     // publish their own disjoint runs while this vector stays on scratch.
-    CMember* staged_members;
+    union
+    {
+        CMember* staged_members;
+        CConstantOperandWork* constant_work;
+    };
     u32 staged_member_count;
     u32 staged_member_capacity;
     CType qualifiers;
@@ -930,6 +979,7 @@ struct CTypeParseFrame
     bool has_function_suffix;
     bool original_type_valid;
     bool is_bit_field;
+    bool constant_operands_prepared;
     bool tag_only_declaration;
     bool scanning_inner_parameters;
     bool has_inner_parameters;
@@ -996,6 +1046,8 @@ typedef enum CConstantEvaluationMode
 
 struct CTypeParseMachine
 {
+    CConstantOperandFact const* constant_operands;
+    u32 constant_operand_count;
     CParseExpressionQuery* expression_queries;
     CParseResult* expression_query_result;
     CToken const* expression_query_tokens;

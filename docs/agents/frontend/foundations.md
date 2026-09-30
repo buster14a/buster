@@ -253,11 +253,15 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   work counters are detached. Casts, generic controllers/association types and
   `typeof` use the same private explicit frames, with machineless scalar reads
   that cannot define or complete tags. New tag bodies remain unresolved.
+  Absent named struct/union pointers mint incomplete forward rows only in the
+  private model. Scalar type-name attributes are applied once by their owner.
   Private model growth uses a separate scratch arena from expression frames;
   its rows survive frame rewinds until stable integer facts have been extracted.
   Ordinary and pending enumerator bindings precede typedef cast detection.
   The returned signed magnitude, rank and target width survive the query;
-  temporary type IDs do not. Existing enumerator folding retains the
+  temporary type IDs do not. Qualified enum aliases read integer facts through
+  their original tag even when the alias was created before its completion.
+  Existing enumerator folding retains the
   `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
   including its machineless `sizeof` path. Migrating that consumer requires
   declaration-owned preparation of source-ordered operand facts; this stage
@@ -265,6 +269,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Its caller supplies the semantic model at the expression's declaration point.
   Scope alone cannot reconstruct earlier tag completeness from a finished unit;
   deferred consumers must retain the bindings and layout facts of their operands.
+  Recognized vector-size attributes accept only nonzero literals in the query;
+  other arguments remain unresolved before the legacy recursive folder can run.
+  The copied model retains its protected-query flag through machineless operand
+  copies, so the actual vector reader also refuses indirect arguments in stored
+  array-bound ranges outside the query span. Already declared vector types remain
+  readable.
   `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
   active machine on successful and refused queries (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private

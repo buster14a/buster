@@ -523,3 +523,26 @@ specifier construction, and resolve immediately after that construction. This
 makes an enum member or completed tag written in the same declaration visible
 to its following declarator attribute. Leading specifier requests retain their
 earlier evaluation point and are not retried.
+
+## Prepared width operands
+
+The experimental `CONSTANT_OPERANDS` frame prepares declaration-bearing bit-field
+width operands through ordinary child frames in source order. Query-lifetime
+facts freeze cast/type bindings, layout/offset leaves, and generic controller
+types before later definitions can change visibility. Failed leaves and generic
+association completeness are frozen too; failed nested leaves are terminal even
+in unselected value branches. Facts are borrowed only by the private
+TYPE query; the member producer consumes the value then releases their scratch.
+Prepared semantic ranges also take precedence over the private vector-argument
+prescan: their owning children already resolved those attributes. Unprepared
+ranges retain the protected query's literal-only vector argument policy.
+The query also retains its postorder bracket facts and detached index/scalar
+checkpoints; nested bracket reads cannot revive rejected array facts through
+the legacy token evaluator.
+The frame unions reuse expression/member scratch pointers and counters. Nested
+`typeof`/array-bound operand checks, compound-literal controller completeness,
+and inline enum initializers still need owning frame continuations. Ordinary
+identifier leaves also need source-point binding facts before a later inline
+enum can publish a shadowing enumerator. Focused fixtures pin the expected
+earlier binding and refusal of a future name; these source-traced gaps remain
+unvalidated. This prototype does not claim complete source parity.

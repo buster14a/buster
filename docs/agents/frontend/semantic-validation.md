@@ -30,6 +30,10 @@ File initializer owners and constexpr values are completed immediately after
 publishing each declaration, before later file declarations merge entities or
 complete tags. A failed file inference attempt is recorded in bound padding;
 late scans cannot turn that failure into a count using a later declaration.
+The lexical pass does not pre-complete every inline tag body in an initializer:
+each operand must be read at its own point. Deferred parameter/body queries and
+inline tag operands still require a lexical operand preparation worklist before
+all lowering bridges can be removed.
 Both semantic entry points retry local owners after body binding; the validation
 path retries once more after preparing its query types. Each retry is one
 bounded scan. Speculative type-machine frames and copied
