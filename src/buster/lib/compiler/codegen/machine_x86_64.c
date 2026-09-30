@@ -15250,6 +15250,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
 
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_x86_64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                               u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     if (!placement->valid)
     {
@@ -15307,7 +15313,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         return result;
     }
     MachineX64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineX64ExactEmitCounters exact_counters = {0};
