@@ -7610,12 +7610,16 @@ struct CompilerDriverWasmNodeRun
     u64 elapsed_microseconds;
     u64 startup_microseconds;
     u64 wait_microseconds;
+    u64 done_uptime_microseconds;
+    u64 exit_uptime_microseconds;
     u32 attempts;
     bool spawned;
     bool startup_ready;
     bool readiness_files_ok;
     bool require_node_ready;
     bool node_ready;
+    bool node_done;
+    bool node_exit;
     bool terminal_marker;
 };
 
@@ -7651,6 +7655,42 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_terminal_marker(String8 
     return result;
 }
 
+// Readiness shims append `<prefix><digits>[ <details>]` stamps after the
+// oracle summary. Strip a well-formed final stamp line so the terminal marker
+// check still sees the summary; malformed stamps stay and fail that check.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_trailing_stamp(String8* output, String8 prefix, u64* uptime_microseconds)
+{
+    bool result = false;
+    String8 text = *output;
+    while (text.length && (text.pointer[text.length - 1] == '\n' || text.pointer[text.length - 1] == '\r'))
+    {
+        text.length -= 1;
+    }
+    u64 line_start = text.length;
+    while (line_start && text.pointer[line_start - 1] != '\n')
+    {
+        line_start -= 1;
+    }
+    if (text.length - line_start > prefix.length && memcmp(text.pointer + line_start, prefix.pointer, prefix.length) == 0)
+    {
+        u64 digits = line_start + prefix.length;
+        u64 index = digits;
+        u64 value = 0;
+        while (index < text.length && text.pointer[index] >= '0' && text.pointer[index] <= '9' && value <= (UINT64_MAX - 9) / 10)
+        {
+            value = value * 10 + (u64)(text.pointer[index] - '0');
+            index += 1;
+        }
+        result = index > digits && (index == text.length || text.pointer[index] == ' ');
+        if (result)
+        {
+            *uptime_microseconds = value;
+            output->length = line_start;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_succeeded(CompilerDriverWasmNodeRun run)
 {
     bool result = run.spawned && run.startup_ready && run.readiness_files_ok && !run.wait.timed_out &&
@@ -7670,6 +7710,17 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_status(CompilerDriver
     else if (!run.startup_ready)
     {
         result = S8("startup-failure");
+    }
+    else if (run.wait.timed_out && run.terminal_marker && run.node_exit)
+    {
+        // Node emitted its exit event, so the event loop drained and the
+        // process stalled in native teardown.
+        result = S8("summary-then-teardown-stall");
+    }
+    else if (run.wait.timed_out && run.terminal_marker && run.node_done)
+    {
+        // The oracle returned, but the event loop never drained.
+        result = S8("summary-then-event-loop-stall");
     }
     else if (run.wait.timed_out && run.terminal_marker)
     {
@@ -7730,7 +7781,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
     {
         if (string_equal(mode, S8("hang")) || string_equal(mode, S8("summary-then-hang")) ||
             string_equal(mode, S8("delayed-summary-then-hang")) || string_equal(mode, S8("missing-ready")) ||
-            string_equal(mode, S8("silent-pre-ready-hang")) || string_equal(mode, S8("post-ready-hang")))
+            string_equal(mode, S8("silent-pre-ready-hang")) || string_equal(mode, S8("post-ready-hang")) ||
+            string_equal(mode, S8("stamped-then-teardown-hang")) || string_equal(mode, S8("stamped-then-event-loop-hang")))
         {
             ready = buster_test_temporary_path(arena, S8("wasm-node-policy-ready"), S8(".txt"));
             result.readiness_files_ok = ready.length && os_file_delete(ready);
@@ -7804,18 +7856,35 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
     }
     String8 standard_output = BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]);
     result.node_ready = result.require_node_ready && compiler_driver_test_wasm_node_startup_marker(standard_output);
-    result.terminal_marker = compiler_driver_test_wasm_node_terminal_marker(standard_output, expected_marker);
+    String8 oracle_output = standard_output;
+    if (result.require_node_ready)
+    {
+        // Stamps are evidence only (#2066): success still needs the summary,
+        // a normal zero exit and empty stderr.
+        result.node_exit = compiler_driver_test_wasm_node_trailing_stamp(&oracle_output, S8("WASM_NODE_EXIT uptime_us="),
+                                                                         &result.exit_uptime_microseconds);
+        result.node_done = compiler_driver_test_wasm_node_trailing_stamp(&oracle_output, S8("WASM_NODE_DONE uptime_us="),
+                                                                         &result.done_uptime_microseconds);
+    }
+    result.terminal_marker = compiler_driver_test_wasm_node_terminal_marker(oracle_output, expected_marker);
+    // Node uptime starts after spawn, so this bounds the time between the
+    // oracle returning and the harness reaping (or killing) the process.
+    u64 post_done_microseconds = result.node_done && result.elapsed_microseconds > result.done_uptime_microseconds
+                                     ? result.elapsed_microseconds - result.done_uptime_microseconds
+                                     : 0;
     String8 status = compiler_driver_test_wasm_node_status(result);
     arguments->show(arguments,
                     S8("WASM_NODE_PROCESS oracle={S8} mode={S8} status={S8} spawned={u32} result={u32} "
                        "platform_status={u32:x} timed_out={u32} marker={u32} elapsed_us={u64} deadline_us={u64} "
-                       "ready={u32} readiness_files_ok={u32} node_ready={u32} startup_us={u64} wait_us={u64}\n"
+                       "ready={u32} readiness_files_ok={u32} node_ready={u32} startup_us={u64} wait_us={u64} "
+                       "node_done={u32} done_uptime_us={u64} node_exit={u32} exit_uptime_us={u64} post_done_us={u64}\n"
                        "stdout:\n{S8}stderr:\n{S8}\n"),
                     oracle, mode, status, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status,
                     (u32)result.wait.timed_out, (u32)result.terminal_marker, result.elapsed_microseconds,
                     result.deadline_microseconds, (u32)result.startup_ready, (u32)result.readiness_files_ok,
                     (u32)result.node_ready, result.startup_microseconds,
-                    result.wait_microseconds, standard_output,
+                    result.wait_microseconds, (u32)result.node_done, result.done_uptime_microseconds, (u32)result.node_exit,
+                    result.exit_uptime_microseconds, post_done_microseconds, standard_output,
                     BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
     return result;
 }
@@ -7850,11 +7919,17 @@ void compiler_driver_test_wasm_node_child_run(void)
         bool silent_pre_ready_hang = string_equal(mode, S8("silent-pre-ready-hang"));
         bool post_ready_hang = string_equal(mode, S8("post-ready-hang"));
         bool ready_complete = string_equal(mode, S8("ready-complete"));
-        bool hang = slow_start || missing_ready || silent_pre_ready_hang || post_ready_hang ||
+        bool teardown_hang = string_equal(mode, S8("stamped-then-teardown-hang"));
+        bool event_loop_hang = string_equal(mode, S8("stamped-then-event-loop-hang"));
+        bool stamp_without_summary = string_equal(mode, S8("stamp-without-summary"));
+        bool malformed_stamp = string_equal(mode, S8("malformed-stamp"));
+        bool stamped = teardown_hang || event_loop_hang || stamp_without_summary || malformed_stamp ||
+                       string_equal(mode, S8("ready-stamped-complete"));
+        bool hang = slow_start || missing_ready || silent_pre_ready_hang || post_ready_hang || teardown_hang || event_loop_hang ||
                     string_equal(mode, S8("hang")) || string_equal(mode, S8("summary-then-hang"));
         bool delayed = string_equal(mode, S8("summary-then-exit"));
-        bool valid = hang || delayed || ready_complete || string_equal(mode, S8("complete")) || string_equal(mode, S8("nonzero")) ||
-                     string_equal(mode, S8("incomplete")) || string_equal(mode, S8("stderr"));
+        bool valid = hang || delayed || ready_complete || stamped || string_equal(mode, S8("complete")) ||
+                     string_equal(mode, S8("nonzero")) || string_equal(mode, S8("incomplete")) || string_equal(mode, S8("stderr"));
         bool written = valid;
         if (slow_start)
         {
@@ -7866,17 +7941,27 @@ void compiler_driver_test_wasm_node_child_run(void)
         }
         if (valid && !missing_ready && !silent_pre_ready_hang && !string_equal(mode, S8("hang")))
         {
-            if (post_ready_hang || ready_complete)
+            if (post_ready_hang || ready_complete || stamped)
             {
                 String8 startup_marker = S8("WASM_NODE_READY startup_ms=123456789\n");
                 written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT),
                                                 (ByteSlice){.pointer = (u8*)startup_marker.pointer, .length = startup_marker.length});
             }
-            if (!post_ready_hang)
+            if (!post_ready_hang && !stamp_without_summary)
             {
                 String8 marker = string_equal(mode, S8("incomplete")) ? S8("WASM_NODE_POLICY incomplete\n") : S8("WASM_NODE_POLICY pass\n");
                 written = written && os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT),
                                                            (ByteSlice){.pointer = (u8*)marker.pointer, .length = marker.length});
+            }
+            if (stamped)
+            {
+                // Mirror tools/wasm_integer_execution_startup.js: DONE after the
+                // summary, then EXIT unless the event loop never drains.
+                String8 stamp = malformed_stamp   ? S8("WASM_NODE_DONE uptime_us=\n")
+                                : event_loop_hang ? S8("WASM_NODE_DONE uptime_us=250000 resources=Timeout\n")
+                                                  : S8("WASM_NODE_DONE uptime_us=250000 resources=\nWASM_NODE_EXIT uptime_us=260000\n");
+                written = written && os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT),
+                                                           (ByteSlice){.pointer = (u8*)stamp.pointer, .length = stamp.length});
             }
         }
         if (string_equal(mode, S8("stderr")))
@@ -8063,6 +8148,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
                 arguments, arguments->arena, S8("integer-policy"), S8("stderr"), S8("ready-complete"),
                 (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
             BUSTER_TEST(arguments, run.attempts == 1 && run.wait.streams[STANDARD_STREAM_ERROR].length != 0 &&
+                                       !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("test")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
+                arguments, arguments->arena, S8("integer-policy"), S8("ready-stamped-complete"), S8("ready-complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, run.attempts == 1 && run.node_ready && run.node_done && run.node_exit &&
+                                       run.done_uptime_microseconds == 250000 && run.exit_uptime_microseconds == 260000 &&
+                                       compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            // #2066: a summary followed by a drained event loop is still a
+            // bounded failure while the process stays alive.
+            String8 node_arguments[] = {node, S8("test")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
+                arguments, arguments->arena, S8("integer-policy"), S8("stamped-then-teardown-hang"), S8("ready-stamped-complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+            BUSTER_TEST(arguments, run.attempts == 1 && run.readiness_files_ok && run.startup_ready && run.wait.timed_out &&
+                                       run.terminal_marker && run.node_done && run.node_exit &&
+                                       run.wait_microseconds <= timeout_upper_bound);
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_status(run), S8("summary-then-teardown-stall")));
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("test")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
+                arguments, arguments->arena, S8("integer-policy"), S8("stamped-then-event-loop-hang"), S8("ready-stamped-complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+            BUSTER_TEST(arguments, run.attempts == 1 && run.readiness_files_ok && run.startup_ready && run.wait.timed_out &&
+                                       run.terminal_marker && run.node_done && !run.node_exit &&
+                                       run.wait_microseconds <= timeout_upper_bound);
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_status(run), S8("summary-then-event-loop-stall")));
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("test")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
+                arguments, arguments->arena, S8("integer-policy"), S8("stamp-without-summary"), S8("ready-stamped-complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, run.attempts == 1 && !run.wait.timed_out && run.node_done && run.node_exit && !run.terminal_marker &&
+                                       string_equal(compiler_driver_test_wasm_node_status(run), S8("incomplete-output")) &&
+                                       !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("test")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run_with_retry(
+                arguments, arguments->arena, S8("integer-policy"), S8("malformed-stamp"), S8("ready-stamped-complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, run.attempts == 1 && !run.wait.timed_out && !run.node_done && !run.terminal_marker &&
                                        !compiler_driver_test_wasm_node_succeeded(run));
         }
         {
