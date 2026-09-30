@@ -21950,7 +21950,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         };
         u32 error_token = start;
         CParseResult syntax_checkpoint = query;
-        CTokenPositionIndex syntax_positions;
+        CTokenPositionIndex syntax_positions = {0};
         if (query.position_index) syntax_positions = *query.position_index;
         String8 error = single ? (String8){0}
                               : c_parse_constant_expression_syntax_error(&query_machine, &query, preprocess, scope, start, end, &error_token);
