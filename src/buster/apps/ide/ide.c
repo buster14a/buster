@@ -18,6 +18,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/file.h>
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.h>
+#endif
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
@@ -96,6 +99,9 @@
 #include <buster/lib/float.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/truetype.c>
+#endif
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.c>
 #endif
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
@@ -495,6 +501,16 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
         if (arena)
         {
+            ByteSlice image_bytes = {.pointer = (u8*)pointer, .length = size};
+            image_decode(arena, image_bytes,
+                         (ImageDecodeOptions){
+                             .max_width = 4096,
+                             .max_height = 4096,
+                             .max_pixels = BUSTER_MB(8),
+                             .max_decoded_bytes = BUSTER_MB(32),
+                             .max_work = BUSTER_MB(64),
+                         });
+            arena_reset_to_start(arena);
             String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
             CPreprocessResult preprocess = c_preprocess(arena, source,
                                                         (CPreprocessOptions){
