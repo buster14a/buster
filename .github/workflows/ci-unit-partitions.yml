@@ -110,9 +110,9 @@ jobs:
               continue
             }
             $Delimiter = 'BUSTER_UNIT_ENV_' + [guid]::NewGuid().ToString('N')
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value "$Name<<$Delimiter"
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value $Value
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value $Delimiter
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Value "$Name<<$Delimiter"
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Value $Value
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Value $Delimiter
           }
           New-Item -ItemType Directory -Force -Path build | Out-Null
           cmd /d /s /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o build\build.exe"
@@ -174,7 +174,7 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $Root 'phases\plan.json'), "{}`n", (New-Object Text.UTF8Encoding($false)))
           $Revision = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "BUSTER_TEST_SOURCE_REVISION=$Revision"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Value "BUSTER_TEST_SOURCE_REVISION=$Revision"
           cmd /d /s /c "clang --version > `"$Root\toolchain.txt`" 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:BUSTER_CI_PYTHON tools/ci_unit_tests_measure_test.py -v
