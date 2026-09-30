@@ -54,6 +54,8 @@
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
 #define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+/* The one fixed unit runtime bound; the dispatch wait equals it. */
+#define BQ_BROKER_RUNTIME_MAX "--property=RuntimeMaxSec=3600000000us"
 #define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
 #define BQ_BROKER_INSTALLED "/opt/buster-bench/installed"
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"
@@ -392,7 +394,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
         bq_broker_add(command, "--property=MemoryMax=8589934592");
         bq_broker_add(command, "--property=MemorySwapMax=0");
         bq_broker_add(command, "--property=TasksMax=256");
-        bq_broker_add(command, "--property=RuntimeMaxSec=3600000000us");
+        bq_broker_add(command, BQ_BROKER_RUNTIME_MAX);
         if (request->stage != BQ_BROKER_OUTER)
         {
             bq_broker_add_format(command, "--property=PartOf=%s", paths.parent);
@@ -1953,7 +1955,7 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
     BQ_ZEN5_CHECK(bq_broker_command(request, groups, &command) && bq_broker_has_argument(&command, "worker-unit") &&
                   bq_broker_has_argument(&command, BQ_ZEN5_STAGE_RECIPE) &&
                   !bq_broker_has_argument(&command, "validate-buster-v1") &&
-                  bq_broker_has_argument(&command, "--property=RuntimeMaxSec=3600000000us"));
+                  bq_broker_has_argument(&command, BQ_BROKER_RUNTIME_MAX));
     request->candidate[0] = 'b';
     BQ_ZEN5_CHECK(!bq_broker_command(request, groups, &command));
     request->candidate[0] = 'a';

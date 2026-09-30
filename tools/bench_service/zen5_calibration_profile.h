@@ -1,8 +1,8 @@
 /* zen5-calibration-v1 installed recipe profile, byte-identical to
  * profiles/zen5-calibration-v1.recipe (zen5_profile_test.py checks both and
  * every pinned tool digest). queue.c registers it; zen5_recipe.c reads its
- * budget, gap, workload and pins. The recipe is held: queue.c neither admits
- * nor serves it until the systemd broker carries its stage table.
+ * budget, gap, workload and pins; zen5_stage.h fixes the workload and CPU
+ * the broker's stage argv uses. queue.c admits and serves the recipe.
  */
 #ifndef BUSTER_BENCH_SERVICE_ZEN5_CALIBRATION_PROFILE_H
 #define BUSTER_BENCH_SERVICE_ZEN5_CALIBRATION_PROFILE_H
@@ -11,7 +11,7 @@
     "recipe=zen5-calibration-v1\n" \
     "repository=buster14a/buster\n" \
     "source-manifest=BQ-SOURCE-V1\n" \
-    "status=held-until-broker-stages\n" \
+    "status=served-by-broker-v2\n" \
     "source=base-equals-candidate\n" \
     "source-tree-file=.bq-source-tree\n" \
     "budget-seconds=2700\n" \
