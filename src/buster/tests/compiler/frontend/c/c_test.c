@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/ir/ir_construction.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
@@ -8956,6 +8957,242 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
         scratch_end(temporary);
     }
 #endif
+    return result;
+}
+
+#if BUSTER_BENCH_ALLOCATIONS
+// Pinned conversion populations of c_test_source_fact_census's program.
+enum
+{
+    C_TEST_CENSUS_SEMANTIC_INTEGERS = 0,
+    C_TEST_CENSUS_LOWER_INTEGERS = 0,
+    C_TEST_CENSUS_SEMANTIC_STRING_COUNTS = 0,
+};
+
+// The phase counter delta between two census snapshots.
+BUSTER_GLOBAL_LOCAL u64 c_test_census_phase_delta(CCensusCounters const* before, CCensusCounters const* after, CCensusPhase phase,
+                                                  CCensusPhaseCounter counter)
+{
+    return after->phase_values[phase][counter] - before->phase_values[phase][counter];
+}
+
+// The source-fact census (c_census.h) is a diagnostic population, so its
+// contract is exactness: a fact at a registered spelling offset is distinct
+// once and a repeat afterwards, a pointer outside the space is untracked,
+// nested phases restore the outer phase, and one end-to-end compile reports
+// the conversion populations pinned below. A frontend change that removes a
+// redundant conversion is expected to lower a pinned count, and says so here.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        char8 space[64] = "12345 0x10";
+        char8 outside[8] = "7";
+        CCensusCounters before = c_census_counters();
+        c_census_space_begin(space, sizeof(space));
+        CCensusPhase outer = c_census_phase_enter(C_CENSUS_PHASE_SEMANTIC);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space + 6, 4);
+        c_census_fact(C_CENSUS_FACT_FLOAT, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, outside, 1);
+        c_census_spelling_read(space, 5);
+        c_census_spelling_read(space, 5);
+        CCensusPhase inner = c_census_phase_enter(C_CENSUS_PHASE_LOWER);
+        BUSTER_TEST(arguments, inner == C_CENSUS_PHASE_SEMANTIC);
+        c_census_spelling_read(space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_phase_exit(inner);
+        c_census_fact(C_CENSUS_FACT_STRING_COUNT, space + 6, 4);
+        c_census_phase_exit(outer);
+        c_census_space_begin(0, 0);
+        CCensusCounters after = c_census_counters();
+        BUSTER_TEST(arguments, !after.overflowed);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 4);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_BYTES) == 15);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 2);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_UNTRACKED) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_FLOAT_CONVERSION_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNT_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_SPELLING_READS) == 2);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_SPELLING_READ_DISTINCT) == 1);
+        // The lower phase read the same offset: distinct per phase. Its
+        // integer conversion repeats the semantic phase's fact.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_SPELLING_READ_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 0);
+    }
+    {
+        String8 source = S8("static const char text[] = \"ab\\n\";\n"
+                            "static int values[] = {1, 22, 333};\n"
+                            "int size(void) { return (int)sizeof text + values[2] + 4; }\n");
+        CCensusCounters before = c_census_counters();
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(arguments->arena, preprocess);
+        CIRLowerResult lowered = c_analyze(arguments->arena, S8("census.c"), preprocess, syntax, target_native);
+        CCensusCounters after = c_census_counters();
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, !after.overflowed);
+        BUSTER_TEST(arguments, after.values[C_CENSUS_OUTPUT_TOKEN_ROWS] - before.values[C_CENSUS_OUTPUT_TOKEN_ROWS] == preprocess.token_count);
+        BUSTER_TEST(arguments, after.values[C_CENSUS_TRANSLATE_CALLS] - before.values[C_CENSUS_TRANSLATE_CALLS] ==
+                                   after.values[C_CENSUS_LEX_CALLS] - before.values[C_CENSUS_LEX_CALLS]);
+        // Five integer literals reach the parser, which converts each once
+        // and publishes the result (CNumberFacts): semantic analysis and
+        // lowering read the facts instead of reconverting the spellings.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_PARSE, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 5);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_PARSE, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 5);
+        u64 semantic_integers = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSIONS);
+        u64 lower_integers = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSIONS);
+        u64 semantic_counts = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS);
+        u64 lower_decodes = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_DECODES);
+        if (os_get_environment_variable(S8("BUSTER_SOURCE_FACT_CENSUS")).length)
+        {
+            arguments->show(arguments, S8("SOURCE_FACT_CENSUS semantic_integers={u64} lower_integers={u64} semantic_string_counts={u64} lower_string_decodes={u64}\n"),
+                            semantic_integers, lower_integers, semantic_counts, lower_decodes);
+        }
+        BUSTER_TEST(arguments, semantic_integers == C_TEST_CENSUS_SEMANTIC_INTEGERS);
+        BUSTER_TEST(arguments, lower_integers == C_TEST_CENSUS_LOWER_INTEGERS);
+        BUSTER_TEST(arguments, semantic_counts == C_TEST_CENSUS_SEMANTIC_STRING_COUNTS);
+        // The first semantic consumer decodes the literal once into the
+        // literal memo; the other three semantic consumers read its length
+        // and lowering reads its bytes instead of walking the spelling again.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_DECODES) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_MEMO_HITS) == 1);
+        BUSTER_TEST(arguments, lower_decodes == 0);
+    }
+    return result;
+}
+#endif
+
+// Number facts (CNumberFacts) replace the repeated conversion of every
+// integer literal in semantic analysis and lowering. Two oracles: the facts of
+// an adversarial spelling set, slid across the 64-token rank windows, must
+// equal the conversions they replace on every data model; and a program that
+// uses integer literals in every consumer position must lower to the same
+// deterministic bitcode, with the same diagnostics, whether the syntax pass
+// published facts or not (without facts every consumer converts the spelling,
+// which is the path this change replaced).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_number_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_X86_64;
+    targets[1].os = OPERATING_SYSTEM_WINDOWS;
+    targets[2].cpu_arch = CPU_ARCH_AARCH64;
+    targets[2].os = OPERATING_SYSTEM_LINUX;
+    targets[3].cpu_arch = CPU_ARCH_AARCH64;
+    targets[3].os = OPERATING_SYSTEM_MACOS;
+    targets[4].cpu_arch = CPU_ARCH_WASM64;
+    targets[4].os = OPERATING_SYSTEM_WASI;
+    String8 spellings = S8("0 1 42 0x0 0xFF 0XffffFFFFffffFFFF 0x10000000000000000 077 08 0b101 0B2 18446744073709551615 "
+                           "18446744073709551616 2147483647 2147483648 4294967295 4294967296 9223372036854775807 9223372036854775808 "
+                           "1u 1U 1l 1L 1ul 1lu 1ull 1llu 1LL 1lL 1uu 1i8 1i16 1i32 1i64 1ui64 0x7fffffffi64 1'000'000 1''0 "
+                           "1.0 1. .5 1e5 1E+5 0x1p3 0x1.8p1 1.0f 1.0L 1.0fi 1f16 0x1e 0xE 1e 123abc 0x 0b 00 0xFFFFFFFFu 037777777777 "
+                           "2147483648u 0x80000000 0x8000000000000000 9223372036854775807L 18446744073709551615ULL 1wb 1uwb\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        u64 capacity = BUSTER_KB(512);
+        char8* bytes = arena_allocate(arguments->arena, char8, capacity);
+        u64 length = 0;
+        for (u32 padding = 0; padding < 70; padding += 1)
+        {
+            for (u32 pad = 0; pad < padding; pad += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, S8("; "));
+            }
+            c_test_append_source(bytes, capacity, &length, spellings);
+        }
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = bytes, .length = length},
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        u32 number_count = 0;
+        BUSTER_TEST(arguments, preprocess.tokens != 0);
+        BUSTER_TEST(arguments, c_test_number_facts_agree(arguments->arena, preprocess, &number_count));
+        // Every repetition carries the same numbers, whatever the lexer makes
+        // of the separator and suffix spellings; presence exactly on numbers
+        // is checked token by token above.
+        BUSTER_TEST(arguments, number_count >= 70 * 50 && number_count % 70 == 0);
+    }
+    String8 source = S8("enum { E0 = 3, E1 = 0x10u, E2 = 07L };\n"
+                        "_Static_assert(sizeof(char[42]) == 42 && 2147483648 > 0 && E1 == 16, \"facts\");\n"
+                        "static unsigned long long table[] = {0, 1, 2147483647, 2147483648, 4294967295u, 4294967296, 0xFFFFFFFFFFFFFFFF, 077, 0b11};\n"
+                        "static long long signed_table[3] = {-1, -2147483648, -9223372036854775807LL};\n"
+                        "static double mixed[] = {1, 2u, 3.5, 0x10};\n"
+                        "static char const bounded[16] = {[3] = 1, [7] = 2};\n"
+                        "static int sized = sizeof 1ull + sizeof(4294967296) + sizeof(0x7fffffff);\n"
+                        "int use(int value)\n"
+                        "{\n"
+                        "    int local[5] = {1, 2, 3};\n"
+                        "    switch (value) { case 1: return 7; case 0x20: return 8; default: break; }\n"
+                        "    unsigned long long wide = value + 18446744073709551615ULL + 1ll + 0x80000000;\n"
+                        "    return (int)(wide >> 3) + local[2] + (int)table[value & 7] + (int)sizeof(1l) + E2 + bounded[3] + sized;\n"
+                        "}\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets) - 1; target_index += 1)
+    {
+        Target target = targets[target_index];
+        LlvmBitcodeArtifact artifacts[2] = {0};
+        u32 diagnostics[2] = {0};
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && syntax.number_facts != 0);
+            if (variant)
+            {
+                syntax.number_facts = 0;
+            }
+            CIRLowerResult lowered = c_analyze(temporary.arena, S8("number-facts.c"), preprocess, syntax, target);
+            diagnostics[variant] = lowered.diagnostic_count;
+            if (lowered.program)
+            {
+                LlvmBitcodeArtifact artifact = llvm_bitcode_emit_program(temporary.arena, lowered.program);
+                if (artifact.success)
+                {
+                    u8* copy = arena_allocate(arguments->arena, u8, artifact.binary.length);
+                    memcpy(copy, artifact.binary.pointer, artifact.binary.length);
+                    artifacts[variant] = (LlvmBitcodeArtifact){.binary = {.pointer = copy, .length = artifact.binary.length}, .success = true};
+                }
+            }
+            scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, diagnostics[0] == 0 && diagnostics[1] == 0);
+        BUSTER_TEST(arguments, artifacts[0].success && artifacts[1].success);
+        BUSTER_TEST(arguments, artifacts[0].binary.length == artifacts[1].binary.length &&
+                                   !memcmp(artifacts[0].binary.pointer, artifacts[1].binary.pointer, artifacts[0].binary.length));
+    }
+    return result;
+}
+
+// The semantic string-count memo across its growth boundary: 1,500
+// distinct literal tokens (narrow, u8, wide, escaped, invalid and empty)
+// force several rebuilds, and every memoized answer must equal the walk.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_memo(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const shapes[] = {
+        S8("\"plain {u32}\""), S8("u8\"utf {u32}\""), S8("L\"wide {u32}\""), S8("\"esc\\x41\\101\\n{u32}\""),
+        S8("\"bad\\q{u32}\""), S8("\"\""), S8("U\"\\u00e9{u32}\""), S8("\"\\777{u32}\""),
+    };
+    u64 capacity = BUSTER_KB(128);
+    char8* bytes = arena_allocate(arguments->arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < 1500; index += 1)
+    {
+        String8 literal = string_format(arguments->arena, shapes[index % BUSTER_ARRAY_LENGTH(shapes)], index);
+        c_test_append_source(bytes, capacity, &length, string_format(arguments->arena, S8("{S8}\n"), literal));
+    }
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = bytes, .length = length},
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    u32 recorded = 0;
+    BUSTER_TEST(arguments, preprocess.tokens != 0);
+    BUSTER_TEST(arguments, c_test_string_literal_memo_growth(arguments->arena, preprocess, &recorded));
+    // Narrow valid fragments only: the plain, u8, escaped and empty shapes,
+    // four of every eight, plus three of the final partial cycle's four.
+    BUSTER_TEST(arguments, recorded == 1500 / 8 * 4 + 3);
     return result;
 }
 
@@ -25160,9 +25397,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         u64 parse_ns = timestamp_ns_between(start, timestamp_take());
         u64 allocated = temporary.arena->position - before;
-        // Clean syntax retains only the token-indexed delimiter stack. The
-        // remaining output is one declaration and one assertion per body.
-        u64 published = (tokens.token_count + 1) * sizeof(u32) +
+        // Clean syntax retains only the token-indexed delimiter stack and the
+        // number facts (one bit per token plus one value and flag byte per
+        // number). The remaining output is one declaration and one assertion
+        // per body.
+        u64 published = (tokens.token_count + 1) * sizeof(u32) + c_test_number_facts_bytes(syntax.number_facts) +
                         (u64)function_count * (sizeof(CParserDeclaration) + sizeof(CParserStaticAssert));
         if (census)
         {
@@ -28143,12 +28382,17 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
     BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
+    BUSTER_TEST_FIXTURE(arguments, c_test_number_facts);
+    BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_memo);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
     BUSTER_TEST_FIXTURE(arguments, c_test_body_scope_map);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
+#if BUSTER_BENCH_ALLOCATIONS
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_fact_census);
+#endif
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);

@@ -12,6 +12,7 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
@@ -208,11 +209,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CP
            c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                  u32 start, u32 end, CIrDecodedString* decoded_out);
+                                                                  u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
 // The same answer without the bytes, for the callers that only size or type
 // the literal; see the definition.
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                 u32 start, u32 end, CIrDecodedString* decoded_out);
+                                                                 u32 start, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
                                                    u32* invalid_specifier);
@@ -336,6 +337,127 @@ BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u3
 #define C_DEFINITION_INDEX_COUNT(index, field, amount) ((void)0)
 #endif
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
+
+// The syntax pass converts every preprocessing number of the final stream once
+// (c_number_facts_build) and publishes the answers beside the token rows, so
+// the semantic typing, constant folding and lowering sites that used to call
+// c_conditional_number and c_semantic_integer_literal_kind on the same
+// spelling again read a byte and a word instead. The index is a rank over the
+// stream: one bit per token in 64-token windows marks the numbers, and the
+// window's prefix count plus a popcount below the lane gives the number's
+// ordinal into `values` and `flags`. Everything is immutable after the syntax
+// pass and lives in its arena for the translation unit. A fact answers only for
+// `tokens`, the stream it was built from; any other token array (synthesized
+// evaluation tokens, hand-built results) takes the conversion itself.
+enum
+{
+    // CTypeKind of c_semantic_integer_literal_kind(target, 0, spelling, value)
+    // for `target`, or C_TYPE_INVALID when there is none.
+    C_NUMBER_FACT_KIND_MASK = 0x3f,
+    // c_conditional_number accepted the spelling; `values` holds its value.
+    C_NUMBER_FACT_CONVERTED = 0x40,
+    // c_number_is_float classified the spelling as floating.
+    C_NUMBER_FACT_FLOATING = 0x80,
+};
+BUSTER_CT_CHECK((u32)C_TYPE_COUNT <= (u32)C_NUMBER_FACT_KIND_MASK + 1);
+
+struct CNumberFacts
+{
+    CToken const* tokens;
+    u64* number_masks;
+    u32* number_ranks;
+    u64* values;
+    u8* flags;
+    // The data model the cached kinds were typed for. Integer literal typing
+    // reads the target only through target_data_layout, which depends on the
+    // architecture and operating system alone (c_number_fact_kind).
+    CpuArch cpu_arch;
+    OperatingSystem os;
+    u32 token_count;
+    u32 number_count;
+};
+
+typedef struct CNumberFact CNumberFact;
+struct CNumberFact
+{
+    u64 value;
+    u8 flags;
+    bool present;
+};
+
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE CNumberFact c_number_fact(CNumberFacts const* facts, CToken const* tokens, u64 token_index)
+{
+    CNumberFact result = {0};
+    if (facts && facts->tokens == tokens && token_index < facts->token_count)
+    {
+        u64 lane = token_index & 63;
+        Mask64 window = facts->number_masks[token_index >> 6];
+        if ((window >> lane) & 1)
+        {
+            Mask64 below = window & mask64_prefix(lane);
+            u32 ordinal = facts->number_ranks[token_index >> 6] + mask64_count(below);
+            result = (CNumberFact){
+                .value = facts->values[ordinal],
+                .flags = facts->flags[ordinal],
+                .present = true,
+            };
+        }
+    }
+    return result;
+}
+
+// The literal's type kind for `target` from a present fact: true, with the
+// cached kind (C_TYPE_INVALID when the spelling did not convert or fits no
+// candidate), when the facts were typed for the same data model.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_number_fact_kind(CNumberFacts const* facts, CNumberFact fact, Target target, CTypeKind* kind_out)
+{
+    bool result = fact.present && facts->cpu_arch == target.cpu_arch && facts->os == target.os;
+    if (result)
+    {
+        *kind_out = (fact.flags & C_NUMBER_FACT_CONVERTED) ? (CTypeKind)(fact.flags & C_NUMBER_FACT_KIND_MASK) : C_TYPE_INVALID;
+    }
+    return result;
+}
+
+BUSTER_C_EXTERN CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess);
+// c_conditional_number of the token at `token_index`: its fact when `facts`
+// answer for `tokens`, the conversion itself otherwise. `value_out` is written
+// only on success, as c_conditional_number writes it.
+BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index,
+                                         u64* value_out);
+
+// The decoded bytes of narrow string-literal fragments, decoded once per
+// final-stream token. Semantic analysis records a fragment the first time a
+// consumer sizes or types it (c_ir_count_string_literal_range_for_target), so
+// every later consumer that sizes, types or reads the same literal -- the
+// remaining semantic queries and every lowering decode -- takes the recorded
+// bytes instead of walking the spelling again. Keys are token indices of
+// `tokens`, the one stream the memo answers for; a query against any other
+// token array bypasses it. The header, its slots and every recorded buffer
+// live in the parse arena, which is never rewound and outlives lowering, so
+// speculative rollback's wholesale CParseResult restore keeps a valid pointer
+// and lowering reads buffers that stay valid for the translation unit. Only
+// semantic analysis records; lowering reads, and every reader copies the
+// bytes it keeps, so a recorded buffer is never written after it is made.
+typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
+struct CStringLiteralMemoSlot
+{
+    u8* bytes;
+    // Decoded byte count, which is the element count of a narrow fragment.
+    u32 length;
+    // token_index + 1; zero marks an empty slot.
+    u32 key;
+};
+
+struct CStringLiteralMemo
+{
+    Arena* arena;
+    CToken const* tokens;
+    CStringLiteralMemoSlot* slots;
+    u32 capacity;
+    u32 count;
+};
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 
