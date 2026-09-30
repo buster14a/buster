@@ -3054,6 +3054,33 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, p6_trailing_junk_bytes, pnm_options,
                                                                    IMAGE_DECODE_MALFORMED));
 
+    // Exactly one whitespace byte ends a binary header: after a CR, an LF byte
+    // is the first raster sample, not part of a CRLF separator.
+    u8 const p5_cr_lf_sample[] = {'P', '5', ' ', '1', ' ', '1', ' ', '2', '5', '5', '\r', '\n'};
+    u64 p5_cr_lf_position = arguments->arena->position;
+    ImageDecodeResult p5_cr_lf_decode = image_decode(arguments->arena, BUSTER_ARRAY_TO_BYTE_SLICE(p5_cr_lf_sample), pnm_options);
+    u8 const p5_cr_lf_expected[] = {10, 10, 10, 255};
+    BUSTER_TEST(arguments, p5_cr_lf_decode.status == IMAGE_DECODE_SUCCESS &&
+                           p5_cr_lf_decode.image.pixels.length == sizeof(p5_cr_lf_expected) &&
+                           !memcmp(p5_cr_lf_decode.image.pixels.pointer, p5_cr_lf_expected, sizeof(p5_cr_lf_expected)));
+    arena_set_position(arguments->arena, p5_cr_lf_position);
+
+    // Plain PBM samples need no separators; netpbm writes packed rows.
+    u8 p1_packed[] = "P1\n3 2\n010\n1 1\n0\n";
+    ByteSlice p1_packed_bytes = {.pointer = p1_packed, .length = sizeof(p1_packed) - 1u};
+    u64 p1_packed_position = arguments->arena->position;
+    ImageDecodeResult p1_packed_decode = image_decode(arguments->arena, p1_packed_bytes, pnm_options);
+    u8 const p1_packed_expected[] = {255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+                                     0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255};
+    BUSTER_TEST(arguments, p1_packed_decode.status == IMAGE_DECODE_SUCCESS &&
+                           p1_packed_decode.image.pixels.length == sizeof(p1_packed_expected) &&
+                           !memcmp(p1_packed_decode.image.pixels.pointer, p1_packed_expected, sizeof(p1_packed_expected)));
+    arena_set_position(arguments->arena, p1_packed_position);
+    u8 p1_bad_digit[] = "P1\n2 1\n02\n";
+    ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
+    ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);
+    BUSTER_TEST(arguments, p1_bad_digit_probe.status == IMAGE_DECODE_MALFORMED && p1_bad_digit_probe.error_offset == 8);
+
     // A caller may intentionally raise the ordinary image limits. A declared
     // PAM raster too large for any u64 ByteSlice is still a truncated bounded
     // input, not a configured-limit failure with an unnamed limit identity.
