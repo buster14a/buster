@@ -20,6 +20,11 @@
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
 //
+// link_objects places every input section of its own name that is spelled as
+// a C identifier after the ordinary sections of its kind, one name at a time,
+// and defines the `__start_NAME`/`__stop_NAME` references GNU `ld` would
+// (link_section_sets_define, issue 1276); its output is one section per kind.
+//
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
 // a **hosted** stub calls the C runtime's `exit` and lets it terminate the
@@ -36,7 +41,8 @@
 //
 // `__attribute__((constructor))` follows the same split. A writer with an
 // entry stub calls the registered functions from it and takes the two array
-// sections off the object first (link_initializer_plan_build), because every
+// sections off the object first (link_initializer_plan_build). Its collector
+// joins relocations to slots in bounded linear work using output storage; every
 // writer places every non-debug section it is given. Mach-O has no stub and
 // needs none for its constructors: it keeps `__DATA,__mod_init_func`, gives
 // it a section command of the type dyld dispatches on, and lets the loader
@@ -412,20 +418,6 @@ enum
     LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
 };
 
-// One function an image has to call before or after `main`, as the merged
-// object spells it: the symbol its `.init_array`/`.fini_array` slot is
-// relocated against, plus that relocation's addend.  Buster's own objects
-// name the function itself with a zero addend; Clang's name the section
-// symbol plus the function's offset inside it, which is why the addend is
-// carried rather than assumed away.
-typedef struct LinkInitializerEntry LinkInitializerEntry;
-struct LinkInitializerEntry
-{
-    s64 addend;
-    u32 symbol;
-    u32 reserved;
-};
-
 // Every initializer of an image, in the order it runs.  The linker writes the
 // entry point itself -- there is no libc startup object in an image it
 // produces, so nothing else would walk the arrays -- and it knows every
@@ -445,29 +437,150 @@ struct LinkInitializerPlan
     u32 destructor_count;
 };
 
-// The entries of one array section, ordered by slot.  A slot with no
-// relocation is a null pointer, which every startup implementation skips and
-// which this therefore drops too.
+// Sparse arrays must not turn an otherwise untouched output reservation into
+// resident pages. Sort only a small prefix of matching relocation indices;
+// the dense path below uses the full reservation as its slot table instead.
+// A prefix has at most E/32 entries. With 32-bit slot/relocation identities,
+// its worst-case heap height is at most 32, keeping sorting work bounded by E.
+enum
+{
+    LINK_INITIALIZER_SPARSE_RATIO = 32,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_initializer_slot_above(LinkInitializerEntry left, LinkInitializerEntry right)
+{
+    // During sparse collection, reserved is the slot and symbol the original
+    // relocation index. The tie-break keeps the incumbent's first match.
+    return left.reserved > right.reserved || (left.reserved == right.reserved && left.symbol > right.symbol);
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slot_sift(LinkInitializerEntry* entries, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_initializer_slot_above(entries[child + 1], entries[child]))
+        {
+            child += 1;
+        }
+        if (!link_initializer_slot_above(entries[child], entries[root]))
+        {
+            break;
+        }
+        LinkInitializerEntry swapped = entries[root];
+        entries[root] = entries[child];
+        entries[child] = swapped;
+        root = child;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slots_sort(LinkInitializerEntry* entries, u32 count)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_initializer_slot_sift(entries, count, root - 1);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkInitializerEntry swapped = entries[0];
+        entries[0] = entries[remaining - 1];
+        entries[remaining - 1] = swapped;
+        link_initializer_slot_sift(entries, remaining - 1, 0);
+    }
+}
+
+// The entries of one array section, ordered by slot. The caller reserves one
+// output entry per complete slot and bounds that capacity to UINT32_MAX.
+// Missing relocations are omitted and the first matching ABSOLUTE64 wins.
+// All transient keys/occupancy live in that existing output reservation, and
+// reserved is zero in every returned entry. No input metadata is changed.
 BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
 {
     u32 count = 0;
-    u64 length = object->sections[kind].data.length;
-    for (u64 offset = 0; offset + OBJECT_INITIALIZER_ENTRY_SIZE <= length; offset += OBJECT_INITIALIZER_ENTRY_SIZE)
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    if (slots == 1)
     {
-        for (u32 index = 0; index < object->relocation_count; index += 1)
+        // Keep the common one-entry case's early exit and avoid table setup.
+        for (u32 index = 0; index < object->relocation_count && !count; index += 1)
         {
             ObjectRelocation relocation = object->relocations[index];
-            if (relocation.section == (u32)kind && relocation.offset == offset && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
+            if (relocation.section == (u32)kind && relocation.offset == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
             {
-                entries[count++] = (LinkInitializerEntry){
-                    .addend = relocation.addend,
-                    .symbol = relocation.symbol,
-                };
-                break;
+                entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
             }
         }
     }
-    for (u32 index = 0; reverse && index * 2 + 1 < count; index += 1)
+    else if (slots && object->relocation_count)
+    {
+        u64 sparse_capacity = slots / LINK_INITIALIZER_SPARSE_RATIO;
+        bool dense = sparse_capacity == 0;
+        for (u32 index = 0; !dense && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && slot < slots)
+            {
+                if (count == sparse_capacity)
+                {
+                    dense = true;
+                }
+                else
+                {
+                    entries[count++] = (LinkInitializerEntry){.symbol = index, .reserved = (u32)slot};
+                }
+            }
+        }
+        if (dense)
+        {
+            count = 0;
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                entries[slot].reserved = 0;
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                    relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0)
+                {
+                    u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                    if (slot < slots && !entries[slot].reserved)
+                    {
+                        entries[slot] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol, .reserved = 1};
+                    }
+                }
+            }
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                if (entries[slot].reserved)
+                {
+                    LinkInitializerEntry entry = entries[slot];
+                    entry.reserved = 0;
+                    // count <= slot: compaction cannot overwrite an unread entry.
+                    entries[count++] = entry;
+                }
+            }
+        }
+        else
+        {
+            link_initializer_slots_sort(entries, count);
+            u32 prefix_count = count;
+            u32 previous_slot = UINT32_MAX;
+            count = 0;
+            for (u32 index = 0; index < prefix_count; index += 1)
+            {
+                LinkInitializerEntry key = entries[index];
+                if (key.reserved != previous_slot)
+                {
+                    ObjectRelocation relocation = object->relocations[key.symbol];
+                    entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+                    previous_slot = key.reserved;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; reverse && index < count / 2; index += 1)
     {
         LinkInitializerEntry swapped = entries[index];
         entries[index] = entries[count - 1 - index];
@@ -476,6 +589,13 @@ BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, Obj
 
     return count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 link_initializer_entries_collect_test(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    return link_initializer_entries_collect(object, kind, entries, reverse);
+}
+#endif
 
 // Reads the two array sections into a plan and hands back the same object
 // with them, and the relocations that filled them, removed: the writers below
@@ -1839,7 +1959,8 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
+BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64 const* section_offsets,
+                                                    ObjectSectionKind const* output_kinds, Arena* arena)
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
@@ -1850,7 +1971,7 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
         {
             return false;
         }
-        ObjectSectionKind kind = object->sections[source->section].kind;
+        ObjectSectionKind kind = output_kinds[source->section];
         if (kind >= OBJECT_SECTION_COUNT)
         {
             return false;
@@ -1987,6 +2108,83 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
     }
 }
 
+// One linker set of a merge: every input section named `name`, a C
+// identifier, placed together at [start, end) of the merged section of `kind`
+// (link_objects, issue 1276).
+typedef struct LinkSectionSet LinkSectionSet;
+struct LinkSectionSet
+{
+    String8 name;
+    u64 start;
+    u64 end;
+    ObjectSectionKind kind;
+    u32 reserved;
+};
+
+// Whether an input section is a member of a linker set: a section of its own
+// past the kinds, named by a C identifier.
+BUSTER_GLOBAL_LOCAL bool link_section_is_set(ObjectFile* object, u32 section_index)
+{
+    ObjectSection* section = object->sections + section_index;
+    return section_index >= OBJECT_SECTION_COUNT && object_section_kind_can_be_named(section->kind) && object_section_name_is_c_identifier(section->name);
+}
+
+// Appends one input section to the merged section of `kind`, aligned, and
+// hands back where it went.
+BUSTER_GLOBAL_LOCAL bool link_section_place(ObjectSection* section, ObjectSectionKind kind, u64* section_sizes, u32* section_alignments, u64* offset)
+{
+    u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
+    u64 aligned = 0;
+    bool result = align_forward_checked(section_sizes[kind], section->alignment, &aligned) && section_size <= UINT64_MAX - aligned;
+    if (result)
+    {
+        *offset = aligned;
+        section_sizes[kind] = aligned + section_size;
+        section_alignments[kind] = BUSTER_MAX(section_alignments[kind], section->alignment);
+    }
+
+    return result;
+}
+
+// GNU `ld` defines `__start_NAME` and `__stop_NAME` at the two ends of every
+// output section named by a C identifier, for the references that ask and for
+// no others, and so does this merge: an undefined reference, weak or strong,
+// to the bound of a set some input placed becomes a hidden definition there.
+// A name no input placed stays undefined, strong references to it are refused
+// and weak ones resolve to zero, as under `ld`. A program's own definition of
+// the name is left alone.
+BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count)
+{
+    String8 start_prefix = S8("__start_");
+    String8 stop_prefix = S8("__stop_");
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count && set_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool start = string_starts_with_sequence(symbol->name, start_prefix);
+        bool stop = !start && string_starts_with_sequence(symbol->name, stop_prefix);
+        if (symbol->section != OBJECT_SECTION_UNDEFINED || (!start && !stop))
+        {
+            continue;
+        }
+        String8 prefix = start ? start_prefix : stop_prefix;
+        String8 set_name = string_slice(symbol->name, prefix.length, symbol->name.length);
+        for (u32 set = 0; set < set_count; set += 1)
+        {
+            if (string_equal(sets[set].name, set_name))
+            {
+                symbol->section = (u32)sets[set].kind;
+                symbol->value = start ? sets[set].start : sets[set].end;
+                symbol->size = 0;
+                symbol->kind = OBJECT_SYMBOL_DATA;
+                symbol->weak = false;
+                symbol->hidden = true;
+                symbol->thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                break;
+            }
+        }
+    }
+}
+
 LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
 {
     LinkObjectResult result = {0};
@@ -2007,12 +2205,18 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     u64 total_symbols = 0;
     u64 total_relocations = 0;
     u64 total_debug_modules = 0;
-    u64 offset_count = (u64)object_count * OBJECT_SECTION_COUNT;
-    u64* section_offsets = arena_allocate(arena, u64, offset_count);
+    // Every input section's slot in `section_offsets` and `output_kinds`. An
+    // object's slots start at `section_slots[object_index]`, and it has at
+    // least OBJECT_SECTION_COUNT of them however few sections it carries, so a
+    // kind-indexed read through its slice stays inside it. The sections past
+    // OBJECT_SECTION_COUNT are the named ones (issue 1276).
+    u64* section_slots = arena_allocate(arena, u64, (u64)object_count + 1);
+    u64 set_section_count = 0;
+    section_slots[0] = 0;
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        if (object->error != OBJECT_ERROR_NONE || !object->sections || object->section_count > OBJECT_SECTION_COUNT ||
+        if (object->error != OBJECT_ERROR_NONE || !object->sections ||
             (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
             (object->comdat_count && !object->comdats) || (object->debug_module_count && !object->debug_modules))
         {
@@ -2041,17 +2245,97 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            u32 alignment = section->alignment;
-            u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = 0;
-            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
+            set_section_count += link_section_is_set(object, section_index);
+        }
+        section_slots[object_index + 1] = section_slots[object_index] + BUSTER_MAX(object->section_count, (u32)OBJECT_SECTION_COUNT);
+    }
+    u64* section_offsets = arena_allocate(arena, u64, section_slots[object_count]);
+    memset(section_offsets, 0, sizeof(*section_offsets) * section_slots[object_count]);
+    ObjectSectionKind* output_kinds = arena_allocate(arena, ObjectSectionKind, section_slots[object_count]);
+    // Every ordinary section is laid out first, in input order, and each
+    // linker set after them, whole: `__start_NAME` and `__stop_NAME` bound one
+    // contiguous range, so every input section of one name goes in together,
+    // sets in the order their names first appear. A set's members share one
+    // kind: their own when they agree, and otherwise writable data, which is
+    // where `ld`'s one output section of mixed flags would be writable too;
+    // code cannot share a set with data. link_section_sets_define gives the
+    // bounds to the references that ask for them.
+    LinkSectionSet* sets = arena_allocate(arena, LinkSectionSet, set_section_count ? set_section_count : 1);
+    u32 set_count = 0;
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
             {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
+                ObjectSection* section = &object->sections[section_index];
+                bool set_member = link_section_is_set(object, section_index);
+                if (pass == 0)
+                {
+                    output_kinds[section_slots[object_index] + section_index] = section->kind;
+                }
+                if (pass == 0 && !set_member)
+                {
+                    if (!link_section_place(section, section->kind, section_sizes, section_alignments,
+                                            &section_offsets[section_slots[object_index] + section_index]))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                }
+                if (pass == 1 && set_member)
+                {
+                    u32 set = 0;
+                    while (set < set_count && !string_equal(sets[set].name, section->name))
+                    {
+                        set += 1;
+                    }
+                    if (set == set_count)
+                    {
+                        sets[set_count++] = (LinkSectionSet){
+                            .name = section->name,
+                            .kind = section->kind,
+                        };
+                    }
+                    else if (sets[set].kind != section->kind)
+                    {
+                        if (sets[set].kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
+                        {
+                            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                            result.symbol = link_string_copy(arena, section->name);
+                            return result;
+                        }
+                        sets[set].kind = OBJECT_SECTION_DATA;
+                    }
+                }
             }
-            section_offsets[(u64)object_index * OBJECT_SECTION_COUNT + section_index] = aligned;
-            section_sizes[section->kind] = aligned + section_size;
-            section_alignments[section->kind] = BUSTER_MAX(section_alignments[section->kind], alignment);
+        }
+    }
+    for (u32 set = 0; set < set_count; set += 1)
+    {
+        LinkSectionSet* current = sets + set;
+        bool first = true;
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+            {
+                ObjectSection* section = &object->sections[section_index];
+                if (link_section_is_set(object, section_index) && string_equal(section->name, current->name))
+                {
+                    u64* offset = &section_offsets[section_slots[object_index] + section_index];
+                    output_kinds[section_slots[object_index] + section_index] = current->kind;
+                    if (!link_section_place(section, current->kind, section_sizes, section_alignments, offset))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                    current->start = first ? *offset : current->start;
+                    current->end = section_sizes[current->kind];
+                    first = false;
+                }
+            }
         }
     }
     LinkComdatPlan comdat_plan = {0};
@@ -2075,7 +2359,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* section = object->sections + section_index;
-            ObjectSectionKind kind = section->kind;
+            ObjectSectionKind kind = output_kinds[section_index];
             if (!aliased_sections[kind])
             {
                 aliased_sections[kind] = section;
@@ -2151,7 +2435,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = objects + object_index;
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule source = object->debug_modules[module_index];
@@ -2166,29 +2450,37 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* source = &object->sections[section_index];
-            if (source->data.length && !alias_section_data[source->kind])
+            if (source->data.length && !alias_section_data[kinds[section_index]])
             {
-                memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
+                memcpy(result.object.sections[kinds[section_index]].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
             }
             // The priorities of an initializer array travel with its entries.
             // An offset that is not a whole number of entries cannot name one,
             // and only an input section aligned under
-            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.
+            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.  The kinds'
+            // sections carry them in initializer_priorities; a named one past
+            // OBJECT_SECTION_COUNT -- a section attribute's `.init_array.101`
+            // or `.preinit_array` (issue 1276) -- spells one priority for all
+            // of its entries in its name.
             u32 slot = source->kind == OBJECT_SECTION_FINI_ARRAY;
             u32* merged = source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
                               ? result.object.initializer_priorities[slot]
                               : 0;
-            u32* priorities = merged ? object->initializer_priorities[slot] : 0;
-            if (priorities && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            bool kind_section = section_index < OBJECT_SECTION_COUNT;
+            u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
+            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                         : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
                 {
-                    merged[first + entry] = priorities[entry];
+                    merged[first + entry] = priorities ? priorities[entry] : named_priority;
                 }
             }
         }
@@ -2266,7 +2558,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             {
                 destination_index = result.object.symbol_count++;
                 if (!link_symbol_definition_set(&result.object.symbols[destination_index], source, object,
-                                                section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                                                section_offsets + section_slots[object_index], output_kinds + section_slots[object_index], arena))
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
@@ -2328,7 +2620,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                                                    : source_thread_local_state;
                 if (source_replaces)
                 {
-                    if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                    if (!link_symbol_definition_set(destination, source, object, section_offsets + section_slots[object_index],
+                                                    output_kinds + section_slots[object_index], arena))
                     {
                         result.error = LINK_ERROR_INVALID_INPUT;
                         return result;
@@ -2347,7 +2640,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation source = object->relocations[relocation_index];
@@ -2365,8 +2659,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            ObjectSectionKind kind = object->sections[source.section].kind;
-            source.section = (u32)kind;
+            source.section = (u32)kinds[source.section];
             source.offset += offsets[object->relocations[relocation_index].section];
             source.symbol = symbol_maps[object_index][source.symbol];
             source.comdat = 0;
@@ -2374,6 +2667,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     link_initializer_arrays_order(arena, &result.object);
+    link_section_sets_define(&result.object, sets, set_count);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)
@@ -4677,6 +4971,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -5969,6 +6264,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7105,6 +7401,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7430,6 +7727,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7845,6 +8143,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -9982,10 +10281,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
         else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -11177,10 +11478,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
         else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -13032,6 +13335,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
     return result;
@@ -13113,6 +13417,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
         if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
 

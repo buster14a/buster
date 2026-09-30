@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/debug/debug_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_scheduled_line_marks(UnitTestArguments* arguments)
 {
@@ -294,9 +295,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
     return result;
 }
 
+// Seeds arrive in code-layout order and must each find the IR function with
+// their symbol -- the first one when two share it -- through the symbol index.
+// Seeds here run backwards over a permuted module, two name symbols no
+// function has, and one hand-built seed outside the symbol table keeps the
+// search it always had. The counting build pins the index at one row per IR
+// function instead of one search per seed.
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_function_seed_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SEED_SYMBOLS = 512, SEED_FUNCTIONS = SEED_SYMBOLS + 1, SEED_COUNT = SEED_SYMBOLS + 1, SEED_LOCALS_MAX = 3 };
+    Arena* arena = arguments->arena;
+    IrSymbol* symbols = arena_allocate(arena, IrSymbol, SEED_SYMBOLS);
+    IrFunction* functions = arena_allocate(arena, IrFunction, SEED_FUNCTIONS);
+    IrDebugLocal* locals = arena_allocate(arena, IrDebugLocal, SEED_FUNCTIONS * SEED_LOCALS_MAX);
+    DebugFunctionSeed* seeds = arena_allocate(arena, DebugFunctionSeed, SEED_COUNT);
+    u32* expected = arena_allocate(arena, u32, SEED_COUNT);
+    for (u32 index = 0; index < SEED_SYMBOLS; index += 1)
+    {
+        symbols[index] = (IrSymbol){.name = S8("f"), .id = {.value = index}, .type = IR_TYPE_ID_INVALID,
+                                    .kind = IR_SYMBOL_FUNCTION, .is_definition = true};
+    }
+    for (u32 index = 0; index < SEED_FUNCTIONS * SEED_LOCALS_MAX; index += 1)
+    {
+        locals[index] = (IrDebugLocal){.name = S8("v"), .type = IR_TYPE_ID_INVALID, .id = {.value = index % SEED_LOCALS_MAX}};
+    }
+    // Functions 0..508 hold symbol (7f + 3) mod 509, a permutation of 0..508.
+    // Functions 509 and 510 repeat symbols 5 and 11 with other local counts,
+    // 511 holds 509, and 512 names a symbol past the table. Nothing holds
+    // symbols 510 and 511.
+    for (u32 index = 0; index < SEED_FUNCTIONS; index += 1)
+    {
+        u32 symbol = index < 509 ? (7 * index + 3) % 509 : index == 509 ? 5 : index == 510 ? 11 : index == 511 ? 509 : SEED_SYMBOLS + 7;
+        functions[index] = (IrFunction){
+            .symbol = {.value = symbol},
+            .debug_locals = locals + index * SEED_LOCALS_MAX,
+            .debug_local_count = index % SEED_LOCALS_MAX + 1,
+        };
+    }
+    IrModule module = {.functions = functions, .function_count = SEED_FUNCTIONS};
+    IrProgram program = {.symbols = {.symbols = symbols, .count = SEED_SYMBOLS}};
+    for (u32 index = 0; index < SEED_COUNT; index += 1)
+    {
+        // Backwards over every symbol, then the seed outside the table.
+        u32 symbol = index < SEED_SYMBOLS ? SEED_SYMBOLS - 1 - index : SEED_SYMBOLS + 7;
+        seeds[index] = (DebugFunctionSeed){.name = S8("f"), .symbol = {.value = symbol}, .code_offset = index * 16, .code_size = 16};
+        expected[index] = 0;
+        for (u32 function = 0; function < SEED_FUNCTIONS && !expected[index]; function += 1)
+        {
+            expected[index] = functions[function].symbol.value == symbol ? functions[function].debug_local_count : 0;
+        }
+    }
+    BUSTER_TEST(arguments, expected[0] == 0 && expected[1] == 0 && expected[SEED_COUNT - 1] == SEED_LOCALS_MAX);
+    DebugLocationIndex empty_index = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    DebugModel model = debug_model_build(arena, (DebugModelInput){
+        .program = &program, .module = &module, .functions = seeds, .function_count = SEED_COUNT, .location_index = &empty_index,
+    });
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_FUNCTION_INDEX_ROWS] - before.values[IR_CONSTRUCTION_DEBUG_FUNCTION_INDEX_ROWS] ==
+                           SEED_FUNCTIONS);
+    // Only the seed outside the table searches, and it matches the last row.
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_FUNCTION_SEED_SCAN_ROWS] -
+                               before.values[IR_CONSTRUCTION_DEBUG_FUNCTION_SEED_SCAN_ROWS] == SEED_FUNCTIONS);
+#endif
+    if (BUSTER_REQUIRE(arguments, model.valid && model.function_count == SEED_COUNT))
+    {
+        bool matches = true;
+        for (u32 index = 0; index < SEED_COUNT; index += 1)
+        {
+            matches = matches && model.functions[index].variable_count == expected[index] &&
+                      model.functions[index].symbol.value == seeds[index].symbol.value;
+        }
+        BUSTER_TEST(arguments, matches);
+    }
+    return result;
+}
+
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
+    UnitTestResult seed_index = debug_test_function_seed_index(arguments);
+    result.succeeded_test_count += seed_index.succeeded_test_count;
+    result.test_count += seed_index.test_count;
     UnitTestResult local_index = debug_test_location_local_index(arguments);
     result.succeeded_test_count += local_index.succeeded_test_count;
     result.test_count += local_index.test_count;
@@ -307,6 +392,35 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RSP) == 7);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_AARCH64}, DEBUG_REGISTER_AARCH64_X29) == 29);
     BUSTER_TEST(arguments, debug_register_codeview_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_R15) == 343);
+    // Every register against CodeView's own enumeration (CV_HREG_e in
+    // Microsoft's cvconst.h, as LLVM's CodeViewRegisters.def mirrors it), not
+    // against our enum order: RAX and R15 alone are the two registers where
+    // "328 + hardware index" happened to agree with it (#1440).
+    typedef struct DebugCodeViewRegisterCase DebugCodeViewRegisterCase;
+    struct DebugCodeViewRegisterCase
+    {
+        CpuArch arch;
+        DebugRegister reg;
+        u32 codeview;
+    };
+    DebugCodeViewRegisterCase codeview_registers[] = {
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RAX, 328},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RBX, 329},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RCX, 330},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RDX, 331},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RSI, 332},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RDI, 333},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RBP, 334},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RSP, 335},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_R8, 336},    {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_R12, 340},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM0, 154},  {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM7, 161},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM8, 252},  {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM15, 259},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X0, 50}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X28, 78},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X29, 79}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X30, 80},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_SP, 81}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_V0, 180},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_V31, 211},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codeview_registers); index += 1)
+    {
+        DebugCodeViewRegisterCase expected = codeview_registers[index];
+        BUSTER_TEST(arguments, debug_register_codeview_number((Target){.cpu_arch = expected.arch}, expected.reg) == expected.codeview);
+    }
 
     // Location transitions are intentionally tested independently of a
     // backend allocator: the neutral model must retain every range and every

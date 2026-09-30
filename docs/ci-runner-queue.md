@@ -85,13 +85,18 @@ indicates a provider outage.
 | pull_request, cancelled | 202 | 4.7% |
 | merge_group, failure | 112 | 2.6% |
 
-Each `ci.yml` run needs eight macOS jobs, so the ceiling runs about six CI
+At the measured revision, each `ci.yml` run needed eight macOS jobs, so the ceiling runs about six CI
 runs at once. Between 6 and 16 merge-group `ci.yml` runs were active
 simultaneously (`max_entries_to_build: 20`); 16 ended cancelled, 1 failed and
 12 succeeded. All five `main` push runs revalidated a SHA whose merge-group
 `ci.yml` run had already succeeded. Successful `ci.yml` runs created in the
 window: 12 merge-group (median 2175 s created-to-updated), 10 pull-request and
 3 push.
+
+Current CI requests four Apple jobs after #1986: macOS AArch64 release, checks
+and native, plus iOS AArch64. The eight-job population and queue measurements
+above remain historical. Halving requested Apple jobs is not a measured
+latency or runner-minute speedup; see [Apple CI policy](apple-ci-policy.md).
 
 ## Candidate corrections
 
@@ -114,3 +119,60 @@ commands above; lower queue depth alone is not a throughput improvement.
    skip a push without exact-SHA success evidence.
 3. **Raise the macOS allowance.** An account/billing decision with unknown
    cost; out of repository scope.
+4. **Shape pull-request macOS demand without adding latency** (#1825). Pull
+   requests were about 40% of macOS minutes. Implemented below, except the
+   parts that change byte-pinned tests.
+
+## Draft pull-request deferral
+
+The maintainer chose deferrals that add no latency and keep merge-queue
+coverage unchanged (#1825). Gating macOS lanes on a Linux result was rejected
+because it serializes PR latency.
+
+**`ci.yml`.** On the first attempt of a `pull_request` run whose payload is a
+draft, each job that would hold a macOS runner (four desktop shards, two
+native lanes, two iOS lanes) runs on `ubuntu-26.04` as
+`<job> (deferred for draft PR)`. Its first step fails unless that condition
+holds, then records a notice. Checkout is skipped, which skips every later step.
+Every other event, a ready pull request and "Re-run all jobs" (attempt 2 or
+later) run the lanes in full. The expressions are in `runs-on`, `name` and
+step `if:` only: the `on:` block and the no-`needs:` shape of the native and
+mobile jobs are pinned by the support-pinned `tests/ci_tools_test.py`.
+
+**`CI complete`.** `github_ci_time.py require-jobs` treats a deferred no-op and
+its macOS job as one logical job. It accepts the no-op only when the API run's
+event and `GITHUB_EVENT_NAME` are both `pull_request`, the run's own
+`GITHUB_EVENT_PATH` payload has `draft: true` for the API run's head SHA, the
+record is attempt 1, and the deferral step succeeded. A merge group, push,
+tag, manual or ready run with a deferred no-op fails closed. Accepted
+deferrals are listed in the job summary and as a notice on the pull request.
+Tests: `tools/matrix_shard_test.py` (`DraftMacosDeferralTests`).
+
+**Marking a draft ready.** `ready_for_review` cannot be added to the `on:`
+block without the support-declaration transition that also blocks #1808. Until
+then a draft marked ready without a new push keeps its deferred run: the
+merge queue still runs every macOS lane before merge, and "Re-run all jobs"
+gives pull-request macOS evidence first without a push.
+
+**Auxiliary workflows.** `compiler-throughput.yml` no longer has a macOS
+harness leg, so its Linux comparison and census jobs no longer wait for a macOS
+runner. `throughput-harness-macos.yml` runs that leg weekly, on demand, and for
+ready pull requests that change an input in the textual include closure of
+`build.c` and `tools/throughput/{tests,shared}.c` (checked by
+`tools/github_ci_time_test.py`). `native-retirement-materializer.yml` merge
+groups keep only the Linux leg: the check is optional and gates nothing there.
+Pull requests that change the materializer, main pushes and manual runs still
+run macOS.
+
+**Remaining (needs a trust transition).** Adding `ready_for_review`,
+path-aware native and mobile macOS lanes (they would need `needs:`), and
+dropping the macOS `Rebind unit` from `native-retirement-rebind.yml` merge
+groups (a trusted implementation path) each need the maintainer-authorized
+sequence in [native-retirement rebinding](native-retirement-rebinding.md#trust-transitions),
+coordinated with #1808.
+
+**Measurement.** Compare a bounded window before and after the change lands,
+using the commands above. Report pull-request macOS minutes, macOS assignment
+wait and completed merges per hour separately. Deferred no-ops appear as
+`ubuntu-26.04` `pull_request` jobs whose names end in `(deferred for draft PR)`.
+No saving is claimed before that window.

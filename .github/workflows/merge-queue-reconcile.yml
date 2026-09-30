@@ -16,6 +16,7 @@ on:
       - GPU toolchain acceptance
       - Benchmark service workflow policy
       - API migration policy
+      - Native retirement rebinding
     types: [completed]
   push:
     branches: [main]

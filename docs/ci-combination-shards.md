@@ -7,8 +7,8 @@ sanitizer/fuzzer policy, deadlines and production backend dispatch do not change
 
 ## Ownership
 
-Each of the six existing runner labels has two jobs, named `<platform> release`
-and `<platform> checks`. The workflow's `lane` × `shard` axes form twelve jobs;
+Each of the five retained runner labels has two jobs, named `<platform> release`
+and `<platform> checks`. The workflow's `lane` × `shard` axes form ten jobs;
 the include entries add metadata by lane rather than creating extra jobs.
 
 | Shard | Work |
@@ -19,7 +19,7 @@ the include entries add metadata by lane rather than creating extra jobs.
 | Platform | Release configurations | Checks configurations | Total required |
 | --- | ---: | ---: | ---: |
 | Linux, either architecture | 1 | 4 | 5 |
-| macOS, either architecture | 1 | 4 | 5 |
+| macOS AArch64 | 1 | 4 | 5 |
 | Windows x86-64 | 1 | 5 | 6 |
 | Windows AArch64 | 1 | 1 | 2 |
 
@@ -34,10 +34,12 @@ required configuration exactly once.
 
 The canonical producer and all its consumers remain in one job: there is no
 cross-job compiler artifact handoff or second canonical compiler build.
-All six desktop platforms have independent native execution-mode jobs; the four
+All five CI desktop platforms have independent native execution-mode jobs; the three
 Unix native jobs additionally share their producer with the differential corpus.
-Mobile, UEFI and the independent analyzer jobs are unchanged. Intel macOS
-retains its existing direct-matrix/self-host exception. The exact Windows mode
+Android x86-64, iOS AArch64, UEFI and the independent analyzer jobs retain
+their obligations. Intel Apple execution is outside routine CI; its source
+policy remains available for best-effort diagnostics and cheap cross-target
+unit checks. See [Apple CI policy](apple-ci-policy.md). The exact Windows mode
 and compiler/configuration contract is documented in
 [Windows CI coverage](windows-ci-coverage.md).
 
@@ -76,8 +78,8 @@ validated on the executing runner. A checks completion explicitly says
 
 * All six job groups (`lint`, `test`, `native`, `mobile`, `uefi`, `analyzer`)
   must succeed, with the existing real-shell negative controls retained.
-* The read-only Actions job inventory must contain the exact 25 expected job
-  identities: all twelve desktop shard names, all six native names, three
+* The read-only Actions job inventory must contain the exact 21 expected job
+  identities: all ten desktop shard names, all five native names, two
   mobile names, UEFI, analyzer, lint and the active aggregate. Every completed
   job must succeed. Each desktop job must complete its applicable matrix,
   coverage summary, tool setup, shared regressions and log upload; each native
@@ -99,7 +101,8 @@ duplicate same-attempt, foreign-run/source and future-attempt records fail.
 `CI complete` itself must be active in the current attempt. The run head SHA
 and actual checkout SHA are recorded separately (PR merge checkouts differ).
 No branch protection, check requirement, write permission or secret is changed;
-only `CI complete` adds job-scoped `actions: read` for this inventory.
+only `CI complete` adds job-scoped `actions: read` for this inventory and
+`checks: read` for the annotations of interrupted jobs.
 
 ## Reproduce
 
@@ -178,12 +181,13 @@ python3 tools/github_ci_time.py summarize candidate-runs.json --output candidate
 ```
 
 The collector understands the historical 6/11/15/17/23-job layouts and the
-current 25-job layout. All 25 execution intervals count toward candidate runner
+current 21-job layout. All 21 execution intervals count toward candidate runner
 seconds, including both Windows mode lanes and the aggregate inventory check.
 It reports whole-workflow elapsed time, execution span, initial queue delay,
 individual job durations and job queue delays when API creation timestamps
 exist (otherwise `null`, never imputed zero). Missing successful steps or shard
-identities reject a sample. Historical 23-job and current 25-job workflow blobs
+identities reject a sample, so draft runs with deferred macOS lanes are never
+timing samples. Historical 23-/25-job and current 21-job workflow blobs
 remain separate cohorts.
 
 Compare medians and retain individual shard distributions. Inspect

@@ -1,7 +1,11 @@
 name: Native retirement merge admission
 
-# PR readiness and main invalidation. The exact merge-group check is published
-# by trusted-main reconciliation after the queued predecessor lands.
+# PR readiness and main-push invalidation for the required `Native retirement
+# merge admission` check. This workflow deliberately has no merge_group trigger:
+# the exact merge-group check is published by the trusted-main reconciler
+# (merge-queue-reconcile.yml) after the queued predecessor lands, so no hosted
+# runner waits for a predecessor (#1807, #1811). See
+# docs/merge-queue-admission.md and docs/native-retirement-rebinding.md.
 on:
   pull_request:
   push:
@@ -14,16 +18,21 @@ permissions:
   statuses: read
   checks: write
 
+# Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
+# so GitHub cannot cancel or replace an older pending invalidation; the push
+# helper orders them explicitly. See docs/main-push-maintenance.md.
 concurrency:
-  group: native-retirement-admission-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: native-retirement-admission-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   native-retirement-admission:
     name: Native retirement merge admission
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # PR admission never waits. A main push may wait up to 30 minutes for an
+    # earlier push's invalidation (main_push_maintenance.py --wait-seconds 1800).
+    timeout-minutes: 45
     steps:
       - name: Require CI admission to be enabled
         shell: bash
@@ -72,21 +81,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           tool="$GITHUB_WORKSPACE/trusted/tools/native_retirement_merge_gate.py"
           if [[ ! -f "$tool" ]]; then
             tool="$GITHUB_WORKSPACE/candidate/tools/native_retirement_merge_gate.py"
-          fi
-          current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
-          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
-          # The PR event's base SHA can predate a successful current-main writer.
-          BASE_SHA=$(git -C trusted rev-parse HEAD)
-          if [[ "$BASE_SHA" != "$current_main" ]]; then
-            echo '::error::Main advanced after trusted PR policy checkout.' >&2
-            exit 1
           fi
           rows="$RUNNER_TEMP/native-retirement-status-rows.json"
           gh api --paginate --slurp \
@@ -100,6 +100,28 @@ jobs:
           rows = [row for page in pages for row in page]
           pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
           PY_STATUS
+          current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          # The PR event's base SHA can predate a successful current-main writer.
+          # The queue lands PRs every few minutes, so main can also advance
+          # after the trusted checkout; re-resolve against the new main a
+          # bounded number of times instead of failing the candidate (#1971).
+          BASE_SHA=$(git -C trusted rev-parse HEAD)
+          attempts=1
+          while [[ "$BASE_SHA" != "$current_main" ]]; do
+            if (( attempts >= 3 )); then
+              echo '::error::Main kept advancing after trusted PR policy checkout.' >&2
+              exit 1
+            fi
+            attempts=$((attempts + 1))
+            echo "::notice::Main advanced from $BASE_SHA to $current_main; re-resolving trusted PR policy."
+            git -C trusted fetch --quiet --no-tags --depth 1 origin "$current_main"
+            git -C trusted checkout --quiet --force --detach "$current_main"
+            git -C candidate fetch --quiet --no-tags origin "$current_main"
+            BASE_SHA=$(git -C trusted rev-parse HEAD)
+            current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+            [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          done
           python3 "$tool" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
             --base "$BASE_SHA" \
@@ -108,14 +130,18 @@ jobs:
             --event "$EVENT_NAME" \
             --status-json "$RUNNER_TEMP/native-retirement-status.json" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
-      - name: Invalidate stale trusted integrations after main advances
+      - name: Reconcile stale trusted integrations after main advances
         if: ${{ github.event_name == 'push' }}
         working-directory: candidate
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 tools/native_retirement_merge_gate.py invalidate-stale \
+          python3 -B tools/main_push_maintenance.py invalidate-native-retirement \
             --repository "$GITHUB_REPOSITORY" \
-            --new-main "$GITHUB_SHA" \
+            --event-main "$GITHUB_SHA" \
+            --workflow "native-retirement-admission.yml" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --predecessor-job "Native retirement merge admission" \
+            --wait-seconds 1800 \
             --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             | tee "$RUNNER_TEMP/native-retirement-invalidation.json"

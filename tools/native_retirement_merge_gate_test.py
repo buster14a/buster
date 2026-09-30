@@ -73,8 +73,30 @@ class Repository:
         git(self.repo, "commit", "-m", name)
         return git(self.repo, "rev-parse", "HEAD")
 
-    def integration(self, candidate: str, kind: str = "ordinary") -> tuple[str, str]:
-        git(self.repo, "checkout", "-B", "integrated", self.base)
+    def advance(self, name: str, changes: dict[str, str], parent: str | None = None) -> str:
+        """Commit changes on top of parent (default base) to model a later main."""
+        git(self.repo, "checkout", "-B", name, parent or self.base)
+        for relative, content in changes.items():
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-m", name)
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def catch_up(self, base: str | None = None) -> tuple[str, str, str]:
+        """Writer integration of an empty candidate on base: generated state only."""
+        base = base or self.base
+        git(self.repo, "checkout", "-B", gate.CATCH_UP_BRANCH, base)
+        git(self.repo, "commit", "--allow-empty", "-m", "catch-up request")
+        candidate = git(self.repo, "rev-parse", "HEAD")
+        head, evidence = self.integration(candidate, base=base)
+        return candidate, head, evidence
+
+    def integration(self, candidate: str, kind: str = "ordinary",
+                    base: str | None = None) -> tuple[str, str]:
+        base = base or self.base
+        git(self.repo, "checkout", "-B", "integrated", base)
         git(self.repo, "merge", "--no-commit", "--no-ff", candidate)
         snapshot = self.repo / "docs/native-retirement-repository-sources-v1.json"
         header = self.repo / "tools/native_retirement_dependency_binding.generated.h"
@@ -90,13 +112,13 @@ class Repository:
         message = (
             "trusted integration\n\n"
             f"{gate.TRAILER_EVIDENCE}: {evidence}\n"
-            f"{gate.TRAILER_BASE}: {self.base}\n"
+            f"{gate.TRAILER_BASE}: {base}\n"
             f"{gate.TRAILER_CANDIDATE}: {candidate}\n"
             f"{gate.TRAILER_FINAL_TREE}: {final_tree}\n"
             f"{gate.TRAILER_KIND}: {kind}\n"
         )
         commit = git(
-            self.repo, "commit-tree", final_tree, "-p", self.base, "-p", candidate,
+            self.repo, "commit-tree", final_tree, "-p", base, "-p", candidate,
             input_text=message,
         )
         git(self.repo, "reset", "--hard", commit)
@@ -135,9 +157,20 @@ class AdmissionTests(unittest.TestCase):
         )
         self.assertEqual(report["mode"], "ordinary")
 
-    def test_bound_source_is_pending_for_ephemeral_validation_but_blocked_for_merge(self):
+    def test_bound_source_is_admitted_without_writer_for_ephemeral_queue_validation(self):
         head = self.repository.branch(
             "bound", {"src/buster/lib/value.c": "int value = 2;\n"}
+        )
+        for allow_pending in (True, False):
+            report = gate.check_pull_request(
+                self.repository.repo, self.repository.base, head,
+                self.repository.base, None, allow_pending,
+            )
+            self.assertEqual(report["mode"], "ordinary-bound")
+
+    def test_trust_transition_is_pending_for_ephemeral_validation_but_blocked_for_merge(self):
+        head = self.repository.branch(
+            "bootstrap", {"tools/native_retirement_rebind.py": "# bootstrap\n"}
         )
         pending = gate.check_pull_request(
             self.repository.repo, self.repository.base, head,
@@ -149,6 +182,69 @@ class AdmissionTests(unittest.TestCase):
                 self.repository.repo, self.repository.base, head,
                 self.repository.base, None, False,
             )
+
+    def test_catch_up_stays_admissible_while_main_publishes_no_generated_state(self):
+        repo, base = self.repository.repo, self.repository.base
+        candidate, head, evidence = self.repository.catch_up()
+        status = status_file(self.root, head, evidence)
+        report = gate.check_pull_request(repo, base, head, base, status, False)
+        self.assertEqual(report["mode"], "trusted-integration")
+        self.assertTrue(report["catch_up"])
+        self.assertEqual(report["recorded_base"], base)
+        # An ordinary-bound source change landing first does not invalidate it.
+        later = self.repository.advance("later", {"src/buster/lib/value.c": "int value = 9;\n"})
+        report = gate.check_pull_request(repo, later, head, later, status, False)
+        self.assertTrue(report["catch_up"])
+        with self.assertRaisesRegex(gate.AdmissionError, "main advanced"):
+            gate.check_pull_request(repo, base, head, later, status, False)
+        # Newer generated state on main makes the catch-up obsolete.
+        refreshed = self.repository.advance("refreshed", {
+            "tools/native_retirement_dependency_binding.generated.h": "#define NEWER 1\n"},
+            parent=later)
+        with self.assertRaisesRegex(gate.AdmissionError, "newer generated state"):
+            gate.check_pull_request(repo, refreshed, head, refreshed, status, False)
+        self.assertEqual(candidate, report["candidate"])
+        # A main that does not descend from the recorded base is rejected.
+        _, later_head, later_evidence = self.repository.catch_up(base=later)
+        fork = self.repository.advance("fork", {"README.md": "fork\n"})
+        with self.assertRaisesRegex(gate.AdmissionError, "ancestor"):
+            gate.check_pull_request(repo, fork, later_head, fork,
+                                    status_file(self.root, later_head, later_evidence), False)
+
+    def test_catch_up_must_publish_generated_state_and_nothing_else(self):
+        repo, base = self.repository.repo, self.repository.base
+        git(repo, "checkout", "-B", gate.CATCH_UP_BRANCH, base)
+        git(repo, "commit", "--allow-empty", "-m", "catch-up request")
+        candidate = git(repo, "rev-parse", "HEAD")
+        for label, changes in (("empty", {}), ("source", {"README.md": "smuggled\n"})):
+            with self.subTest(label=label):
+                git(repo, "checkout", "-B", "integrated-" + label, base)
+                for relative, content in changes.items():
+                    (repo / relative).write_text(content)
+                git(repo, "add", ".")
+                final_tree = git(repo, "write-tree")
+                message = (
+                    "trusted integration\n\n"
+                    f"{gate.TRAILER_EVIDENCE}: {'e' * 64}\n"
+                    f"{gate.TRAILER_BASE}: {base}\n"
+                    f"{gate.TRAILER_CANDIDATE}: {candidate}\n"
+                    f"{gate.TRAILER_FINAL_TREE}: {final_tree}\n"
+                    f"{gate.TRAILER_KIND}: ordinary\n"
+                )
+                head = git(repo, "commit-tree", final_tree, "-p", base, "-p", candidate,
+                           input_text=message)
+                with self.assertRaisesRegex(gate.AdmissionError, "no generated change|non-generated"):
+                    gate.check_pull_request(repo, base, head, base,
+                                            status_file(self.root, head, "e" * 64), False)
+
+    def test_non_catch_up_integration_still_requires_exact_current_main(self):
+        repo, base = self.repository.repo, self.repository.base
+        candidate = self.repository.branch("bound", {"src/buster/lib/value.c": "int value = 6;\n"})
+        head, evidence = self.repository.integration(candidate)
+        later = self.repository.advance("later", {"README.md": "later\n"})
+        with self.assertRaisesRegex(gate.AdmissionError, "not based on"):
+            gate.check_pull_request(repo, later, head, later,
+                                    status_file(self.root, head, evidence), False)
 
     def test_manual_generated_edit_fails_even_in_pending_mode(self):
         head = self.repository.branch("generated", {
@@ -222,9 +318,11 @@ class AdmissionTests(unittest.TestCase):
 class FakeGitHub:
     repository = "buster14a/buster"
 
-    def __init__(self, pulls: list[dict], commits: dict[str, dict]):
+    def __init__(self, pulls: list[dict], commits: dict[str, dict],
+                 comparisons: dict[str, dict] | None = None):
         self.pulls = pulls
         self.commits = commits
+        self.comparisons = comparisons or {}
         self.posts = []
 
     def all(self, path: str, **query):
@@ -235,6 +333,8 @@ class FakeGitHub:
     def request(self, path: str, *, method: str = "GET", body=None, **query):
         if path.startswith("commits/") and method == "GET":
             return self.commits[path.removeprefix("commits/")]
+        if path.startswith("compare/") and method == "GET":
+            return self.comparisons[path.removeprefix("compare/")]
         if path == "check-runs" and method == "POST":
             self.posts.append(body)
             return {"id": len(self.posts)}
@@ -305,6 +405,31 @@ class MergeGroupTests(unittest.TestCase):
         head = self.repository.branch("docs", {"README.md": "unrelated\n"})
         result = self.check(self.group(head), None)
         self.assertEqual(result["mode"], "ordinary-merge-group")
+
+    def test_bound_source_group_needs_no_writer_and_is_marked_for_reconstruction(self):
+        head = self.repository.branch("bound-direct", {"src/buster/lib/value.c": "int value = 11;\n"})
+        result = self.check(self.group(head), None)
+        self.assertEqual(result["mode"], "ordinary-bound-merge-group")
+
+    def test_catch_up_group_lands_after_bound_predecessor_without_new_writer_run(self):
+        _, head, evidence = self.repository.catch_up()
+        api = GroupGitHub(self.root, self.repository.base, head, evidence)
+        later = self.repository.advance("later", {"src/buster/lib/value.c": "int value = 12;\n"})
+        result = self.check(self.group(head, base=later), api, base=later)
+        self.assertEqual(result["mode"], "trusted-integration-merge-group")
+        self.assertTrue(result["catch_up"])
+        # The writer run is verified against the catch-up's own recorded base.
+        self.assertEqual(result["publication"], {"run_id": 1, "run_attempt": 1})
+
+    def test_catch_up_group_cannot_add_other_bytes(self):
+        _, head, evidence = self.repository.catch_up()
+        api = GroupGitHub(self.root, self.repository.base, head, evidence)
+        later = self.repository.advance("later", {"src/buster/lib/value.c": "int value = 13;\n"})
+        extra = self.repository.advance("extra", {"README.md": "smuggled\n"}, parent=later)
+        merged = gate.clean_merge_tree(self.repository.repo, extra, head)
+        group = self.group(head, base=later, tree=merged)
+        with self.assertRaisesRegex(gate.AdmissionError, "combined tree|more than"):
+            self.check(group, api, base=later)
 
     def test_second_ordinary_group_waits_until_first_synthetic_group_lands(self):
         first = self.repository.branch("first", {"README.md": "first\n"})
@@ -507,17 +632,57 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(api.posts[0]["conclusion"], "failure")
         self.assertEqual(api.posts[0]["head_sha"], stale_head)
 
+    def test_catch_up_head_is_invalidated_only_when_main_publishes_generated_state(self):
+        old, new = "1" * 40, "2" * 40
+        message = (
+            f"{gate.TRAILER_EVIDENCE}: {'e' * 64}\n"
+            f"{gate.TRAILER_BASE}: {old}\n"
+            f"{gate.TRAILER_CANDIDATE}: {'6' * 40}\n"
+            f"{gate.TRAILER_FINAL_TREE}: {'7' * 40}\n"
+            f"{gate.TRAILER_KIND}: ordinary\n"
+        )
+        head = "3" * 40
+        pull = {"number": 9,
+                "head": {"sha": head, "ref": gate.CATCH_UP_BRANCH,
+                         "repo": {"full_name": "buster14a/buster"}},
+                "base": {"repo": {"full_name": "buster14a/buster"}}}
+        source = {"filename": "src/buster/lib/value.c"}
+        generated = {"filename": "tools/native_retirement_dependency_binding.generated.h"}
+        renamed = {"filename": "moved.h",
+                   "previous_filename": "docs/native-retirement-repository-sources-v1.json"}
+        cases = (
+            ({"status": "ahead", "files": [source]}, 0),
+            ({"status": "ahead", "files": [source, generated]}, 1),
+            ({"status": "ahead", "files": [renamed]}, 1),
+            ({"status": "diverged", "files": [source]}, 1),
+            ({"status": "ahead", "files": [source] * gate.COMPARE_FILE_LIMIT}, 1),
+            ({"status": "ahead"}, 1),
+        )
+        for comparison, posts in cases:
+            with self.subTest(comparison=comparison):
+                api = FakeGitHub([pull], {head: {"commit": {"message": message}}},
+                                 {old + "..." + new: comparison})
+                gate.invalidate_stale(api, new, "https://github.com/buster14a/buster/actions/runs/2")
+                self.assertEqual(len(api.posts), posts)
+
 
 class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
 
     def test_stale_pr_event_base_uses_trusted_live_main_and_groups_keep_queued_base(self):
-        for name, step, events in (("native-retirement-admission.yml", "Enforce trusted native-retirement integration", ("pull_request",)),
-                                   ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions", ("pull_request", "merge_group"))):
+        enforce = "Enforce trusted native-retirement integration"
+        # The rebind job admits PRs before reconstruction and groups after
+        # their predecessor lands, so each event has its own step (#1893).
+        # Merge-group native admission is published by the trusted reconciler,
+        # so the admission workflow has a pull-request step only (#1811).
+        for name, steps in (("native-retirement-admission.yml", {"pull_request": enforce}),
+                            ("native-retirement-rebind.yml", {
+                                "pull_request": "Reject feature-owned generated state and classify trust transitions",
+                                "merge_group": "Admit the landed merge group with trusted tools"})):
             workflow = (self.root / ".github/workflows" / name).read_text()
-            block = workflow.split("      - name: " + step + "\n", 1)[1].split("      - name:", 1)[0]
-            script = textwrap.dedent(block.split("        run: |\n", 1)[1])
-            for event in events:
+            for event in steps:
+                block = workflow.split("      - name: " + steps[event] + "\n", 1)[1].split("      - name:", 1)[0]
+                script = textwrap.dedent(block.split("        run: |\n", 1)[1])
                 with self.subTest(workflow=name, event=event), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     (root / "trusted/tools").mkdir(parents=True)
@@ -531,27 +696,48 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "args=p.parse_args()\n"
                         "if args.event=='pull_request':\n"
                         " assert args.status_json\n"
-                        " assert args.base==os.environ['TRUSTED_MAIN_SHA']==args.current_main\n"
+                        " assert args.base==os.environ['EXPECTED_MAIN_SHA']==args.current_main\n"
                         " assert args.base!=os.environ['STALE_EVENT_BASE_SHA']\n"
                         "else:\n"
                         " assert args.repository=='buster14a/buster'\n"
                         " assert args.base==os.environ['BASE_SHA']\n"
-                        "print(json.dumps({'status':'admitted','mode':'trusted-integration'}))\n")
+                        "mode='trusted-integration-merge-group' if args.event=='merge_group' else 'trusted-integration'\n"
+                        "print(json.dumps({'status':'admitted','mode':mode}))\n")
                     (root / "trusted/tools/merge_queue_admission.py").write_text(
                         "import json\nprint(json.dumps({'status':'base-landed'}))\n")
                     # The PR event still names the old main, while a verified
                     # writer has published a head based on the newer checkout.
-                    prefix = (
-                        'git() { if [[ "$*" == *"rev-parse HEAD"* ]]; then '
-                        'printf "%s\\n" "$TRUSTED_MAIN_SHA"; else '
-                        'printf "%s\\trefs/heads/main\\n" "$REMOTE_MAIN_SHA"; fi; }\n'
-                        'gh() { printf "[[]]\\n"; }\n'
-                    )
+                    # The fake git keeps each checkout's HEAD in a state file so
+                    # a re-resolved trusted checkout is observable; with
+                    # MAIN_KEEPS_MOVING every ls-remote reports a new main.
+                    prefix = r'''
+git() {
+    local dir=$2
+    shift 2
+    case "$1" in
+        rev-parse) cat "$RUNNER_TEMP/$dir-head" ;;
+        ls-remote)
+            if [[ -n "${MAIN_KEEPS_MOVING:-}" ]]; then
+                local count=$(( $(cat "$RUNNER_TEMP/ls-remote-count" 2>/dev/null || echo 0) + 1 ))
+                printf "%s\n" "$count" > "$RUNNER_TEMP/ls-remote-count"
+                printf "%040x\trefs/heads/main\n" "$count"
+            else
+                printf "%s\trefs/heads/main\n" "$REMOTE_MAIN_SHA"
+            fi ;;
+        fetch) printf "%s\n" "${@: -1}" >> "$RUNNER_TEMP/$dir-fetches" ;;
+        checkout) printf "%s\n" "${@: -1}" > "$RUNNER_TEMP/$dir-head" ;;
+        *) return 1 ;;
+    esac
+}
+gh() { printf "[[]]\n"; }
+printf "%s\n" "$TRUSTED_MAIN_SHA" > "$RUNNER_TEMP/trusted-head"
+'''
                     env = {**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
                            "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
                            "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
                            "STALE_EVENT_BASE_SHA": "a" * 40,
                            "TRUSTED_REF": "a" * 40, "TRUSTED_MAIN_SHA": "c" * 40,
+                           "EXPECTED_MAIN_SHA": "c" * 40,
                            "REMOTE_MAIN_SHA": "c" * 40, "HEAD_SHA": "b" * 40,
                            "GITHUB_SHA": "b" * 40, "GITHUB_EVENT_PATH": str(root / "event.json"),
                            "CANDIDATE_HEAD": "b" * 40}
@@ -559,13 +745,29 @@ class WorkflowPolicyTests(unittest.TestCase):
                         env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if event == "pull_request":
+                        self.assertFalse((root / "trusted-fetches").exists())
+                        # Main advancing once re-resolves the trusted policy
+                        # and admits against the new main (#1971).
                         moved = subprocess.run(
                             ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
-                            env={**env, "REMOTE_MAIN_SHA": "d" * 40},
+                            env={**env, "REMOTE_MAIN_SHA": "d" * 40,
+                                 "EXPECTED_MAIN_SHA": "d" * 40},
                             capture_output=True, text=True,
                         )
-                        self.assertNotEqual(moved.returncode, 0)
-                        self.assertIn("Main advanced after trusted PR policy checkout", moved.stderr)
+                        self.assertEqual(moved.returncode, 0, moved.stderr)
+                        self.assertIn("re-resolving trusted PR policy", moved.stdout)
+                        self.assertEqual((root / "trusted-head").read_text(), "d" * 40 + "\n")
+                        self.assertEqual((root / "trusted-fetches").read_text(), "d" * 40 + "\n")
+                        self.assertEqual((root / "candidate-fetches").read_text(), "d" * 40 + "\n")
+                        # A main that never settles is still refused, boundedly.
+                        moving = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
+                            env={**env, "MAIN_KEEPS_MOVING": "1"},
+                            capture_output=True, text=True,
+                        )
+                        self.assertNotEqual(moving.returncode, 0)
+                        self.assertIn("Main kept advancing after trusted PR policy checkout",
+                                      moving.stderr)
 
     def test_admission_and_compatibility_are_independent_required_checks(self):
         policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
@@ -583,7 +785,8 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_both_required_jobs_fail_instead_of_skipping_when_ci_is_disabled(self):
         policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
         admission = (self.root / ".github/workflows/native-retirement-admission.yml").read_text()
-        for job in (policy.split("  policy:\n", 1)[1], admission):
+        for job in (policy.split("  policy:\n", 1)[1],
+                    admission.split("  native-retirement-admission:\n", 1)[1]):
             self.assertNotIn("vars.GH_ACTIONS_CI_ENABLED", job.split("    steps:\n", 1)[0])
             guard = job.split("      - name: Require CI admission to be enabled\n", 1)[1]
             script = textwrap.dedent(guard.split("        run: |\n", 1)[1].split("      - name:", 1)[0])

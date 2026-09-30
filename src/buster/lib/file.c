@@ -115,7 +115,18 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     result.error = target.error;
     bool replaces = target.valid && target.kind == OS_FILE_KIND_REGULAR;
     bool stages = false;
-    if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
+    if (target.valid && target.kind == OS_FILE_KIND_STREAM)
+    {
+        // A device or FIFO such as /dev/null is the requested sink itself;
+        // there is nothing to replace, so write it in place.
+        OsFileTransferResult written = file_write_checked(path, content, permissions);
+        result.error = written.error;
+        if (!result.error.v)
+        {
+            result.status = written.transferred == content.length ? FILE_PUBLISH_PUBLISHED : FILE_PUBLISH_FAILED;
+        }
+    }
+    else if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
     {
         result.status = FILE_PUBLISH_UNSUPPORTED_DESTINATION;
     }
@@ -209,6 +220,15 @@ BUSTER_GLOBAL_LOCAL FileIdentity file_identity_from_stats(FileStats stats)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL FileMapTestCounters file_map_test_state;
+
+FileMapTestCounters file_map_test_counters(void)
+{
+    return file_map_test_state;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void file_map_read_fallback(Arena* arena, String8 path, FileReadOptions options, FileMapRead* result)
 {
     FileReadResult read = file_read_checked(arena, path, options);
@@ -262,6 +282,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                         result.mapped_size = file_size;
                         result.mapped_handle = mapping;
                         result.identity = file_identity_from_stats(stats);
+#if BUSTER_INCLUDE_TESTS
+                        file_map_test_state.mapped += 1;
+#endif
                     }
                     else
                     {
@@ -297,6 +320,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                         .index = (u64)file_stats.st_ino,
                         .valid = true,
                     };
+#if BUSTER_INCLUDE_TESTS
+                    file_map_test_state.mapped += 1;
+#endif
                 }
             }
             close(file_descriptor);
@@ -320,6 +346,9 @@ void file_map_unmap(FileMapRead map)
     if (map.mapped_pointer)
     {
         UnmapViewOfFile(map.mapped_pointer);
+#if BUSTER_INCLUDE_TESTS
+        file_map_test_state.unmapped += 1;
+#endif
     }
     if (map.mapped_handle)
     {
@@ -331,6 +360,9 @@ void file_map_unmap(FileMapRead map)
     if (map.mapped_pointer && map.mapped_size)
     {
         munmap(map.mapped_pointer, map.mapped_size);
+#if BUSTER_INCLUDE_TESTS
+        file_map_test_state.unmapped += 1;
+#endif
     }
 #endif
 }

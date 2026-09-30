@@ -1,6 +1,8 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/hash.h>
 
+#include <buster/lib/string.h>
+
 // Direct canonical-IR serialization: llvm_bc_build_types preserves storage
 // layout, llvm_bc_plan_function assigns SSA ids, and llvm_bc_emit_module writes
 // the records. LLVM's bitstream is LSB-first. The writer intentionally emits
@@ -40,6 +42,7 @@ enum
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
     LLVM_BC_MODULE_DATALAYOUT = 3,
+    LLVM_BC_MODULE_SECTIONNAME = 5,
     LLVM_BC_MODULE_GLOBALVAR = 7,
     LLVM_BC_MODULE_FUNCTION = 8,
     LLVM_BC_MODULE_SOURCE_FILENAME = 16,
@@ -1425,9 +1428,10 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function
     return llvm_bc_alignment(alignment);
 }
 
-static u32 llvm_bc_linkage(IrSymbol* symbol)
+// LLVM accepts only external or extern_weak linkage on a declaration.
+static u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
 {
-    return symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
+    return !declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
 }
 
 static u32 llvm_bc_calling_convention(IrCallingConvention convention)
@@ -1725,16 +1729,61 @@ static bool llvm_bc_add_integer_count(LlvmBcContext* context, IrFunction* functi
     return !llvm_bc_failed(context);
 }
 
+// Marks every symbol a lowered instruction or a global initializer names.
+static void llvm_bc_mark_referenced_symbols(LlvmBcContext* context, u8* referenced)
+{
+    u32 symbol_count = context->program->symbols.count;
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrSymbolId symbol = function->instructions[instruction_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            if (global->initializer_symbol.value < symbol_count)
+            {
+                referenced[global->initializer_symbol.value] = 1;
+            }
+            for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
+            {
+                IrSymbolId symbol = global->relocations[relocation_index].symbol;
+                if (symbol.value < symbol_count)
+                {
+                    referenced[symbol.value] = 1;
+                }
+            }
+        }
+    }
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
     u32 symbol_count = context->program->symbols.count;
     context->symbol_value_ids = arena_allocate(context->arena, u32, symbol_count ? symbol_count : 1);
     context->symbol_seen = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    u8* referenced = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
     for (u32 index = 0; index < symbol_count; index += 1)
     {
         context->symbol_value_ids[index] = LLVM_BC_INVALID_ID;
         context->symbol_seen[index] = 0;
+        referenced[index] = 0;
     }
+    llvm_bc_mark_referenced_symbols(context, referenced);
 
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
@@ -1744,6 +1793,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             IrGlobal* global = module->globals + global_index;
             IrSymbol* symbol = llvm_bc_ir_symbol(context, global->symbol);
             bool declaration = !symbol || !symbol->is_definition || global->initializer_kind == IR_GLOBAL_INITIALIZER_NONE;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_global_entity(context, global, symbol, declaration))
             {
                 return false;
@@ -1764,6 +1817,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             }
             IrSymbol* symbol = llvm_bc_ir_symbol(context, function->symbol);
             bool declaration = function->state == IR_FUNCTION_DECLARATION || !symbol || !symbol->is_definition;
+            if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
+            {
+                continue;
+            }
             if (!llvm_bc_add_function_entity(context, function, symbol, declaration))
             {
                 return false;
@@ -4401,8 +4458,47 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
     }
 }
 
+// The one-based MODULE_CODE_SECTIONNAME index of a definition's requested
+// section (issue 1276), appending the name when it is new; zero, the
+// record's "no section", for a declaration or a definition that names none.
+static u32 llvm_bc_section_id(String8* names, u32* name_count, IrSymbol* symbol, bool declaration)
+{
+    u32 result = 0;
+    String8 name = symbol && !declaration ? symbol->section_name : (String8){0};
+    for (u32 index = 0; index < *name_count && name.length && !result; index += 1)
+    {
+        result = string_equal(names[index], name) ? index + 1 : 0;
+    }
+    if (name.length && !result)
+    {
+        names[*name_count] = name;
+        *name_count += 1;
+        result = *name_count;
+    }
+
+    return result;
+}
+
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
+    // Every section name is recorded ahead of the entities that refer to it,
+    // which is the order a reader resolves them in.
+    String8* section_names = arena_allocate(context->arena, String8, context->global_count + context->function_count + 1);
+    u32* section_ids = arena_allocate(context->arena, u32, context->global_count + context->function_count + 1);
+    u32 section_name_count = 0;
+    for (u32 index = 0; index < context->global_count; index += 1)
+    {
+        section_ids[index] = llvm_bc_section_id(section_names, &section_name_count, context->globals[index].symbol, context->globals[index].declaration);
+    }
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        section_ids[context->global_count + index] =
+            llvm_bc_section_id(section_names, &section_name_count, context->functions[index].symbol, context->functions[index].declaration);
+    }
+    for (u32 index = 0; index < section_name_count; index += 1)
+    {
+        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, section_names[index]);
+    }
     for (u32 index = 0; index < context->global_count; index += 1)
     {
         LlvmBcGlobal* global = context->globals + index;
@@ -4428,9 +4524,9 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             global->storage_type_id,
             2 | (global->read_only ? 1 : 0), // explicit storage type, optionally constant
             initializer,
-            llvm_bc_linkage(global->symbol),
+            llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
-            0, // section id
+            section_ids[index],
             0, // visibility
             global->is_thread_local ? 1 : 0,
         };
@@ -4443,10 +4539,10 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->type_id,
             function->calling_convention,
             function->declaration,
-            llvm_bc_linkage(function->symbol),
+            llvm_bc_linkage(function->symbol, function->declaration),
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
-            0, // section id
+            section_ids[context->global_count + index],
             0, // visibility
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);

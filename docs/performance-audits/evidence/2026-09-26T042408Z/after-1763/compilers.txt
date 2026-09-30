@@ -1,0 +1,6 @@
+# Compilers compared (Release ide, -march=native)
+010d497b24f8f8945376e1c1552a75c5d8ac5a62b6ea2d4280d41d41b7221b21  ide-main
+201b743164dc639f7abf07e261f49276acf847e8db38de45275ed4be3f8a9dcb  ide-merge
+# ide-main: main 5c7d85d763751e06355775628e34f0dc3cf3c1e1
+# ide-merge: c0cfac8 (5c7d85d merged into the pull request)
+# Frozen corpus: git archive 5c7d85d src tests; compared with ../corpus_compare.sh and ../corpus_compare_mode.sh

@@ -15,6 +15,13 @@
 // of physical memory.
 #define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
 
+// Bounds of `@path` response-file expansion in compiler_driver_parse_arguments:
+// the bytes read from all response files of one invocation together, and the
+// length of the expanded command line. A command line with no argument that
+// begins with '@' is not expanded and neither bound applies to it.
+#define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
+#define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
+
 typedef enum CompilerDriverError
 {
     COMPILER_DRIVER_ERROR_NONE,
@@ -206,6 +213,7 @@ struct CompilerDriverResult
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     String8 diagnostic;
     String8 warning;
     // Published in input/stage order, owned by the result arena. Empty on a
@@ -222,6 +230,8 @@ struct CompilerDriverResult
     LlvmBitcodeArtifact llvm_bitcode;
     EbpfArtifact ebpf;
     ObjectFile object;
+    // What serializing `object` cost, for -c; zero when no object was written.
+    ObjectWriteStatistics object_write_statistics;
     CodegenStatistics codegen_statistics;
     CompilerDriverFallbackRecord* fallback_records;
     u32 fallback_record_count;

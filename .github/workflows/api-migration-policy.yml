@@ -11,9 +11,16 @@ on:
 permissions:
   contents: read
 
+env:
+  MAIN_PUSH_MAINTENANCE_SHA256: 118669698721ecc0d5da220d598bdf87afa172111dac784b6142e1f82a251ce5
+
+# Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
+# so GitHub cannot cancel or replace an older pending run. The pinned push-only
+# maintenance helper runs in native-retirement-admission.yml; this job verifies
+# its digest from the exact combined tree. See docs/main-push-maintenance.md.
 concurrency:
-  group: api-migration-policy-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: api-migration-policy-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   policy:
@@ -31,6 +38,20 @@ jobs:
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
           fi
+      - name: Check out exact combined maintenance authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify main-push maintenance authority
+        shell: bash
+        working-directory: authority
+        run: >-
+          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256"
+          tools/main_push_maintenance.py |
+          sha256sum --check --strict
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:

@@ -177,13 +177,33 @@ a Release `ide.exe` built for that target, run:
 
 The runner checks the resolved compiler with the existing `/Bv /EP /TC`
 identity and native-target probe. `VSCMD_ARG_TGT_ARCH` and a working Visual
-Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. The
-preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
+Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. Each
+attempt emits a structured `MSVC_REFERENCE_PREFLIGHT` record with the resolved
+executable, exact argv, elapsed time, spawn and wait outcomes, native status,
+target, parsed version, and bounded stdout/stderr blocks. The shared compiler
+query owns a bounded process group, drains all child output while retaining at
+most 4 KiB per stream, and records observed, captured, and dropped byte counts.
+Capture or process-tree cleanup failures are classified as wait failures.
+
+Failures are classified as executable missing, spawn failure, timeout, wait
+failure, signal, nonzero exit, missing or mismatched identity, or missing or
+mismatched target. Only a timeout or spawn failure receives at most one bounded
+retry before any differential output is claimed. Wait, capture, process-tree
+cleanup, compiler, identity, and target failures are never retried. The 30-second identity
+preflight is independent of `--reference-timeout`, which governs later
+reference compilation, linking, and execution. A final
+`MSVC_REFERENCE_PREFLIGHT_RESULT` records whether a second attempt recovered.
+
+The preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
 built-in or generated suites, `--sanitize-oracle`, and any nonzero reduction
-budget **before** creating the output directory. The default reduction budget
-is 64, so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan equivalent
-to the runner's sanitized reduction contract. Required Clang/GCC corpus and
-sanitizer runs remain separate, unchanged obligations.
+budget **before** creating the output directory. Output-directory refusal is
+reported separately and only after both compiler executables pass preflight, so
+a tool failure cannot be mislabeled as stale evidence. A structured
+`DIFFERENTIAL_OUTPUT_CLAIM` record distinguishes created, already-existing,
+create-error, and not-attempted outcomes. The default reduction budget is 64,
+so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan
+equivalent to the runner's sanitized reduction contract. Required Clang/GCC
+corpus and sanitizer runs remain separate, unchanged obligations.
 
 Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
 extensions, compiler builtins, signed-overflow-dependent behavior and

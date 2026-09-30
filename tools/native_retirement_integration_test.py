@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -170,6 +172,14 @@ class ClassificationTests(unittest.TestCase):
         integration.enforce_classification(policy, "policy", True)
         self.assertEqual(support_policy.kind, "policy")
         integration.enforce_classification(support_policy, "policy", True)
+
+    def test_native_admission_workflows_are_trusted_implementation(self):
+        # The PR/main admission job moved out of api-migration-policy.yml
+        # (#1818); editing either workflow stays a trusted bootstrap.
+        for path in (".github/workflows/api-migration-policy.yml",
+                     ".github/workflows/native-retirement-admission.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(integration.classify_paths([path]).kind, "bootstrap")
 
     def test_candidate_cannot_change_its_authority_and_policy_together(self):
         report = integration.classify_paths([
@@ -422,6 +432,79 @@ class DispatchResolutionTests(unittest.TestCase):
             self.assertIn("EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}", job)
             self.assertIn("EXPECTED_BASE: ${{ needs.prepare.outputs.base }}", job)
             self.assertIn("AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}", job)
+
+
+class WriterEligibilityTests(unittest.TestCase):
+    """The writer refuses candidates the merge gate rejects as redundant (#1828)."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repo = Path(temporary.name) / "repo"
+        git(Path(temporary.name), "init", "-b", "main", os.fspath(self.repo))
+        git(self.repo, "config", "user.name", "Test User")
+        git(self.repo, "config", "user.email", "test@example.invalid")
+        self.write({
+            "src/buster/lib/value.c": "int value = 1;\n",
+            ".github/workflows/ci.yml": "name: ci\n",
+            "docs/native-retirement-repository-sources-v1.json": json.dumps(
+                {"records": [{"source": "src/buster/lib/value.c"}]}) + "\n",
+        })
+        self.base = git(self.repo, "rev-parse", "HEAD")
+
+    def write(self, changes: dict[str, str]) -> str:
+        for relative, content in changes.items():
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "--allow-empty", "-m", "change")
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def candidate(self, changes: dict[str, str]) -> str:
+        git(self.repo, "checkout", "-q", "--detach", self.base)
+        return self.write(changes)
+
+    def resolve(self, head: str) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_WORKFLOW_SHA": self.base,
+                                          "GITHUB_ACTOR": "dispatcher"}), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = integration.main([
+                "resolve-dispatch", "--repo-root", os.fspath(self.repo),
+                "--base", self.base, "--head", head, "--source-head", head,
+            ])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_ordinary_non_source_candidate_is_refused_before_preparation(self):
+        head = self.candidate({".github/workflows/ci.yml": "name: ci changed\n"})
+        with self.assertRaisesRegex(integration.IntegrationError,
+                                    "does not require trusted integration"):
+            integration.require_trusted_integration(self.repo, self.base, head)
+        code, stdout, stderr = self.resolve(head)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("does not require trusted integration", stderr)
+
+    def test_bound_trusted_and_catch_up_candidates_remain_eligible(self):
+        for changes, kind in (
+                ({"src/buster/lib/value.c": "int value = 2;\n"}, "ordinary"),
+                ({"tools/native_retirement_rebind.py": "# next\n"}, "bootstrap"),
+                ({"docs/native-retirement-support-v1.tsv": "next\n"}, "policy"),
+                ({}, "ordinary")):
+            with self.subTest(kind=kind, changes=sorted(changes)):
+                head = self.candidate(changes)
+                self.assertEqual(
+                    integration.require_trusted_integration(self.repo, self.base, head).kind,
+                    kind)
+                code, stdout, _stderr = self.resolve(head)
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(stdout)["classification"], kind)
+
+    def test_writer_and_merge_gate_share_one_predicate(self):
+        text = Path(__file__).with_name("native_retirement_merge_gate.py").read_text()
+        self.assertIn("integration.classification_is_bound(", text)
+        self.assertIn("integration.bound_sources(", text)
 
 
 class IntegrationTests(unittest.TestCase):
