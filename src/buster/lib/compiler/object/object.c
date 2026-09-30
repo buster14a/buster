@@ -4551,7 +4551,7 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
 
 // The x86-64 ELF relocation vocabulary this file knows by name, which the
 // refusal below uses to say which one it met.  Every one named here reads;
-// the table is what keeps a refusal of an unnamed type (TLSDESC, PC64, ...)
+// the table is what keeps a refusal of an unnamed type (TLSDESC, ...)
 // from being a bare number next to names the reader accepts.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
