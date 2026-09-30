@@ -288,6 +288,14 @@ unknown label, so keep the two in step when a runner changes.
 `python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
 summaries, native evidence packer and timing collector on each desktop platform
 (`python` on Windows).
+`python3 tools/ci_artifact_upload_test.py -v` runs in required Workflow lint.
+It checks the local upload action's two approved pins, failed-first-attempt and
+cancellation guards, identical artifact options, replacement on retry and
+blocking terminal failure, then executes its Bash backoff and reporting bodies.
+The backoff uses a fake sleep command so this offline test does not wait.
+These regressions leave the frozen support tests and their reviewed identities
+unchanged. They cover upload failures after the action starts; action dependency
+resolution before composite execution is tracked separately in #1790.
 `python3 tools/analyzer_selection_test.py -v` separately exercises the analyzer
 comparison-selection record, conservative event fallback, baseline-path
 admission and reference/candidate failure propagation on Unix runners.

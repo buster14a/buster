@@ -1,0 +1,11 @@
+88,528,820 (100.0%)  PROGRAM TOTALS
+57,658,855 (65.13%)  codegen/machine_x86_64.c:machine_x86_64_exact_prewarm
+43,338,204 (48.95%)  assembly/x86_64_metadata.c:buster_x86_metadata_emit_exact_machine
+29,065,593 (32.83%)  assembly/x86_64_metadata.c:buster_x86_metadata_prewarm
+28,878,353 (32.62%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_tables_once
+16,353,191 (18.47%)  assembly/x86_64_metadata.c:buster_x86_metadata_fill_nul_distances
+11,291,916 (12.76%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_base64_chunk_scalar
+ 7,384,577 ( 8.34%)  codegen/machine_x86_64.c:machine_x64_metadata_shape_resolve
+ 7,317,605 ( 8.27%)  assembly/x86_64_metadata.c:buster_x86_metadata_select_form
+ 3,760,719 ( 4.25%)  codegen/machine_x86_64.c:machine_x64_exact_prepare_fixed_template_family
+ 2,289,088 ( 2.59%)  assembly/x86_64_metadata.c:buster_x86_metadata_exact_plan_prepare
