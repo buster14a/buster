@@ -113,32 +113,124 @@ class Commands:
         return result.stdout
 
 
+def _apt_index_key_from_description(description):
+    parts = description.split()
+    if len(parts) < 2:
+        return None
+    pocket = parts[0]
+    if "/" not in pocket:
+        if len(parts) == 2 and parts[1] in ("InRelease", "Release", "Release.gpg"):
+            return ("release", pocket, parts[1])
+        return None
+    suite, component = pocket.split("/", 1)
+    if not suite or not component:
+        return None
+    if len(parts) == 2 and parts[1].startswith("Translation-"):
+        return ("translation", suite, component, parts[1][len("Translation-"):])
+    if len(parts) < 3:
+        return None
+    architecture = parts[1]
+    kind = " ".join(parts[2:])
+    if kind == "Packages":
+        return ("packages", suite, component, architecture)
+    if kind == "Components":
+        return ("components", suite, component, architecture)
+    if kind == "c-n-f Metadata":
+        return ("cnf", suite, component, architecture)
+    return None
+
+
+def _apt_index_key_from_url(url, prefix):
+    if not url.startswith(prefix):
+        return None
+    path = url[len(prefix):].split("?", 1)[0]
+    patterns = (
+        (r"dists/([^/]+)/([^/]+)/binary-([^/]+)/Packages(?:\.[^/]+)?$", "packages"),
+        (r"dists/([^/]+)/([^/]+)/i18n/Translation-([^/.]+)(?:\.[^/]+)?$", "translation"),
+        (r"dists/([^/]+)/([^/]+)/dep11/Components-([^/.]+)\.yml(?:\.[^/]+)?$", "components"),
+        (r"dists/([^/]+)/([^/]+)/cnf/Commands-([^/.]+)(?:\.[^/]+)?$", "cnf"),
+    )
+    for pattern, kind in patterns:
+        match = re.fullmatch(pattern, path)
+        if match:
+            suite, component, detail = match.groups()
+            return (kind, suite, component, detail)
+    match = re.fullmatch(r"dists/([^/]+)/(InRelease|Release|Release\.gpg)$", path)
+    if match:
+        return ("release", *match.groups())
+    return None
+
+
+def _snapshot_err_5xx(diagnostics, prefix):
+    transient_keys = set()
+    found = False
+    foreign = False
+    current_key = None
+    current_snapshot = False
+    header = re.compile(r"^Err:\d+\s+(\S+)\s+(.+)$")
+    for line in diagnostics.splitlines():
+        match = header.match(line)
+        if match:
+            base, description = match.groups()
+            current_snapshot = base.rstrip("/") + "/" == prefix
+            foreign = foreign or (base.startswith(("http://", "https://")) and not current_snapshot)
+            current_key = _apt_index_key_from_description(description) if current_snapshot else None
+            continue
+        if not line[:1].isspace():
+            current_key = None
+            current_snapshot = False
+            continue
+        if current_snapshot and re.match(r"\s+5\d\d(?:\s|$)", line):
+            found = True
+            if current_key is not None:
+                transient_keys.add(current_key)
+    return found, transient_keys, foreign
+
+
 def transient_snapshot_failure(error, lock):
-    retryable = error.returncode == 100
-    if retryable:
-        diagnostics = (error.stdout or "") + "\n" + (error.stderr or "")
-        retryable = not re.search(
+    if error.returncode != 100:
+        return False
+    stdout = error.stdout or ""
+    stderr = error.stderr or ""
+    diagnostics = stdout + "\n" + stderr
+    if re.search(
             r"(?i)GPG error|NO_PUBKEY|Hash Sum mismatch|not signed|unauthenticated|certificate verification failed",
-            diagnostics)
-        prefix = "https://snapshot.ubuntu.com/ubuntu/" + lock["snapshot"] + "/"
-        fetch = re.compile(r"E: Failed to fetch " + re.escape(prefix) + r"\S+\s+5\d\d(?:\s|$)")
-        # Apt can omit the reason on other indexes in the same failed update.
-        empty_fetch = re.compile(r"E: Failed to fetch " + re.escape(prefix) + r"\S+\s*$")
-        tails = {
-            "E: Some index files failed to download. They have been ignored, or old ones used instead.",
-            "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?",
-        }
-        found = False
-        for line in diagnostics.splitlines():
-            if line.startswith("E: "):
-                if fetch.match(line):
-                    found = True
-                elif empty_fetch.fullmatch(line):
-                    pass
-                elif line not in tails:
-                    retryable = False
-        retryable = retryable and found
-    return retryable
+            diagnostics):
+        return False
+    prefix = "https://snapshot.ubuntu.com/ubuntu/" + lock["snapshot"] + "/"
+    found, transient_keys, foreign = _snapshot_err_5xx(diagnostics, prefix)
+    if foreign:
+        return False
+    fetch = re.compile(r"^E: Failed to fetch (\S+)(?:\s+(.*\S))?\s*$")
+    tails = {
+        "E: Some index files failed to download. They have been ignored, or old ones used instead.",
+        "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?",
+    }
+    saw_fetch = False
+    for line in diagnostics.splitlines():
+        if not line.startswith("E: "):
+            continue
+        match = fetch.fullmatch(line)
+        if match:
+            url, reason = match.groups()
+            if not url.startswith(prefix):
+                return False
+            saw_fetch = True
+            reason = reason or ""
+            if not reason:
+                continue
+            status = re.match(r"(\d{3})(?:\s|$)", reason)
+            if status and status.group(1).startswith("5"):
+                found = True
+                continue
+            if status and status.group(1) == "404":
+                key = _apt_index_key_from_url(url, prefix)
+                if key is not None and key in transient_keys:
+                    continue
+            return False
+        if line not in tails:
+            return False
+    return saw_fetch and found
 
 
 def run_snapshot_apt(run, argv, lock):

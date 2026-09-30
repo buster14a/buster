@@ -49,7 +49,7 @@ group, `benchmark-9700x` environment,
 deployment branch policies and `BENCH_SERVICE_DISPATCH_ENABLED`. Its read-back
 verifier must pass with `value=false`, and no superseded benchmark branch
 ruleset may be present. The main queue must retain eight Actions-bound checks,
-non-strict status checks, 20-build/one-merge `ALLGREEN` and exactly the two
+non-strict status checks, 4-build/one-merge `ALLGREEN` and exactly the two
 reviewed standing bypass actors, Repository admin (role 5) and `davidgmbb`
 (user 39247043), both in `always` mode. The environment must have no
 required reviewer, wait timer or other approval rule and must allow only the

@@ -494,9 +494,10 @@
   through scalar MIR: CLZ normalization, exponent rebiasing, sign and payload
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
-  preserving subnormals even with flush-to-zero enabled. No libcall or direct
-  emitter is used. `compiler_driver_test_aarch64_float_to_f128` retains the
-  original created-NaN fixture and tests independent binary128 byte cases.
+  preserving subnormals even with flush-to-zero enabled. No libcall is used;
+  the canonical `none` emitter builds the same image with the same rows.
+  `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
+  fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
   Binary128 arithmetic and rounding conversions are frontend runtime calls;
