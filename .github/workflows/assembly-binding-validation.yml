@@ -1,92 +1,23 @@
-name: Assembly binding validation 1223
+name: Assembly binding source validation 1223
 on:
   push:
     branches: [codex/1223-assembly-binding-validation]
 permissions:
   contents: read
 jobs:
-  validate:
+  source:
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: candidate
-            revision: 0a3554cf1cadb4fd6349da453a185f810723911c
-    env:
-      BUSTER_TEST_JOBS: 4
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ matrix.revision }}
-          fetch-depth: 2
+          ref: 8520a574bc18870a598b4f7b1309c909fa56011f
+          fetch-depth: 0
           persist-credentials: false
-      - name: Build hosted driver and compiler
+      - name: Source size and whitespace on final head
         run: |
           mkdir -p .cache/assembly-binding
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/assembly-binding/build
-          .cache/assembly-binding/build generate --ci --linker DEFAULT --build-directory build-1223 -- -DBUSTER_UNITY_BUILD=ON
-          .cache/assembly-binding/build build --config Release --build-directory build-1223 -t ide
-      - name: Reproduce weak replacement through independent linker
-        env:
-          EXPECT_FAILURE: ${{ matrix.label == 'baseline' && '1' || '0' }}
-        run: |
-          mkdir -p .cache/assembly-binding/probe
-          cd .cache/assembly-binding/probe
-          cat > weak.s <<'ASM'
-          .intel_syntax noprefix
-          .text
-          .weak chosen
-          .type chosen,@function
-          chosen:
-              mov eax,11
-              ret
-          .globl via_call
-          .type via_call,@function
-          via_call:
-              sub rsp,8
-              call chosen
-              add rsp,8
-              ret
-          .globl via_address
-          .type via_address,@function
-          via_address:
-              lea rax,[rip+chosen]
-              ret
-          .section .note.GNU-stack,"",@progbits
-          ASM
-          cat > strong.c <<'C'
-          int chosen(void) { return 29; }
-          C
-          cat > main.c <<'C'
-          extern int printf(char const*, ...);
-          typedef int (*Function)(void);
-          extern int chosen(void), via_call(void);
-          extern Function via_address(void);
-          int main(void) {
-              Function p=via_address();
-              int d=chosen(), w=via_call(), i=p(), s=p==chosen;
-              printf("direct=%d via_call=%d pointed=%d same_address=%d\n", d,w,i,s);
-              return d!=29 || w!=29 || i!=29 || !s;
-          }
-          C
-          "$GITHUB_WORKSPACE/build-1223/Release/ide" cc -c weak.s -o weak.o
-          clang -g0 -O0 -fno-pie -c strong.c main.c
-          readelf -Ws -r weak.o
-          objdump -drwC -Mintel weak.o
-          clang -fuse-ld=bfd -no-pie weak.o strong.o main.o -o probe
-          status=0
-          ./probe || status=$?
-          test "$status" = "$EXPECT_FAILURE"
-      - name: Registered tests
-        if: ${{ matrix.label == 'candidate' && !cancelled() }}
-        run: .cache/assembly-binding/build build --config Release --build-directory build-1223 -t test_all
-      - name: Self-host fixed point
-        if: ${{ !cancelled() }}
-        run: .cache/assembly-binding/build test_self_host --config Release --build-directory build-1223
-      - name: Source size and whitespace
-        if: ${{ matrix.label == 'candidate' && !cancelled() }}
-        run: |
           .cache/assembly-binding/build source_size --base adf3e62f9fa732186a14ad95d2a7d23ff7d04b61
           git diff --check adf3e62f9fa732186a14ad95d2a7d23ff7d04b61 HEAD
+          git diff --exit-code 0a3554cf1cadb4fd6349da453a185f810723911c HEAD -- src/buster/lib

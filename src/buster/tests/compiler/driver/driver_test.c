@@ -3161,10 +3161,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     return result;
 }
 
-// Exercise the complete native-language boundary, then drive a nonstandard-
-// suffix assembly unit through parsing, assembly, object serialization and
-// object reading. This reaches the native target resolver, unlike an
-// assembly_unit_encode-only test.
+// Weak/default-visible assembly references must survive the source/object
+// boundary until symbol selection. Independent host tools cover both link
+// directions; source and object routes cover every supported allocator.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3343,6 +3342,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(
     return result;
 }
 
+// Exercise the complete native-language boundary, then drive a nonstandard-
+// suffix assembly unit through parsing, assembly, object serialization and
+// object reading. This reaches the native target resolver, unlike an
+// assembly_unit_encode-only test.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
