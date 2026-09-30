@@ -521,10 +521,10 @@ struct CPreprocessOptions
     // text macro expansion are not replayed. This consumes a reserved byte so
     // the public options record keeps its existing size.
     bool already_preprocessed;
-    // No report will read preprocessed.bytes (the driver sets this without
-    // -v and -fsource-metrics), so the pass over the output stream that sums
-    // spelling lengths is skipped and the field stays zero. Every other metric
-    // is still gathered. It takes the last reserved byte.
+    // No report will read preprocessed.bytes (the driver passes its
+    // invocation's omit_spelled_bytes), so the pass over the output stream
+    // that sums spelling lengths is skipped and the field stays zero. Every
+    // other metric is still gathered. It takes the last reserved byte.
     bool omit_spelled_bytes;
 };
 

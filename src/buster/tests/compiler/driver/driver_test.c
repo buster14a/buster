@@ -2102,28 +2102,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
 }
 
 // preprocessed.bytes is read only by the -v source report and the
-// -fsource-metrics file, so the driver sums it only when one of them is
-// requested; the other preprocessed counts are gathered either way.
+// -fsource-metrics file. A driver caller gets it by default; omit_spelled_bytes,
+// which the cc command sets when it prints neither report, skips the sum and
+// leaves it zero while the other preprocessed counts are gathered either way.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_spelled_byte_metrics_on_request(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".c"));
-    String8 metrics = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".metrics"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define WIDE long long\nWIDE value = 12;\n"))));
-    String8 plain_command[] = {S8("-g0"), S8("-fsyntax-only"), input};
-    String8 verbose_command[] = {S8("-g0"), S8("-v"), S8("-fsyntax-only"), input};
-    String8 metrics_command[] = {S8("-g0"), string_format(arena, S8("-fsource-metrics={S8}"), metrics), S8("-fsyntax-only"), input};
-    CompilerDriverResult plain = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(plain_command)));
-    CompilerDriverResult verbose = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(verbose_command)));
-    CompilerDriverResult measured = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(metrics_command)));
-    BUSTER_TEST(arguments, plain.error == COMPILER_DRIVER_ERROR_NONE && verbose.error == COMPILER_DRIVER_ERROR_NONE && measured.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 command[] = {S8("-g0"), S8("-fsyntax-only"), input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.omit_spelled_bytes);
+    CompilerDriverResult measured = compiler_driver_execute_invocation(arena, invocation);
+    invocation.omit_spelled_bytes = 1;
+    CompilerDriverResult omitted = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE && omitted.error == COMPILER_DRIVER_ERROR_NONE);
     // "long" "long" "value" "=" "12" ";"
-    BUSTER_TEST(arguments, verbose.preprocessed.bytes == 17 && measured.preprocessed.bytes == 17);
-    BUSTER_TEST(arguments, plain.preprocessed.bytes == 0);
-    BUSTER_TEST(arguments, plain.preprocessed.tokens == 6 && verbose.preprocessed.tokens == 6 && measured.preprocessed.tokens == 6);
-    BUSTER_TEST(arguments, plain.preprocessed.expansions == verbose.preprocessed.expansions && plain.source_lexed.bytes == verbose.source_lexed.bytes);
+    BUSTER_TEST(arguments, measured.preprocessed.bytes == 17 && omitted.preprocessed.bytes == 0);
+    BUSTER_TEST(arguments, measured.preprocessed.tokens == 6 && omitted.preprocessed.tokens == 6);
+    BUSTER_TEST(arguments, measured.preprocessed.spelling_bytes == omitted.preprocessed.spelling_bytes);
+    BUSTER_TEST(arguments, measured.preprocessed.expansions == omitted.preprocessed.expansions);
+    BUSTER_TEST(arguments, measured.source_lexed.bytes == omitted.source_lexed.bytes && measured.source_lexed.tokens == omitted.source_lexed.tokens);
+    // The sum is taken before C23 respelling rewrites `bool` as `_Bool`, so it
+    // counts the spelling the source used: "bool" "b" ";".
+    String8 c23_input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics-c23"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(c23_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("bool b;\n"))));
+    String8 c23_command[] = {S8("-g0"), S8("-std=c23"), S8("-fsyntax-only"), c23_input};
+    CompilerDriverResult c23 = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c23_command)));
+    BUSTER_TEST(arguments, c23.error == COMPILER_DRIVER_ERROR_NONE && c23.preprocessed.tokens == 3 && c23.preprocessed.bytes == 6);
     scratch_end(temporary);
     return result;
 }
