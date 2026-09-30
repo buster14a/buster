@@ -1032,8 +1032,11 @@ static inline int bq_retirement_unit_campaign_metrics_ready(BqRetirementUnitCamp
 static inline int bq_retirement_unit_campaign_begin(BqRetirementUnitCampaign* driver, BqPhaseChannel* phases,
     int cancellation_fd, uint64_t deadline_ns, int work_directory, int log_directory)
 {
+    /* SETTLING must be the channel's next phase: after PREPARING (BQPHASE1)
+     * or after RETIREMENT_READY carried the ready digest (BQPHASE2). */
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_NEW && !driver->phases && phases &&
-        phases->sequence == BQ_PHASE_PREPARING && work_directory >= 3 && log_directory >= 3 &&
+        bq_phase_next(phases->version, phases->sequence) == BQ_PHASE_SETTLING && work_directory >= 3 &&
+        log_directory >= 3 &&
         bq_retirement_unit_campaign_live(phases, cancellation_fd, deadline_ns);
     if (ok)
     {
@@ -1819,10 +1822,13 @@ static inline int bq_retirement_unit_campaign_measured_digest(char const post_co
 
 /* MEASURED, only after READY and the caller's composition and authority
  * confirmation; the two confirmed digests are recorded and chained to the
- * post-sample context and record (measured_sha256). The fixed phase message
- * carries no digest (phase_channel.h), so the post-sample record, sealed by
- * lane E's retained manifest under the producer authority, is what keeps the
- * A/B log chain durable. A failed or incomplete campaign never sends it,
+ * post-sample context and record (measured_sha256). A BQPHASE1 message
+ * carries no digest (phase_channel.h); on the worker-unit's BQPHASE2 channel
+ * MEASURED must carry the authority digest (bq_phase_exchange_digest_until,
+ * #881 PR 3), and this digest-less send is refused there. The post-sample
+ * record, sealed by lane E's retained manifest under the producer authority,
+ * keeps the A/B log chain durable. A failed or incomplete campaign never
+ * sends it,
  * which the supervisor requires for success. */
 static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignHandoff const* handoff)
