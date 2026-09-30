@@ -65,7 +65,7 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. A parameter is trivial
 when every edge out of a reachable block carries the same value; an edge out
 of an unreachable block never runs, so its value decides only when no
-reachable edge carries one. A braced statement ending in `break`, `goto`,
+reachable edge carries one; then every dead edge must agree, as before. A braced statement ending in `break`, `goto`,
 `return` or `continue` leaves its continuation block without predecessors,
 yet the next `case` or label still receives an edge from it; counting that
 edge kept a merge of every local read after the label, the shape of a

@@ -2596,13 +2596,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
 // The ELF counterpart of compiler_driver_pe_library_exports.  A shared library
 // is looked up where the loader would look for it, and a file whose machine
 // disagrees with the target is skipped rather than believed, so a cross link
-// does not read the host's own libc.
+// does not read the host's own libc.  Without a sysroot, `/usr/<triple>/lib`
+// is also searched: it is where Debian's cross libc packages (for example
+// libc6-arm64-cross) install and where the GNU cross toolchains look.
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
                                                              NativeDynamicLibrary* library, FileMapRead* export_map)
 {
     String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
-    String8 roots[6] = {0};
+    String8 roots[7] = {0};
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -2617,6 +2619,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     {
         roots[root_count++] = string_format(arena, S8("/lib/{S8}"), multiarch);
         roots[root_count++] = string_format(arena, S8("/usr/lib/{S8}"), multiarch);
+        roots[root_count++] = string_format(arena, S8("/usr/{S8}/lib"), multiarch);
         roots[root_count++] = S8("/lib64");
         roots[root_count++] = S8("/usr/lib64");
         roots[root_count++] = S8("/lib");
@@ -3982,6 +3985,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
+    result.type_layout = lowered.type_layout;
     if (!lowered.program || lowered.diagnostic_count)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
@@ -5319,6 +5323,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.direct_ssa.writes += unit.direct_ssa.writes;
         result.direct_ssa.parameters_created += unit.direct_ssa.parameters_created;
         result.direct_ssa.parameters_removed += unit.direct_ssa.parameters_removed;
+        result.type_layout.solves += unit.type_layout.solves;
+        result.type_layout.pass_solves += unit.type_layout.pass_solves;
+        result.type_layout.pass_state_types += unit.type_layout.pass_state_types;
+        result.type_layout.pass_attempts += unit.type_layout.pass_attempts;
+        result.type_layout.agenda_solves += unit.type_layout.agenda_solves;
+        result.type_layout.agenda_types += unit.type_layout.agenda_types;
+        result.type_layout.agenda_attempts += unit.type_layout.agenda_attempts;
+        result.type_layout.agenda_edges += unit.type_layout.agenda_edges;
+        result.type_layout.agenda_notifications += unit.type_layout.agenda_notifications;
+        result.type_layout.agenda_pushes += unit.type_layout.agenda_pushes;
+        result.type_layout.agenda_fallbacks += unit.type_layout.agenda_fallbacks;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

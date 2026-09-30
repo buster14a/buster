@@ -35,10 +35,13 @@
 //                                                 matching-delimiter index
 //   c_parse_builtin_type_layout,                  target-dependent type
 //   c_record_layout_place,                        sizes/alignments, the one
-//   c_parse_type_layout                           member-placement authority
-//                                                 both layout engines use
+//   CParseLayoutAgenda ..                         member-placement authority
+//   c_parse_type_layout                           both layout engines use
 //                                                 (CRecordLayoutRule), and
-//                                                 aggregate/bit-field layout
+//                                                 aggregate/bit-field layout;
+//                                                 the solve's ordered passes
+//                                                 and demand-driven agenda
+//                                                 share one per-type attempt
 //   c_semantic_check_named_call_arities          bound call constraints without IR
 //   c_parse_bfloat16_builtin,                    target builtin signatures
 //   c_parse_validate_bfloat16_builtin_calls       checked before unused pruning
@@ -1047,6 +1050,14 @@ BUSTER_C_SHARED bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 elem
     return true;
 }
 
+// The rollback snapshot of the frame in this slot. Only a frame that wrote it
+// may read it, and only while it is on the stack: the row belongs to whichever
+// frame occupies the slot next.
+BUSTER_C_INTERNAL CParseResult* c_type_parse_frame_checkpoint(CTypeParseMachine* machine, CTypeParseFrame const* frame)
+{
+    return machine->frame_checkpoints + (frame - machine->frames);
+}
+
 BUSTER_C_INTERNAL bool c_type_parse_frame_push(CTypeParseMachine* machine, CTypeParseFrame frame)
 {
     if (machine->frame_count >= machine->frame_capacity)
@@ -1154,14 +1165,15 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
     return true;
 }
 
-BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult checkpoint, u32 mutation_mark)
+BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult const* checkpoint, u32 mutation_mark)
 {
-    CType* checkpoint_types = checkpoint.types;
-    *result = checkpoint;
+    CType* checkpoint_types = checkpoint->types;
+    u32 checkpoint_type_count = checkpoint->type_count;
+    *result = *checkpoint;
     while (machine->mutation_count > mutation_mark)
     {
         CTypeMutation mutation = machine->mutations[--machine->mutation_count];
-        if (checkpoint_types && mutation.id.value < checkpoint.type_count)
+        if (checkpoint_types && mutation.id.value < checkpoint_type_count)
         {
             checkpoint_types[mutation.id.value] = mutation.previous;
         }
@@ -1170,7 +1182,7 @@ BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseRes
 
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start);
 
-BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CParseResult* result, CParseResult checkpoint, u32 mutation_mark,
+BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CParseResult* result, CParseResult const* checkpoint, u32 mutation_mark,
                                                   CSourceLocation location)
 {
     bool valid = machine->result_valid && !machine->failed;
@@ -1271,7 +1283,7 @@ BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, 
     machine->result_valid = false;
     bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
                                               .result = result,
-                                              .preprocess = preprocess,
+                                              .preprocess = &preprocess,
                                               .start = start,
                                               .end = end,
                                               .kind = C_TYPE_PARSE_FRAME_ALIGNMENT,
@@ -1280,7 +1292,7 @@ BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, 
     {
         c_type_parse_machine_run(machine, frame_start);
     }
-    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+    bool valid = c_type_parse_root_finish(machine, result, &checkpoint, mutation_mark,
                                           machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
     *alignment_start = machine->result_index;
     *alignment_count = machine->result_type.value;
@@ -1904,6 +1916,111 @@ BUSTER_C_INTERNAL CTypeId c_parse_type_name_specifiers(CTypeParseMachine* machin
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
 
+// The per-query state of one layout solve, and the two drivers that fill it.
+//
+// Within one query a type's layout fact only ever moves from unknown to
+// resolved (size, alignment, provisional), and a per-type attempt in
+// c_parse_type_layout_attempts is a pure function of the facts it reads when
+// no type-parse machine is involved. The requested type's answer is therefore
+// the same under every attempt order, with one exception: a sizeof operand in
+// an array bound whose layout its kind alone determines answers from the
+// first same-kind type that has resolved by then, which does depend on order.
+//
+// The ordered passes seed every builtin type, then attempt the pending types
+// in list order, pass after pass, until the requested type resolves or a pass
+// resolves nothing. Without a cache the pending list is the whole type table,
+// so every such query costs the whole table, however little it needs.
+//
+// The agenda attempts only the types the requested one reaches. Before its
+// first attempt a type waits on every open prerequisite any successful attempt
+// of it must read (c_parse_layout_agenda_expand), so it is attempted only once
+// they are all final. An attempt that still stops at an open type -- an array
+// bound's sizeof operand, which no static rule names -- records it as the
+// blocker, waits on it, and is retried exactly when it becomes final. Each
+// edge is a necessary condition for success and is registered at most once per
+// waiting type, so when nothing is ready and the requested type is still open,
+// every open type waits on another open type through necessary conditions:
+// none can resolve in any order, which is the ordered passes' "no progress".
+// Attempts, edges and notifications are bounded by the requested type's
+// dependency closure, not by the table. The order-dependent reads above are
+// answered only where every order agrees (a seeded operand, or a kind whose
+// first type is seeded); anything else abandons the agenda before its answer
+// is used, and the query reruns on the ordered passes.
+#define C_PARSE_LAYOUT_NONE UINT32_MAX
+// Keeps every agenda array's doubling capacity in u32: entries never exceed
+// the type count and the open-addressed index holds at most twice as many.
+#define C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT (1u << 28)
+// Edge growth past this abandons the agenda rather than overflow its capacity.
+#define C_PARSE_LAYOUT_AGENDA_EDGE_LIMIT (1u << 30)
+#define C_PARSE_LAYOUT_AGENDA_INITIAL_CAPACITY 32u
+
+typedef enum CParseLayoutState
+{
+    C_PARSE_LAYOUT_OPEN,
+    C_PARSE_LAYOUT_RESOLVED,
+    C_PARSE_LAYOUT_FAILED,
+} CParseLayoutState;
+
+typedef struct CParseLayoutEntry CParseLayoutEntry;
+struct CParseLayoutEntry
+{
+    u64 size;
+    u32 type_index;
+    u32 alignment;
+    // Head of the chain of edges from types waiting on this one, plus one.
+    u32 first_waiter;
+    // Registered prerequisite edges whose type is not final yet.
+    u32 unfinished;
+    u8 state;
+    bool provisional;
+    // Resolved by the seed rule, which the ordered passes apply to every
+    // pending type before their first attempt.
+    bool seeded;
+    // Pushed at least once. An open entry that was never pushed is a
+    // placeholder a read created.
+    bool visited;
+    // Its static prerequisites are registered, which happens when it is first
+    // popped and before its first attempt.
+    bool expanded;
+};
+
+typedef struct CParseLayoutEdge CParseLayoutEdge;
+struct CParseLayoutEdge
+{
+    u32 waiter;
+    u32 next;
+};
+
+typedef struct CParseLayoutAgenda CParseLayoutAgenda;
+struct CParseLayoutAgenda
+{
+    CParseLayoutEntry* entries;
+    // Entry index plus one by type index, open addressing.
+    u32* slots;
+    CParseLayoutEdge* edges;
+    u32* ready;
+    u32 entry_count;
+    u32 entry_capacity;
+    u32 slot_capacity;
+    u32 edge_count;
+    u32 edge_capacity;
+    u32 ready_count;
+    u32 ready_capacity;
+    u32 root;
+    // The entry whose attempt is running, and the first open type that
+    // attempt read, plus one.
+    u32 current;
+    u32 blocker;
+    // The last type looked up and its entry, or C_PARSE_LAYOUT_NONE and its
+    // fact when the seed rule answers it: an attempt reads a type's
+    // resolution and then its layout, so this answers all but the first.
+    u32 last_type;
+    u32 last_entry;
+    CParseLayoutEntry last_seed;
+    // An attempt reached a read whose answer depends on attempt order.
+    bool abandoned;
+};
+
 typedef struct CParseLayoutContext CParseLayoutContext;
 struct CParseLayoutContext
 {
@@ -1911,11 +2028,588 @@ struct CParseLayoutContext
     Arena* arena;
     CPreprocessResult preprocess;
     CParseResult* result;
+    // Ordered passes: columns indexed by type id, and the list they walk.
+    u64* sizes;
     u32* alignments;
     bool* resolved;
     bool* provisional;
+    u32* pending;
+    u32 pending_count;
+    // The demand-driven solve; null for the ordered passes.
+    CParseLayoutAgenda* agenda;
+    CTypeLayoutStatistics* statistics;
+    u64* offset_out;
+    CTypeId requested;
+    u32 offset_member;
     u32 type_count;
+    bool any_type_alignment;
 };
+
+// The seed rule: the layout the ordered passes give a pending type before
+// their first attempt. A builtin scalar kind takes its target layout, promoted
+// when _Atomic, and an enum with neither a fixed nor a completed underlying
+// type takes the guessed, provisional 4/4. Aligned aliases are handed back to
+// their own branch by the caller.
+BUSTER_C_INTERNAL bool c_parse_layout_seed(Target target, CType const* type, u64* size_out, u32* alignment_out, bool* provisional_out)
+{
+    u64 size = 0;
+    u32 alignment = 0;
+    bool provisional = false;
+    if (!c_parse_builtin_type_layout(target, type->kind, &size, &alignment) && type->kind == C_TYPE_ENUM &&
+        type->element_type.value == C_ID_UNDERLYING_INVALID)
+    {
+        size = 4;
+        alignment = 4;
+        provisional = true;
+    }
+    if (alignment)
+    {
+        // `_Atomic T` is a type built from T rather than a qualified T, so
+        // the copy the seed just answered from its kind takes the atomic
+        // layout of that kind.  The atomic branch of the solve performs the
+        // same step for every kind this seed cannot answer.
+        if (type->is_atomic)
+        {
+            c_atomic_promoted_layout(target_data_layout(target).atomic_max_width, &size, &alignment);
+        }
+        *size_out = size;
+        *alignment_out = alignment;
+        *provisional_out = provisional;
+    }
+    return alignment != 0;
+}
+
+// Kinds whose layout the kind alone decides, which the sizeof-operand kind
+// scan may answer for; an aggregate, array or vector operand waits for its
+// own layout instead.
+BUSTER_C_INTERNAL bool c_parse_layout_kind_determines_layout(CTypeKind kind)
+{
+    return kind != C_TYPE_STRUCT && kind != C_TYPE_UNION && kind != C_TYPE_ARRAY && kind != C_TYPE_VECTOR;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_layout_agenda_slot(u32 type_index, u32 slot_capacity)
+{
+    return (type_index * 0x9E3779B1u) & (slot_capacity - 1);
+}
+
+BUSTER_C_INTERNAL u32 c_parse_layout_agenda_find(CParseLayoutAgenda const* agenda, u32 type_index)
+{
+    u32 result = C_PARSE_LAYOUT_NONE;
+    u32 slot = c_parse_layout_agenda_slot(type_index, agenda->slot_capacity);
+    bool searching = true;
+    while (searching)
+    {
+        u32 occupant = agenda->slots[slot];
+        if (!occupant)
+        {
+            searching = false;
+        }
+        else if (agenda->entries[occupant - 1].type_index == type_index)
+        {
+            result = occupant - 1;
+            searching = false;
+        }
+        else
+        {
+            slot = (slot + 1) & (agenda->slot_capacity - 1);
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_parse_layout_agenda_index(CParseLayoutAgenda* agenda, u32 entry)
+{
+    u32 slot = c_parse_layout_agenda_slot(agenda->entries[entry].type_index, agenda->slot_capacity);
+    while (agenda->slots[slot])
+    {
+        slot = (slot + 1) & (agenda->slot_capacity - 1);
+    }
+    agenda->slots[slot] = entry + 1;
+}
+
+// The fact the seed rule gives `type_index`, which the ordered passes apply to
+// every pending type before their first attempt; aligned aliases belong to
+// their own branch.
+BUSTER_C_INTERNAL bool c_parse_layout_agenda_seed(CParseLayoutContext* context, u32 type_index, CParseLayoutEntry* fact)
+{
+    *fact = (CParseLayoutEntry){
+        .type_index = type_index,
+        .state = C_PARSE_LAYOUT_RESOLVED,
+        .seeded = true,
+    };
+    bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
+    return !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+}
+
+// Appends `fresh` as a new entry.
+BUSTER_C_INTERNAL u32 c_parse_layout_agenda_create(CParseLayoutContext* context, CParseLayoutEntry fresh)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    if (agenda->entry_count == agenda->entry_capacity)
+    {
+        u32 capacity = agenda->entry_capacity * 2;
+        CParseLayoutEntry* entries = arena_allocate(context->arena, CParseLayoutEntry, capacity);
+        memcpy(entries, agenda->entries, sizeof(*entries) * agenda->entry_count);
+        agenda->entries = entries;
+        agenda->entry_capacity = capacity;
+    }
+    if ((agenda->entry_count + 1) * 2 > agenda->slot_capacity)
+    {
+        agenda->slot_capacity *= 2;
+        agenda->slots = arena_allocate_zeroed(context->arena, u32, agenda->slot_capacity);
+        for (u32 index = 0; index < agenda->entry_count; index += 1)
+        {
+            c_parse_layout_agenda_index(agenda, index);
+        }
+    }
+    u32 entry = agenda->entry_count;
+    agenda->entry_count += 1;
+    agenda->entries[entry] = fresh;
+    c_parse_layout_agenda_index(agenda, entry);
+    if (context->statistics)
+    {
+        context->statistics->agenda_types += 1;
+    }
+    return entry;
+}
+
+// The entry of `type_index` (below the query's type count), created on first
+// sight with the seed rule applied. Only the requested type and blockers need
+// one whatever their kind; reads go through c_parse_layout_agenda_lookup.
+BUSTER_C_INTERNAL u32 c_parse_layout_agenda_enter(CParseLayoutContext* context, u32 type_index)
+{
+    u32 entry = c_parse_layout_agenda_find(context->agenda, type_index);
+    if (entry == C_PARSE_LAYOUT_NONE)
+    {
+        CParseLayoutEntry fresh;
+        if (!c_parse_layout_agenda_seed(context, type_index, &fresh))
+        {
+            fresh = (CParseLayoutEntry){
+                .type_index = type_index,
+                .state = C_PARSE_LAYOUT_OPEN,
+            };
+        }
+        entry = c_parse_layout_agenda_create(context, fresh);
+    }
+    return entry;
+}
+
+// Makes `type_index` (below the query's type count) the last type looked up.
+// A type the seed rule answers gets no entry: its fact is a function of its
+// own record, so it is recomputed on a later miss rather than stored. Any
+// other type gets an open entry on first sight.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_lookup(CParseLayoutContext* context, u32 type_index)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    u32 entry = c_parse_layout_agenda_find(agenda, type_index);
+    if (entry == C_PARSE_LAYOUT_NONE && !c_parse_layout_agenda_seed(context, type_index, &agenda->last_seed))
+    {
+        entry = c_parse_layout_agenda_create(context, (CParseLayoutEntry){
+                                                          .type_index = type_index,
+                                                          .state = C_PARSE_LAYOUT_OPEN,
+                                                      });
+    }
+    agenda->last_type = type_index;
+    agenda->last_entry = entry;
+}
+
+// The current fact of `type_index`, by value. An entry is read afresh, since
+// its state changes as the solve goes on; a seeded fact never changes.
+BUSTER_C_INTERNAL BUSTER_INLINE CParseLayoutEntry c_parse_layout_agenda_fact(CParseLayoutContext* context, u32 type_index)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    if (agenda->last_type != type_index)
+    {
+        c_parse_layout_agenda_lookup(context, type_index);
+    }
+    return agenda->last_entry == C_PARSE_LAYOUT_NONE ? agenda->last_seed : agenda->entries[agenda->last_entry];
+}
+
+BUSTER_C_INTERNAL void c_parse_layout_agenda_push(CParseLayoutContext* context, u32 entry)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    if (agenda->ready_count == agenda->ready_capacity)
+    {
+        u32 capacity = agenda->ready_capacity * 2;
+        u32* ready = arena_allocate(context->arena, u32, capacity);
+        memcpy(ready, agenda->ready, sizeof(*ready) * agenda->ready_count);
+        agenda->ready = ready;
+        agenda->ready_capacity = capacity;
+    }
+    agenda->ready[agenda->ready_count] = entry;
+    agenda->ready_count += 1;
+    agenda->entries[entry].visited = true;
+    if (context->statistics)
+    {
+        context->statistics->agenda_pushes += 1;
+    }
+}
+
+// `waiter` is retried only after `dependency`, which is open, becomes final.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_wait(CParseLayoutContext* context, u32 waiter, u32 dependency)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    if (agenda->edge_count == agenda->edge_capacity)
+    {
+        // Nothing an abandoned agenda computed is used, so a full edge table
+        // abandons instead of overflowing its capacity.
+        agenda->abandoned |= agenda->edge_capacity >= C_PARSE_LAYOUT_AGENDA_EDGE_LIMIT;
+        if (!agenda->abandoned)
+        {
+            u32 capacity = agenda->edge_capacity * 2;
+            CParseLayoutEdge* edges = arena_allocate(context->arena, CParseLayoutEdge, capacity);
+            memcpy(edges, agenda->edges, sizeof(*edges) * agenda->edge_count);
+            agenda->edges = edges;
+            agenda->edge_capacity = capacity;
+        }
+    }
+    if (!agenda->abandoned)
+    {
+        agenda->edges[agenda->edge_count] = (CParseLayoutEdge){
+            .waiter = waiter,
+            .next = agenda->entries[dependency].first_waiter,
+        };
+        agenda->edge_count += 1;
+        agenda->entries[dependency].first_waiter = agenda->edge_count;
+        agenda->entries[waiter].unfinished += 1;
+        if (context->statistics)
+        {
+            context->statistics->agenda_edges += 1;
+        }
+        if (!agenda->entries[dependency].visited)
+        {
+            c_parse_layout_agenda_push(context, dependency);
+        }
+    }
+}
+
+// `entry` just became final: every edge waiting on it completes once, and a
+// waiter whose last edge completed is ready again.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_finish(CParseLayoutContext* context, u32 entry)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    u32 edge = agenda->entries[entry].first_waiter;
+    agenda->entries[entry].first_waiter = 0;
+    while (edge)
+    {
+        CParseLayoutEdge completed = agenda->edges[edge - 1];
+        CParseLayoutEntry* waiter = agenda->entries + completed.waiter;
+        waiter->unfinished -= 1;
+        if (!waiter->unfinished)
+        {
+            c_parse_layout_agenda_push(context, completed.waiter);
+        }
+        if (context->statistics)
+        {
+            context->statistics->agenda_notifications += 1;
+        }
+        edge = completed.next;
+    }
+}
+
+// Waits on `type` unless it is final or `waiter` already waits on it. One
+// expansion registers its edges back to back, so a repeated prerequisite --
+// two members of one type -- finds its first edge at the head of that type's
+// waiters.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_expect(CParseLayoutContext* context, u32 waiter, CTypeId type)
+{
+    if (type.value < context->type_count && c_parse_layout_agenda_fact(context, type.value).state == C_PARSE_LAYOUT_OPEN)
+    {
+        CParseLayoutAgenda* agenda = context->agenda;
+        u32 dependency = agenda->last_entry;
+        u32 newest = agenda->entries[dependency].first_waiter;
+        if (!(newest && agenda->edges[newest - 1].waiter == waiter))
+        {
+            c_parse_layout_agenda_wait(context, waiter, dependency);
+        }
+    }
+}
+
+// The type-naming alignment specifiers c_parse_layout_alignment_specifiers
+// reads for [start, start + count), up to the first record out of range.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_expect_specifiers(CParseLayoutContext* context, u32 waiter, u32 start, u32 count)
+{
+    CParseResult* result = context->result;
+    for (u32 index = 0; index < count && start <= result->alignment_count && index < result->alignment_count - start; index += 1)
+    {
+        c_parse_layout_agenda_expect(context, waiter, result->alignments[start + index].type);
+    }
+}
+
+// Registers, before the entry's first attempt, the types every successful
+// attempt of its type reads, choosing the branch exactly as
+// c_parse_type_layout_attempts does: an aligned alias's unqualified type and
+// specifiers, an atomic copy's unqualified type, an enum's, vector's or
+// array's element, and a complete aggregate's member layout types and
+// specifiers. A success reads every one of them, so each edge is a necessary
+// condition; a type none of whose attempts can succeed may register anything,
+// since whatever waits on it cannot resolve either. Nothing here parses, so
+// the type record stays where it is.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_expand(CParseLayoutContext* context, u32 waiter)
+{
+    CParseResult* result = context->result;
+    u32 type_index = context->agenda->entries[waiter].type_index;
+    CType* type = result->types + type_index;
+    CTypeAlignment const* alias = context->any_type_alignment ? c_parse_type_alignment(result, (CTypeId){.value = type_index}) : 0;
+    if (alias)
+    {
+        if (type->has_unqualified_type)
+        {
+            c_parse_layout_agenda_expect(context, waiter, type->unqualified_type);
+        }
+        c_parse_layout_agenda_expect_specifiers(context, waiter, alias->alignment_start, alias->alignment_count);
+    }
+    else if (type->is_atomic && type->kind != C_TYPE_ARRAY && type->has_unqualified_type && type->unqualified_type.value < context->type_count)
+    {
+        c_parse_layout_agenda_expect(context, waiter, type->unqualified_type);
+    }
+    else if (type->kind == C_TYPE_ENUM || type->kind == C_TYPE_VECTOR || type->kind == C_TYPE_ARRAY)
+    {
+        c_parse_layout_agenda_expect(context, waiter, type->element_type);
+    }
+    else if ((type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION) && type->is_complete)
+    {
+        bool members_in_table = true;
+        for (u32 member_index = 0; member_index < type->member_count && members_in_table; member_index += 1)
+        {
+            CMember member = result->members[type->member_start + member_index];
+            members_in_table = member.type.value < context->type_count;
+            if (members_in_table)
+            {
+                // Only an array member can be flexible, so the named-member
+                // count behind the answer is skipped for every other one.
+                bool flexible = result->types[member.type.value].kind == C_TYPE_ARRAY && c_parse_type_is_flexible_array_member(result, type, member_index);
+                c_parse_layout_agenda_expect(context, waiter, flexible ? result->types[member.type.value].element_type : member.type);
+                c_parse_layout_agenda_expect_specifiers(context, waiter, member.alignment_start, member.alignment_count);
+            }
+        }
+        CAggregateAttributes attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
+        c_parse_layout_agenda_expect_specifiers(context, waiter, attributes.alignment_start, attributes.alignment_count);
+    }
+}
+
+// The agenda's half of c_parse_layout_resolved: the first open type an
+// attempt reads becomes that attempt's blocker.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_layout_agenda_resolved(CParseLayoutContext* context, u32 type_index)
+{
+    u8 state = c_parse_layout_agenda_fact(context, type_index).state;
+    if (state == C_PARSE_LAYOUT_OPEN && !context->agenda->blocker)
+    {
+        context->agenda->blocker = type_index + 1;
+    }
+    return state == C_PARSE_LAYOUT_RESOLVED;
+}
+
+// Records the layout of the type being attempted, which becomes final; its
+// waiters' edges complete.
+BUSTER_C_INTERNAL void c_parse_layout_agenda_publish(CParseLayoutContext* context, u32 type_index, u64 size, u32 alignment, bool provisional)
+{
+    CParseLayoutAgenda* agenda = context->agenda;
+    CParseLayoutEntry* published = agenda->entries + agenda->current;
+    BUSTER_CHECK(published->type_index == type_index);
+    published->size = size;
+    published->alignment = alignment;
+    published->provisional = provisional;
+    published->state = C_PARSE_LAYOUT_RESOLVED;
+    c_parse_layout_agenda_finish(context, agenda->current);
+}
+
+// The accessors every attempt reads and writes through. `agenda` is the
+// solve's agenda, or null for the ordered passes, which index their columns
+// directly. The attempts pass it as a parameter rather than reading
+// context->agenda so that, once c_parse_type_layout_attempts is inlined into
+// each driver with a constant, the passes' copy has no agenda branch left.
+//
+// Whether `type_index` (below the query's type count) has resolved.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_layout_resolved(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index)
+{
+    return agenda ? c_parse_layout_agenda_resolved(context, type_index) : context->resolved[type_index];
+}
+
+// The layout of a type c_parse_layout_resolved has answered true for.
+BUSTER_C_INTERNAL BUSTER_INLINE u64 c_parse_layout_size(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index)
+{
+    return agenda ? c_parse_layout_agenda_fact(context, type_index).size : context->sizes[type_index];
+}
+
+BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_alignment(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index)
+{
+    return agenda ? c_parse_layout_agenda_fact(context, type_index).alignment : context->alignments[type_index];
+}
+
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_layout_provisional(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index)
+{
+    return agenda ? c_parse_layout_agenda_fact(context, type_index).provisional : context->provisional[type_index];
+}
+
+// Records the layout of `type_index`, the type being attempted.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_layout_publish(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index, u64 size, u32 alignment,
+                                                            bool provisional)
+{
+    if (agenda)
+    {
+        c_parse_layout_agenda_publish(context, type_index, size, alignment, provisional);
+    }
+    else
+    {
+        context->sizes[type_index] = size;
+        context->alignments[type_index] = alignment;
+        context->provisional[type_index] = provisional;
+        context->resolved[type_index] = true;
+    }
+}
+
+// Whether a sizeof operand already in the table answers from its own layout.
+// The ordered passes use it only once it has resolved and otherwise fall back
+// to the kind scan, so for a kind the scan can answer the result depends on
+// attempt order unless the seed resolved the operand before any attempt; the
+// agenda abandons that case.
+BUSTER_C_INTERNAL bool c_parse_layout_operand_resolved(CParseLayoutContext* context, CParseLayoutAgenda* agenda, CTypeKind kind, u32 type_index)
+{
+    bool result;
+    if (agenda && c_parse_layout_kind_determines_layout(kind))
+    {
+        result = c_parse_layout_agenda_fact(context, type_index).seeded;
+        agenda->abandoned |= !result;
+    }
+    else
+    {
+        result = c_parse_layout_resolved(context, agenda, type_index);
+    }
+    return result;
+}
+
+// The ordered passes answer a sizeof operand they could not resolve with the
+// first type of the same kind that has resolved when the scan runs. The first
+// type of that kind gives the same answer at every point of every order only
+// when the seed resolves it; the agenda answers that case and abandons the
+// others.
+BUSTER_C_INTERNAL bool c_parse_layout_kind_scan(CParseLayoutContext* context, CParseLayoutAgenda* agenda, CTypeKind kind, u64* size_out, u32* alignment_out,
+                                                bool* provisional_out)
+{
+    bool found = false;
+    CParseResult* result = context->result;
+    if (agenda)
+    {
+        u32 candidate = 0;
+        while (candidate < context->type_count && result->types[candidate].kind != kind)
+        {
+            candidate += 1;
+        }
+        if (candidate < context->type_count)
+        {
+            CParseLayoutEntry fact = c_parse_layout_agenda_fact(context, candidate);
+            found = fact.seeded;
+            agenda->abandoned |= !found;
+            if (found)
+            {
+                *size_out = fact.size;
+                *alignment_out = fact.alignment;
+                *provisional_out |= fact.provisional;
+            }
+        }
+    }
+    else
+    {
+        for (u32 candidate = 0; candidate < context->type_count && !found; candidate += 1)
+        {
+            if (result->types[candidate].kind == kind && context->resolved[candidate])
+            {
+                *size_out = context->sizes[candidate];
+                *alignment_out = context->alignments[candidate];
+                *provisional_out |= context->provisional[candidate];
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+// The agenda's next attempt. It first settles the attempt that just ended: a
+// resolved one already finished in c_parse_layout_agenda_publish; one that
+// stopped at an open type waits on it; one that stopped anywhere else has
+// failed for good and finishes. It then pops ready entries. An entry popped
+// for the first time registers its static prerequisites and is attempted only
+// if none of them is open; otherwise the last of them to become final pushes
+// it again. It stops once the requested type is final, nothing is ready, or it
+// abandoned.
+BUSTER_C_INTERNAL u32 c_parse_layout_agenda_next(CParseLayoutContext* context)
+{
+    u32 result = C_PARSE_LAYOUT_NONE;
+    CParseLayoutAgenda* agenda = context->agenda;
+    if (agenda->current != C_PARSE_LAYOUT_NONE && agenda->entries[agenda->current].state == C_PARSE_LAYOUT_OPEN && !agenda->abandoned)
+    {
+        u32 settled = agenda->current;
+        if (agenda->blocker)
+        {
+            // Every static prerequisite was final when the attempt began, so
+            // the blocker, which the attempt's read entered, is a new edge.
+            c_parse_layout_agenda_wait(context, settled, c_parse_layout_agenda_find(agenda, agenda->blocker - 1));
+        }
+        else
+        {
+            agenda->entries[settled].state = C_PARSE_LAYOUT_FAILED;
+            c_parse_layout_agenda_finish(context, settled);
+        }
+    }
+    agenda->current = C_PARSE_LAYOUT_NONE;
+    while (result == C_PARSE_LAYOUT_NONE && agenda->ready_count && agenda->entries[agenda->root].state == C_PARSE_LAYOUT_OPEN && !agenda->abandoned)
+    {
+        agenda->ready_count -= 1;
+        u32 entry = agenda->ready[agenda->ready_count];
+        if (agenda->entries[entry].state == C_PARSE_LAYOUT_OPEN)
+        {
+            if (!agenda->entries[entry].expanded)
+            {
+                agenda->entries[entry].expanded = true;
+                c_parse_layout_agenda_expand(context, entry);
+            }
+            if (!agenda->entries[entry].unfinished && !agenda->abandoned)
+            {
+                agenda->current = entry;
+                agenda->blocker = 0;
+                result = agenda->entries[entry].type_index;
+            }
+        }
+    }
+    if (result != C_PARSE_LAYOUT_NONE && context->statistics)
+    {
+        context->statistics->agenda_attempts += 1;
+    }
+    return result;
+}
+
+// The ordered passes' next attempt: the pending list in order from `*cursor`,
+// skipping what has resolved; the end of the list ends the pass and rewinds
+// the cursor.
+BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_pass_next(CParseLayoutContext* context, u32* cursor)
+{
+    u32 result = C_PARSE_LAYOUT_NONE;
+    while (result == C_PARSE_LAYOUT_NONE && *cursor < context->pending_count)
+    {
+        u32 type_index = context->pending[*cursor];
+        *cursor += 1;
+        if (type_index < context->type_count && !context->resolved[type_index])
+        {
+            result = type_index;
+        }
+    }
+    if (result == C_PARSE_LAYOUT_NONE)
+    {
+        *cursor = 0;
+    }
+    else if (context->statistics)
+    {
+        context->statistics->pass_attempts += 1;
+    }
+    return result;
+}
+
+// The next type to attempt, or C_PARSE_LAYOUT_NONE at the end of a pass.
+BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32* cursor)
+{
+    return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
+}
 
 // Raises `*alignment` to each alignment specifier of [start, start + count),
 // which is what c_ir_alignment_evaluate does for the IR layout; the two run
@@ -1937,7 +2631,7 @@ struct CParseLayoutContext
 // `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
 // is below the declared type's own alignment, while every other reader of a
 // request only ever raises with it. Zero means no record resolved.
-BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, u32 start, u32 count, u32* alignment, u32* requested_out,
+BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 start, u32 count, u32* alignment, u32* requested_out,
                                                            bool* provisional_out)
 {
     bool valid = true;
@@ -1952,13 +2646,13 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         u64 requested_alignment = 0;
         if (specifier.type.value < context->type_count)
         {
-            if (!context->resolved[specifier.type.value])
+            if (!c_parse_layout_resolved(context, agenda, specifier.type.value))
             {
                 valid = false;
                 break;
             }
-            *provisional_out |= context->provisional[specifier.type.value];
-            requested_alignment = context->alignments[specifier.type.value];
+            *provisional_out |= c_parse_layout_provisional(context, agenda, specifier.type.value);
+            requested_alignment = c_parse_layout_alignment(context, agenda, specifier.type.value);
         }
         else
         {
@@ -1985,13 +2679,13 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     aligned_type = c_parse_pointer_chain(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                     aligned_type = c_parse_array_suffixes(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                 }
-                if (aligned_type.value >= context->type_count || aligned_type_index != type_end || !context->resolved[aligned_type.value])
+                if (aligned_type.value >= context->type_count || aligned_type_index != type_end || !c_parse_layout_resolved(context, agenda, aligned_type.value))
                 {
                     valid = false;
                     break;
                 }
-                *provisional_out |= context->provisional[aligned_type.value];
-                requested_alignment = context->alignments[aligned_type.value];
+                *provisional_out |= c_parse_layout_provisional(context, agenda, aligned_type.value);
+                requested_alignment = c_parse_layout_alignment(context, agenda, aligned_type.value);
             }
             else
             {
@@ -2022,177 +2716,29 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                             CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out)
+// The per-type attempts of one solve, in the order c_parse_layout_next hands
+// them out. An attempt that resolves its type publishes the layout; one that
+// cannot yet simply continues, and the driver decides when to retry it. Each
+// driver inlines its own copy with `agenda` constant, so the ordered passes
+// run the loop they ran before the agenda existed.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutContext* context, CParseLayoutAgenda* agenda)
 {
-    if (requested.value >= result->type_count)
-    {
-        return false;
-    }
-    // Almost no translation unit has an aligned typedef in it, and the two
-    // scans below run once per type of the table, so the empty case is one
-    // register test rather than a call that finds nothing.
-    bool any_type_alignment = result->type_alignment_count != 0;
-    // The seed pass below resolves builtin scalars and incomplete enums from
-    // the requested record alone and takes the early exit, so answer those
-    // without walking the table.  A type a typedef gave an alignment of its own
-    // is the one exception: its answer is not derivable from its kind, so it
-    // falls through to the solve, where the alias branch reads the request.
-    if (!any_type_alignment || !c_parse_type_alignment(result, requested))
-    {
-        CType requested_type = result->types[requested.value];
-        u64 direct_size = 0;
-        u32 direct_alignment = 0;
-        if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
-        {
-            if (direct_alignment)
-            {
-                // The same promotion the seed below performs, on the one type
-                // this exit answers for; `_Atomic double` is the common shape
-                // and takes it unchanged, `_Atomic _Complex float` is the one
-                // that moves.
-                if (requested_type.is_atomic)
-                {
-                    c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &direct_size, &direct_alignment);
-                }
-                *size_out = direct_size;
-                *alignment_out = direct_alignment;
-                return true;
-            }
-        }
-        else if (requested_type.kind == C_TYPE_ENUM && requested_type.element_type.value == C_ID_UNDERLYING_INVALID)
-        {
-            *size_out = 4;
-            *alignment_out = 4;
-            return true;
-        }
-    }
-    CTypeLayoutCache* cache = !offset_out && machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
-    if (cache && requested.value < cache->capacity && cache->states[requested.value])
-    {
-        *size_out = cache->sizes[requested.value];
-        *alignment_out = cache->alignments[requested.value];
-        return true;
-    }
-    // The type table can grow while the solve parses alignof/sizeof operand
-    // types; the scratch arrays cover the types that existed at entry and
-    // later additions stay unresolved for this query.
-    //
-    // The committed rows seed the scratch by copy rather than by a walk that
-    // reads each of them through three tests, and the three passes below
-    // visit the ids the cache has not committed rather than the whole table.
-    // The list is snapshotted here because the solve reenters the parse --
-    // an alignment specifier or an array bound may name a type of its own --
-    // and a nested query may both extend the list and move it.
-    u32 type_count = result->type_count;
-    u32* pending;
-    u32 pending_count;
-    if (cache)
-    {
-        c_type_layout_cache_reserve(cache, result->arena, type_count);
-        for (u32 type_index = cache->pending_seeded; type_index < type_count; type_index += 1)
-        {
-            c_type_layout_cache_pending_push(cache, type_index);
-        }
-        cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
-        pending_count = cache->pending_count;
-        pending = arena_allocate(arena, u32, pending_count + 1);
-        memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
-    }
-    else
-    {
-        pending_count = type_count;
-        pending = arena_allocate(arena, u32, pending_count + 1);
-        for (u32 type_index = 0; type_index < type_count; type_index += 1)
-        {
-            pending[type_index] = type_index;
-        }
-    }
-    u64* sizes = arena_allocate(arena, u64, type_count + 1);
-    u32* alignments = arena_allocate(arena, u32, type_count + 1);
-    bool* resolved = arena_allocate(arena, bool, type_count + 1);
-    bool* provisional = arena_allocate(arena, bool, type_count + 1);
-    if (cache)
-    {
-        memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
-        memcpy(alignments, cache->alignments, sizeof(*alignments) * type_count);
-        memcpy(resolved, cache->states, type_count);
-    }
-    else
-    {
-        memset(resolved, 0, sizeof(*resolved) * type_count);
-    }
-    memset(provisional, 0, sizeof(*provisional) * type_count);
-    CParseLayoutContext layout_context = {
-        .machine = machine,
-        .arena = arena,
-        .preprocess = preprocess,
-        .result = result,
-        .alignments = alignments,
-        .resolved = resolved,
-        .provisional = provisional,
-        .type_count = type_count,
-    };
-    for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
-    {
-        u32 type_index = pending[pending_index];
-        if (type_index >= type_count || resolved[type_index])
-        {
-            continue;
-        }
-        CTypeKind kind = result->types[type_index].kind;
-        u64 size = 0;
-        u32 alignment = 0;
-        if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && kind == C_TYPE_ENUM &&
-            result->types[type_index].element_type.value == C_ID_UNDERLYING_INVALID)
-        {
-            size = 4;
-            alignment = 4;
-            provisional[type_index] = true;
-        }
-        if (alignment)
-        {
-            // `_Atomic T` is a type built from T rather than a qualified T, so
-            // the copy the seed just answered from its kind takes the atomic
-            // layout of that kind.  The atomic branch of the solve below
-            // performs the same step for every kind this seed cannot answer.
-            if (result->types[type_index].is_atomic)
-            {
-                c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &size, &alignment);
-            }
-            sizes[type_index] = size;
-            alignments[type_index] = alignment;
-            resolved[type_index] = true;
-        }
-    }
-    // An aligned alias keeps the kind it copied, so the seed just answered it
-    // with the natural layout; hand those few back to the solve below, which
-    // owns them.  Walking the records rather than testing every type in the
-    // seed is what keeps the empty case -- almost every translation unit --
-    // free: the seed runs over the whole table on every uncached query.  A
-    // cached answer already carries the replacement and is left alone.
-    for (u32 alias_index = 0; alias_index < result->type_alignment_count; alias_index += 1)
-    {
-        u32 alias_type = result->type_alignments[alias_index].type_index;
-        if (alias_type < type_count && !(cache && alias_type < cache->capacity && cache->states[alias_type]))
-        {
-            resolved[alias_type] = false;
-        }
-    }
-    if (resolved[requested.value])
-    {
-        goto requested_resolved;
-    }
+    CTypeParseMachine* machine = context->machine;
+    Arena* arena = context->arena;
+    CPreprocessResult preprocess = context->preprocess;
+    CParseResult* result = context->result;
+    CTypeId requested = context->requested;
+    u32 type_count = context->type_count;
+    bool any_type_alignment = context->any_type_alignment;
+    u32 offset_member = context->offset_member;
+    u64* offset_out = context->offset_out;
+    u32 cursor = 0;
     for (u32 pass = 0; pass < type_count; pass += 1)
     {
         bool progress = false;
-        for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
+        for (u32 type_index = c_parse_layout_next(context, agenda, &cursor); type_index != C_PARSE_LAYOUT_NONE;
+             type_index = c_parse_layout_next(context, agenda, &cursor))
         {
-            u32 type_index = pending[pending_index];
-            if (type_index >= type_count || resolved[type_index])
-            {
-                continue;
-            }
             CType type = result->types[type_index];
             // `typedef int cache_line __attribute__((aligned(64)))` asks for
             // the alignment of a *type*, which replaces the natural one rather
@@ -2209,13 +2755,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             CTypeAlignment const* requested_type_alignment = any_type_alignment ? c_parse_type_alignment(result, (CTypeId){.value = type_index}) : 0;
             if (requested_type_alignment)
             {
-                if (!type.has_unqualified_type || type.unqualified_type.value >= type_count || !resolved[type.unqualified_type.value])
+                if (!type.has_unqualified_type || type.unqualified_type.value >= type_count ||
+                    !c_parse_layout_resolved(context, agenda, type.unqualified_type.value))
                 {
                     continue;
                 }
                 u32 alias_alignment = 1;
-                bool alias_provisional = provisional[type.unqualified_type.value];
-                if (!c_parse_layout_alignment_specifiers(&layout_context, requested_type_alignment->alignment_start,
+                bool alias_provisional = c_parse_layout_provisional(context, agenda, type.unqualified_type.value);
+                if (!c_parse_layout_alignment_specifiers(context, agenda, requested_type_alignment->alignment_start,
                                                          requested_type_alignment->alignment_count, &alias_alignment, 0, &alias_provisional))
                 {
                     continue;
@@ -2228,16 +2775,13 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 // promotion would ask for is discarded here -- the request
                 // already answered that question, which is what the alias
                 // exists for.
-                u64 alias_size = sizes[type.unqualified_type.value];
+                u64 alias_size = c_parse_layout_size(context, agenda, type.unqualified_type.value);
                 u32 discarded_alignment = alias_alignment;
                 if (type.is_atomic && type.kind != C_TYPE_ARRAY)
                 {
                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &alias_size, &discarded_alignment);
                 }
-                sizes[type_index] = alias_size;
-                alignments[type_index] = alias_alignment;
-                provisional[type_index] = alias_provisional;
-                resolved[type_index] = true;
+                c_parse_layout_publish(context, agenda, type_index, alias_size, alias_alignment, alias_provisional);
                 if (type_index == requested.value)
                 {
                     goto requested_resolved;
@@ -2260,17 +2804,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             // Clang and GCC alike.
             if (type.is_atomic && type.kind != C_TYPE_ARRAY && type.has_unqualified_type && type.unqualified_type.value < type_count)
             {
-                if (!resolved[type.unqualified_type.value])
+                if (!c_parse_layout_resolved(context, agenda, type.unqualified_type.value))
                 {
                     continue;
                 }
-                u64 atomic_size = sizes[type.unqualified_type.value];
-                u32 atomic_alignment = alignments[type.unqualified_type.value];
+                u64 atomic_size = c_parse_layout_size(context, agenda, type.unqualified_type.value);
+                u32 atomic_alignment = c_parse_layout_alignment(context, agenda, type.unqualified_type.value);
                 c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &atomic_size, &atomic_alignment);
-                sizes[type_index] = atomic_size;
-                alignments[type_index] = atomic_alignment;
-                provisional[type_index] = provisional[type.unqualified_type.value];
-                resolved[type_index] = true;
+                c_parse_layout_publish(context, agenda, type_index, atomic_size, atomic_alignment, c_parse_layout_provisional(context, agenda, type.unqualified_type.value));
                 if (type_index == requested.value)
                 {
                     goto requested_resolved;
@@ -2278,12 +2819,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 progress = true;
                 continue;
             }
-            if (type.kind == C_TYPE_ENUM && type.element_type.value < type_count && resolved[type.element_type.value])
+            if (type.kind == C_TYPE_ENUM && type.element_type.value < type_count && c_parse_layout_resolved(context, agenda, type.element_type.value))
             {
-                sizes[type_index] = sizes[type.element_type.value];
-                alignments[type_index] = alignments[type.element_type.value];
-                provisional[type_index] = provisional[type.element_type.value];
-                resolved[type_index] = true;
+                c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value),
+                                       c_parse_layout_alignment(context, agenda, type.element_type.value),
+                                       c_parse_layout_provisional(context, agenda, type.element_type.value));
                 if (type_index == requested.value)
                 {
                     goto requested_resolved;
@@ -2295,16 +2835,13 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             {
                 u64 storage_size = 0;
                 u32 vector_alignment = 0;
-                if (type.element_type.value >= type_count || !resolved[type.element_type.value] ||
-                    !c_vector_type_layout(preprocess.target, sizes[type.element_type.value], type.vector_byte_size, 0, &storage_size,
+                if (type.element_type.value >= type_count || !c_parse_layout_resolved(context, agenda, type.element_type.value) ||
+                    !c_vector_type_layout(preprocess.target, c_parse_layout_size(context, agenda, type.element_type.value), type.vector_byte_size, 0, &storage_size,
                                           &vector_alignment))
                 {
                     continue;
                 }
-                sizes[type_index] = storage_size;
-                alignments[type_index] = vector_alignment;
-                provisional[type_index] = provisional[type.element_type.value];
-                resolved[type_index] = true;
+                c_parse_layout_publish(context, agenda, type_index, storage_size, vector_alignment, c_parse_layout_provisional(context, agenda, type.element_type.value));
                 if (type_index == requested.value)
                 {
                     goto requested_resolved;
@@ -2314,11 +2851,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             }
             if (type.kind == C_TYPE_ARRAY)
             {
-                if (type.element_type.value >= type_count || !resolved[type.element_type.value] || type.array_bound >= result->array_bound_count)
+                if (type.element_type.value >= type_count || !c_parse_layout_resolved(context, agenda, type.element_type.value) ||
+                    type.array_bound >= result->array_bound_count)
                 {
                     continue;
                 }
-                bool array_provisional = provisional[type.element_type.value];
+                bool array_provisional = c_parse_layout_provisional(context, agenda, type.element_type.value);
                 CArrayBound bound = result->array_bounds[type.array_bound];
                 u64 count = 0;
                 bool unresolved_identifier = false;
@@ -2410,11 +2948,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                             operand_size = c_preprocess_detail(preprocess)->data_layout.pointer.size;
                             operand_alignment = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
                         }
-                        else if (operand_resolved && operand_type.value < type_count && resolved[operand_type.value])
+                        else if (operand_resolved && operand_type.value < type_count &&
+                                 c_parse_layout_operand_resolved(context, agenda, operand_parse.types[operand_type.value].kind, operand_type.value))
                         {
-                            operand_size = sizes[operand_type.value];
-                            operand_alignment = alignments[operand_type.value];
-                            array_provisional |= provisional[operand_type.value];
+                            operand_size = c_parse_layout_size(context, agenda, operand_type.value);
+                            operand_alignment = c_parse_layout_alignment(context, agenda, operand_type.value);
+                            array_provisional |= c_parse_layout_provisional(context, agenda, operand_type.value);
                         }
                         else if (operand_resolved && operand_type.value < operand_parse.type_count)
                         {
@@ -2426,20 +2965,9 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                             // size into the bound â and the fixpoint retries it
                             // once the real layout lands.
                             CTypeKind operand_kind = operand_parse.types[operand_type.value].kind;
-                            operand_resolved = false;
-                            bool kind_determines_layout = operand_kind != C_TYPE_STRUCT && operand_kind != C_TYPE_UNION &&
-                                                          operand_kind != C_TYPE_ARRAY && operand_kind != C_TYPE_VECTOR;
-                            for (u32 candidate_index = 0; kind_determines_layout && candidate_index < type_count; candidate_index += 1)
-                            {
-                                if (result->types[candidate_index].kind == operand_kind && resolved[candidate_index])
-                                {
-                                    operand_size = sizes[candidate_index];
-                                    operand_alignment = alignments[candidate_index];
-                                    array_provisional |= provisional[candidate_index];
-                                    operand_resolved = true;
-                                    break;
-                                }
-                            }
+                            bool kind_determines_layout = c_parse_layout_kind_determines_layout(operand_kind);
+                            operand_resolved = kind_determines_layout &&
+                                               c_parse_layout_kind_scan(context, agenda, operand_kind, &operand_size, &operand_alignment, &array_provisional);
                             if (!operand_resolved && kind_determines_layout)
                             {
                                 operand_resolved = c_parse_builtin_type_layout(preprocess.target, operand_kind, &operand_size, &operand_alignment);
@@ -2560,14 +3088,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
                          !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
                          evaluation.diagnostic_count ||
-                         (count && sizes[type.element_type.value] > UINT64_MAX / count))
+                         (count && c_parse_layout_size(context, agenda, type.element_type.value) > UINT64_MAX / count))
                 {
                     continue;
                 }
-                sizes[type_index] = sizes[type.element_type.value] * count;
-                alignments[type_index] = alignments[type.element_type.value];
-                provisional[type_index] = array_provisional;
-                resolved[type_index] = true;
+                c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value) * count,
+                                       c_parse_layout_alignment(context, agenda, type.element_type.value), array_provisional);
                 if (type_index == requested.value)
                 {
                     goto requested_resolved;
@@ -2602,14 +3128,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 bool flexible = c_parse_type_is_flexible_array_member(result, &type, member_index);
                 CType* member_type = result->types + member.type.value;
                 CTypeId layout_type = flexible ? member_type->element_type : member.type;
-                if (layout_type.value >= type_count || !resolved[layout_type.value])
+                if (layout_type.value >= type_count || !c_parse_layout_resolved(context, agenda, layout_type.value))
                 {
                     fields_resolved = false;
                     break;
                 }
-                aggregate_provisional |= provisional[layout_type.value];
-                u64 member_size = flexible ? 0 : sizes[layout_type.value];
-                u32 natural_alignment = alignments[layout_type.value];
+                aggregate_provisional |= c_parse_layout_provisional(context, agenda, layout_type.value);
+                u64 member_size = flexible ? 0 : c_parse_layout_size(context, agenda, layout_type.value);
+                u32 natural_alignment = c_parse_layout_alignment(context, agenda, layout_type.value);
                 u32 member_alignment = natural_alignment;
                 // A byte ceiling is what makes a bit-field take the next bit
                 // rather than the next storage unit, so the predicate is
@@ -2625,7 +3151,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                     member_alignment = BUSTER_MIN(member_alignment, pack_alignment);
                 }
                 u32 member_alignment_request = 0;
-                bool alignment_resolved = c_parse_layout_alignment_specifiers(&layout_context, member.alignment_start, member.alignment_count,
+                bool alignment_resolved = c_parse_layout_alignment_specifiers(context, agenda, member.alignment_start, member.alignment_count,
                                                                               &member_alignment, &member_alignment_request, &aggregate_provisional);
                 if (!alignment_resolved)
                 {
@@ -2662,16 +3188,13 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 continue;
             }
             u32 alignment = record.alignment;
-            if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
+            if (!c_parse_layout_alignment_specifiers(context, agenda, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
                                                      &alignment, 0, &aggregate_provisional))
             {
                 continue;
             }
             u64 size = c_record_layout_size(&record, alignment);
-            sizes[type_index] = size;
-            alignments[type_index] = alignment;
-            provisional[type_index] = aggregate_provisional;
-            resolved[type_index] = true;
+            c_parse_layout_publish(context, agenda, type_index, size, alignment, aggregate_provisional);
             if (type_index == requested.value)
             {
                 goto requested_resolved;
@@ -2684,6 +3207,110 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         }
     }
 requested_resolved:
+    return;
+}
+
+// The ordered passes: per-query columns over the whole type table, seeded
+// from the committed rows when there is a cache and by the seed rule
+// otherwise, attempts in pending order until the requested type resolves or
+// a pass resolves nothing, and then the commit.
+BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, CTypeLayoutCache* cache, u64* size_out, u32* alignment_out)
+{
+    CTypeParseMachine* machine = context->machine;
+    Arena* arena = context->arena;
+    CPreprocessResult preprocess = context->preprocess;
+    CParseResult* result = context->result;
+    CTypeId requested = context->requested;
+    // The type table can grow while the solve parses alignof/sizeof operand
+    // types; the scratch arrays cover the types that existed at entry and
+    // later additions stay unresolved for this query.
+    //
+    // The committed rows seed the scratch by copy rather than by a walk that
+    // reads each of them through three tests, and the three passes below
+    // visit the ids the cache has not committed rather than the whole table.
+    // The list is snapshotted here because the solve reenters the parse --
+    // an alignment specifier or an array bound may name a type of its own --
+    // and a nested query may both extend the list and move it.
+    u32 type_count = result->type_count;
+    u32* pending;
+    u32 pending_count;
+    if (cache)
+    {
+        c_type_layout_cache_reserve(cache, result->arena, type_count);
+        for (u32 type_index = cache->pending_seeded; type_index < type_count; type_index += 1)
+        {
+            c_type_layout_cache_pending_push(cache, type_index);
+        }
+        cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
+        pending_count = cache->pending_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+    }
+    else
+    {
+        pending_count = type_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        {
+            pending[type_index] = type_index;
+        }
+    }
+    u64* sizes = arena_allocate(arena, u64, type_count + 1);
+    u32* alignments = arena_allocate(arena, u32, type_count + 1);
+    bool* resolved = arena_allocate(arena, bool, type_count + 1);
+    bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    if (cache)
+    {
+        memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
+        memcpy(alignments, cache->alignments, sizeof(*alignments) * type_count);
+        memcpy(resolved, cache->states, type_count);
+    }
+    else
+    {
+        memset(resolved, 0, sizeof(*resolved) * type_count);
+    }
+    memset(provisional, 0, sizeof(*provisional) * type_count);
+    context->sizes = sizes;
+    context->alignments = alignments;
+    context->resolved = resolved;
+    context->provisional = provisional;
+    context->pending = pending;
+    context->pending_count = pending_count;
+    if (context->statistics)
+    {
+        context->statistics->pass_solves += 1;
+        context->statistics->pass_state_types += type_count;
+    }
+    for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
+    {
+        u32 type_index = pending[pending_index];
+        if (type_index >= type_count || resolved[type_index])
+        {
+            continue;
+        }
+        if (c_parse_layout_seed(preprocess.target, result->types + type_index, sizes + type_index, alignments + type_index, provisional + type_index))
+        {
+            resolved[type_index] = true;
+        }
+    }
+    // An aligned alias keeps the kind it copied, so the seed just answered it
+    // with the natural layout; hand those few back to the solve below, which
+    // owns them.  Walking the records rather than testing every type in the
+    // seed is what keeps the empty case -- almost every translation unit --
+    // free: the seed runs over the whole table on every uncached query.  A
+    // cached answer already carries the replacement and is left alone.
+    for (u32 alias_index = 0; alias_index < result->type_alignment_count; alias_index += 1)
+    {
+        u32 alias_type = result->type_alignments[alias_index].type_index;
+        if (alias_type < type_count && !(cache && alias_type < cache->capacity && cache->states[alias_type]))
+        {
+            resolved[alias_type] = false;
+        }
+    }
+    if (!resolved[requested.value])
+    {
+        c_parse_type_layout_attempts(context, 0);
+    }
     if (cache && !machine->frame_count && !machine->mutation_count)
     {
         for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
@@ -2713,13 +3340,151 @@ requested_resolved:
         }
         cache->pending_count = kept_count;
     }
-    if (!resolved[requested.value])
+    bool answered = resolved[requested.value];
+    if (answered)
+    {
+        *size_out = sizes[requested.value];
+        *alignment_out = alignments[requested.value];
+    }
+    return answered;
+}
+
+// The demand-driven solve (see CParseLayoutAgenda). Its state lives in
+// `context->arena` for this query only. `*settled_out` is false when it
+// abandoned, and the query then belongs to the ordered passes.
+BUSTER_C_INTERNAL bool c_parse_type_layout_agenda(CParseLayoutContext* context, u64* size_out, u32* alignment_out, bool* settled_out)
+{
+    Arena* arena = context->arena;
+    CParseLayoutAgenda agenda = {
+        .entry_capacity = C_PARSE_LAYOUT_AGENDA_INITIAL_CAPACITY,
+        .slot_capacity = C_PARSE_LAYOUT_AGENDA_INITIAL_CAPACITY * 2,
+        .edge_capacity = C_PARSE_LAYOUT_AGENDA_INITIAL_CAPACITY,
+        .ready_capacity = C_PARSE_LAYOUT_AGENDA_INITIAL_CAPACITY,
+        .current = C_PARSE_LAYOUT_NONE,
+        .last_type = C_PARSE_LAYOUT_NONE,
+        .last_entry = C_PARSE_LAYOUT_NONE,
+    };
+    agenda.entries = arena_allocate(arena, CParseLayoutEntry, agenda.entry_capacity);
+    agenda.slots = arena_allocate_zeroed(arena, u32, agenda.slot_capacity);
+    agenda.edges = arena_allocate(arena, CParseLayoutEdge, agenda.edge_capacity);
+    agenda.ready = arena_allocate(arena, u32, agenda.ready_capacity);
+    context->agenda = &agenda;
+    if (context->statistics)
+    {
+        context->statistics->agenda_solves += 1;
+    }
+    agenda.root = c_parse_layout_agenda_enter(context, context->requested.value);
+    if (agenda.entries[agenda.root].state == C_PARSE_LAYOUT_OPEN)
+    {
+        c_parse_layout_agenda_push(context, agenda.root);
+        c_parse_type_layout_attempts(context, &agenda);
+    }
+    context->agenda = 0;
+    CParseLayoutEntry root = agenda.entries[agenda.root];
+    bool answered = !agenda.abandoned && root.state == C_PARSE_LAYOUT_RESOLVED;
+    if (answered)
+    {
+        *size_out = root.size;
+        *alignment_out = root.alignment;
+    }
+    if (agenda.abandoned && context->statistics)
+    {
+        context->statistics->agenda_fallbacks += 1;
+    }
+    *settled_out = !agenda.abandoned;
+    return answered;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                 CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out,
+                                                 bool agenda_allowed)
+{
+    if (requested.value >= result->type_count)
     {
         return false;
     }
-    *size_out = sizes[requested.value];
-    *alignment_out = alignments[requested.value];
-    return true;
+    // Almost no translation unit has an aligned typedef in it, and the two
+    // scans below run once per type of the table, so the empty case is one
+    // register test rather than a call that finds nothing.
+    bool any_type_alignment = result->type_alignment_count != 0;
+    // The seed rule (c_parse_layout_seed) resolves builtin scalars and
+    // incomplete enums from the requested record alone, so answer those
+    // without a solve.  A type a typedef gave an alignment of its own
+    // is the one exception: its answer is not derivable from its kind, so it
+    // falls through to the solve, where the alias branch reads the request.
+    if (!any_type_alignment || !c_parse_type_alignment(result, requested))
+    {
+        CType requested_type = result->types[requested.value];
+        u64 direct_size = 0;
+        u32 direct_alignment = 0;
+        if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
+        {
+            if (direct_alignment)
+            {
+                // The same promotion the seed rule performs, on the one type
+                // this exit answers for; `_Atomic double` is the common shape
+                // and takes it unchanged, `_Atomic _Complex float` is the one
+                // that moves.
+                if (requested_type.is_atomic)
+                {
+                    c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &direct_size, &direct_alignment);
+                }
+                *size_out = direct_size;
+                *alignment_out = direct_alignment;
+                return true;
+            }
+        }
+        else if (requested_type.kind == C_TYPE_ENUM && requested_type.element_type.value == C_ID_UNDERLYING_INVALID)
+        {
+            *size_out = 4;
+            *alignment_out = 4;
+            return true;
+        }
+    }
+    CTypeLayoutCache* cache = !offset_out && machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
+    if (cache && requested.value < cache->capacity && cache->states[requested.value])
+    {
+        *size_out = cache->sizes[requested.value];
+        *alignment_out = cache->alignments[requested.value];
+        return true;
+    }
+    CParseLayoutContext layout_context = {
+        .machine = machine,
+        .arena = arena,
+        .preprocess = preprocess,
+        .result = result,
+        .statistics = result->type_layout_statistics,
+        .offset_out = offset_out,
+        .requested = requested,
+        .offset_member = offset_member,
+        .type_count = result->type_count,
+        .any_type_alignment = any_type_alignment,
+    };
+    if (layout_context.statistics)
+    {
+        layout_context.statistics->solves += 1;
+    }
+    // A query without a cache has no state that outlives it, and without a
+    // machine no attempt can reenter the parse, so its answer is the same
+    // whichever order the attempts run in; the agenda then does the work of
+    // the requested type's closure instead of the whole table's.
+    bool settled = false;
+    bool answered = false;
+    if (agenda_allowed && !cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)
+    {
+        answered = c_parse_type_layout_agenda(&layout_context, size_out, alignment_out, &settled);
+    }
+    if (!settled)
+    {
+        answered = c_parse_type_layout_passes(&layout_context, cache, size_out, alignment_out);
+    }
+    return answered;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                             CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out)
+{
+    return c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, true);
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -3539,6 +4304,16 @@ bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult prepr
 {
     return c_parse_direct_expression_type_core(scratch, preprocess, result, (CScopeId){.value = 0}, start, end, type_out);
 }
+
+bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId type, bool agenda_allowed, u32 offset_member,
+                        CTypeLayoutStatistics* statistics, u64* size_out, u32* alignment_out, u64* offset_out)
+{
+    CTypeLayoutStatistics* production = result->type_layout_statistics;
+    result->type_layout_statistics = statistics;
+    bool resolved = c_parse_type_layout_solve(0, arena, preprocess, result, type, size_out, alignment_out, offset_member, offset_out, agenda_allowed);
+    result->type_layout_statistics = production;
+    return resolved;
+}
 #endif
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
@@ -4285,7 +5060,7 @@ BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, 
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     CParseResult* result = frame->result;
     CScopeId scope = frame->scope;
     u32 start = frame->start;
@@ -4609,7 +5384,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             machine->expression_task_count = frame->task_mark + task_count;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
-                                                      .preprocess = preprocess,
+                                                      .preprocess = frame->preprocess,
                                                       .arena = arena,
                                                       .scope = scope,
                                                       .start = task->start,
@@ -4955,7 +5730,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         machine->result_valid = false;
         bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
-                                                  .preprocess = preprocess,
+                                                  .preprocess = &preprocess,
                                                   .arena = arena,
                                                   .scope = scope,
                                                   .start = start,
@@ -4966,7 +5741,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         {
             c_type_parse_machine_run(machine, frame_start);
         }
-        valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+        valid = c_type_parse_root_finish(machine, result, &checkpoint, mutation_mark,
                                               machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
         if (valid)
         {
@@ -8469,7 +9244,52 @@ CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, Strin
 void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint)
 {
     CTypeParseMachine machine = {0};
-    c_type_parse_rollback(&machine, result, checkpoint, 0);
+    c_type_parse_rollback(&machine, result, &checkpoint, 0);
+}
+
+u64 c_test_type_parse_frame_bytes(void)
+{
+    return sizeof(CTypeParseFrame);
+}
+
+// Pushes `depth` frames that each snapshot the result into their row before
+// appending a type and rewriting type 0, then rolls them back innermost first:
+// every rollback must restore the count and the type 0 its own frame saw while
+// the deeper frames' rows were live.
+bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth)
+{
+    CParseResult result = {
+        .types = arena_allocate(arena, CType, depth + 1),
+        .type_count = 1,
+        .type_capacity = depth + 1,
+    };
+    result.types[0] = (CType){.kind = C_TYPE_INT};
+    CTypeParseMachine machine = {
+        .frames = arena_allocate(arena, CTypeParseFrame, depth),
+        .frame_checkpoints = arena_allocate(arena, CParseResult, depth),
+        .mutations = arena_allocate(arena, CTypeMutation, depth),
+        .frame_capacity = depth,
+        .mutation_capacity = depth,
+    };
+    bool valid = true;
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        valid &= c_type_parse_frame_push(&machine, (CTypeParseFrame){.result = &result, .kind = C_TYPE_PARSE_FRAME_SCALAR});
+        CTypeParseFrame* frame = machine.frames + level;
+        *c_type_parse_frame_checkpoint(&machine, frame) = result;
+        frame->mutation_mark = machine.mutation_count;
+        machine.mutations[machine.mutation_count++] = (CTypeMutation){.id = {.value = 0}, .previous = result.types[0]};
+        result.types[0].member_count = level + 1;
+        result.types[result.type_count++] = (CType){.kind = C_TYPE_LONG};
+    }
+    for (u32 level = depth; level-- > 0;)
+    {
+        CTypeParseFrame* frame = machine.frames + level;
+        c_type_parse_rollback(&machine, &result, c_type_parse_frame_checkpoint(&machine, frame), frame->mutation_mark);
+        valid &= result.type_count == level + 1 && result.types[0].member_count == level;
+        machine.frame_count = level;
+    }
+    return valid && machine.mutation_count == 0;
 }
 
 void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type)
@@ -9965,7 +10785,7 @@ BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult
 BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
         frame->alignment_start = result->alignment_count;
@@ -10049,7 +10869,7 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
-                                                  .preprocess = preprocess,
+                                                  .preprocess = frame->preprocess,
                                                   .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
                                                   .start = index + 2,
                                                   .end = close,
@@ -10074,9 +10894,9 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             CTypeKind from = frame->result->types[source.value].kind;
             bool source_aggregate = from == C_TYPE_STRUCT || from == C_TYPE_UNION;
             bool target_aggregate = to == C_TYPE_STRUCT || to == C_TYPE_UNION;
-            machine->expression_constraint = c_parse_scalar_conversion_message(frame->preprocess.target, to, from, machine->runtime_expression_constraints);
+            machine->expression_constraint = c_parse_scalar_conversion_message(frame->preprocess->target, to, from, machine->runtime_expression_constraints);
             if ((source_aggregate != target_aggregate && to != C_TYPE_VOID) ||
-                (source_aggregate && target_aggregate && !c_parse_types_compatible(frame->arena, frame->result, frame->preprocess, c_parse_unqualified_type(frame->result, frame->type), c_parse_unqualified_type(frame->result, source))))
+                (source_aggregate && target_aggregate && !c_parse_types_compatible(frame->arena, frame->result, *frame->preprocess, c_parse_unqualified_type(frame->result, frame->type), c_parse_unqualified_type(frame->result, source))))
                 machine->expression_constraint = S8("cast operand has an incompatible type");
             machine->expression_constraint_token = frame->end;
         }
@@ -10089,18 +10909,18 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         u32 type_index = machine->result_index;
         if (type.value != C_ID_UNDERLYING_INVALID && type_index < frame->close)
         {
-            type = c_parse_pointer_chain(frame->result, frame->preprocess, type, &type_index, frame->close);
-            type = c_parse_array_suffixes(frame->result, frame->preprocess, type, &type_index, frame->close);
+            type = c_parse_pointer_chain(frame->result, *frame->preprocess, type, &type_index, frame->close);
+            type = c_parse_array_suffixes(frame->result, *frame->preprocess, type, &type_index, frame->close);
         }
         if (type.value != C_ID_UNDERLYING_INVALID && type_index == frame->close)
         {
             u32 initializer = frame->close + 1;
-            if (initializer < frame->end && c_token_is_punctuator(&frame->preprocess.tokens[initializer], C_PUNCTUATOR_LEFT_BRACE))
+            if (initializer < frame->end && c_token_is_punctuator(&frame->preprocess->tokens[initializer], C_PUNCTUATOR_LEFT_BRACE))
             {
-                u32 close = c_parse_matching_delimiter_indexed(frame->result, frame->preprocess, initializer);
+                u32 close = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, initializer);
                 if (close < frame->end)
                 {
-                    type = c_parse_direct_expression_postfix(frame->arena, frame->preprocess, frame->result, type, close + 1, frame->end);
+                    type = c_parse_direct_expression_postfix(frame->arena, *frame->preprocess, frame->result, type, close + 1, frame->end);
                 }
             }
             else if (machine->validate_expression_constraints)
@@ -10117,9 +10937,9 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             return;
         }
     }
-    else if (frame->start < frame->end && c_token_is_punctuator(&frame->preprocess.tokens[frame->start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    else if (frame->start < frame->end && c_token_is_punctuator(&frame->preprocess->tokens[frame->start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        u32 close = c_parse_matching_delimiter(frame->preprocess, frame->start, frame->end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        u32 close = c_parse_matching_delimiter(*frame->preprocess, frame->start, frame->end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (close < frame->end - 1)
         {
             frame->close = close;
@@ -10138,7 +10958,7 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             return;
         }
     }
-    CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
+    CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, *frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
 }
 
@@ -10164,7 +10984,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
     }
     while (frame->index <= frame->end)
     {
-        CToken token = frame->preprocess.tokens[frame->index];
+        CToken token = frame->preprocess->tokens[frame->index];
         if (frame->index < frame->end && (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                                           c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE)))
         {
@@ -10299,7 +11119,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_fail(CTypeParseMachine* ma
             result->diagnostics[diagnostic_count++] = diagnostic;
         }
     }
-    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+    c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
     result->diagnostic_count = diagnostic_count;
     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
 }
@@ -10310,7 +11130,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_expected_member_name(CType
 {
     CParseResult* result = frame->result;
     u32 diagnostic_start = result->diagnostic_count;
-    c_parse_diagnostic(result, c_preprocess_token_location(&frame->preprocess, frame->preprocess.tokens[token_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+    c_parse_diagnostic(result, c_preprocess_token_location(frame->preprocess, frame->preprocess->tokens[token_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
                        S8("expected member name or ';' after declaration specifiers"));
     c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
 }
@@ -10325,7 +11145,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_trailing_token(CTypeParseM
 {
     CParseResult* result = frame->result;
     u32 diagnostic_start = result->diagnostic_count;
-    c_parse_diagnostic(result, c_preprocess_token_location(&frame->preprocess, frame->preprocess.tokens[token_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+    c_parse_diagnostic(result, c_preprocess_token_location(frame->preprocess, frame->preprocess->tokens[token_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
                        S8("unexpected token after member declarator"));
     c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
 }
@@ -10374,7 +11194,7 @@ BUSTER_C_INTERNAL u32 c_parse_parenthesized_declarator_extent(CPreprocessResult 
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
         // A member _Static_assert declares no member. It is checked with the
@@ -10432,12 +11252,12 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }
-        frame->checkpoint = *result;
+        *c_type_parse_frame_checkpoint(machine, frame) = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
-                                                  .preprocess = preprocess,
+                                                  .preprocess = frame->preprocess,
                                                   .scope = frame->scope,
                                                   .start = frame->start,
                                                   .end = frame->end,
@@ -10452,7 +11272,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         if (!machine->result_valid)
         {
-            c_type_parse_aggregate_segment_fail(machine, frame, frame->checkpoint.diagnostic_count);
+            c_type_parse_aggregate_segment_fail(machine, frame, c_type_parse_frame_checkpoint(machine, frame)->diagnostic_count);
             return;
         }
         frame->alignment_start = machine->result_index;
@@ -10461,7 +11281,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (type_start >= frame->end)
         {
             // `__attribute__((packed));` declares nothing; clang only warns.
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }
@@ -10469,7 +11289,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
-                                                  .preprocess = preprocess,
+                                                  .preprocess = frame->preprocess,
                                                   .scope = frame->scope,
                                                   .start = type_start,
                                                   .end = frame->end,
@@ -10477,7 +11297,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                   .kind = C_TYPE_PARSE_FRAME_SCALAR,
                                               }))
         {
-            c_type_parse_aggregate_segment_fail(machine, frame, frame->checkpoint.diagnostic_count);
+            c_type_parse_aggregate_segment_fail(machine, frame, c_type_parse_frame_checkpoint(machine, frame)->diagnostic_count);
         }
         return;
     }
@@ -10528,7 +11348,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             {
                 BUSTER_VALIDATE(result->member_count < result->member_capacity);
                 result->members[result->member_count++] = (CMember){
-                    .location = c_preprocess_token_location(&frame->preprocess, frame->first),
+                    .location = c_preprocess_token_location(frame->preprocess, frame->first),
                     .type = frame->base_type,
                     .alignment_start = frame->alignment_start,
                     .alignment_count = frame->alignment_count,
@@ -10566,7 +11386,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             }
             else
             {
-                c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             }
             return;
@@ -10593,7 +11413,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 {
                     if (!depth)
                     {
-                        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                        c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
                         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                         return;
                     }
@@ -10700,7 +11520,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                           .result = result,
-                                                          .preprocess = preprocess,
+                                                          .preprocess = frame->preprocess,
                                                           .type = declarator_type,
                                                           .start = declarator,
                                                           .end = declarator_end,
@@ -10710,7 +11530,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                           .has_name = true,
                                                       }))
                 {
-                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+                    c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                 }
                 return;
@@ -10782,7 +11602,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     if (!c_parse_member_alignment_run(result, frame->alignment_start, frame->alignment_count, frame->shared_specifier_end, frame->declarator_start,
                                       frame->declarator_end, &alignment_start, &alignment_count))
     {
-        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+        c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
     }
@@ -10828,7 +11648,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         else
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         }
         return;
@@ -10845,7 +11665,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     // two ranges rather than as the span between them, which would read a
     // preceding declarator's own attribute as this one's; c_ir_declaration_is_noreturn
     // and the block-scope site split the same way, for the same reason.
-    CTypeId noreturn_function = c_parse_noreturn_candidate_function_type(result, declarator_type, false, frame->checkpoint.type_count);
+    CTypeId noreturn_function = c_parse_noreturn_candidate_function_type(result, declarator_type, false, c_type_parse_frame_checkpoint(machine, frame)->type_count);
     if (noreturn_function.value != C_ID_UNDERLYING_INVALID && (c_ir_noreturn_marker_in_range(preprocess, frame->start, frame->shared_specifier_end) ||
                                                                c_ir_noreturn_marker_in_range(preprocess, frame->declarator_start, frame->declarator_end)))
     {
@@ -11166,14 +11986,14 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
 // cannot see is left to its uses; neither is reported here. A leading
 // `__extension__` is an expression prefix, not the start of a type name.
 // Returns whether the operand is refused.
-BUSTER_C_INTERNAL bool c_type_parse_typeof_operand_refused(CTypeParseFrame* frame, bool operand_valid)
+BUSTER_C_INTERNAL bool c_type_parse_typeof_operand_refused(CTypeParseMachine* machine, CTypeParseFrame* frame, bool operand_valid)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     u32 operand_start = frame->specifier_index + 2;
     u32 operand_end = frame->close - 1;
     bool refused = !operand_valid;
-    if (result->diagnostic_count == frame->checkpoint.diagnostic_count)
+    if (result->diagnostic_count == c_type_parse_frame_checkpoint(machine, frame)->diagnostic_count)
     {
         u32 error_index = 0;
         String8 message = {0};
@@ -11240,7 +12060,7 @@ BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult prepro
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
         if (frame->start >= frame->end)
@@ -11300,7 +12120,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             // shadowing an outer name of the same spelling lost.
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
-                                                      .preprocess = preprocess,
+                                                      .preprocess = frame->preprocess,
                                                       .scope = frame->scope,
                                                       .start = start,
                                                       .end = frame->end,
@@ -11342,7 +12162,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
         }
-        frame->checkpoint = *result;
+        *c_type_parse_frame_checkpoint(machine, frame) = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->specifier_index = specifier_index;
         frame->close = close;
@@ -11368,7 +12188,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         }
         else if (c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                        .result = result,
-                                                       .preprocess = preprocess,
+                                                       .preprocess = frame->preprocess,
                                                        .scope = frame->scope,
                                                        .start = operand_start,
                                                        .end = operand_end,
@@ -11421,11 +12241,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         {
             frame->index = type.value != C_ID_UNDERLYING_INVALID ? type_index : operand_end;
             frame->pending_index = result->diagnostic_count;
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
             frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
-                                                      .preprocess = preprocess,
+                                                      .preprocess = frame->preprocess,
                                                       .arena = machine->scratch_arena,
                                                       .scope = frame->scope,
                                                       .start = operand_start,
@@ -11437,7 +12257,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             }
             return;
         }
-        if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK && c_type_parse_typeof_operand_refused(frame, type.value != C_ID_UNDERLYING_INVALID))
+        if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK && c_type_parse_typeof_operand_refused(machine, frame, type.value != C_ID_UNDERLYING_INVALID))
         {
             type = C_TYPE_ID_INVALID;
         }
@@ -11513,10 +12333,10 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         u32 declarator_start = frame->start;
         CTypeId type = C_TYPE_ID_INVALID;
         u32 definition_end = 0;
-        if (c_parse_aggregate_definition_at(frame->preprocess, frame->start, frame->end, &definition_end))
+        if (c_parse_aggregate_definition_at(*frame->preprocess, frame->start, frame->end, &definition_end))
         {
             u32 open = frame->start + 1;
-            if (frame->preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+            if (frame->preprocess->tokens[open].kind == C_TOKEN_IDENTIFIER)
             {
                 open += 1;
             }
@@ -11529,7 +12349,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
                 {
                     type.value = index;
                     declarator_start = definition_end + 1;
-                    type = c_parse_apply_trailing_qualifiers(result, frame->preprocess, type, &declarator_start, frame->end);
+                    type = c_parse_apply_trailing_qualifiers(result, *frame->preprocess, type, &declarator_start, frame->end);
                 }
             }
         }
@@ -11544,11 +12364,11 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         // without a word. The word-bits test keeps an ordinary declarator
         // name -- every declaration there is -- at one load.
         if (type.value != C_ID_UNDERLYING_INVALID && !machine->failed && declarator_start < frame->end &&
-            frame->preprocess.tokens[declarator_start].kind == C_TOKEN_IDENTIFIER &&
-            c_parse_type_word_for_dialect_token(frame->preprocess, frame->preprocess.tokens[declarator_start]) &&
-            c_parse_type_specifier_token(frame->preprocess, declarator_start))
+            frame->preprocess->tokens[declarator_start].kind == C_TOKEN_IDENTIFIER &&
+            c_parse_type_word_for_dialect_token(*frame->preprocess, frame->preprocess->tokens[declarator_start]) &&
+            c_parse_type_specifier_token(*frame->preprocess, declarator_start))
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&frame->preprocess, frame->preprocess.tokens[declarator_start]),
+            c_parse_diagnostic(result, c_preprocess_token_location(frame->preprocess, frame->preprocess->tokens[declarator_start]),
                 C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
             type = C_TYPE_ID_INVALID;
         }
@@ -11569,7 +12389,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         }
         if (nested_aggregate)
         {
-            type = c_parse_apply_trailing_qualifiers(result, frame->preprocess, type, &declarator_start, frame->end);
+            type = c_parse_apply_trailing_qualifiers(result, *frame->preprocess, type, &declarator_start, frame->end);
             c_type_parse_frame_complete(machine, type, declarator_start, true);
             return;
         }
@@ -11655,14 +12475,14 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         return;
     }
     u32 completion_index = frame->close + 1;
-    CTypeId completion_type = c_parse_apply_trailing_qualifiers(result, frame->preprocess, frame->type, &completion_index, frame->end);
+    CTypeId completion_type = c_parse_apply_trailing_qualifiers(result, *frame->preprocess, frame->type, &completion_index, frame->end);
     c_type_parse_frame_complete(machine, completion_type, completion_index, true);
 }
 
 BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
         if (result->position_index && !result->position_index->built)
@@ -11696,7 +12516,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
-                                                  .preprocess = preprocess,
+                                                  .preprocess = frame->preprocess,
                                                   .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
                                                   .start = frame->start,
                                                   .end = frame->end,
@@ -11752,7 +12572,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
             frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
-                                                      .preprocess = preprocess,
+                                                      .preprocess = frame->preprocess,
                                                       .type = frame->type,
                                                       .start = frame->declarator_start,
                                                       .end = frame->end,
@@ -11915,7 +12735,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame*
 BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
     {
         // The nested group carries the name, so its type is this declarator's.
@@ -12129,7 +12949,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                           .result = result,
-                                                          .preprocess = preprocess,
+                                                          .preprocess = frame->preprocess,
                                                           .start = frame->segment_start,
                                                           .end = frame->scan_index,
                                                           .kind = C_TYPE_PARSE_FRAME_PARAMETER,
@@ -12188,7 +13008,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
-                                                      .preprocess = preprocess,
+                                                      .preprocess = frame->preprocess,
                                                       .type = frame->type,
                                                       .start = frame->nested_start,
                                                       .end = frame->close_index,
@@ -12299,7 +13119,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_context(CTypeParseMachine
     machine->result_valid = false;
     bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
                                               .result = result,
-                                              .preprocess = preprocess,
+                                              .preprocess = &preprocess,
                                               .scope = scope,
                                               .start = start,
                                               .end = end,
@@ -12311,7 +13131,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_context(CTypeParseMachine
     {
         c_type_parse_machine_run(machine, frame_start);
     }
-    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+    bool valid = c_type_parse_root_finish(machine, result, &checkpoint, mutation_mark,
                                           machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
     *declarator_start = machine->result_index;
     return valid ? machine->result_type : C_TYPE_ID_INVALID;
@@ -12937,7 +13757,7 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start)
 {
     CParseResult* result = frame->result;
-    CPreprocessResult preprocess = frame->preprocess;
+    CPreprocessResult preprocess = *frame->preprocess;
     u32 start = frame->start;
     u32 end = frame->end;
     CTypeId qualified_typedef = c_parse_qualified_typedef_type(result, preprocess, frame->scope, start, end, declarator_start);
@@ -13827,7 +14647,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
     machine->result_valid = false;
     bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
                                               .result = result,
-                                              .preprocess = preprocess,
+                                              .preprocess = &preprocess,
                                               .type = base,
                                               .start = declarator_start,
                                               .end = suffix_end,
@@ -13840,7 +14660,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
     {
         c_type_parse_machine_run(machine, frame_start);
     }
-    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+    bool valid = c_type_parse_root_finish(machine, result, &checkpoint, mutation_mark,
                                           declarator_start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[declarator_start]) : (CSourceLocation){0});
     return valid ? machine->result_type : C_TYPE_ID_INVALID;
 }
@@ -25028,6 +25848,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u32 incomplete_array_chain_capacity = (u32)promoted_member_capacity_u64;
     u64 machine_buffer_size = arena_minimum_position;
     if (!c_type_parse_buffer_size_add(&machine_buffer_size, type_frame_capacity, sizeof(CTypeParseFrame), BUSTER_ALIGN_OF(CTypeParseFrame)) ||
+        !c_type_parse_buffer_size_add(&machine_buffer_size, type_frame_capacity, sizeof(CParseResult), BUSTER_ALIGN_OF(CParseResult)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, type_mutation_capacity, sizeof(CTypeMutation), BUSTER_ALIGN_OF(CTypeMutation)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, expression_task_capacity, sizeof(CParseExpressionTypeTask),
                                       BUSTER_ALIGN_OF(CParseExpressionTypeTask)) ||
@@ -25055,6 +25876,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     TemporalArena machine_temporary = scratch_begin(machine_conflicts, BUSTER_ARRAY_LENGTH(machine_conflicts));
     CTypeParseMachine machine = {
         .frames = arena_allocate(machine_buffer_arena, CTypeParseFrame, type_frame_capacity),
+        .frame_checkpoints = arena_allocate(machine_buffer_arena, CParseResult, type_frame_capacity),
         .mutations = arena_allocate(machine_buffer_arena, CTypeMutation, type_mutation_capacity),
         .expression_tasks = arena_allocate(machine_buffer_arena, CParseExpressionTypeTask, expression_task_capacity),
         .incomplete_array_chain = arena_allocate(machine_buffer_arena, CTypeId, incomplete_array_chain_capacity),
@@ -25156,6 +25978,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
+    result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
+    *result.type_layout_statistics = (CTypeLayoutStatistics){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token_plus_one = arena_allocate_zeroed(arena, u32, result.identifier_use_by_token_capacity);
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
@@ -25777,6 +26601,10 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
     else
     {
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
+    }
+    if (analysis.type_layout_statistics)
+    {
+        result.type_layout = *analysis.type_layout_statistics;
     }
     return result;
 }

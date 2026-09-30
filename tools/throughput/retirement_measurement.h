@@ -393,20 +393,31 @@ static int tp_retirement_directory_only(int directory, char const* leaf)
  * nothing else, and it is, without following a link, the single-link,
  * owner-executable regular file of this user, not group- or world-writable,
  * that the caller observed by fstat of the descriptor it wrote and hashed
- * (device, inode, size and change time). A link, a second link, a replaced,
- * rewritten or pre-planted file, a file from another step's directory, a
- * bad mode or an extra entry is refused. */
+ * (device, inode, size and change time), and its bytes still have that
+ * SHA-256: it is opened (never following a link, non-blocking, so a planted
+ * FIFO cannot stall the launch), must be that same file, and is re-hashed.
+ * The re-hash is what catches an in-place rewrite that keeps the size within
+ * one timestamp tick, which leaves the change time as observed. A link, a
+ * second link, a replaced, rewritten or pre-planted file, a file from another
+ * step's directory, a bad mode or an extra entry is refused. */
 static int tp_retirement_launch_program(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs)
 {
     TpProcessProgram const* program = inputs->program;
-    struct stat info;
-    int ok = program && tp_retirement_artifact_leaf(program->leaf) &&
+    struct stat info, opened;
+    int ok = program && tp_retirement_artifact_leaf(program->leaf) && tp_retirement_digest(program->sha256) &&
         tp_process_layout_program(command->arguments[0], program) &&
         fstatat(inputs->directory, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
         info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 0022) && (info.st_mode & S_IXUSR) &&
         info.st_dev == program->device && info.st_ino == program->inode && info.st_size == program->size &&
         info.st_ctim.tv_sec == program->changed.tv_sec && info.st_ctim.tv_nsec == program->changed.tv_nsec &&
         tp_retirement_directory_only(inputs->directory, program->leaf);
+    int file = ok ? openat(inputs->directory, program->leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    char digest[65];
+    uint64_t bytes = 0;
+    ok = file >= 0 && fstat(file, &opened) == 0 && tp_retirement_file_same(&info, &opened) &&
+        tp_retirement_file_hash(file, digest, &bytes) && bytes == (uint64_t)program->size &&
+        !strcmp(digest, program->sha256);
+    if (file >= 0 && close(file) != 0) ok = 0;
     return ok;
 }
 

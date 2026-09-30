@@ -481,8 +481,12 @@ The object writer already carries that requirement into the section metadata
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
-`lib`/`usr/lib` roots, multiarch first — and rejects a file whose ELF machine
+`lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
+cross-libc root `/usr/<triple>/lib` — and rejects a file whose ELF machine
 disagrees with the target, so a cross link never reads the host's own libc.
+A cross link that finds no target libc cannot tell a missing symbol from a
+libc import and keeps every strong undefined reference as an import (GitHub
+#1729).
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
