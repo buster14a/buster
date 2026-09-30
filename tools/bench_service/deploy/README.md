@@ -12,7 +12,8 @@ selects the authenticated long-lived `serve` endpoint, not the one-shot
 `worker-run` CLI. The installed service includes the fixed gateway and
 [bounded result exporter](../EXPORT.md); this directory still supplies no
 runner authorization, durable publication destination or physical-host
-qualification.
+qualification. The constrained broker design and operator checks are in
+[SYSTEMD_BROKER.md](SYSTEMD_BROKER.md).
 
 The installed executable must be the reviewed `bench_service` binary at
 `/usr/local/libexec/buster-bench-service`. The queue, workspace root and stable
@@ -20,7 +21,8 @@ lease inode live under `/var/lib/buster-bench`; the frozen recipe/source store
 lives at `/opt/buster-bench/installed`. The new-installation lease path is
 `/var/lib/buster-bench/lease/host.lock`, with a private `lease` parent. The state
 parent is group-traversable and the workspace root is SGID to the candidate
-group; the queue, lease parent and durable results remain service-private.
+group; the queue and lease parents allow traversal by the service group only,
+while their files and durable result leaves remain service-private.
 Never move or replace an existing lease as part of applying this reference.
 State is provisioned once under the dedicated account; installed executables
 must be operator-owned and immutable to service/candidate/runner users. Paths
@@ -31,11 +33,32 @@ build and throughput services use the candidate account as both their explicit
 UID and primary GID and never receive the service account's queue or lease
 group.
 
+The broker instance keeps UID 0 with empty capability sets, takes the service
+group as its primary group and the candidate group as a supplementary group.
+The fixed queue and lease parents are `0710` service:service; the stable lease
+is `0640`, and broker-readable worker records are `0440`. The results parent
+is `0710` service:service, but each result leaf remains `0700`. No candidate or
+runner identity belongs to the service group. The broker traverses the
+candidate-group workspace ancestry and checks exact owner, group and mode
+before reading the fixed manifests; it cannot list the private result leaf.
+
 The fixed recipe handoff additionally expects the reviewed build driver at
 `/usr/local/libexec/buster-bench-build` and the native throughput harness at
 `/usr/local/libexec/buster-bench-throughput`. The service supplies only the
 six recipe identities documented in the service README; those two executable
 paths and every build/throughput option remain build-policy constants.
+Each new transient unit first runs the static root-owned
+`/usr/local/libexec/buster-bench-credential-gate`, which checks the actual
+numeric credentials and complete groups before the fixed payload. Build,
+install and hash it with the other binaries. Its ELF must have no interpreter
+or dynamic segment and a nonexecutable stack; see
+[the effective-credential boundary](SYSTEMD_BROKER.md#effective-credentials-before-each-transient-payload).
+The installed build driver must have a nonexecutable ELF stack (a `GNU_STACK`
+program header with `RW`, without `E`). The reference transient sandbox keeps
+`MemoryDenyWriteExecute=yes`; a TCC bootstrap executable without that header
+cannot spawn recipe stages there. Build and hash a reviewed Clang driver from
+the same `build.c` source for this installed path. The ordinary `build.sh`
+bootstrap remains TCC based.
 
 The example CPU (`2`) and budgets are review fixtures, not portable defaults.
 CPU 2 is also compiled into `build.c::BENCH_SERVICE_RECIPE_CPU`; changing only
@@ -54,6 +77,25 @@ workspace is the only writable tree, and `ProtectSystem=strict`,
 and the fixed system-service syscall filter are enabled. The build driver
 locks baseline/candidate build trees before throughput and retains result
 bundle plus failure/cancellation outcome evidence for retrieval.
+The worker compares the manager's expanded `SystemCallFilter` with the
+reviewed long-lived service's effective filter and accepts the manager's
+numeric `SystemCallErrorNumber=1` spelling for `EPERM`. An active unit with
+`Result=success` is still running until its active state and cgroup prove exit.
+After exit, systemd may clear `ControlGroup` or collect the unit entirely.
+The worker then requires the recorded invocation where available and proof
+that the original cgroup leaf is absent. Outer units explicitly use
+`CollectMode=inactive`, verified by the worker and signal broker, so failed
+units retain their exact manager `Result` for OOM/timeout attribution.
+Only a collected successful outer unit may use the bounded
+`systemd-run --wait` zero exit status before finalizing. A missing unit
+with a nonzero or signalled launcher status is an evidence mismatch and
+remains quarantined; it is never classified as a generic execution failure.
+`LoadState=not-found` does not carry the full set of active-unit properties.
+Stage units retain `CollectMode=inactive-or-failed`; this change adds no
+manager reset operation or automatic removal of retained failed outer units.
+Manager collection can precede removal of the cgroup leaf. The worker waits
+up to the fixed stop deadline for the recorded leaf to disappear, and waits
+for an inactive stage unit to be collected without sending it another signal.
 
 Recipe stages use deterministic sibling service names and bind their lifetime
 to the outer worker with `PartOf=`, `BindsTo=` and `After=` and are collected
@@ -74,12 +116,18 @@ and copies the complete throughput tree into an unpredictable trusted staging
 directory before a no-replace directory publication. The workspace parent is
 SGID to the candidate group so materialized source/build descendants inherit
 the intended group without a request-controlled chown or path.
+The fixed throughput command includes `--service-output`. After measurement
+and comparison close their files, the candidate verifies the output tree has
+only same-device, single-link regular files and directories owned by its UID
+and group, then grants the trusted service group read access to files and
+read/write/traverse access to directories. The service copies into its own
+private result leaf, validates the bundle, and later removes candidate-owned
+staging directories through that group access without owner-only `chmod`.
 
-Do not enable the service yet. This change supplies the fixed recipe boundary
-but does not install dependencies, run systemd, qualify a host or claim a
-successful performance measurement. Live-systemd qualification and narrowly
-service authorization remain explicit operator work; no request field is
-executable.
+Do not enable the service yet. The broker socket, binary, root-owned lease
+identity and service dependencies must be installed and independently reviewed
+as one exact set. These references do not qualify a host or claim a successful
+performance measurement. No request field is executable.
 
 The reference service needs no Linux capability and explicitly empties both
 capability sets. It retains only local `AF_UNIX` access for the system manager,

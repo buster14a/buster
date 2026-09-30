@@ -1,0 +1,17 @@
+[Unit]
+Description=Buster benchmark constrained systemd broker socket (operator reference)
+ConditionPathIsDirectory=/run/buster-bench-systemd-broker
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenSequentialPacket=/run/buster-bench-systemd-broker/control.sock
+Accept=yes
+SocketUser=buster-bench
+SocketGroup=buster-bench
+SocketMode=0600
+DirectoryMode=0710
+RemoveOnStop=yes
+MaxConnections=8
+
+# Start only after the operator has installed and read back the exact reviewed
+# broker binary, private runtime directory and root-owned lease identity.

@@ -68,6 +68,9 @@ prints `opcode=not-applicable`. The existing `CodegenStatistics` reason/opcode/s
 censuses remain the single owner of fallback counts; records introduce no second
 counter system. Existing feature evidence is preserved in messages; the adapter
 does not reconstruct required/effective features from a generic refusal.
+For a MIR verifier refusal, the backend reason names the verifier error and
+the message retains its numeric code and machine block/instruction/operand;
+`opcode=unknown` means no canonical instruction can be attributed.
 
 `compiler_diagnostic_tests` covers ownership, notes, unknown locations, original
 mapping and cycles, macro/include remapping, directive-only headers, multiple-input

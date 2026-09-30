@@ -4,8 +4,10 @@ The benchmark host is not a general Actions executor. The sole Actions path
 uses the installed fixed gateway in `.github/workflows/9700x-service-dispatch.yml`;
 no workflow may check out candidate code onto this host. The repository variable
 `BENCH_SERVICE_DISPATCH_ENABLED` stays `false` until live host qualification.
+Only dispatches by `davidgmbb` (user 39247043) reach the runner, and they run
+without a manual approval step; the workflow gate in section 2 enforces this.
 
-## 1. Restrict the runner before accepting connector requests
+## 1. Restrict the runner before accepting dispatch requests
 
 The repository is public. Register `buster-zen5-9700x` as an **organization**
 runner in `buster14a`, not a repository runner, and move it into the new
@@ -40,15 +42,24 @@ bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 The preflight requires the repository variable to be exactly `false` without
 changing it, then verifies the exact main merge-queue ruleset `22537199`, the
 absence of the superseded benchmark branch ruleset, the runner group, and the
-absence of a repository-scoped benchmark runner. It reads
-and verifies the **existing** repository Actions policy for the exact workflow,
-requester list, and manual event; it does not create or replace that policy.
+absence of a repository-scoped benchmark runner. It compares live `main`'s
+dispatch workflow byte for byte with the trusted checkout and runs the static
+workflow policy test, because that workflow's gate is the actor restriction.
+It reads and verifies the **existing** repository Actions policy for the exact
+workflow, requester list, and manual event; it does not create or replace that
+policy.
 The existing Actions policy targets only the fixed workflow through
 `workflow_dispatch`. The reviewed requester list is
 `Repository admin` (role 5), `davidgmbb` (user 39247043), ChatGPT Codex
-Connector (app 1144995), Claude (app 1236702), and Devin.ai Integration
-(app 811515). These actors can start the workflow, but they do not thereby
-release its protected environment job. Do not add another requester. The
+Connector (installation 158946652, app 1144995), Claude (installation
+159756060, app 1236702), and Devin.ai Integration (installation 161964061,
+app 811515). GitHub's live Actions policy identifies the three integrations
+by installation ID and `IntegrationInstallation` type; the reviewed fixture
+pins those exact installed actors. Read back `orgs/buster14a/installations`
+to verify each installation-to-app mapping. Reinstallation changes this
+identity and requires a new policy review. These actors can start the workflow,
+but only `davidgmbb` passes its gate; any other requester's run is skipped and
+never reaches the self-hosted runner. Do not add another requester. The
 existing main merge queue keeps all eight checks, including `CI complete` and
 `Benchmark service workflow policy`, 20 concurrent builds, one merge and
 `ALLGREEN`. Its two reviewed
@@ -58,21 +69,42 @@ normal main protection. This is administrator authority under the reviewed
 contract, not a workflow admission result or a connector permission.
 
 The preflight verifies that `davidgmbb` still has repository `admin`
-permission and is the sole required reviewer for
-`benchmark-9700x` with self-review prevention. The environment remains
-restricted to the one exact `main` deployment branch. Connector requests
-wait for that administrator's approval before the runner is assigned a job;
-an administrator starting a run cannot approve their own request. If any
-readback fails, leave dispatch disabled and investigate before retrying.
-GitHub currently allows repository administrators to bypass environment
-protection; using that control is also an explicit administrator release and
-must be recorded as such. It does not count as the required review receipt.
-The preflight fetches the environment, deployment branch policies and
-repository variable again. It checks the administrator reviewer and
-self-review prevention, the one exact `main` branch, and literal `false`
-dispatch state. It separately rereads the requester policy and administrator
-permission. Keep those responses and the preflight log as administrator
-receipts; they do not replace the physical host checks.
+permission. The `benchmark-9700x` environment has **no required reviewer, no
+wait timer and no manual approval step**; the verifier fails if a
+`required_reviewers`, `wait_timer` or any rule other than the deployment branch
+policy is present. It keeps exactly one deployment branch, `main`, with custom
+branch policies and without protected-branch mode. If any readback fails,
+leave dispatch disabled and investigate before retrying. The preflight fetches
+the environment, deployment branch policies and repository variable again. It
+checks the absence of reviewer and timer rules, the one exact `main` branch,
+and literal `false` dispatch state. It separately rereads the requester policy
+and administrator permission. Keep those responses, the organization
+installation mapping and the preflight log as administrator receipts; they do
+not replace the physical host checks.
+
+### Dispatch gate
+
+The workflow, not an environment approval, restricts execution to `davidgmbb`.
+Its first job, `authorize`, runs on a GitHub-hosted `ubuntu-24.04` runner with
+only `actions: read`, performs no checkout, and reads this exact run attempt
+from `GET /repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}`.
+It fails closed unless the event is `workflow_dispatch`, the head branch is
+`main`, both `actor` and `triggering_actor` are login `davidgmbb` **and**
+numeric ID 39247043, and the returned attempt equals the running attempt. Only
+then does it output `attempt=<run_attempt>`. Context values reach its script
+through `env:`; no expression is interpolated into shell source.
+
+The self-hosted `submit` job needs `authorize` and requires `main`,
+`BENCH_SERVICE_DISPATCH_ENABLED == 'true'`, `workflow_dispatch`, actor
+`davidgmbb` with actor ID 39247043, triggering actor `davidgmbb`, and an
+`authorize` output equal to the current `github.run_attempt`. `authorize`
+carries the same context checks, so other requesters' runs skip both jobs
+without an API call. GitHub reuses the outputs of jobs that succeeded in an
+earlier attempt when failed or single jobs are re-run, so the attempt binding
+prevents anyone's re-run from inheriting an old authorization; `submit` runs
+only after `authorize` itself passes in the same attempt. A maintainer re-run
+must use **Re-run all jobs**. `submit` keeps `environment: benchmark-9700x` so
+the main-only deployment branch rule still applies.
 
 The actor restriction governs **who starts the workflow**, not who edits its
 definition or the installed gateway. Admins must control changes to the
@@ -80,6 +112,21 @@ workflow, policy files, installed binary, recipe and host registration.
 Changes to any of these need review under the repository's trust policy before
 live activation; do not equate a passing static policy check with approval of
 arbitrary new commands on a self-hosted runner.
+
+### Settings transition
+
+The repository change does not alter settings. Apply the transition from the
+former required-reviewer contract in two separate steps:
+
+1. After this workflow gate is on protected `main`, the administrator removes
+   the required reviewer from `benchmark-9700x`, keeps its one `main`
+   deployment branch rule, adds no wait timer, and leaves
+   `BENCH_SERVICE_DISPATCH_ENABLED=false`. With the variable still `false`,
+   run the read-only preflight above and retain its receipts.
+2. Only after the host operator posts readiness matching the exact
+   installation packet (section 3 and
+   [`ISSUE_880_OPERATOR_PACKET.md`](ISSUE_880_OPERATOR_PACKET.md)), the
+   administrator sets `BENCH_SERVICE_DISPATCH_ENABLED=true` as in section 4.
 
 ## 3. Verify the host boundary before activation
 
@@ -101,17 +148,19 @@ alone do not prove the host is safe.
 
 ## 4. Activate and dispatch
 
-After the host checks pass and evidence is retained, enable the repository
-variable once:
+After the host checks pass, the host operator has posted readiness matching
+the exact installation packet, and evidence is retained, the administrator
+enables the repository variable once (transition step 2):
 
 ```sh
 gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body true --repo buster14a/buster
 ```
 
-An approved connector can request the fixed workflow from protected `main`
-with full lowercase immutable commit IDs and a stable idempotency key. The
-reviewed repository administrator approves or rejects the pending environment
-job after checking the request. The service
+`davidgmbb` dispatches the fixed workflow from protected `main` with full
+lowercase immutable commit IDs and a stable idempotency key; the job runs
+without an approval step once `authorize` passes. Runs started by any other
+permitted requester, or re-run by anyone other than `davidgmbb`, are skipped
+before the self-hosted runner. The service
 owns idle-only atomic admission and cleanup; Actions concurrency is only a UI
 guard. Leave the variable enabled during normal verified operation. Disable
 it immediately on policy, workflow, host, or verifier drift, or on ambiguous
@@ -121,6 +170,8 @@ service recovery:
 gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo buster14a/buster
 ```
 
-After changing the workflow, main ruleset, Actions policy, preflight,
-installed gateway, recipe, or profile, verify the reviewed admission and
-host again before re-enabling dispatch.
+After changing the workflow or its gate, main ruleset, Actions policy,
+environment, preflight, installed gateway, recipe, or profile, verify the
+reviewed admission and host again before re-enabling dispatch. Re-adding a
+required reviewer or wait timer is drift from this contract: disable dispatch
+and review the change.

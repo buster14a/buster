@@ -42,6 +42,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_TOKEN_TOO_LONG] = S8_INITIALIZER("c.token-too-long"),
         [C_DIAGNOSTIC_INVALID_INTEGER_LITERAL] = S8_INITIALIZER("c.invalid-integer-literal"),
         [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
+        [C_DIAGNOSTIC_UNKNOWN_TYPE_NAME] = S8_INITIALIZER("c.unknown-type-name"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");
@@ -329,6 +330,25 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticLocation compiler_driver_backend_location(
     return result;
 }
 
+// The LLVM bitcode, WebAssembly and eBPF emitters report a failure as a fixed
+// message plus the IDs it concerns. When it concerns a function, name that
+// function and point at it, as a native code generation refusal does; a bare
+// message gives no way to find the function in a large translation unit.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_emitter_diagnostic(Arena* arena, IrProgram* program, IrModule* module, IrFunctionId function,
+                                                               IrInstructionId instruction, String8 message)
+{
+    String8 result = message;
+    if (program && module && function.value < module->function_count)
+    {
+        CompilerDiagnostic diagnostic = {
+            .message = string_format(arena, S8("{S8} (in function '{S8}')"), message, module->functions[function.value].name),
+            .primary = compiler_driver_backend_location(program, module, function, instruction),
+        };
+        result = compiler_diagnostic_render(arena, diagnostic);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Arena* arena, CompilerDriverInvocation invocation,
                                                                                  IrProgram* program, IrModule* module, CodegenModule code)
 {
@@ -340,6 +360,14 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Ar
         .instruction_id = code.failed_instruction.value, .opcode_id = code.failed_opcode < IR_OPCODE_COUNT ? (u32)code.failed_opcode : UINT32_MAX,
         .operation_id = UINT32_MAX,
     };
+    if (code.error == CODEGEN_ERROR_INVALID_IR && code.failed_opcode >= IR_OPCODE_COUNT)
+    {
+        result.opcode = S8("unknown");
+    }
+    if (code.failed_machine_verification.error != MACHINE_VERIFY_NONE)
+    {
+        result.reason = machine_verify_error_name(code.failed_machine_verification.error);
+    }
     if (code.failed_function.value < module->function_count)
     {
         IrFunction* function = module->functions + code.failed_function.value;
@@ -484,6 +512,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_link_code(LinkError error)
         [LINK_ERROR_ENTRY_SYMBOL] = S8_INITIALIZER("link.entry-symbol"),
         [LINK_ERROR_RELOCATION] = S8_INITIALIZER("link.relocation"),
         [LINK_ERROR_SYMBOL_VERSION] = S8_INITIALIZER("link.symbol-version"),
+        [LINK_ERROR_TLS_SYMBOL_MISMATCH] = S8_INITIALIZER("link.tls-symbol-mismatch"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == LINK_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("link.unknown");

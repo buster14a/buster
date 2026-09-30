@@ -356,6 +356,13 @@ BUSTER_GLOBAL_LOCAL String8 meta_diagnostic(String8 output)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 meta_captured_diagnostic(ByteSlice output, ByteSlice error)
+{
+    ByteSlice diagnostic = error.length ? error : output;
+    String8 result = meta_diagnostic((String8){(char8*)diagnostic.pointer, diagnostic.length});
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL MetaOutcome meta_process(Arena* arena, SliceString8 argv, MetaPhase phase)
 {
     MetaOutcome result = {.phase = phase, .wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
@@ -371,12 +378,8 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_process(Arena* arena, SliceString8 argv, Me
     if (result.launched)
     {
         result.wait = os_process_wait_deadline(arena, spawn, BUSTER_META_TIMEOUT_US);
-        ByteSlice diagnostic = result.wait.streams[STANDARD_STREAM_OUTPUT];
-        if (!diagnostic.length)
-        {
-            diagnostic = result.wait.streams[STANDARD_STREAM_ERROR];
-        }
-        result.diagnostic = meta_diagnostic((String8){(char8*)diagnostic.pointer, diagnostic.length});
+        result.diagnostic = meta_captured_diagnostic(result.wait.streams[STANDARD_STREAM_OUTPUT],
+                                                     result.wait.streams[STANDARD_STREAM_ERROR]);
     }
     return result;
 }
@@ -1005,6 +1008,9 @@ UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !meta_assess(ok, bad).passed);
     BUSTER_TEST(arguments, string_equal(meta_diagnostic(S8("cc: error: before.c:1:2: bad token\n")),
                                        meta_diagnostic(S8("cc: error: after.c:10:20: bad token\n"))));
+    ByteSlice telemetry = BUSTER_SLICE_TO_BYTE_SLICE(S8("CODEGEN_VERIFY version=1\n"));
+    ByteSlice diagnostic = BUSTER_SLICE_TO_BYTE_SLICE(S8("cc: error: before.c:1:2: bad token\n"));
+    BUSTER_STRING_TEST(arguments, meta_captured_diagnostic(telemetry, diagnostic), S8("bad token\n"));
     BUSTER_TEST(arguments, meta_expected((MetaSpec){.terms = 1, .rounds = 2, .salt = 3, .factor = 5}, 2, 7) == 79);
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS
     String8 directory = buster_test_temporary_path(arguments->arena, S8("metamorphic"), S8(""));

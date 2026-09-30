@@ -1,6 +1,7 @@
 #include <buster/lib/compiler/debug/debug.h>
 
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL String8 debug_string(Arena* arena, String8 string)
@@ -610,6 +611,28 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
             }
         }
 
+        // Emitted debug seeds follow code layout, while the IR module retains
+        // declaration order, so each seed finds its canonical locals by
+        // symbol. Index the module's functions by dense symbol id once --
+        // walking backwards leaves the first function per symbol, the one a
+        // forward search stops at -- instead of searching the module per seed.
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u32 symbol_count = input.program->symbols.count;
+        u32* function_by_symbol = 0;
+        if (input.module)
+        {
+            function_by_symbol = arena_allocate(temporary.arena, u32, symbol_count ? symbol_count : 1);
+            memset(function_by_symbol, 0xff, sizeof(*function_by_symbol) * (u64)symbol_count);
+            for (u32 module_index = input.module->function_count; module_index; module_index -= 1)
+            {
+                IR_CONSTRUCTION_RECORD(DEBUG_FUNCTION_INDEX_ROWS, 1);
+                u32 symbol = input.module->functions[module_index - 1].symbol.value;
+                if (symbol < symbol_count)
+                {
+                    function_by_symbol[symbol] = module_index - 1;
+                }
+            }
+        }
         for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
             DebugFunctionSeed* seed = input.functions + function_index;
@@ -633,14 +656,19 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
             {
                 function->name = result.source_paths[declaration.source];
             }
-            // Emitted debug seeds follow code layout, while the IR module
-            // retains declaration order. Match the canonical locals by
-            // symbol so each function DIE receives its own locations.
             IrFunction* module_function = 0;
-            if (input.module)
+            if (function_by_symbol && seed->symbol.value < symbol_count)
             {
+                u32 module_index = function_by_symbol[seed->symbol.value];
+                module_function = module_index != UINT32_MAX ? input.module->functions + module_index : 0;
+            }
+            else if (input.module)
+            {
+                // Codegen seeds always name a program symbol; only a
+                // hand-built seed outside the table reaches this search.
                 for (u32 module_index = 0; module_index < input.module->function_count; module_index += 1)
                 {
+                    IR_CONSTRUCTION_RECORD(DEBUG_FUNCTION_SEED_SCAN_ROWS, 1);
                     IrFunction* candidate = input.module->functions + module_index;
                     if (candidate->symbol.value == seed->symbol.value)
                     {
@@ -657,6 +685,7 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                 debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity, function_variable_capacity);
             }
         }
+        scratch_end(temporary);
         debug_add_canonical_globals(arena, &result, &input, variable_capacity);
 
         for (u32 inline_index = 0; inline_index < input.inline_site_count; inline_index += 1)
@@ -727,34 +756,48 @@ u32 debug_register_dwarf_number(Target target, DebugRegister reg)
     return UINT32_MAX;
 }
 
+// CodeView numbers registers in its own order (CV_HREG_e in Microsoft's
+// cvconst.h, mirrored by LLVM's CodeViewRegisters.def), which is neither the
+// hardware encoding order DebugRegister follows nor DWARF's: RBX precedes RCX,
+// XMM8-15 are not contiguous with XMM0-7, and ARM64 X0 is 50, not 0 (#1440).
+// The tables below are that enumeration, not arithmetic over ours.
 u32 debug_register_codeview_number(Target target, DebugRegister reg)
 {
     u32 register_index = (u32)reg;
+    u32 result = UINT32_MAX;
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
+        // RAX RCX RDX RBX RSP RBP RSI RDI R8..R15, in DebugRegister order.
+        static const u16 gpr[] = {328, 330, 331, 329, 335, 334, 332, 333, 336, 337, 338, 339, 340, 341, 342, 343};
         if (register_index >= (u32)DEBUG_REGISTER_X86_RAX && register_index <= (u32)DEBUG_REGISTER_X86_R15)
         {
-            return 328 + register_index - (u32)DEBUG_REGISTER_X86_RAX;
+            result = gpr[register_index - (u32)DEBUG_REGISTER_X86_RAX];
         }
-        if (register_index >= (u32)DEBUG_REGISTER_X86_XMM0 && register_index <= (u32)DEBUG_REGISTER_X86_XMM15)
+        else if (register_index >= (u32)DEBUG_REGISTER_X86_XMM0 && register_index <= (u32)DEBUG_REGISTER_X86_XMM7)
         {
-            return 154 + register_index - (u32)DEBUG_REGISTER_X86_XMM0;
+            result = 154 + register_index - (u32)DEBUG_REGISTER_X86_XMM0;
+        }
+        else if (register_index >= (u32)DEBUG_REGISTER_X86_XMM8 && register_index <= (u32)DEBUG_REGISTER_X86_XMM15)
+        {
+            result = 252 + register_index - (u32)DEBUG_REGISTER_X86_XMM8;
         }
     }
     else if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
+        // X0..X28 are 50..78, then FP (X29) 79, LR (X30) 80, SP 81; a vector
+        // register is named by its full 128-bit Q view, Q0..Q31 180..211.
         if (register_index >= (u32)DEBUG_REGISTER_AARCH64_X0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_X30)
         {
-            return register_index - (u32)DEBUG_REGISTER_AARCH64_X0;
+            result = 50 + register_index - (u32)DEBUG_REGISTER_AARCH64_X0;
         }
-        if (register_index == (u32)DEBUG_REGISTER_AARCH64_SP)
+        else if (register_index == (u32)DEBUG_REGISTER_AARCH64_SP)
         {
-            return 31;
+            result = 81;
         }
-        if (register_index >= (u32)DEBUG_REGISTER_AARCH64_V0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_V31)
+        else if (register_index >= (u32)DEBUG_REGISTER_AARCH64_V0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_V31)
         {
-            return 64 + register_index - (u32)DEBUG_REGISTER_AARCH64_V0;
+            result = 180 + register_index - (u32)DEBUG_REGISTER_AARCH64_V0;
         }
     }
-    return UINT32_MAX;
+    return result;
 }

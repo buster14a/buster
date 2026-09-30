@@ -28,4 +28,6 @@ jobs:
       - name: Exercise merge-tree fixtures and workflow policy
         run: |
           python3 -B tools/merge_conflict_preflight_test.py -v
+          python3 -B tools/merge_conflict_preflight_refresh_test.py -v
           python3 -B tools/merge_conflict_preflight_attestation_test.py -v
+          python3 -B tools/main_push_maintenance_test.py -v

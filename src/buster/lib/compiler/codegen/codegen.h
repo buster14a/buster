@@ -10,6 +10,7 @@
 
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/target.h>
 
 // IEEE encodings of 2^63, shared by the canonical and machine unsigned
@@ -405,6 +406,13 @@ struct CodegenStatistics
     u32 verified_ir_module_count;
     u32 verified_mir_function_count;
     u32 verified_scheduled_function_count;
+    // Committed machine-path code bytes the encoder wrote straight into the
+    // module's code buffer, and those it wrote into its own buffer -- when
+    // its worst-case budget did not fit what the module buffer had left --
+    // and that were then copied in. A function abandoned for the canonical
+    // path after encoding counts in neither.
+    u64 machine_code_bytes_in_place;
+    u64 machine_code_bytes_copied;
 };
 
 struct CodegenModule
@@ -445,6 +453,10 @@ struct CodegenModule
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
+    // Set only when selected or scheduled MIR fails invariant verification.
+    // Machine row coordinates are separate from canonical instruction IDs.
+    MachineVerifyResult failed_machine_verification;
+    bool failed_machine_scheduled;
     // First fallback in source order, valid when fallback_function_count is
     // nonzero. Retained even when canonical emission succeeds, so strict
     // driver coverage can identify the function before writing any artifact.

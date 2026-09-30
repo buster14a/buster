@@ -2,7 +2,9 @@
 Description=Buster benchmark authenticated service (repository reference only)
 Documentation=file:/usr/local/share/doc/buster/bench_service/README.md
 Requires=buster-bench.slice
+Requires=buster-bench-systemd-broker.socket
 After=local-fs.target
+After=buster-bench-systemd-broker.socket
 ConditionPathIsDirectory=/opt/buster-bench/installed
 ConditionPathIsDirectory=/var/lib/buster-bench/workspaces
 

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Read-only exact-merge-group admission (#867).
+"""Read-only exact-merge-group admission (#867, #1122).
 
 GitHub owns ordering and rebuilding; this is not another queue or publisher.
 The six existing gates remain independently required. Their latest workflow
 attempts are resolved by path, event and exact group SHA, never by a same-name
 commit status or a historical PR-head result. Native-retirement admission is
-executed only from the immutable trusted base and must fail closed.
+executed only from an independently trusted main revision and must fail closed.
+Groups that land admitted sources without an exact-tree writer attestation
+also require the ephemeral reconstruction job (required_checks, #1893).
+
+Map: identity/check_current bind one group; collect/check_results read the six
+gates; run_gate is the legacy runner-held merge_group loop and wait_base the
+predecessor wait still used by the native-retirement workflows. reconcile is
+the event-driven replacement (#1807): one bounded pass from trusted main, no
+sleeping, publishing CONTEXT through CheckWriter only for groups whose own
+workflow no longer produces it (group_owner).
 """
 
 from __future__ import annotations
@@ -24,7 +33,14 @@ import urllib.request
 SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
 RETIREMENT_CONTEXT = "Native retirement merge admission"
+RETIREMENT_MARKER = "buster-native-retirement-admission-v1"
+RETIREMENT_WORKFLOW = ".github/workflows/api-migration-policy.yml"
 RULESET_ID = 22537199
+GITHUB_ACTIONS_APP_ID = 15368
+QUEUE_REF_PREFIX = "refs/heads/gh-readonly-queue/main/"
+ADMISSION_WORKFLOW = ".github/workflows/merge-queue-admission.yml"
+# Twice the build limit: replaced groups can briefly coexist with new ones.
+MAX_QUEUE_REFS = 40
 BYPASS_ACTORS = [
     {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"},
     {"actor_id": 39247043, "actor_type": "User", "bypass_mode": "always"},
@@ -37,10 +53,15 @@ CHECKS = {
     "bench-service-policy.yml": "Benchmark service workflow policy",
     "api-migration-policy.yml": "API migration policy",
 }
+# Retirement groups whose generated state is not attested for their exact
+# tree additionally need the read-only ephemeral reconstruction (#1893). It is
+# collected here, not made ruleset-required, because it is path-filtered on PRs.
+RECONSTRUCTION_CHECK = {"native-retirement-rebind.yml": "Reconstruct candidate closure ephemerally"}
+RECONSTRUCTION_MODES = frozenset(("ordinary-bound-merge-group", "trusted-integration-merge-group"))
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 20,
+    "max_entries_to_build": 4,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,
@@ -49,6 +70,30 @@ QUEUE = {
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_PAGES = 20
+POLICY_PATHS = (
+    "tools/merge_queue_admission.py",
+    "tools/native_retirement_merge_gate.py",
+    "tools/native_retirement_integration.py",
+    "tools/native_retirement_contract.py",
+    "tools/native_retirement_dependency_binding.py",
+    "tools/native_retirement_external.py",
+    "tools/native_retirement_materializer.py",
+    "tools/native_retirement_rebind.py",
+    "tools/native_retirement_rebind_contract.py",
+    "tools/native_retirement_sdks.py",
+    ".github/workflows/merge-queue-admission.yml",
+    ".github/workflows/merge-queue-reconcile.yml",
+    ".github/workflows/ci-merge-group-watch.yml",
+    ".github/workflows/ci-recovery.yml",
+    ".github/scripts/recover-ci.py",
+    ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-admission.yml",
+    ".github/workflows/native-retirement-rebind.yml",
+    ".github/main-merge-queue.ruleset.json",
+    "docs/native-retirement-dependencies-v1.json",
+    "docs/native-retirement-sdks-v1.json",
+    "docs/native-retirement-support-v1.tsv",
+)
 
 
 class AdmissionError(Exception):
@@ -73,7 +118,8 @@ def git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def identity(event: dict, repository: str, expected_sha: str, repo: Path) -> dict:
+def identity(event: dict, repository: str, expected_sha: str, repo: Path,
+             trusted_sha: str | None = None) -> dict:
     require(event.get("action") == "checks_requested", "not a checks_requested event")
     require(event.get("repository", {}).get("full_name") == repository,
             "merge-group repository mismatch")
@@ -85,28 +131,60 @@ def identity(event: dict, repository: str, expected_sha: str, repo: Path) -> dic
     base = digest(group.get("base_sha"), "base")
     head = digest(group.get("head_sha"), "head")
     require(head == digest(expected_sha, "GITHUB_SHA"), "event/group SHA mismatch")
-    require(git(repo, "rev-parse", "HEAD") == base,
-            "admission must execute from the immutable trusted base")
+    policy_sha = digest(trusted_sha if trusted_sha is not None else git(repo, "rev-parse", "HEAD"),
+                        "trusted policy revision")
+    # GitHub builds later entries on the preceding synthetic merge. Never run
+    # policy from that base until it has actually become main.
+    chain = git(repo, "rev-list", "--first-parent", "--max-count=21", base).splitlines()
+    require(policy_sha in chain,
+            "trusted main is not within the bounded first-parent chain of the group base")
     git(repo, "merge-base", "--is-ancestor", base, head)
+    parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
+    require(len(parents) == 3 and parents[0] == head and parents[1] == base,
+            "group head must have the event base as its first parent and one PR as its second")
     return {"schema": SCHEMA, "repository": repository, "base": base,
             "base_tree": git(repo, "rev-parse", base + "^{tree}"), "head": head,
-            "final_tree": git(repo, "rev-parse", head + "^{tree}"), "head_ref": ref}
+            "final_tree": git(repo, "rev-parse", head + "^{tree}"), "head_ref": ref,
+            "policy_sha": policy_sha, "base_first_parents": chain}
 
 
-def check_current(candidate: dict, current_main: str, queue_head: str) -> None:
-    require(digest(current_main, "current main") == candidate["base"],
-            "main advanced: discard this group and rebuild against current main")
+def check_current(candidate: dict, current_main: str, queue_head: str) -> bool:
+    main = digest(current_main, "current main")
     require(digest(queue_head, "current queue head") == candidate["head"],
-            "merge group was replaced: never reuse this result for its successor")
+            f"merge group replaced: main={main} base={candidate['base']} "
+            f"head={candidate['head']} current_head={queue_head}; do not reuse this result")
+    chain = candidate["base_first_parents"]
+    require(candidate["policy_sha"] in chain and main in chain and
+            chain.index(main) <= chain.index(candidate["policy_sha"]),
+            f"main diverged from queued predecessor: main={main} "
+            f"base={candidate['base']} head={candidate['head']}; rebuild this group")
+    return main == candidate["base"]
 
 
-def latest_runs(rows: list, candidate: dict) -> dict:
+def verify_trusted_policy(candidate: dict, repo: Path) -> None:
+    # A predecessor may change policy while this workflow waits. Old code is
+    # independently trusted, but must not authorize a tree under new policy.
+    changed = git(repo, "diff", "--name-only", candidate["policy_sha"],
+                  candidate["base"], "--", *POLICY_PATHS)
+    require(not changed,
+            f"queued predecessor changed admission policy ({changed.replace(chr(10), ', ')}): "
+            f"main={candidate['base']} head={candidate['head']}; rebuild this group")
+
+
+def required_checks(retirement: dict | None) -> dict:
+    checks = dict(CHECKS)
+    if retirement is not None and retirement.get("mode") in RECONSTRUCTION_MODES:
+        checks.update(RECONSTRUCTION_CHECK)
+    return checks
+
+
+def latest_runs(rows: list, candidate: dict, checks: dict = CHECKS) -> dict:
     selected = {}
     for row in rows:
         if not isinstance(row, dict):
             raise AdmissionError("malformed workflow-run row")
         path = row.get("path")
-        if path not in {".github/workflows/" + name for name in CHECKS}:
+        if path not in {".github/workflows/" + name for name in checks}:
             continue
         require(row.get("head_sha") == candidate["head"], "workflow SHA mismatch")
         require(row.get("event") == "merge_group", "workflow is not merge-group evidence")
@@ -123,9 +201,10 @@ def latest_runs(rows: list, candidate: dict) -> dict:
     return selected
 
 
-def check_results(runs: dict, jobs: dict, candidate: dict) -> tuple[list, list]:
+def check_results(runs: dict, jobs: dict, candidate: dict,
+                  checks: dict = CHECKS) -> tuple[list, list]:
     evidence, pending = [], []
-    for filename, context in CHECKS.items():
+    for filename, context in checks.items():
         run = runs.get(".github/workflows/" + filename)
         if run is None:
             pending.append(context + ": missing workflow")
@@ -191,7 +270,7 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     expected = set(CHECKS.values()) | {CONTEXT, RETIREMENT_CONTEXT}
     require(len(actual) == len(expected) and {item.get("context") for item in actual} == expected,
             "all six original checks, retirement admission and exact-group admission must remain required")
-    require(all(item.get("integration_id") == 15368 for item in actual),
+    require(all(item.get("integration_id") == GITHUB_ACTIONS_APP_ID for item in actual),
             "required check source must be GitHub Actions")
     require("deletion" in by_type and "non_fast_forward" in by_type,
             "retain deletion and non-fast-forward protection")
@@ -272,23 +351,46 @@ class GitHub:
         return result
 
 
-def live_identity(api: GitHub, candidate: dict) -> None:
+def live_identity(api: GitHub, candidate: dict) -> bool:
     main = api.get("git/ref/heads/main")["object"]["sha"]
     ref = candidate["head_ref"].removeprefix("refs/")
     head = api.get("git/ref/" + urllib.parse.quote(ref, safe="/"))["object"]["sha"]
-    check_current(candidate, main, head)
+    ready = check_current(candidate, main, head)
+    if not ready:
+        print(f"waiting for queued predecessor: main={main} base={candidate['base']} "
+              f"head={candidate['head']} predecessor=ahead-of-main", file=sys.stderr)
+    return ready
 
 
-def collect(api: GitHub, candidate: dict) -> tuple[list, list]:
+def wait_base(arguments) -> dict:
+    event = json.loads(arguments.event.read_text())
+    policy_sha = git(arguments.trusted_root, "rev-parse", "HEAD")
+    candidate = identity(event, arguments.repository, arguments.sha, arguments.repo_root,
+                         trusted_sha=policy_sha)
+    api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
+    deadline = time.monotonic() + arguments.wait_seconds
+    while True:
+        if live_identity(api, candidate):
+            verify_trusted_policy(candidate, arguments.repo_root)
+            require(live_identity(api, candidate), "group changed after predecessor landed")
+            return {"schema": SCHEMA, "status": "base-landed", "base": candidate["base"],
+                    "head": candidate["head"], "policy_sha": candidate["policy_sha"]}
+        require(time.monotonic() < deadline,
+                f"timed out waiting for predecessor: base={candidate['base']} "
+                f"head={candidate['head']}; no admission was issued")
+        time.sleep(min(30, max(0, deadline - time.monotonic())))
+
+
+def collect(api: GitHub, candidate: dict, checks: dict = CHECKS) -> tuple[list, list]:
     rows = api.pages("actions/runs", "workflow_runs", event="merge_group", head_sha=candidate["head"])
-    runs = latest_runs(rows, candidate)
+    runs = latest_runs(rows, candidate, checks)
     jobs = {}
     for run in runs.values():
         if run.get("status") == "completed":
             key = (run["id"], run["run_attempt"])
             path = f"actions/runs/{key[0]}/attempts/{key[1]}/jobs"
             jobs[key] = api.pages(path, "jobs")
-    return check_results(runs, jobs, candidate)
+    return check_results(runs, jobs, candidate, checks)
 
 
 def retirement_admission(arguments, candidate: dict) -> dict:
@@ -315,25 +417,304 @@ def run_gate(arguments) -> dict:
     api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
     live_identity(api, candidate)
     ruleset_before = live_ruleset(api, arguments.repository)
-    retirement = retirement_admission(arguments, candidate)
     deadline = time.monotonic() + arguments.wait_seconds
+    retirement = None
     while True:
-        live_identity(api, candidate)
-        evidence, pending = collect(api, candidate)
+        if live_identity(api, candidate):
+            verify_trusted_policy(candidate, arguments.repo_root)
+            retirement = retirement_admission(arguments, candidate)
+            evidence, pending = collect(api, candidate, required_checks(retirement))
+        else:
+            pending = ["queued predecessor has not landed"]
         if not pending:
             # Re-read completed attempts as well as refs. An older successful
             # attempt must not hide a rerun that started during collection.
-            repeated, pending = collect(api, candidate)
+            repeated, pending = collect(api, candidate, required_checks(retirement))
             if not pending and repeated == evidence:
                 require(retirement_admission(arguments, candidate) == retirement,
                         "trusted publication changed during combined-head CI; rebuild admission")
-                live_identity(api, candidate)
+                require(live_identity(api, candidate),
+                        "predecessor no longer equals main before final admission")
+                verify_trusted_policy(candidate, arguments.repo_root)
                 ruleset_after = live_ruleset(api, arguments.repository)
                 break
         require(time.monotonic() < deadline, "timed out waiting for exact-group gates: " + ", ".join(pending))
         time.sleep(min(30, max(0, deadline - time.monotonic())))
     return dict(candidate, status="admitted", checks=evidence, retirement=retirement,
                 ruleset_reads=[ruleset_before, ruleset_after])
+
+
+def ancestor(repo: Path, older: str, newer: str) -> bool:
+    result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+                            capture_output=True, text=True, check=False)
+    require(result.returncode in (0, 1), "git merge-base failed: " + result.stderr.strip())
+    return result.returncode == 0
+
+
+def check_marker(head: str) -> str:
+    # Binds a reconciler-published check run to one exact group head. The CI
+    # fail-fast watcher recognizes the same marker (.github/scripts/recover-ci.py).
+    return SCHEMA + ":" + digest(head, "group head")
+
+
+def group_owner(repo: Path, head: str) -> str:
+    # Exactly one producer per group. A group whose own admission workflow still
+    # declares merge_group runs the legacy runner-held job; the reconciler then
+    # only shadows it. The group's bytes are read as data, never executed.
+    git(repo, "cat-file", "-e", head + "^{commit}")
+    listed = git(repo, "ls-tree", "--name-only", head, "--", ADMISSION_WORKFLOW)
+    text = git(repo, "show", head + ":" + ADMISSION_WORKFLOW) if listed else ""
+    return "legacy" if "\n  merge_group:\n" in text else "reconciler"
+
+
+def queue_refs(repo: Path) -> tuple[str, dict]:
+    refs = {}
+    for line in git(repo, "ls-remote", "origin", "refs/heads/main", QUEUE_REF_PREFIX + "*").splitlines():
+        sha, ref = line.split("\t")
+        require(ref == "refs/heads/main" or ref.startswith(QUEUE_REF_PREFIX), "unexpected ref " + ref)
+        refs[ref] = digest(sha, ref)
+    main = refs.pop("refs/heads/main", None)
+    require(main is not None, "main is missing from the remote")
+    require(len(refs) <= MAX_QUEUE_REFS, f"{len(refs)} queue refs exceed the bound of {MAX_QUEUE_REFS}")
+    git(repo, "fetch", "--no-tags", "--quiet", "origin", main, *sorted(set(refs.values())))
+    return main, refs
+
+
+def published_checks(api: GitHub, head: str, context: str = CONTEXT,
+                     marker: str | None = None) -> tuple[dict | None, list]:
+    marker = check_marker(head) if marker is None else marker
+    rows = api.pages(f"commits/{head}/check-runs", "check_runs", check_name=context,
+                     filter="all", app_id=GITHUB_ACTIONS_APP_ID)
+    ours, foreign = [], []
+    for row in rows:
+        require(isinstance(row, dict) and row.get("name") == context and row.get("head_sha") == head and
+                row.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID, "malformed check-run row")
+        (ours if row.get("external_id") == marker else foreign).append(row)
+    require(len(ours) <= 1, "duplicate reconciler check runs on " + head)
+    return (ours[0] if ours else None), [row.get("id") for row in foreign]
+
+
+def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
+    """One bounded pass: ("pending", reasons) or ("admitted", report); rejects raise."""
+    state, detail = "pending", ["queued predecessor has not landed"]
+    # Requiring the trusted checkout to be the landed base is stronger than
+    # verify_trusted_policy alone: a predecessor policy change is never judged
+    # by older authority. A stale checkout waits for the base's own main push.
+    if not live_identity(api, candidate):
+        pass
+    elif candidate["policy_sha"] != candidate["base"]:
+        detail = ["reconciler checkout predates the landed base; its main push reconciles"]
+    else:
+        verify_trusted_policy(candidate, arguments.repo_root)
+        retirement = retirement_admission(arguments, candidate)
+        # Same inventory as run_gate: unattested retirement groups also need
+        # the ephemeral reconstruction job (#1893).
+        checks = required_checks(retirement)
+        evidence, detail = collect(api, candidate, checks)
+        if not detail:
+            ruleset_before = live_ruleset(api, arguments.repository)
+            # An older successful attempt must not hide a rerun started during
+            # collection; that rerun's own completion event reconciles again.
+            repeated, detail = collect(api, candidate, checks)
+            if not detail and repeated != evidence:
+                detail = ["required workflow attempts changed during collection"]
+            if not detail:
+                require(retirement_admission(arguments, candidate) == retirement,
+                        "trusted publication changed during combined-head CI; rebuild admission")
+                require(live_identity(api, candidate),
+                        "predecessor no longer equals main before final admission")
+                ruleset_after = live_ruleset(api, arguments.repository)
+                state = "admitted"
+                detail = dict(candidate, status="admitted", checks=evidence, retirement=retirement,
+                              ruleset_reads=[ruleset_before, ruleset_after])
+    return state, detail
+
+
+class CheckWriter:
+    """The reconciler's only write: its two exact-group admission checks."""
+
+    def __init__(self, repository: str, token: str):
+        require(REPOSITORY.fullmatch(repository) is not None, "invalid repository")
+        require(bool(token), "GH_TOKEN is required")
+        self.prefix = "https://api.github.com/repos/" + repository + "/check-runs"
+        self.token = token
+
+    def send(self, existing: dict | None, body: dict) -> dict:
+        head = body.get("head_sha") if existing is None else existing.get("head_sha")
+        require(body.get("name") in (CONTEXT, RETIREMENT_CONTEXT) and
+                digest(head, "check head") == head and
+                body.get("external_id") == (check_marker(head) if body["name"] == CONTEXT
+                                             else native_marker(head)),
+                "check writer accepts only reviewed exact-head admission contexts")
+        url = self.prefix if existing is None else self.prefix + "/" + str(existing["id"])
+        request = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                         method="POST" if existing is None else "PATCH", headers={
+            "Authorization": "Bearer " + self.token,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        })
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+        return result
+
+
+def check_body(head: str, state: str, detail, details_url: str) -> dict:
+    title = {"pending": "Waiting for exact-group prerequisites",
+             "admitted": "Exact group admitted", "rejected": "Exact group rejected"}[state]
+    if state == "pending":
+        summary = "Not admitted. Pending: " + "; ".join(detail)
+    elif state == "admitted":
+        summary = (f"Admitted {head} on base {detail['base']} under trusted policy "
+                   f"{detail['policy_sha']}.")
+    else:
+        summary = "Not admitted: " + detail
+    body = {"name": CONTEXT, "head_sha": head, "external_id": check_marker(head),
+            "details_url": details_url, "status": "in_progress" if state == "pending" else "completed",
+            "output": {"title": title, "summary": summary[:60000]}}
+    if state != "pending":
+        body["conclusion"] = "success" if state == "admitted" else "failure"
+    if state == "admitted":
+        body["output"]["text"] = "```json\n" + json.dumps(detail, sort_keys=True, indent=2)[:60000] + "\n```"
+    return body
+
+
+def reconcile_group(api: GitHub, writer: CheckWriter, arguments, policy: str, main: str,
+                    ref: str, head: str) -> dict:
+    repo = arguments.repo_root
+    result = {"ref": ref, "head": head, "published": False}
+    base = None if ancestor(repo, head, main) else git(repo, "rev-parse", head + "^1")
+    if base is None:
+        result["state"] = "landed"
+    elif base != main and ancestor(repo, main, base):
+        # Nothing can change until main advances; that push reconciles again.
+        result.update(state="pending", detail=["queued predecessor has not landed"])
+    else:
+        owner = group_owner(repo, head)
+        existing, foreign = published_checks(api, head) if owner == "reconciler" else (None, [])
+        result["owner"] = owner
+        if existing is not None and existing.get("status") == "completed":
+            # Terminal: never retry a correctness failure or re-issue a success.
+            result.update(state="published", conclusion=existing.get("conclusion"))
+        else:
+            event = {"action": "checks_requested", "repository": {"full_name": arguments.repository},
+                     "merge_group": {"base_ref": "refs/heads/main", "head_ref": ref,
+                                     "base_sha": base, "head_sha": head}}
+            try:
+                # Another producer of this name is never authority; refuse to race it.
+                require(not foreign, f"unexpected second producer of {CONTEXT}: check runs {foreign}")
+                candidate = identity(event, arguments.repository, head, repo, trusted_sha=policy)
+                state, detail = evaluate(api, arguments, candidate)
+            except AdmissionError as error:
+                state, detail = "rejected", str(error)
+            body = check_body(head, state, detail, arguments.details_url)
+            unchanged = (existing is not None and state == "pending" and
+                         existing.get("output", {}).get("summary") == body["output"]["summary"])
+            if owner == "reconciler" and not unchanged:
+                if existing is not None:
+                    del body["head_sha"]
+                writer.send(existing, body)
+            result.update(state=state, detail=detail, published=owner == "reconciler")
+    return result
+
+
+def native_owner(repo: Path, head: str) -> str:
+    # The API compatibility job remains in this workflow after activation. Only
+    # the native-admission job moves, so the workflow's merge_group event alone
+    # cannot determine ownership. Candidate YAML is inspected as inert data.
+    listed = git(repo, "ls-tree", "--name-only", head, "--", RETIREMENT_WORKFLOW)
+    if not listed:
+        return "missing"
+    source = git(repo, "show", head + ":" + RETIREMENT_WORKFLOW)
+    return "legacy" if "\n  native-retirement-admission:\n" in source else "reconciler"
+
+
+def native_marker(head: str) -> str:
+    return RETIREMENT_MARKER + ":" + digest(head, "group head")
+
+
+def native_evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
+    state, detail = "pending", ["queued predecessor has not landed"]
+    if not live_identity(api, candidate):
+        pass
+    elif candidate["policy_sha"] != candidate["base"]:
+        detail = ["trusted checkout predates the landed base; its main push reconciles"]
+    else:
+        verify_trusted_policy(candidate, arguments.repo_root)
+        before = live_ruleset(api, arguments.repository)
+        retirement = retirement_admission(arguments, candidate)
+        require(retirement_admission(arguments, candidate) == retirement,
+                "trusted retirement publication changed during validation")
+        require(live_identity(api, candidate), "group changed before native admission")
+        verify_trusted_policy(candidate, arguments.repo_root)
+        after = live_ruleset(api, arguments.repository)
+        state = "admitted"
+        detail = dict(candidate, status="admitted", retirement=retirement,
+                      ruleset_reads=[before, after])
+    return state, detail
+
+
+def reconcile_native_group(api: GitHub, writer: CheckWriter, arguments, policy: str,
+                           main: str, ref: str, head: str) -> dict:
+    result = {"ref": ref, "head": head, "published": False}
+    base = None if ancestor(arguments.repo_root, head, main) else git(
+        arguments.repo_root, "rev-parse", head + "^1")
+    if base is None:
+        result["state"] = "landed"
+    elif base != main and ancestor(arguments.repo_root, main, base):
+        result.update(state="pending", detail=["queued predecessor has not landed"])
+    else:
+        owner = native_owner(arguments.repo_root, head)
+        result["owner"] = owner
+        if owner == "missing":
+            result.update(state="rejected", detail="native admission workflow is absent")
+        else:
+            existing, foreign = published_checks(api, head, RETIREMENT_CONTEXT,
+                                                 native_marker(head)) if owner == "reconciler" else (None, [])
+            if existing is not None and existing.get("status") == "completed":
+                result.update(state="published", conclusion=existing.get("conclusion"))
+            else:
+                event = {"action": "checks_requested", "repository": {"full_name": arguments.repository},
+                         "merge_group": {"base_ref": "refs/heads/main", "head_ref": ref,
+                                         "base_sha": base, "head_sha": head}}
+                try:
+                    require(not foreign, "unexpected second native admission producer: " + str(foreign))
+                    candidate = identity(event, arguments.repository, head,
+                                         arguments.repo_root, trusted_sha=policy)
+                    state, detail = native_evaluate(api, arguments, candidate)
+                except AdmissionError as error:
+                    state, detail = "rejected", str(error)
+                body = check_body(head, state, detail, arguments.details_url)
+                body["name"] = RETIREMENT_CONTEXT
+                body["external_id"] = native_marker(head)
+                unchanged = (existing is not None and state == "pending" and
+                             existing.get("output", {}).get("summary") == body["output"]["summary"])
+                if owner == "reconciler" and not unchanged:
+                    if existing is not None:
+                        del body["head_sha"]
+                    writer.send(existing, body)
+                result.update(state=state, detail=detail, published=owner == "reconciler")
+    return result
+
+
+def reconcile(arguments) -> dict:
+    policy = git(arguments.repo_root, "rev-parse", "HEAD")
+    main, refs = queue_refs(arguments.repo_root)
+    token = os.environ.get("GH_TOKEN", "")
+    api = GitHub(arguments.repository, token)
+    writer = CheckWriter(arguments.repository, token)
+    groups = []
+    for ref, head in sorted(refs.items()):
+        try:
+            group = reconcile_group(api, writer, arguments, policy, main, ref, head)
+            group["native"] = reconcile_native_group(api, writer, arguments, policy, main, ref, head)
+            groups.append(group)
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            # Transport or response failure: publish nothing; the next event or
+            # the scheduled sweep retries. Correctness failures never land here.
+            groups.append({"ref": ref, "head": head, "state": "retry", "detail": str(error)})
+    return {"schema": SCHEMA, "mode": "reconcile", "repository": arguments.repository,
+            "policy_sha": policy, "main": main, "groups": groups}
 
 
 def main(argv=None) -> int:
@@ -350,6 +731,18 @@ def main(argv=None) -> int:
     check.add_argument("--sha", required=True)
     check.add_argument("--wait-seconds", type=int, default=18000)
     check.add_argument("--output", type=Path, required=True)
+    waiting = commands.add_parser("wait-base")
+    waiting.add_argument("--repo-root", type=Path, required=True)
+    waiting.add_argument("--trusted-root", type=Path, required=True)
+    waiting.add_argument("--event", type=Path, required=True)
+    waiting.add_argument("--repository", required=True)
+    waiting.add_argument("--sha", required=True)
+    waiting.add_argument("--wait-seconds", type=int, default=18000)
+    sweep = commands.add_parser("reconcile")
+    sweep.add_argument("--repo-root", type=Path, required=True)
+    sweep.add_argument("--repository", required=True)
+    sweep.add_argument("--details-url", required=True)
+    sweep.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args(argv)
     code = 0
     try:
@@ -359,6 +752,15 @@ def main(argv=None) -> int:
         elif arguments.command == "audit-workflows":
             audit_workflows(arguments.root)
             print("required workflow event inventory passed")
+        elif arguments.command == "reconcile":
+            report = reconcile(arguments)
+            arguments.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+            print(json.dumps(report, sort_keys=True))
+            if any(group["state"] == "retry" for group in report["groups"]):
+                code = 1
+        elif arguments.command == "wait-base":
+            require(0 <= arguments.wait_seconds <= 18000, "wait must be bounded to five hours")
+            print(json.dumps(wait_base(arguments), sort_keys=True))
         else:
             require(0 <= arguments.wait_seconds <= 18000, "wait must be bounded to five hours")
             report = run_gate(arguments)

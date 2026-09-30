@@ -42,10 +42,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `quality` compile the same signatures without machine fallback. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
-  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's
-  compiler-runtime entry points carry the half bits in the integer ABI even
-  though ordinary `_Float16` still uses XMM, so lowering bridges those symbols
-  through an internal `unsigned short` view. AArch64 uses baseline scalar `FCVT`
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
+  `long double` source (real or complex) uses `__truncxfhf2` with the f80
+  operand in its usual memory position, so it rounds once rather than through
+  binary32. Widening `_Float16` to x87 is exact through `__extendhfsf2`. Other
+  wider-than-64-bit sources (binary128) stay refused. Darwin x86-64's
+  binary32/binary64 compiler-runtime entry points carry the half bits in the
+  integer ABI even though ordinary `_Float16` still uses XMM, so lowering
+  bridges those symbols through an internal `unsigned short` view. The newer
+  `__truncxfhf2` returns its half in XMM0 there, as Clang expects, and takes no
+  bridge. AArch64 uses baseline scalar `FCVT`
   instructions for the same half/wider conversions, without runtime imports.
   Apple AArch64 packs named stack-only scalar arguments at their natural
   alignment; unnamed variadic arguments retain eightbyte-aligned slots;
@@ -128,7 +134,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and an exact zero/2^63 correction at extended precision; it preserves all
   four rounding modes and restores the complete control word after truncation.
   The direct implementation is `codegen_canonical_x64_emit_f80_*` in
-  `codegen.c`; f80/i128 conversions remain unsupported by both backends.
+  `codegen.c`. The machine selector also lowers i128 casts to and from f80
+  through two frame limbs and closed x87 transactions. Its final addition
+  selects 24-, 53-, or 64-bit precision for one row, preserving the caller's
+  complete control word; f80-to-i128 extracts high and low unsigned limbs
+  at 64-bit precision before restoring a signed result.
   Preserve the caller's
   x87 control word: canonical truncate helpers and the MIR conversion row
   may temporarily change only rounding control for a C integer cast, then

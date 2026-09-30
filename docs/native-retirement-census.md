@@ -35,10 +35,18 @@ compiler defect was demonstrated; the input and expected result are in range.
 The fixture remains one subject with the same applicability and compilation
 obligation. The inventory remains 559 inputs, 411 subjects, and 78,912 row
 identities. The exact successor declaration digest is
-`0d878bf0a3df9f0528803a5b08275d950f9edda57e373fd7618229dee264e427`; both
-previous declaration digests remain accepted for historical evidence. Trusted
-reader bootstrap #1086 admits this exact digest before the separate policy
-transition updates the fixture row and benchmark-service pins.
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932` (derived
+from `50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` with
+only this row changed to 7,233 bytes and
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`). The four
+`docs/native-retirement-applicability-v1.tsv` rows for this fixture carry the
+same new fixture hash, so that ledger becomes
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` with the
+same 374 identities, and the census producer pins it. All previous declaration
+and ledger digests remain accepted for historical evidence. Trusted-reader
+bootstrap #1086 admitted both exact digests before this separate policy
+transition updated the fixture, its ledger rows, the producer pin, and the
+benchmark-service support pin.
 
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,

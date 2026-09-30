@@ -45,7 +45,8 @@ full commit and tree and check active service PRs before changing the inventory.
   identities and every separately bound lifecycle control. Durable publication
   under #510 remains operator work; an Actions artifact alone is not sufficient.
 - `.github/workflows/9700x-service-dispatch.yml` is the reviewed smoke
-  submission path. It is manual, main-only, protected-environment gated and
+  submission path. It is manual, main-only, restricted to `davidgmbb` by a
+  per-attempt workflow gate without manual approval, and
   fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
   performs no checkout and invokes only literal installed `gateway
   capabilities`, `gateway submit` and `gateway result` commands. Keep it
@@ -81,30 +82,49 @@ units as well as the long-lived unit.
 | Object | Required new-installation contract |
 | --- | --- |
 | `/usr/local/libexec/buster-bench-service` | Reviewed service binary; operator-owned, executable, not writable by any service/candidate/runner identity |
-| `/usr/local/libexec/buster-bench-build` | Reviewed native `build.c` driver; same executable ownership rule |
+| `/usr/local/libexec/buster-bench-build` | Reviewed Clang-built native `build.c` driver with a nonexecutable `GNU_STACK` program header (`RW`, no `E`); same executable ownership rule |
 | `/usr/local/libexec/buster-bench-throughput` | Reviewed prebuilt native harness; same executable ownership rule |
 | `/opt/buster-bench/installed` | Root/service-owned, no write bits, service-readable, no symlink components |
 | `installed/recipes/validate-buster-v1.recipe` | Exact repository recipe bytes, read-only regular single-link file |
 | `installed/sources/REVISION/source.manifest` | Exact `BQ-SOURCE-V1` manifest and reviewed source closure; read-only |
 | `/var/lib/buster-bench` | `buster-bench:buster-bench-candidate`, `0710`; candidate traversal only |
-| `/var/lib/buster-bench/queue` | `buster-bench:buster-bench`, `0700`; local durable filesystem |
-| `/var/lib/buster-bench/lease` | `buster-bench:buster-bench`, `0700`; private final lease parent |
-| `/var/lib/buster-bench/lease/host.lock` | Pre-provision once, `0600`, service-owned, regular, one link; record device/inode; never truncate, unlink, replace or age it |
+| `/var/lib/buster-bench/queue` | `buster-bench:buster-bench`, `0710`; service-group traversal only, local durable filesystem |
+| `queue/worker-JOB`, `queue/worker-instance-JOB` | `buster-bench:buster-bench`, `0440`; broker-readable single-link records |
+| `/var/lib/buster-bench/lease` | `buster-bench:buster-bench`, `0710`; service-group traversal only |
+| `/var/lib/buster-bench/lease/host.lock` | Pre-provision once, `0640`, `buster-bench:buster-bench`, regular, one link; record device/inode; never truncate, unlink, replace or age it |
 | `/var/lib/buster-bench/workspaces` | `buster-bench:buster-bench-candidate`, `02710`; SGID and candidate traversal, no group write |
 | `workspaces/job-JOB-attempt-TOKEN` | Materializer-owned; disjoint base/candidate source/build trees, candidate staging only |
-| `workspaces/results/job-JOB-attempt-TOKEN` | Service-private durable evidence; outside removable attempt tree |
+| `workspaces/results` | `buster-bench:buster-bench`, `0710`; service-group traversal only |
+| `workspaces/results/job-JOB-attempt-TOKEN` | `buster-bench:buster-bench`, `0700`; service-private durable evidence outside removable attempt tree |
 | `/run/buster-bench/control.sock` | Service-created Unix seqpacket endpoint under systemd-owned runtime directory, `0700`, service UID/GID |
 
-The private lease subdirectory is deliberate: candidate traversal of the state
-parent must not weaken the worker's private-final-lease-parent check. A `0700`
+The service-group-only lease subdirectory is deliberate: candidate traversal
+of the state parent must not expose the lease. A `0700`
 workspace without SGID fails `bq_workspace_root_directory`; a `0700` state
 parent blocks candidate traversal even if the workspace itself is correct.
 Do not grant candidate write permission to either parent to fix an access error.
+With `RestrictSUIDSGID=yes`, verify that the materializer inherits SGID from
+the `02710` workspace parent when it creates an attempt, both `02710` subject
+directories, `02750` source directories and `02700` build directories. The
+trusted driver must likewise inherit `02770` for candidate staging and
+throughput output. Exact owner, candidate-group identity and mode checks must
+pass without requesting SGID in `mkdir` or `chmod`; a mismatch stops admission.
+
+The broker template uses root UID, service primary GID, candidate
+supplementary GID and empty capability sets. Read back those exact groups and
+the queue, result and lease modes before starting the socket. A TCC bootstrap
+driver with no `GNU_STACK` header cannot run inside the transient unit's
+`MemoryDenyWriteExecute=yes` sandbox: glibc's stage `posix_spawn` requests a
+writable and executable stack and fails with `EACCES`. The installed recipe
+driver must be independently built and reviewed from the selected source with
+Clang; verify its `GNU_STACK` header is `RW` without `E` before installation.
 
 The long-lived reference uses `Type=exec` and `serve`, with `Restart=no`.
 `RuntimeDirectory` manages only the socket directory. It does not reconcile
 queue state or clean sibling transient units. No `.socket` activation unit is
-supplied: `serve` binds its own endpoint and rejects a pre-existing socket.
+supplied for the service control endpoint: `serve` binds its own endpoint and
+rejects a pre-existing socket. The separate root systemd broker has a
+socket-activated template service.
 Do not blindly unlink a stale endpoint; establish daemon/instance absence and
 preserve the journal before an operator-authorized restart.
 
@@ -153,14 +173,15 @@ identities; changing only `serve`'s CPU argument is insufficient. Preserve the
 existing sandbox properties and exact checks in `bq_worker_observed` and
 `bench_service_recipe_sandbox_process_add`.
 
-An operator must review system-bus authorization for the fixed transient-unit
-lifecycle. Merely matching a unit-name prefix or granting the entire
-`manage-units` action does not constrain arbitrary transient service properties
-or executable selection. Do not install such a broad polkit rule. Establish a
-reviewed boundary for the actual installed systemd/polkit versions and record
-which identity may start, observe, signal and collect each fixed unit. If that
-cannot be demonstrated, leave the service stopped. Candidates and the Actions
-runner must not gain that authority.
+An operator must review and install the constrained broker and exact socket,
+template service and lease-identity receipt described in
+[SYSTEMD_BROKER.md](SYSTEMD_BROKER.md). Merely matching a unit-name prefix or
+granting the entire `manage-units` action does not constrain arbitrary
+transient service properties or executable selection. Do not install such a
+broad polkit rule. Record which identity may start, observe, signal and collect
+each fixed unit and prove that direct manager writes remain denied to the
+service, candidate and runner. If that cannot be demonstrated, leave the
+service stopped. Candidates and the Actions runner must not gain broker access.
 
 Record kernel, boot ID, systemd version, cgroup-v2 mount identity, CPU model,
 logical/physical topology and SMT siblings, microcode, RAM, governor/driver,
@@ -173,13 +194,14 @@ the `ryzen-9700x` runner label or from this repository's example values.
 ### GitHub and competing execution
 
 Restrict the runner to the reviewed service workflow and a protected manual
-main dispatch. Provision and verify the environment's actual review/branch
-rules; an `environment:` name in YAML can create an unprotected environment.
+main dispatch. Provision and verify the environment's actual branch rule and
+absence of reviewer/timer rules; an `environment:` name in YAML can create an
+unprotected environment.
 See [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 Require immutable action SHAs for any action use, minimal permissions, and
 `persist-credentials: false` for any checkout. The fixed dispatcher has no
-checkout, sets `permissions: {}`, and selects both the restricted group and
-labels exactly:
+checkout, sets `permissions: {}` (only its GitHub-hosted `authorize` job reads
+`actions`), and selects both the restricted group and labels exactly:
 
 ```yaml
 runs-on:
@@ -222,9 +244,13 @@ acknowledgment; never change the key to hide a failed or unknown attempt.
    demonstrated through the reviewed containment procedure, not an uploaded
    candidate script or a root-run probe.
 3. The harness invocation remains exactly the recipe's `--profile smoke
-   --mode all --pairs 1 --warmups 1 --no-guard` selection. This recipe builds
-   Release `ide` with tests disabled; it does not run the compiler correctness
-   suite or self-host fixed point. Record those as separate exact-head checks,
+   --mode all --pairs 1 --warmups 1 --no-guard --service-output` selection.
+   The final option makes completed candidate-owned output readable and its
+   directories removable through the trusted service's candidate-group
+   membership before private result copying and workspace cleanup.
+   This recipe builds Release `ide` with tests disabled; it does not run the
+   compiler correctness suite or self-host fixed point. Record those as
+   checks of the exact revision,
    never infer them from smoke success.
 4. Retain success or failure evidence. Require exhaustive `BQ-BUNDLE-V1`
    replay: 4,096 entries, 512 MiB total, 64 MiB/file, 256 levels, 192-byte
@@ -278,6 +304,30 @@ and later admission proof. Preserve original failed attempts and diagnosis.
 Mark every unavailable gate explicitly. An Actions artifact's finite retention
 is not the entire durable publication policy. Keep the service-owned original,
 exact downloaded copy and their digests attributable to the same attempt.
-Leave the implementation PR in draft until the requested exact-head checks,
-independent review and real smoke/recovery slice have passed. Do not merge a
-branch onto main merely to run unreviewed code on the dedicated host.
+
+## Implementation admission before live qualification
+
+For a service implementation PR, finish its exact-head checks and independent
+source review while draft. Before marking a sandbox repair ready, obtain the
+required **isolated real-systemd** slice for the exact tested source, binary
+hashes, manager/kernel and effective sandbox properties. Exercise actual
+materialization, staging and output creation, visibility verification and
+complete build-tree freezing under the relevant trusted/candidate identities.
+Retain failures and cleanup observations. Repository fixtures and a standalone
+syscall-filter probe do not replace this slice. Do not install an unmerged PR
+on Benchpress to satisfy a pre-merge gate.
+
+After those pre-merge gates pass, the owner marks the draft ready and submits
+it to the normal main merge queue. The queue must validate the actual combined
+tree; refresh preflight and admission if main or the PR head changes. A clean
+branch need not be rebased solely because it is behind main. Once the admitted
+PR is merged, record the resulting protected-main commit/tree. Only then
+install the reviewed artifact under fresh administrator and host receipts and
+start a new, separately keyed rehearsal through the protected fixed gateway.
+
+The full real smoke/recovery campaign described above is **post-merge** #880
+qualification, not a prerequisite for marking its implementation PR ready.
+It still requires the five distinct scenarios, durable export/download/replay,
+recursive absence and subsequent reservation before #880 can close. An
+unavailable pre-merge slice or ambiguous live-host state remains a failed gate;
+neither the merge queue nor the operator controls may be bypassed.

@@ -17,7 +17,7 @@ run is availability information and provides no semantic acceptance evidence.
 
 | Profile | Supported tools | Artifact and independent acceptance |
 |---|---|---|
-| `spirv-dxc-2025.07` | DXC release `v1.8.2505.1`, commit `b106a961`; SPIRV-Tools 2025.1 or 2026.1 | HLSL compute SM 6.0 to Vulkan 1.2 SPIR-V; `spirv-val --target-env vulkan1.2 artifact` |
+| `spirv-dxc-2025.07` | DXC release `v1.8.2505.1`, commit `b106a961`; SPIRV-Tools 2025.1 or 2026.1 | HLSL compute SM 6.0 to Vulkan 1.2 SPIR-V; validate the compiler output, pass that `.spv` through both `-c` and default link actions and require byte-identical outputs, then validate both copies with `spirv-val --target-env vulkan1.2` |
 | `ptx-llvm18-cuda12.4` | LLVM 18.1.x; NVIDIA ptxas 12.4.131 | NVVM-annotated LLVM IR to `sm_70` PTX; `ptxas -v -arch=sm_70 artifact -o accepted.cubin`, requiring the kernel name in its assembly report |
 | `amdgcn-llvm18` | Clang, LLD, llvm-readobj and llvm-objdump 18.1.x | OpenCL to `gfx900` ET_REL and HSA ET_DYN; read headers, symbols and decoded kernel metadata; disassemble and require `s_endpgm` without unknown instructions |
 | `metal-xcode16.4` | macOS, Xcode 16.4, macOS SDK, accessible Metal device | Metal source to AIR; real metallib linker accepts AIR; separately built C Metal-framework consumer loads the metallib, resolves `buster_gpu_smoke`, and creates its compute pipeline |
@@ -37,6 +37,8 @@ header but is truncated; DXIL/metallib retain their container magic. Metal's
 linker also rejects truncated AIR. A crash, timeout, missing executable or
 silent nonzero exit never counts as successful rejection. The positive and
 negative outcomes are both required.
+
+The SPIR-V profile also checks the documented single-binary input path: it reuses the independently accepted DXC artifact as input to `ide cc -target=spirv -c` and the default link action, compares each output byte-for-byte with the input, and validates both outputs again. This proves copy-path preservation for the tested module; it does not test multi-module linking, disassembly, or canonical-C GPU lowering.
 
 These are toolchain acceptance smoke tests, not shader execution tests. Linux
 profiles require no GPU or driver. Metal creates a pipeline through the public

@@ -1,0 +1,51 @@
+[Unit]
+Description=Buster benchmark constrained systemd broker connection (operator reference)
+ConditionPathExists=/etc/buster-bench/systemd-broker-lease.identity
+
+[Service]
+Type=exec
+User=root
+Group=buster-bench
+SupplementaryGroups=buster-bench-candidate
+UMask=0077
+# The static entry gate verifies the installed accounts, credentials, empty
+# capabilities, NNP/seccomp, read-only mounts and connected FD0, records one
+# BQ-BROKER-ENTRY-V1 PASS line, then fexecve()s the fixed broker in this PID.
+ExecStart=/usr/local/libexec/buster-bench-broker-entry-gate
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/
+Restart=no
+TimeoutStartSec=3700s
+RuntimeMaxSec=3700s
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ReadOnlyPaths=/etc/buster-bench
+ReadOnlyPaths=/opt/buster-bench/installed
+ReadOnlyPaths=/var/lib/buster-bench
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

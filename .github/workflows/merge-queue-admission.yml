@@ -33,10 +33,10 @@ jobs:
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
           fi
-      - name: Check out trusted base for groups and tested revision for readiness
+      - name: Check out independently trusted main for groups and tested revision for readiness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          ref: ${{ github.event_name == 'merge_group' && 'main' || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Exercise exact-head and ruleset regression tests

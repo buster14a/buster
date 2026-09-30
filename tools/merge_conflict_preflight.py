@@ -5,16 +5,29 @@ The core path uses only git plumbing.  It never checks out, rebases, merges, or
 updates a pull-request branch.  GitHub orchestration runs this trusted script
 from the default branch, fetches immutable objects into private local refs, and
 publishes a commit status whose description binds the result to exact SHAs.
+
+PR-scoped routes also read merge-queue membership (``lookup_merge_queue``,
+``lookup_pull_merge_queue``, ``apply_merge_queue``).  GitHub skips a queued
+entry that starts conflicting with main without removing it, and refuses pushes
+to a queued branch, so a conflicted queued PR must be dequeued before its
+resolution can be pushed (#1865).  That read is advisory: it changes the
+report's instructions and the status's optional ``q=queued`` token, never the
+outcome or its blocking state.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import datetime
+import email.utils
+import errno
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -33,8 +46,40 @@ STATUS_CONTEXT = "merge-conflict-preflight"
 HEX_OBJECT = re.compile(r"[0-9a-f]{40,64}\Z")
 STATUS_DESCRIPTION = re.compile(
     r"v1 m=(?P<main>[0-9a-f]{40}) h=(?P<head>[0-9a-f]{40}) "
-    r"o=(?P<outcome>[1-4]) c=(?P<state>clean|conflicted)\Z"
+    r"o=(?P<outcome>[1-4]) c=(?P<state>clean|conflicted)(?: q=(?P<queue>queued))?\Z"
 )
+
+# Merge-queue membership of one exact PR head, as the report records it.
+QUEUE_QUEUED = "queued"
+QUEUE_NOT_QUEUED = "not-queued"
+QUEUE_UNKNOWN = "unknown"
+QUEUE_NOT_CHECKED = "not-checked"
+QUEUE_LOCKED_ACTION = (
+    "This PR is still in the merge queue. GitHub skips a queued entry that conflicts with main "
+    "without removing it, and refuses every push to a queued branch (GH006). Dequeue the PR "
+    "first, then push the resolution and re-enqueue it after its checks pass."
+)
+QUEUE_UNKNOWN_ACTION = (
+    "Merge-queue membership could not be read. If this PR is queued, GitHub refuses every push "
+    "to its branch (GH006) until it is dequeued: dequeue it first, then push the resolution."
+)
+OPEN_QUEUE_MEMBERSHIP_QUERY = """
+query($owner: String!, $name: String!, $base: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, baseRefName: $base, first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number headRefOid isInMergeQueue }
+    }
+  }
+}
+"""
+PULL_QUEUE_MEMBERSHIP_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { number headRefOid isInMergeQueue }
+  }
+}
+"""
 
 # These are the generated and reviewed authorities installed by #862-#865.
 # Keep this list synchronized with tools/native_retirement_integration.py.  The
@@ -48,12 +93,16 @@ RETIREMENT_TRUST_PATHS = frozenset((
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
+    ".github/workflows/native-retirement-automation.yml",
+    ".github/workflows/native-retirement-catch-up.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".gitattributes",
     "tools/native_retirement_contract.py",
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_automation.py",
+    "tools/native_retirement_controller.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
@@ -61,6 +110,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 RETIREMENT_POLICY_SCHEMA_PATHS = frozenset((
+    ".github/native-retirement-automation.json",
     "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",
     "docs/native-retirement-dependencies-v1.json",
@@ -74,10 +124,70 @@ OUTCOME_CLEAN = 3
 OUTCOME_POLICY = 4
 MAX_STABLE_ATTEMPTS = 3
 MAX_API_PAGES = 10
+MAX_GET_ATTEMPTS = 3
+MAX_RETRY_DELAY_SECONDS = 30
+REFRESH_BUDGET_SECONDS = 240  # Leave the five-minute job time to retain reports.
+REFRESH_SCHEMA = "buster-merge-conflict-refresh-v1"
 
 
 class PreflightError(Exception):
     """A malformed repository, merge-tree result, event, or API response."""
+
+
+class RefreshBudgetError(PreflightError):
+    """The default-branch refresh has no time left for another operation."""
+
+
+class ApiRequestError(PreflightError):
+    """An API request failed with a recorded retry and rate-limit decision."""
+
+    def __init__(self, message: str, attempts: int, retryable: bool,
+                 systemic: bool) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.retryable = retryable
+        self.systemic = systemic
+        self.retry_exhausted = retryable and attempts >= MAX_GET_ATTEMPTS
+
+
+def _retry_after(headers, rate_limited: bool) -> float | None:
+    """Return the server's minimum delay, or None if no guidance was supplied."""
+    value = headers.get("Retry-After") if headers is not None else None
+    delay = None
+    if value is not None:
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                date = email.utils.parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=datetime.timezone.utc)
+                delay = date.timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if delay is not None:
+            delay = max(0.0, delay) if math.isfinite(delay) else None
+    if rate_limited and headers is not None and headers.get("X-RateLimit-Remaining") == "0":
+        try:
+            reset_delay = float(headers["X-RateLimit-Reset"]) - time.time()
+            if math.isfinite(reset_delay):
+                delay = max(delay or 0.0, reset_delay)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return delay
+
+
+def _transient_url_error(error: urllib.error.URLError) -> bool:
+    reason = error.reason
+    if isinstance(reason, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(reason, OSError):
+        return reason.errno in {
+            errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED,
+            errno.ECONNREFUSED, errno.EPIPE, errno.ENETUNREACH,
+            errno.EHOSTUNREACH, socket.EAI_AGAIN,
+        }
+    return False
 
 
 @dataclass(frozen=True)
@@ -118,6 +228,33 @@ class PreviousResult:
     outcome: int | None = None
 
 
+@dataclass(frozen=True)
+class MergeQueueLookup:
+    """One read of PR number -> (head SHA, in merge queue); None if it failed."""
+    heads: dict[int, tuple[str, bool]] | None
+    error: str | None = None
+
+    def membership(self, number: int, head: str) -> str:
+        entry = self.heads.get(number) if self.heads is not None else None
+        # A PR absent from the read, or read at another head, is unknown.
+        if entry is None or entry[0] != head:
+            value = QUEUE_UNKNOWN
+        else:
+            value = QUEUE_QUEUED if entry[1] else QUEUE_NOT_QUEUED
+        return value
+
+
+def _queue_node(node) -> tuple[int, str, bool]:
+    number = node.get("number") if isinstance(node, dict) else None
+    head = node.get("headRefOid") if isinstance(node, dict) else None
+    queued = node.get("isInMergeQueue") if isinstance(node, dict) else None
+    if (not isinstance(number, int) or isinstance(number, bool) or number <= 0 or
+            not isinstance(head, str) or not HEX_OBJECT.fullmatch(head) or
+            not isinstance(queued, bool)):
+        raise PreflightError(f"GitHub merge-queue membership node is malformed: {node!r}")
+    return number, head, queued
+
+
 class GitHubApi:
     def __init__(self, repository: str, token: str, api_url: str) -> None:
         if not repository or "/" not in repository:
@@ -127,6 +264,22 @@ class GitHubApi:
         self.repository = repository
         self.token = token
         self.api_url = api_url.rstrip("/")
+        self.deadline: float | None = None
+
+    def _remaining(self) -> float:
+        return (self.deadline - time.monotonic() if self.deadline is not None
+                else float("inf"))
+
+    def _wait_for_retry(self, attempt: int, guidance: float | None,
+                        rate_limited: bool) -> bool:
+        # A rate limit without timing guidance is not a license to probe it.
+        if rate_limited and guidance is None:
+            return False
+        delay = max(float(2 ** (attempt - 1)), guidance or 0.0)
+        if delay > MAX_RETRY_DELAY_SECONDS or delay >= self._remaining():
+            return False
+        time.sleep(delay)
+        return True
 
     def _request(self, method: str, path: str, payload: dict | None = None):
         url = self.api_url + path
@@ -141,14 +294,43 @@ class GitHubApi:
             data = json.dumps(payload, sort_keys=True).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", "replace")
-            raise PreflightError(f"GitHub API {method} {path} failed: HTTP {error.code}: {detail}") from error
-        except urllib.error.URLError as error:
-            raise PreflightError(f"GitHub API {method} {path} failed: {error}") from error
+        attempts = MAX_GET_ATTEMPTS if method == "GET" else 1
+        for attempt in range(1, attempts + 1):
+            remaining = self._remaining()
+            if remaining <= 0:
+                raise RefreshBudgetError("merge-conflict refresh time budget exhausted")
+            try:
+                with urllib.request.urlopen(request, timeout=min(30, remaining)) as response:
+                    body = response.read()
+                if attempt > 1:
+                    print(f"merge-conflict-preflight: recovered GitHub API {method} {path} "
+                          f"after {attempt} attempts", file=sys.stderr)
+                break
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", "replace")
+                rate_limited = (error.code == 429 or (error.code == 403 and (
+                    error.headers is not None and
+                    error.headers.get("X-RateLimit-Remaining") == "0" or
+                    "rate limit" in detail.lower())))
+                retryable = method == "GET" and (
+                    error.code in (408, 500, 502, 503, 504) or rate_limited)
+                guidance = _retry_after(error.headers, rate_limited)
+                if (retryable and attempt < attempts and
+                        self._wait_for_retry(attempt, guidance, rate_limited)):
+                    continue
+                raise ApiRequestError(
+                    f"GitHub API {method} {path} failed after {attempt} attempt(s): "
+                    f"HTTP {error.code}: {detail}", attempt, retryable,
+                    rate_limited or (error.code == 503 and guidance is not None)) from error
+            except (urllib.error.URLError, TimeoutError) as error:
+                retryable = method == "GET" and (
+                    isinstance(error, TimeoutError) or _transient_url_error(error))
+                if (retryable and attempt < attempts and
+                        self._wait_for_retry(attempt, None, False)):
+                    continue
+                raise ApiRequestError(
+                    f"GitHub API {method} {path} failed after {attempt} attempt(s): {error}",
+                    attempt, retryable, False) from error
         if not body:
             return None
         try:
@@ -201,6 +383,56 @@ class GitHubApi:
             raise PreflightError(f"GitHub pull request #{number} response is not an object")
         return value
 
+    def graphql(self, query: str, variables: dict) -> dict:
+        # Sent once like any POST; callers treat a failure as unknown membership.
+        value = self._request("POST", "/graphql", {"query": query, "variables": variables})
+        errors = value.get("errors") if isinstance(value, dict) else None
+        data = value.get("data") if isinstance(value, dict) else None
+        if errors or not isinstance(data, dict):
+            detail = json.dumps(errors, sort_keys=True)[:500] if errors else "no data object"
+            raise PreflightError(f"GitHub GraphQL query failed: {detail}")
+        return data
+
+    def queue_membership(self, base: str) -> dict[int, tuple[str, bool]]:
+        owner, name = self.repository.split("/", 1)
+        heads: dict[int, tuple[str, bool]] = {}
+        cursor = None
+        for _ in range(MAX_API_PAGES):
+            data = self.graphql(OPEN_QUEUE_MEMBERSHIP_QUERY, {
+                "owner": owner, "name": name, "base": base, "cursor": cursor,
+            })
+            repository = data.get("repository")
+            connection = repository.get("pullRequests") if isinstance(repository, dict) else None
+            nodes = connection.get("nodes") if isinstance(connection, dict) else None
+            page = connection.get("pageInfo") if isinstance(connection, dict) else None
+            if not isinstance(nodes, list) or not isinstance(page, dict):
+                raise PreflightError("GitHub merge-queue membership response omits nodes/pageInfo")
+            for node in nodes:
+                number, head, queued = _queue_node(node)
+                if number in heads:
+                    raise PreflightError(f"merge-queue membership repeats pull request #{number}")
+                heads[number] = (head, queued)
+            cursor = page.get("endCursor")
+            if page.get("hasNextPage") is not True:
+                break
+            if not isinstance(cursor, str) or not cursor:
+                raise PreflightError("GitHub merge-queue membership page has no end cursor")
+        else:
+            raise PreflightError(f"merge-queue membership pagination exceeded {MAX_API_PAGES} pages")
+        return heads
+
+    def pull_queue_membership(self, number: int) -> dict[int, tuple[str, bool]]:
+        owner, name = self.repository.split("/", 1)
+        data = self.graphql(PULL_QUEUE_MEMBERSHIP_QUERY, {
+            "owner": owner, "name": name, "number": number,
+        })
+        repository = data.get("repository")
+        found, head, queued = _queue_node(
+            repository.get("pullRequest") if isinstance(repository, dict) else None)
+        if found != number:
+            raise PreflightError(f"merge-queue membership returned #{found} while resolving #{number}")
+        return {number: (head, queued)}
+
     def retirement_status(self, head: str) -> dict:
         rows = []
         for page in range(1, MAX_API_PAGES + 1):
@@ -237,9 +469,10 @@ class GitHubApi:
         outcome = report["outcome"]["number"]
         clean = report["merge"]["clean"]
         blocking = report["outcome"]["blocking"]
+        queued = report["merge_queue"]["membership"] == QUEUE_QUEUED
         description = (
             f"{STATUS_SCHEMA} m={report['main']['sha']} h={report['head']['sha']} "
-            f"o={outcome} c={'clean' if clean else 'conflicted'}"
+            f"o={outcome} c={'clean' if clean else 'conflicted'}{' q=queued' if queued else ''}"
         )
         if len(description) > 140:
             raise PreflightError("commit-status description exceeds GitHub's 140-character limit")
@@ -264,7 +497,8 @@ def _canonical_path(path: str) -> str:
     return candidate.as_posix()
 
 
-def _git(repo: Path, *arguments: str, check: bool = True) -> GitResult:
+def _git(repo: Path, *arguments: str, check: bool = True,
+         timeout: float | None = None) -> GitResult:
     environment = os.environ.copy()
     environment.update({
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -275,7 +509,11 @@ def _git(repo: Path, *arguments: str, check: bool = True) -> GitResult:
         "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
         "-C", os.fspath(repo), *arguments,
     )
-    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+    try:
+        process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=environment, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise PreflightError(f"git {' '.join(arguments)} timed out") from error
     result = GitResult(tuple(command), process.returncode, process.stdout, process.stderr)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
@@ -519,6 +757,49 @@ def _previous_state(repo: Path, previous: PreviousResult | None, main: str, head
     return result
 
 
+def _merge_queue_record(membership: str, conflicted: bool,
+                        lookup_error: str | None = None) -> dict:
+    queued = membership == QUEUE_QUEUED
+    action = None
+    if conflicted and queued:
+        action = QUEUE_LOCKED_ACTION
+    elif conflicted and membership == QUEUE_UNKNOWN:
+        action = QUEUE_UNKNOWN_ACTION
+    return {
+        "membership": membership,
+        "lookup_error": lookup_error,
+        "branch_locked_by_queue": (
+            queued if membership in (QUEUE_QUEUED, QUEUE_NOT_QUEUED) else None),
+        "dequeue_required_before_push": conflicted and queued,
+        "action": action,
+    }
+
+
+def lookup_merge_queue(api: GitHubApi, base: str) -> MergeQueueLookup:
+    """Read every open PR targeting ``base``; a failure becomes unknown membership."""
+    try:
+        lookup = MergeQueueLookup(api.queue_membership(base))
+    except PreflightError as error:
+        lookup = MergeQueueLookup(None, str(error))
+    return lookup
+
+
+def lookup_pull_merge_queue(api: GitHubApi, number: int) -> MergeQueueLookup:
+    """Read one PR; a failure becomes unknown membership."""
+    try:
+        lookup = MergeQueueLookup(api.pull_queue_membership(number))
+    except PreflightError as error:
+        lookup = MergeQueueLookup(None, str(error))
+    return lookup
+
+
+def apply_merge_queue(report: dict, lookup: MergeQueueLookup, number: int) -> dict:
+    membership = lookup.membership(number, report["head"]["sha"])
+    report["merge_queue"] = _merge_queue_record(
+        membership, not report["merge"]["clean"], lookup.error)
+    return report
+
+
 def analyze(repo: Path, main_revision: str, head_revision: str,
             previous: PreviousResult | None = None, retirement_status: dict | None = None,
             retirement_event: str = "pull_request", retirement_api=None) -> dict:
@@ -644,6 +925,8 @@ def analyze(repo: Path, main_revision: str, head_revision: str,
             "genuine_source_paths": source_conflicts,
         },
         "previous_authoritative_result": previous_state,
+        # Exact git identities cannot show queue state; PR routes fill it in.
+        "merge_queue": _merge_queue_record(QUEUE_NOT_CHECKED, not merge.clean),
         "outcome": {
             "number": outcome_number,
             "kind": outcome_kind,
@@ -684,6 +967,12 @@ def report_markdown(report: dict, title: str | None = None) -> str:
         )
     else:
         lines.append("- No prior authoritative result was available for this exact head.")
+    queue = report["merge_queue"]
+    if queue["membership"] != QUEUE_NOT_CHECKED:
+        lines.append(
+            f"- Merge queue: **{queue['membership']}**" +
+            (f" (lookup failed: {queue['lookup_error']})" if queue["lookup_error"] else "") + "."
+        )
     paths = report["merge"]["path_details"]
     if paths:
         lines.extend(("", "| Conflicting path | Git classification | Retirement ownership |", "|---|---|---|"))
@@ -704,6 +993,8 @@ def report_markdown(report: dict, title: str | None = None) -> str:
     generated = report["candidate_changes"]["generated_or_integration_owned_retirement_paths"]
     if generated and not report["trusted_retirement_integration"]["verified"]:
         lines.extend(("", "Candidate-owned generated paths: " + ", ".join(f"`{path}`" for path in generated) + "."))
+    if queue["action"]:
+        lines.extend(("", "**Merge queue:** " + queue["action"]))
     lines.extend((
         "",
         "**Required response:** " + report["outcome"]["action"],
@@ -737,8 +1028,13 @@ def _event(path: Path) -> dict:
     return value
 
 
-def _fetch_ref(repo: Path, source: str, destination: str) -> str:
-    _git(repo, "fetch", "--no-tags", "--force", "origin", f"+{source}:{destination}")
+def _fetch_ref(repo: Path, source: str, destination: str,
+               deadline: float | None = None) -> str:
+    remaining = deadline - time.monotonic() if deadline is not None else None
+    if remaining is not None and remaining <= 0:
+        raise RefreshBudgetError("merge-conflict refresh time budget exhausted")
+    _git(repo, "fetch", "--no-tags", "--force", "origin", f"+{source}:{destination}",
+         timeout=min(30, remaining) if remaining is not None else None)
     return _commit(repo, destination)
 
 
@@ -771,8 +1067,8 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             raise PreflightError(f"pull-request API returned #{number_before} while resolving #{number}")
         main_ref = "refs/merge-conflict-preflight/main"
         head_ref = f"refs/merge-conflict-preflight/pr-{number}"
-        main = _fetch_ref(repo, f"refs/heads/{base}", main_ref)
-        head = _fetch_ref(repo, f"refs/pull/{number}/head", head_ref)
+        main = _fetch_ref(repo, f"refs/heads/{base}", main_ref, api.deadline)
+        head = _fetch_ref(repo, f"refs/pull/{number}/head", head_ref, api.deadline)
         if head != expected_head:
             continue
         previous = api.previous_status(head, context)
@@ -781,12 +1077,13 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             candidate = analyze(repo, main, head, previous, api.retirement_status(head))
         pull_after = api.pull_request(number)
         _, current_head, current_base = _pull_identity(pull_after)
-        current_main = _fetch_ref(repo, f"refs/heads/{current_base}", main_ref)
+        current_main = _fetch_ref(repo, f"refs/heads/{current_base}", main_ref, api.deadline)
         if current_head == head and current_base == base and current_main == main:
             report = candidate
             break
     if report is None:
         raise PreflightError(f"pull request #{number} or its base moved during {MAX_STABLE_ATTEMPTS} preflight attempts")
+    apply_merge_queue(report, lookup_pull_merge_queue(api, number), number)
     return report, head
 
 
@@ -828,34 +1125,129 @@ def _github_workflow_run_event(repo: Path, api: GitHubApi, event: dict,
     api.publish_status(head, report, context, _target_url())
     return bool(report["outcome"]["blocking"])
 
+
+def _refresh_failure(error: PreflightError, scope: str, stage: str,
+                     number: int | None = None, head_hint: str | None = None) -> dict:
+    details = {
+        "type": "api" if isinstance(error, ApiRequestError) else "preflight",
+        "message": str(error),
+    }
+    if isinstance(error, ApiRequestError):
+        details.update(attempts=error.attempts, retryable=error.retryable,
+                       retry_exhausted=error.retry_exhausted,
+                       systemic=error.systemic)
+    return {
+        "schema": REFRESH_SCHEMA,
+        "authoritative_for_exact_identities": False,
+        "scope": scope,
+        "stage": stage,
+        "pull_request": number,
+        "listed_head_hint_unvalidated": head_hint,
+        "status_publication": (
+            "not_attempted" if isinstance(error, RefreshBudgetError) and stage == "publish" else
+            "unknown" if stage == "publish" else "none"
+        ),
+        "error": details,
+    }
+
+
+def _finish_refresh(refresh: dict, report_dir: Path, summary: Path | None) -> int:
+    refresh["coverage_complete"] = (
+        refresh["inventory_complete"] and not refresh["failed"] and
+        not refresh["not_attempted"])
+    _write_report(refresh, report_dir / "refresh.json", None)
+    if summary is not None:
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        with summary.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"\nRefresh {'complete' if refresh['coverage_complete'] else 'incomplete'}: "
+                f"completed {len(refresh['completed'])}, failed {len(refresh['failed'])}, "
+                f"not attempted {len(refresh['not_attempted']) if refresh['inventory_complete'] else 'unknown'}; "
+                f"{refresh['blocking_count']} PR(s) received a blocking preflight status.\n"
+            )
+            for failure in refresh["failed"]:
+                stream.write(
+                    f"- {failure['scope']} "
+                    f"{failure['pull_request'] if failure['pull_request'] is not None else ''}: "
+                    f"{failure['error']['message']}\n"
+                )
+            if refresh["not_attempted"]:
+                stream.write(f"- Not attempted (listed PR numbers): {refresh['not_attempted']}\n")
+            stream.write("Open-PR conflicts do not make the new main commit itself fail.\n")
+    return 0 if refresh["coverage_complete"] else 2
+
+
 def _github_push_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
-                       summary: Path | None, context: str) -> bool:
+                       summary: Path | None, context: str) -> int:
     repository = event.get("repository")
     default_branch = repository.get("default_branch") if isinstance(repository, dict) else None
     if not isinstance(default_branch, str) or not default_branch:
         default_branch = "main"
-    pulls = api.open_pull_requests(default_branch)
-    blocking_count = 0
+    api.deadline = time.monotonic() + REFRESH_BUDGET_SECONDS
+    refresh = {
+        "schema": REFRESH_SCHEMA,
+        "default_branch": default_branch,
+        "budget_seconds": REFRESH_BUDGET_SECONDS,
+        "inventory_complete": False,
+        "listed_pull_requests": None,
+        "completed": [],
+        "failed": [],
+        "not_attempted": [],
+        "blocking_count": 0,
+    }
+    try:
+        pulls = api.open_pull_requests(default_branch)
+    except PreflightError as error:
+        failure = _refresh_failure(error, "inventory", "list")
+        refresh["failed"].append(failure)
+        _write_report(failure, report_dir / "inventory-error.json", None)
+        return _finish_refresh(refresh, report_dir, summary)
+    refresh["inventory_complete"] = True
+    refresh["listed_pull_requests"] = len(pulls)
     if summary is not None:
         summary.parent.mkdir(parents=True, exist_ok=True)
         with summary.open("a", encoding="utf-8") as stream:
             stream.write(f"## Default-branch conflict refresh for {len(pulls)} open PR(s)\n\n")
-    for pull in pulls:
-        number, _, base = _pull_identity(pull)
-        if base != default_branch:
-            continue
-        report, head = _analyze_stable_pull(repo, api, number, context)
-        output = report_dir / f"pr-{number}-{head}.json"
-        _write_report(report, output, summary, f"PR #{number}")
-        api.publish_status(head, report, context, _target_url())
-        blocking_count += int(report["outcome"]["blocking"])
-    if summary is not None:
-        with summary.open("a", encoding="utf-8") as stream:
-            stream.write(
-                f"\nRefresh completed; {blocking_count} PR(s) received a blocking preflight status. "
-                "Open-PR conflicts do not make the new main commit itself fail.\n"
-            )
-    return False
+    for index, pull in enumerate(pulls):
+        if time.monotonic() >= api.deadline:
+            refresh["not_attempted"] = [
+                item.get("number") if isinstance(item, dict) else None
+                for item in pulls[index:]
+            ]
+            break
+        number = pull.get("number") if isinstance(pull, dict) else None
+        number = number if isinstance(number, int) and number > 0 else None
+        head_hint = pull.get("head") if isinstance(pull, dict) else None
+        head_hint = head_hint.get("sha") if isinstance(head_hint, dict) else None
+        head_hint = head_hint if isinstance(head_hint, str) and HEX_OBJECT.fullmatch(head_hint) else None
+        stage = "resolve"
+        try:
+            resolved_number, _, base = _pull_identity(pull)
+            if resolved_number != number or base != default_branch:
+                raise PreflightError(f"listed pull request #{number} has an invalid/default-branch base")
+            report, head = _analyze_stable_pull(repo, api, number, context)
+            _write_report(report, report_dir / f"pr-{number}-{head}.json", summary,
+                          f"PR #{number}")
+            stage = "publish"
+            api.publish_status(head, report, context, _target_url())
+            refresh["completed"].append({"pull_request": number, "head": head,
+                                         "main": report["main"]["sha"],
+                                         "blocking": report["outcome"]["blocking"]})
+            refresh["blocking_count"] += int(report["outcome"]["blocking"])
+        except PreflightError as error:
+            failure = _refresh_failure(error, "pull_request", stage, number, head_hint)
+            refresh["failed"].append(failure)
+            _write_report(failure, report_dir / (
+                f"pr-{number}-error.json" if number is not None else
+                f"pr-unidentified-{index}-error.json"), None)
+            if (isinstance(error, RefreshBudgetError) or
+                    isinstance(error, ApiRequestError) and error.systemic):
+                refresh["not_attempted"] = [
+                    item.get("number") if isinstance(item, dict) else None
+                    for item in pulls[index + 1:]
+                ]
+                break
+    return _finish_refresh(refresh, report_dir, summary)
 
 
 def _github_merge_group_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
@@ -904,7 +1296,7 @@ def github_event(repo: Path, event_path: Path, repository: str, report_dir: Path
     if event_name == "workflow_run":
         blocking = _github_workflow_run_event(repo, api, event, report_dir, summary, context)
     elif event_name in ("push", "workflow_dispatch"):
-        blocking = _github_push_event(repo, api, event, report_dir, summary, context)
+        return _github_push_event(repo, api, event, report_dir, summary, context)
     elif event_name == "merge_group":
         blocking = _github_merge_group_event(repo, api, event, report_dir, summary, context)
     else:

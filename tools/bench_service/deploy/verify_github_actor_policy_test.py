@@ -37,6 +37,15 @@ class ActorPolicyTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "actors differ"):
                     self.check()
 
+    def test_app_ids_cannot_replace_reviewed_installation_ids(self):
+        self.actual["rules"][0]["parameters"]["allowed_actors"][2:] = [
+            {"id": 1144995, "type": "App"},
+            {"id": 1236702, "type": "App"},
+            {"id": 811515, "type": "App"},
+        ]
+        with self.assertRaisesRegex(ValueError, "actors differ"):
+            self.check()
+
     def test_scope_event_enforcement_and_identity_drift(self):
         for path, value in (("conditions", {"workflow_path": {"include": ["*"], "exclude": []}}),
                             ("enforcement", "disabled"), ("id", 9),

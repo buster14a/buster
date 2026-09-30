@@ -13,7 +13,8 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use thirteen permanent cases and four generated cases, seed 1, a
+On desktop SysV x86-64, the defaults use fourteen successful permanent cases,
+two rejection controls, and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts one executable, not a shell
@@ -61,6 +62,16 @@ execution evidence. The former direct emitter has independently reproduced
 public-list and Darwin named-stack ABI defects, so agreement with it does not
 serve as the oracle for these new public-ABI cases.
 
+The `x64-i128-float` case crosses the compiler boundary in both directions:
+an independently compiled Clang or GCC caller supplies signed/unsigned 128-bit
+integers and f32/f64/f80 values to the Buster subject, checks every conversion
+against its own casts, and checks wide arguments and return values through the
+native ABI. Inputs include the signed minimum, both sides of 2^64, and the
+largest f80 value below 2^128. The three MIR allocators require zero fallback;
+NONE remains the direct reference before its separate cutover. The registered
+driver fixture covers Windows x86-64; this independent native comparison runs
+where System V x87 long double is available.
+
 On ELF AArch64, twenty-two additional relations exchange actual public `va_list`
 objects, rather than only calling variadic functions compiled by the other
 compiler. Independent producers and consumers check the three-pointer/two-offset
@@ -104,8 +115,17 @@ the host compiler links it to the fixed caller/observer translation unit.
 This also accepts saved C cases from `tools/differential_c_harness.py`.
 `--host` and `--reject` cannot be combined. The original subject's directory
 remains on the include path during reduction. `--generated N`, `--seed N`,
-`--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
-trials disables automatic reduction. `--no-verify` exists for testing older
+`--timeout N`, `--reference-timeout N`, and `--minimize N` are validated bounded
+integers; `--reference-timeout` defaults to the value of `--timeout` and applies
+only to the independent compiler and its caller, link, and run processes. The
+candidate matrix keeps `--timeout`, whose default is 10 seconds. Zero reduction
+trials disables automatic reduction. `--reference-samples N` (1–64) is an
+MSVC-only measurement option for one custom source; it records sequential
+`/Od` and `/O2` subject compiles before the independent oracle run. The summary
+prints the sample count, 50th percentile, 90th percentile, and maximum, while
+`processes.tsv` and each sample's `.argv`, `.stdout`, and `.stderr` retain the
+underlying observations. Samples do not add rows to the 432-configuration
+matrix. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
 `--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
 default mode, retaining NONE and its alias as direct controls. It is recorded in
@@ -150,19 +170,40 @@ a Release `ide.exe` built for that target, run:
 ```powershell
 ./build.ps1 test_differential --ide build/Release/ide.exe --cc cl.exe `
   --reference-dialect msvc --source tools/fixtures/msvc_reference_subject.c `
-  --host tools/fixtures/msvc_reference_caller.c --minimize 0 --strict-mir `
+  --host tools/fixtures/msvc_reference_caller.c --minimize 0 --reference-timeout 60 `
+  --reference-samples 12 --strict-mir `
   --out build/differential-msvc
 ```
 
 The runner checks the resolved compiler with the existing `/Bv /EP /TC`
 identity and native-target probe. `VSCMD_ARG_TGT_ARCH` and a working Visual
-Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. The
-preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
+Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. Each
+attempt emits a structured `MSVC_REFERENCE_PREFLIGHT` record with the resolved
+executable, exact argv, elapsed time, spawn and wait outcomes, native status,
+target, parsed version, and bounded stdout/stderr blocks. The shared compiler
+query owns a bounded process group, drains all child output while retaining at
+most 4 KiB per stream, and records observed, captured, and dropped byte counts.
+Capture or process-tree cleanup failures are classified as wait failures.
+
+Failures are classified as executable missing, spawn failure, timeout, wait
+failure, signal, nonzero exit, missing or mismatched identity, or missing or
+mismatched target. Only a timeout or spawn failure receives at most one bounded
+retry before any differential output is claimed. Wait, capture, process-tree
+cleanup, compiler, identity, and target failures are never retried. The 30-second identity
+preflight is independent of `--reference-timeout`, which governs later
+reference compilation, linking, and execution. A final
+`MSVC_REFERENCE_PREFLIGHT_RESULT` records whether a second attempt recovered.
+
+The preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
 built-in or generated suites, `--sanitize-oracle`, and any nonzero reduction
-budget **before** creating the output directory. The default reduction budget
-is 64, so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan equivalent
-to the runner's sanitized reduction contract. Required Clang/GCC corpus and
-sanitizer runs remain separate, unchanged obligations.
+budget **before** creating the output directory. Output-directory refusal is
+reported separately and only after both compiler executables pass preflight, so
+a tool failure cannot be mislabeled as stale evidence. A structured
+`DIFFERENTIAL_OUTPUT_CLAIM` record distinguishes created, already-existing,
+create-error, and not-attempted outcomes. The default reduction budget is 64,
+so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan
+equivalent to the runner's sanitized reduction contract. Required Clang/GCC
+corpus and sanitizer runs remain separate, unchanged obligations.
 
 Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
 extensions, compiler builtins, signed-overflow-dependent behavior and
@@ -187,11 +228,21 @@ The manifest records the resolved executable and its hash, MSVC version and
 target, dialect, capabilities and environment policy; phase `.argv` files
 record exact NUL-delimited arguments. Child stdout/stderr/status and stable
 artifact hashes use the same evidence checks as the default dialect.
+The GitHub Windows AArch64 CI step uses a 60-second deadline for the independent
+MSVC references and their caller, link, and run processes. Buster candidate
+processes keep the 10-second default. On AArch64, 12 extra `/Od` and 12 extra
+`/O2` subject compiles report runner timings. A forced one-second timeout
+self-control checks the timeout observation path on that runner.
 
 ## Observations and independent controls
 
 The two reference executions compile the same subject with the host compiler
-at O0 and O2. The default dialect preserves `-fwrapv`,
+at O0 and O2. A failed oracle now reports its phase and cause, such as
+`host-o0-compile-timeout` or `host-o0-compile-spawn-failure`, together with the
+case evidence directory and `processes.tsv` path. The matching phase names the
+exact `.argv`, `.stdout`, and `.stderr` files. Completed O0/O2 disagreement is
+reported separately as `host-o0-o2-observations-disagree`. The default dialect
+preserves `-fwrapv`,
 `-fno-strict-aliasing`, and `-funsigned-char` for subjects and callers. The
 MSVC subset uses `/J` and sources that do not require the first two flags.
 The references must agree and terminate normally before they can be an

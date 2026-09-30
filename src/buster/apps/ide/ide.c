@@ -59,15 +59,21 @@
 
 #if BUSTER_UNITY_BUILD
 #if BUSTER_INCLUDE_TESTS
-// Keep the intrinsic vocabulary outside the optnone region used for test
-// bodies; otherwise Clang can make production SIMD intrinsics uninlinable.
+// Test bodies compile optnone to bound the unity compile's memory (#781).
+// `#pragma clang optimize off` marks only the functions *defined* inside its
+// region. The `#pragma clang attribute` form it replaces marked every
+// function a test source merely *declared* there too, so the production
+// functions that test headers redeclare ran at -O0 in the trusted Release
+// `ide` (#1376). A production header that defines functions must still be
+// included before the region, as simd.h's fallbacks are here;
+// `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute push (__attribute__((optnone)), apply_to=function)
+#pragma clang optimize off
 #endif
 #include <buster/tests/test.c>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute pop
+#pragma clang optimize on
 #endif
 #endif
 #include <buster/lib/byte_writer.c>
@@ -146,6 +152,10 @@ struct CompilerProgram
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
     String8 selection_benchmark_path;
+#if BUSTER_INCLUDE_TESTS
+    String8 coff_relocation_fixture_path;
+    String8 test_module_selection;
+#endif
     CompilerCommand command;
 };
 
@@ -156,7 +166,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
-                    "  ide test [--verbose=0|1] [--ci=0|1]\n"
+                    "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
@@ -197,15 +207,59 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
-        for (u64 index = 2; index < arguments.length; index += 1)
+        ProcessResult result = PROCESS_RESULT_SUCCESS;
+        for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {
+            String8 argument = arguments.pointer[index];
+#if BUSTER_INCLUDE_TESTS
+            if (compiler_state.command == COMPILER_COMMAND_TEST && string_starts_with_sequence(argument, S8("--module=")))
+            {
+                if (compiler_state.test_module_selection.length)
+                {
+                    string_print(S8("test: --module may only be specified once\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    compiler_state.test_module_selection = string_slice(argument, S8("--module=").length, argument.length);
+                    if (!compiler_state.test_module_selection.length)
+                    {
+                        string_print(S8("test: expected a module name after --module=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!buster_test_module_selection_check(compiler_state.test_module_selection))
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+            }
+            else if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
+            {
+                if (compiler_state.coff_relocation_fixture_path.length)
+                {
+                    string_print(S8("test: --coff-relocation-fixture may only be specified once\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    compiler_state.coff_relocation_fixture_path =
+                        string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
+                    if (!compiler_state.coff_relocation_fixture_path.length)
+                    {
+                        string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+            }
+            else
+#endif
             if (!compiler_process_common_argument(index))
             {
-                string_print(S8("test: unsupported option: {S8}\n"), arguments.pointer[index]);
-                return PROCESS_RESULT_FAILED;
+                string_print(S8("test: unsupported option: {S8}\n"), argument);
+                result = PROCESS_RESULT_FAILED;
             }
         }
-        return PROCESS_RESULT_SUCCESS;
+        return result;
     }
     if (string_equal(command, S8("bench-select")))
     {
@@ -298,7 +352,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
         if (arena)
         {
-            UnitTestArguments arguments = {arena, &default_show};
+            UnitTestArguments arguments = {
+                .arena = arena,
+                .show = &default_show,
+#if BUSTER_INCLUDE_TESTS
+                .coff_relocation_fixture_path = compiler_state.coff_relocation_fixture_path,
+                .module_selection = compiler_state.test_module_selection,
+#endif
+            };
 
             ThreadContext* application_context = thread_context_selected();
             ThreadContext* test_context = thread_context_allocate();
@@ -791,9 +852,8 @@ BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSour
 // throughput series that STEP_INSTRUCTIONS alone cannot express (see
 // `self_host_compare_action` in build.c).
 //
-// A whole file rather than another stdout line, because capturing the
-// compiler's stdout would buffer the diagnostics that currently stream as the
-// compile runs, and losing those on a failing build costs more than this file.
+// A whole file rather than another stdout line lets a build driver read these
+// measurements without capturing the compiler's primary output.
 //
 // Keys are `<group>.<CSourceMetrics field name>`, so the format is the struct
 // and readers can key off exactly the fields they need. Only ever add keys:
@@ -862,7 +922,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
-    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 2);
 #define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
     BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
 #undef BUSTER_QUALITY_WRITE_FIELD
@@ -905,6 +965,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_census_stage(CodegenFallbackReason reason)
     return stage;
 }
 
+BUSTER_GLOBAL_LOCAL void compiler_print_diagnostic(String8 format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, arguments, STRING_FORMAT_VA_GP_SLOTS(2));
+    va_end(arguments);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -919,11 +987,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
-        string_print(S8("{S8}"), compile.warning);
+        compiler_print_diagnostic(S8("{S8}"), compile.warning);
     }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        string_print(S8("cc: error: {S8}\n"), compile.diagnostic);
+        compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
     else if (!invocation.output_path.length)
@@ -968,7 +1036,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (invocation.source_metrics_path.length &&
             !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
         {
-            string_print(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
+            compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;
         }
     }
@@ -979,6 +1047,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        CTypeLayoutStatistics layout = compile.type_layout;
+        string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
+                        "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
+                     layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
+                     layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
         if (invocation.fast_passes)
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
@@ -1025,6 +1098,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("CODEGEN_ENCODER exact_attempts={u64} exact_successes={u64} exact_failures={u64}\n"),
                      compile.codegen_statistics.exact_attempts, compile.codegen_statistics.exact_successes, compile.codegen_statistics.exact_failures);
         string_print(S8("CODEGEN_MIR mutable_virtual_registers={u64}\n"), compile.codegen_statistics.mutable_virtual_register_count);
+        string_print(S8("CODEGEN_EMIT machine_code_in_place={u64} machine_code_copied={u64}\n"),
+                     compile.codegen_statistics.machine_code_bytes_in_place, compile.codegen_statistics.machine_code_bytes_copied);
+        if (compile.object_write_statistics.output_bytes)
+        {
+            ObjectWriteStatistics written = compile.object_write_statistics;
+            string_print(S8("OBJECT_WRITE format={S8} section_visits={u64} symbol_visits={u64} relocation_visits={u64} image_reserved={u64} "
+                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} scratch={u64} retained={u64} "
+                            "output={u64}\n"),
+                         object_format_name(object_format_for_target(invocation.target)), written.section_visits, written.symbol_visits,
+                         written.relocation_visits, written.image_bytes_reserved, written.image_bytes_stored, written.image_bytes_zeroed,
+                         written.image_bytes_patched, written.payload_bytes_copied, written.scratch_bytes, written.retained_bytes,
+                         written.output_bytes);
+        }
         for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
         {
             if (compile.codegen_statistics.fallback_reason_counts[reason])
@@ -1093,10 +1179,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
         if (valid)
         {
 #if BUSTER_WINDOWS
+            HANDLE probe = (HANDLE)(uintptr_t)parsed.value;
             DWORD flags = 0;
             SetLastError(ERROR_SUCCESS);
-            BOOL present = GetHandleInformation((HANDLE)(uintptr_t)parsed.value, &flags);
-            success = !present && GetLastError() == ERROR_INVALID_HANDLE;
+            BOOL present = GetHandleInformation(probe, &flags);
+            if (!present)
+            {
+                success = GetLastError() == ERROR_INVALID_HANDLE;
+            }
+            else
+            {
+                // Handle values are per process: this process (for example its
+                // sanitizer runtime) may own an unrelated handle with the same
+                // value. Fail only when it names the parent's event object.
+                String8 name = os_get_environment_variable(S8("BUSTER_OS_SPAWN_PROBE_NAME"));
+                typedef BOOL(WINAPI * CompareObjectHandlesProc)(HANDLE, HANDLE);
+                HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
+                CompareObjectHandlesProc compare_object_handles =
+                    kernelbase ? (CompareObjectHandlesProc)(void (*)(void))GetProcAddress(kernelbase, "CompareObjectHandles") : 0;
+                if (name.length && compare_object_handles)
+                {
+                    String16 name16 = string16_from_string8(program_state->arena, name, true);
+                    HANDLE named = OpenEventW(SYNCHRONIZE, FALSE, (LPCWSTR)name16.pointer);
+                    if (named)
+                    {
+                        success = !compare_object_handles(probe, named);
+                        CloseHandle(named);
+                    }
+                }
+            }
 #else
             errno = 0;
             success = fcntl((int)parsed.value, F_GETFD) < 0 && errno == EBADF;

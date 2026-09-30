@@ -24,6 +24,60 @@ BENCHMARK_RULESET = ROOT / ".github" / "rulesets" / "benchmark-main.json"
 MAIN_QUEUE_RULESET = ROOT / ".github" / "main-merge-queue.ruleset.json"
 ACTOR_POLICY = ROOT / ".github" / "benchmark-actions-policy.json"
 MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
+ADMISSION_GUIDE = SERVICE / "deploy" / "GITHUB_ADMISSION.md"
+OPERATOR_PACKET = SERVICE / "deploy" / "ISSUE_880_OPERATOR_PACKET.md"
+
+# Cheap context checks shared by both jobs. The authorize job then proves the
+# same identity, by login and numeric ID, from GitHub's record of the attempt.
+MAINTAINER_TERMS = (
+    "github.ref == 'refs/heads/main'",
+    "vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true'",
+    "github.event_name == 'workflow_dispatch'",
+    "github.actor == 'davidgmbb'",
+    "github.actor_id == '39247043'",
+    "github.triggering_actor == 'davidgmbb'",
+)
+# Re-running failed or single jobs reuses earlier successful job outputs, so
+# submission is bound to an authorization produced in this same attempt.
+ATTEMPT_BINDING = "needs.authorize.outputs.attempt == format('{0}', github.run_attempt)"
+AUTHORIZE_IF = "    if: ${{ " + " && ".join(MAINTAINER_TERMS) + " }}"
+SUBMIT_IF = "    if: ${{ " + " && ".join((*MAINTAINER_TERMS, ATTEMPT_BINDING)) + " }}"
+AUTHORIZE_LINES = (
+    AUTHORIZE_IF,
+    "    runs-on: ubuntu-24.04",
+    "    outputs:",
+    "      attempt: ${{ steps.verify.outputs.attempt }}",
+    "        id: verify",
+    "          GH_TOKEN: ${{ github.token }}",
+    "          BQ_REPOSITORY: ${{ github.repository }}",
+    "          BQ_RUN_ID: ${{ github.run_id }}",
+    "          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}",
+    "          [[ \"$BQ_REPOSITORY\" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]",
+    "          [[ \"$BQ_RUN_ID\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"$BQ_RUN_ATTEMPT\" =~ ^[1-9][0-9]*$ ]]",
+    "          printf 'Authorization: Bearer %s\\n' \"$GH_TOKEN\" |",
+    "            curl --fail --silent --show-error --proto '=https' --max-time 30 --retry 3 \\",
+    "              \"https://api.github.com/repos/$BQ_REPOSITORY/actions/runs/"
+    "$BQ_RUN_ID/attempts/$BQ_RUN_ATTEMPT\"",
+    "          maintainer = {\"login\": \"davidgmbb\", \"id\": 39247043}",
+    "              (\"run id\", type(run.get(\"id\")) is int and run.get(\"id\") == run_id),",
+    "              (\"event\", run.get(\"event\") == \"workflow_dispatch\"),",
+    "              (\"head branch\", run.get(\"head_branch\") == \"main\"),",
+    "              (\"actor\", identity(\"actor\") == maintainer),",
+    "              (\"triggering actor\", identity(\"triggering_actor\") == maintainer),",
+    "              (\"run attempt\", type(run.get(\"run_attempt\")) is int and",
+    "               run.get(\"run_attempt\") == run_attempt),",
+    "              sys.exit(\"BENCH_DISPATCH_UNAUTHORIZED \" + \", \".join(failures))",
+)
+AUTHORIZE_OUTPUT = "          printf 'attempt=%s\\n' \"$BQ_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\""
+SUBMIT_LINES = (
+    "    needs: authorize",
+    SUBMIT_IF,
+    "    environment: benchmark-9700x",
+    "    runs-on:",
+    "      group: buster-9700x-service-dispatch",
+    "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
+)
 
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
@@ -60,7 +114,20 @@ DOCUMENTATION_REQUIREMENTS = {
         "The retired audit workflow must not be restored",
         "BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true",
     ),
+    ADMISSION_GUIDE: (
+        "### Dispatch gate",
+        "### Settings transition",
+        "must use **Re-run all jobs**",
+    ),
+    OPERATOR_PACKET: (
+        "**Step 1:**",
+        "**Step 2:**",
+    ),
 }
+
+# The superseded contract required davidgmbb's approval with self-review
+# prevention, which blocked the maintainer's own dispatches.
+SUPERSEDED_CONTRACT = ("self-review", "prevent_self_review", "pending environment")
 
 
 def main() -> int:
@@ -78,6 +145,14 @@ def main() -> int:
         for marker in markers:
             if marker not in text:
                 errors.append(f"{path.relative_to(ROOT)} is missing policy marker: {marker}")
+
+    for path in (ADMISSION_GUIDE, OPERATOR_PACKET, BENCHMARKING, DEPLOYMENT):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            for phrase in SUPERSEDED_CONTRACT:
+                if phrase in text:
+                    errors.append(
+                        f"{path.relative_to(ROOT)} restates the manual-approval contract: {phrase}")
 
     if BENCHMARKING.is_file():
         text = BENCHMARKING.read_text(encoding="utf-8")
@@ -134,9 +209,9 @@ def main() -> int:
             actors = actor_policy["rules"][0]["parameters"]["allowed_actors"]
             if actors != [{"id": 5, "type": "RepositoryRole"},
                           {"id": 39247043, "type": "User"},
-                          {"id": 1144995, "type": "App"},
-                          {"id": 1236702, "type": "App"},
-                          {"id": 811515, "type": "App"}]:
+                          {"id": 158946652, "type": "IntegrationInstallation"},
+                          {"id": 159756060, "type": "IntegrationInstallation"},
+                          {"id": 161964061, "type": "IntegrationInstallation"}]:
                 errors.append("benchmark requester allowlist differs")
         else:
             errors.append("missing reviewed benchmark Actions requester policy")
@@ -220,13 +295,48 @@ def main() -> int:
         return report(errors)
 
     dispatch = DISPATCH.read_text(encoding="utf-8")
+    jobs = job_blocks(dispatch)
+    if list(jobs) != ["authorize", "submit"]:
+        errors.append(f"dispatch workflow jobs must be authorize then submit: {list(jobs)}")
+    authorize = jobs.get("authorize", [])
+    submit = jobs.get("submit", [])
+
     permission_declarations = [
-        line.strip()
+        line.rstrip()
         for line in dispatch.splitlines()
         if line.lstrip().startswith("permissions:")
     ]
-    if permission_declarations != ["permissions: {}"]:
-        errors.append("dispatch workflow must grant no GITHUB_TOKEN permissions")
+    if permission_declarations != ["permissions: {}", "    permissions:"]:
+        errors.append("dispatch workflow must grant no GITHUB_TOKEN permissions beyond authorize")
+    authorize_permissions = ("    permissions:", "      actions: read", "    timeout-minutes: 5")
+    if not contains_block(authorize, authorize_permissions):
+        errors.append("authorize job must be granted exactly actions: read")
+
+    for line in AUTHORIZE_LINES:
+        if line not in authorize:
+            errors.append(f"authorize job is missing exact line: {line.strip()}")
+    scripts = run_scripts(authorize)
+    if len(scripts) != 1 or not scripts[0] or scripts[0][-1] != AUTHORIZE_OUTPUT:
+        errors.append("authorize job must emit its attempt only after every verification passes")
+    elif sum("GITHUB_OUTPUT" in line for line in scripts[0]) != 1:
+        errors.append("authorize job must write exactly one output")
+    for marker in ("environment:", "buster-zen5", "ryzen-9700x", "self-hosted", "inputs."):
+        if any(marker in line for line in authorize):
+            errors.append(f"authorize job must not use: {marker}")
+
+    for line in SUBMIT_LINES:
+        if line not in submit:
+            errors.append(f"submit job is missing exact line: {line.strip()}")
+    submit_if = [line for line in submit if line.startswith("    if:")]
+    for term in (*MAINTAINER_TERMS, ATTEMPT_BINDING):
+        if len(submit_if) != 1 or term not in submit_if[0]:
+            errors.append(f"submit job condition is missing: {term}")
+    for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:"):
+        if any(marker in line for line in submit):
+            errors.append(f"submit job must not use: {marker}")
+
+    for number, line in expression_lines_in_scripts(dispatch):
+        errors.append(f"line {number} interpolates an expression inside a run script")
 
     workflows = sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")))
     benchmark_users = [
@@ -265,8 +375,9 @@ def main() -> int:
         "push:",
         " git ",
         " ssh ",
-        "curl ",
         "wget ",
+        "uses:",
+        "secrets.",
         "./build",
         "cmake ",
         "ninja ",
@@ -274,6 +385,10 @@ def main() -> int:
     for marker in forbidden:
         if marker in dispatch:
             errors.append(f"dispatch workflow contains forbidden execution path: {marker}")
+    curl_lines = [line for line in dispatch.splitlines() if "curl " in line]
+    if len(curl_lines) != 1 or curl_lines[0] not in authorize or \
+            sum("https://" in line for line in dispatch.splitlines()) != 1:
+        errors.append("only authorize may fetch, once, from its fixed run-attempt API URL")
 
     input_line = re.compile(r"^\s+BQ_(IDEMPOTENCY_KEY|BASE_COMMIT|CANDIDATE_COMMIT): \$\{\{ inputs\.")
     for number, line in enumerate(dispatch.splitlines(), 1):
@@ -296,6 +411,66 @@ def main() -> int:
         errors.append("submission must use exactly one literal installed-gateway command")
 
     return report(errors)
+
+
+def job_blocks(workflow: str) -> dict[str, list[str]]:
+    """Map each top-level job to its lines, excluding comments between jobs."""
+    lines = workflow.splitlines()
+    start = lines.index("jobs:") + 1 if "jobs:" in lines else len(lines)
+    jobs: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in lines[start:]:
+        header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if header:
+            current = jobs.setdefault(header.group(1), [])
+        elif line.strip() and not line.startswith("   "):
+            # A comment between jobs or a later top-level key ends the job.
+            current = None
+        elif current is not None:
+            current.append(line)
+    return jobs
+
+
+def contains_block(lines: list[str], block: tuple[str, ...]) -> bool:
+    return any(tuple(lines[index:index + len(block)]) == block for index in range(len(lines)))
+
+
+def run_scripts(lines: list[str]) -> list[list[str]]:
+    """Return the non-empty lines of every literal `run: |` script."""
+    scripts: list[list[str]] = []
+    indent = None
+    for line in lines:
+        if indent is not None:
+            if not line.strip() or len(line) - len(line.lstrip()) > indent:
+                if line.strip():
+                    scripts[-1].append(line)
+                continue
+            indent = None
+        match = re.fullmatch(r"( *)(?:- )?run: \|", line)
+        if match:
+            indent = len(match.group(1))
+            scripts.append([])
+    return scripts
+
+
+def expression_lines_in_scripts(workflow: str) -> list[tuple[int, str]]:
+    """Find `${{ }}` inside run scripts, including a one-line `run:` value."""
+    found: list[tuple[int, str]] = []
+    indent = None
+    for number, line in enumerate(workflow.splitlines(), 1):
+        if indent is not None:
+            if not line.strip() or len(line) - len(line.lstrip()) > indent:
+                if "${{" in line:
+                    found.append((number, line))
+                continue
+            indent = None
+        match = re.fullmatch(r"( *)(?:- )?run:(.*)", line)
+        if match:
+            if match.group(2).strip() in ("|", ">", "|-", ">-", "|+", ">+", ""):
+                indent = len(match.group(1))
+            elif "${{" in match.group(2):
+                found.append((number, line))
+    return found
 
 
 def report(errors: list[str]) -> int:
