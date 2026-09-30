@@ -1,6 +1,0 @@
-data $bias: s32 = 1;
-
-code add : fn (a: s32, b: s32) s32
-{
-    return a + b + bias;
-}

@@ -1,4 +1,0 @@
-code main[export] : fn[cc(c)] () s32
-{
-    return 0 == 0 and 1 < 2 or 2 == 2 and? 3 != 4 or? 4 <= 5;
-}

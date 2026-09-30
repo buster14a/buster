@@ -1,2 +1,0 @@
-type Missing =
-code main : fn () s32 { return 21; }

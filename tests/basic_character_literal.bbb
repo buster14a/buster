@@ -1,5 +1,0 @@
-code main[export] : fn[cc(c)] () s32
-{
-    data character = 'a';
-    return @cast(character);
-}

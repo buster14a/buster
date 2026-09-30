@@ -1,1 +1,0 @@
-#define SECOND_FEATURE_HEADER 1
