@@ -426,6 +426,64 @@ struct CIrTypeContext
     u64 literal_limits[C_TYPE_COUNT];
 };
 
+BUSTER_C_INTERNAL String8 c_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    if (!type)
+    {
+        return S8("unresolved type");
+    }
+    if (type->name.length)
+    {
+        return type->name;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_VOID:
+        return S8("void");
+    case IR_TYPE_BOOLEAN:
+        return S8("boolean");
+    case IR_TYPE_INTEGER:
+    {
+        return type->is_signed ? string_format(arena, S8("{u32}-bit signed integer"), type->bit_width)
+                               : string_format(arena, S8("{u32}-bit unsigned integer"), type->bit_width);
+    }
+    case IR_TYPE_FLOAT:
+    {
+        return type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? S8("bfloat16") : string_format(arena, S8("{u32}-bit floating-point"), type->bit_width);
+    }
+    case IR_TYPE_VA_LIST:
+        return S8("variadic argument list");
+    case IR_TYPE_POINTER:
+        return S8("pointer");
+    case IR_TYPE_SLICE:
+        return S8("slice");
+    case IR_TYPE_ARRAY:
+        return string_format(arena, S8("{u64}-element array"), type->element_count);
+    case IR_TYPE_VECTOR:
+        return string_format(arena, S8("{u64}-element vector"), type->element_count);
+    case IR_TYPE_FUNCTION:
+        return S8("function");
+    case IR_TYPE_RANGE:
+        return S8("range");
+    case IR_TYPE_STRUCT:
+        return S8("structure");
+    case IR_TYPE_UNION:
+        return S8("union");
+    case IR_TYPE_ENUM:
+        return S8("enumeration");
+    case IR_TYPE_COUNT:
+        break;
+    }
+    return S8("unknown type");
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    return c_ir_diagnostic_type_name(arena, type);
+}
+#endif
+
 BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
 {
     switch (kind)
@@ -5904,7 +5962,9 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                     // dead block. Counting it would keep a merge of every
                     // variable read after that label -- and of everything
                     // downstream -- alive. With no runnable edge carrying a
-                    // value, only the dead ones decide, as they always did.
+                    // value, only the dead ones decide, as they always did:
+                    // every dead root must agree, so the first mismatch is
+                    // final and a later repeat cannot restore triviality.
                     u32 same = UINT32_MAX;
                     bool trivial = true;
                     u32 dead_same = UINT32_MAX;
@@ -5921,7 +5981,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         }
                         else if (value != parameter->value.value)
                         {
-                            dead_trivial = dead_same == UINT32_MAX || value == dead_same;
+                            dead_trivial = dead_trivial && (dead_same == UINT32_MAX || value == dead_same);
                             dead_same = value;
                         }
                     }
@@ -7976,8 +8036,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     if (operation == IR_CONVERSION_COUNT)
     {
-        builder->failure_message = string_format(builder->arena, S8("cannot convert IR type {u32} (kind {u32}) to IR type {u32} (kind {u32})"),
-                                                 source_type.value, (u32)source_value->kind, target_type.value, (u32)target_value->kind);
+        builder->failure_message =
+            string_format(builder->arena, S8("cannot convert type '{S8}' to type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, source_value),
+                          c_ir_diagnostic_type_name(builder->arena, target_value));
         return IR_VALUE_ID_INVALID;
     }
     return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
@@ -24886,7 +24947,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
         IrType* type = ir_type_from_id(&builder->program->types, task.type);
         if (!type)
         {
-            builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize unresolved IR type {u32}"), task.type.value);
+            builder->failure_message = S8("cannot zero-initialize an unresolved type");
             return IR_VALUE_ID_INVALID;
         }
         if (task.kind == C_IR_ZERO_TASK_COMPLETE)
@@ -24945,7 +25006,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
             }
             if (zero.value == IR_ID_UNDERLYING_INVALID)
             {
-                builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize IR type kind {u32}"), (u32)type->kind);
+                builder->failure_message =
+                    string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
                 return zero;
             }
             *task.output = zero;
@@ -32781,10 +32843,9 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
         if (result_type.value == IR_ID_UNDERLYING_INVALID)
         {
-            builder->failure_message = string_format(
-                builder->arena, S8("conditional expression predicted incompatible branch types {u32} (kind {u32}) and {u32} (kind {u32})"),
-                true_type.value, true_type_value ? (u32)true_type_value->kind : UINT32_MAX, false_type.value,
-                false_type_value ? (u32)false_type_value->kind : UINT32_MAX);
+            builder->failure_message =
+                string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
+                              c_ir_diagnostic_type_name(builder->arena, true_type_value), c_ir_diagnostic_type_name(builder->arena, false_type_value));
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -42043,7 +42104,7 @@ bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool*
         .mutation_count = 1,
         .mutation_capacity = 1,
     };
-    c_type_parse_rollback(&machine, &result, checkpoint, 0);
+    c_type_parse_rollback(&machine, &result, &checkpoint, 0);
     bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
     bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 && string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
     bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 && string_equal(grown_types[0].tag, S8("RollbackTag"));
@@ -50212,8 +50273,15 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection = member_rejection;
                         definition_rejection_member = field_index;
                     }
+                    // The semantic parse evaluated the width where the member
+                    // was declared (CMember.bit_width); the IR layout takes
+                    // that number, so a folded sizeof and the object it sizes
+                    // cannot disagree about it. Only a width the parse could
+                    // not fold still reaches the lowering evaluator: a
+                    // temporary bridge that keeps every accepted program
+                    // accepted until the semantic phase owns the rejection.
                     u32 member_bit_width = member->bit_width;
-                    if (member->is_bit_field && member->bit_width_token_count)
+                    if (member->is_bit_field && !member->bit_width_resolved && member->bit_width_token_count)
                     {
                         u64 evaluated_width = 0;
                         if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
@@ -50234,10 +50302,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     // but the request to move the next member to a boundary
                     // that the layout below performs. Accepted, the named
                     // spelling laid out a member occupying no bits that could
-                    // still be assigned and read back. The check sits here,
-                    // where the constant expression has just been folded, so
-                    // `int b : 1 - 1;` is refused with the literal `int b : 0;`
-                    // rather than only the spelling the parse fast path folds.
+                    // still be assigned and read back. The check reads the
+                    // evaluated width the layout uses, so `int b : 1 - 1;` is
+                    // refused with the literal `int b : 0;`.
                     // The layout below still runs, the same way a rejected
                     // alignment specifier still hands back an alignment: the
                     // definition finishes and the program hears about the
@@ -51131,9 +51198,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         if (!type_value || !type_value->layout.resolved)
         {
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                .message = string_format(arena, S8("C IR lowering cannot resolve definition '{S8}' with C type {u32} (kind {u32}) and IR type {u32}"),
-                                         entity->name, entity->type.value,
-                                         entity->type.value < parse.type_count ? (u32)parse.types[entity->type.value].kind : UINT32_MAX, type.value),
+                .message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
+                                         c_ir_diagnostic_type_name(arena, type_value)),
                 .location = entity->location,
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };

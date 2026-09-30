@@ -198,6 +198,18 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+## Plain-char signedness
+
+`-fsigned-char` and `-funsigned-char` override the target's implementation-
+defined plain-`char` signedness; the last option wins. With neither option,
+the target ABI default remains in effect. This policy is carried through
+`TargetDataLayout`, so the C frontend uses it consistently for plain-`char`
+typing and promotions, casts, character constants, `__CHAR_UNSIGNED__`, and
+the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
+and `unsigned char` keep their specified behavior. The options apply to C
+frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
+pipelines reject them because their toolchains do not use Buster's C frontend.
+
 ## C input phase selection
 
 A `.c` input and any path under `-x c` begin as raw C source and run the full
@@ -339,8 +351,12 @@ The object writer already carries that requirement into the section metadata
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
-`lib`/`usr/lib` roots, multiarch first — and rejects a file whose ELF machine
+`lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
+cross-libc root `/usr/<triple>/lib` — and rejects a file whose ELF machine
 disagrees with the target, so a cross link never reads the host's own libc.
+A cross link that finds no target libc cannot tell a missing symbol from a
+libc import and keeps every strong undefined reference as an import (GitHub
+#1729).
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 

@@ -333,6 +333,64 @@ class ResultInputTests(unittest.TestCase):
                 self.root.rmdir()
                 moved.rename(self.root)
 
+    def test_unrelated_sibling_directory_churn_in_ancestor_is_accepted(self):
+        # Each case moves the parent's link count by one; a paired mkdir and
+        # rmdir would cancel out and hide the regression.
+        for create in (True, False):
+            with self.subTest(create=create):
+                sibling = self.root.with_name(self.root.name + "-sibling")
+                if not create:
+                    sibling.mkdir()
+
+                def churn_parent(identity, _path):
+                    if identity == "shard-b":
+                        if create:
+                            sibling.mkdir()
+                        else:
+                            sibling.rmdir()
+
+                try:
+                    receipt = self.verify(after_stream=churn_parent)
+                finally:
+                    if sibling.exists():
+                        sibling.rmdir()
+                self.assertEqual(receipt["records"], 3)
+
+    def test_ancestor_replacement_after_stream_is_rejected(self):
+        parent = self.root.parent / (self.root.name + "-parent")
+        moved = parent.with_name(parent.name + "-old")
+        parent.mkdir()
+        evidence = parent / "evidence"
+        self.root.rename(evidence)
+
+        def replace_parent(identity, _path):
+            if identity == "shard-b":
+                parent.rename(moved)
+                parent.mkdir()
+                (moved / "evidence").rename(evidence)
+
+        try:
+            with self.assertRaisesRegex(result_input.IntegrityError, "directory.*replaced"):
+                self.verify(root=evidence, after_stream=replace_parent)
+        finally:
+            if moved.exists():
+                if (moved / "evidence").exists():
+                    (moved / "evidence").rename(self.root)
+                else:
+                    evidence.rename(self.root)
+                parent.rmdir()
+                moved.rmdir()
+            else:
+                evidence.rename(self.root)
+                parent.rmdir()
+
+    def test_directory_created_inside_evidence_root_is_rejected(self):
+        def add_directory(identity, _path):
+            if identity == "shard-b":
+                (self.root / "added").mkdir()
+
+        self.assert_invalid("directory.*changed", after_stream=add_directory)
+
     def test_nested_ancestor_replacement_after_stream_is_rejected(self):
         nested = self.root / "nested"
         moved = self.root / "nested-old"
