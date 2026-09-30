@@ -21623,10 +21623,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(c_statement_expression_value_temporary);
     }
+    // A named object's own `_Alignas`/`aligned` raises `_Alignof` over it, in
+    // constant expressions too (#1704); every value was compared against clang.
+    // The native-retirement support contract freezes the tracked test inventory,
+    // so this runtime case is written from here instead of a file under tests/.
+    String8 c_alignof_object_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-alignof-object"), S8(".c"));
+    String8 c_alignof_object_source = S8(
+        "static _Alignas(64) int aligned_object;\n"
+        "static int attribute_aligned_object __attribute__((aligned(32)));\n"
+        "extern int redeclared_object;\n"
+        "_Alignas(16) int redeclared_object;\n"
+        "_Static_assert(_Alignof(aligned_object) == 64, \"alignof an _Alignas object\");\n"
+        "_Static_assert(__alignof__(attribute_aligned_object) == 32, \"alignof an aligned object\");\n"
+        "_Static_assert(__alignof__(redeclared_object) == 16, \"alignof a redeclared object\");\n"
+        "static unsigned long folded_alignment = __alignof__(aligned_object);\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    // A declared alignment raises the type's, wherever the answer is read.\n"
+        "    _Alignas(128) int aligned_local = 0;\n"
+        "    _Static_assert(_Alignof(aligned_local) == 128, \"alignof an _Alignas local\");\n"
+        "    if (__alignof__(aligned_object) != 64 || _Alignof((aligned_object)) != 64)\n"
+        "    {\n"
+        "        return 1;\n"
+        "    }\n"
+        "    if (__alignof__(attribute_aligned_object) != 32 || __alignof__(redeclared_object) != 16)\n"
+        "    {\n"
+        "        return 2;\n"
+        "    }\n"
+        "    if (_Alignof(aligned_local) != 128 || ((unsigned long)&aligned_local & 127) != 0)\n"
+        "    {\n"
+        "        return 3;\n"
+        "    }\n"
+        "    if (folded_alignment != 64)\n"
+        "    {\n"
+        "        return 4;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n");
+    BUSTER_TEST(arguments, file_write(c_alignof_object_source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_alignof_object_source)));
     // Every fixture here folds a sizeof or _Alignof whose wrong lowering still
     // produces a plausible constant -- an unevaluated operand, an enum constant
     // over an object sizeof, a compound literal, a call-typed array bound, a
-    // function designator, an expression operand under GNU's `__alignof__` --
+    // function designator, an expression operand under GNU's `__alignof__`, an
+    // object's declared alignment --
     // so reading the diagnostic is no evidence and the fixtures run.
     String8 c_runtime_fixture_paths[] = {
         S8("tests/basic_c_sizeof_unevaluated.c"),
@@ -21635,7 +21675,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_sizeof_call_array_bound.c"),
         S8("tests/basic_c_sizeof_function_designator.c"),
         S8("tests/basic_c_alignof_expression.c"),
-        S8("tests/basic_c_alignof_object.c"),
+        c_alignof_object_source_path,
         // The two sbase fixtures belong here for the same reason: a wrong
         // lowering of a self-referential initializer or of `onestr + 1` still
         // produces a program, and only running it reads the pointer.
@@ -21649,7 +21689,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-sizeof-call-array-bound"),
         S8("buster-c-sizeof-function-designator"),
         S8("buster-c-alignof-expression"),
-        S8("buster-c-alignof-object"),
+        S8("buster-c-alignof-object-program"),
         S8("buster-c-sbase-declarations"),
         S8("buster-c-sbase-expressions"),
     };

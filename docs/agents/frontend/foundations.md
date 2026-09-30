@@ -418,7 +418,7 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   mapped are refused rather than guessed at. `tests/basic_c_alignof_expression.c`
   is the fixture, and every value in it was compared against clang. A named
   object's own `_Alignas`/`aligned` then raises that answer, in constant
-  expressions too (`tests/basic_c_alignof_object.c`); see
+  expressions too (`compiler_driver_tests` compiles and runs that case); see
   [`_Alignof` over an object](layout.md#_alignof-over-an-object).
 - **`void` is one byte, and an object of it is still refused.** GNU gives
   `void` a size and an alignment of one so that arithmetic on a `void *` steps
