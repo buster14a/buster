@@ -1,22 +1,68 @@
-name: Issue 1226 baseline
+name: Issue 1226 exact-head regression
 on:
   push:
     branches: [codex/1226-half-baseline]
 permissions:
   contents: read
 jobs:
-  baseline:
+  regression:
     if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
+          fetch-depth: 0
           persist-credentials: false
-      - name: Bootstrap hosted build driver
-        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-      - name: Configure unchanged baseline
-        run: '"$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT'
-      - name: Reproduce baseline fixed point
-        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
+      - name: Verify independent detector and freeze families
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/half-evidence"
+          cp tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"
+          clang -std=c11 -O1 -g -Wall -Wextra -Werror -Wpedantic -fsanitize=address,undefined tests/oracle_half_exact/half_oracle.c -o "$RUNNER_TEMP/half-oracle"
+          "$RUNNER_TEMP/half-oracle" self-test | tee "$RUNNER_TEMP/half-evidence/calibration.log"
+          "$RUNNER_TEMP/half-oracle" emit design "$RUNNER_TEMP/half-evidence/design.c"
+          "$RUNNER_TEMP/half-oracle" emit heldout "$RUNNER_TEMP/half-evidence/heldout.c"
+          sha256sum tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"*.c > "$RUNNER_TEMP/half-evidence/frozen-inputs.sha256"
+      - name: Build exact candidate
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/half-fixed" f8e405732d0759c7af548d62424e182a3e03a6dd
+          cd "$RUNNER_TEMP/half-fixed"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/half-evidence/source-identity.txt"
+          git diff --exit-code
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/half-build"
+          "$RUNNER_TEMP/half-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/half-build" build --config Release -t ide
+          "$RUNNER_TEMP/half-build" source_size --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617 | tee "$RUNNER_TEMP/half-evidence/source-size.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/half-evidence/compiler-binary.sha256"
+      - name: Check frozen integer oracle against reference and repaired Buster
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-evidence"
+          for family in design heldout; do
+            clang -std=gnu11 -O0 -Xclang -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o"
+            clang -std=gnu11 -O1 observer.c "$family.clang.o" -o "$family.clang-observer"
+            "./$family.clang-observer" > "$family.clang.values"
+            "$RUNNER_TEMP/half-oracle" check "$family" "$family.clang.values" > "$family.clang.csv" 2> "$family.clang.summary"
+            cat "$family.clang.summary"
+            "$RUNNER_TEMP/half-fixed/build/Release/ide" cc -target x86_64-linux -march=baseline -fregister-allocator=fast -fno-machine-fallback -fcompile-jobs=1 -c "$family.c" -o "$family.buster.o"
+            clang -std=gnu11 -O1 observer.c "$family.buster.o" -o "$family.buster-observer"
+            "./$family.buster-observer" > "$family.buster.values"
+            "$RUNNER_TEMP/half-oracle" check "$family" "$family.buster.values" > "$family.buster.csv" 2> "$family.buster.summary"
+            cat "$family.buster.summary"
+          done
+      - name: Run registered frontend and driver regressions
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-fixed"
+          build/Release/ide test --module=c_tests,compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/half-evidence/registered-tests.log"
+          git diff --exit-code
+      - name: Retain raw observations
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1226-exact-head-${{ github.run_id }}
+          path: ${{ runner.temp }}/half-evidence
+          retention-days: 7
+          if-no-files-found: error
