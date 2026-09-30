@@ -172,10 +172,15 @@ static void test_unit_campaign_scrub(int cwd, int code)
     static char const* const codes[] = {"code-3-0.o", "code-3-1.o"};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(leaves); ++i) unlinkat(cwd, leaves[i], 0);
     for (unsigned i = 0; code >= 3 && i < BUSTER_ARRAY_LENGTH(codes); ++i) unlinkat(code, codes[i], 0);
+    /* Each stage's retained runtime programs. */
+    static char const* const programs[] = {"program-0-6-0", "program-1-6-0", "program-1-6-1"};
+    for (unsigned i = 0; code >= 3 && i < BUSTER_ARRAY_LENGTH(programs); ++i) unlinkat(code, programs[i], 0);
     /* A failed runtime launch keeps its program's step directory. */
     int listed = fcntl(cwd, F_DUPFD_CLOEXEC, 3);
     DIR* listing = listed >= 0 ? fdopendir(listed) : NULL;
     if (!listing && listed >= 0) close(listed);
+    /* The duplicate shares the directory offset: start from the first entry. */
+    if (listing) rewinddir(listing);
     for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
     {
         int step = !strncmp(entry->d_name, "runtime-", 8) ?
@@ -1114,6 +1119,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     uint64_t deadline = bq_phase_clock() + (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_DEADLINE ? UINT64_C(1500000000) :
                                                                                                UINT64_C(600000000000));
     BqRetirementUnitCampaign driver = {0};
+    /* The phase peer is this process's child, not a launch. */
+    driver.allowed_child = peer;
     CHECK(bq_retirement_unit_campaign_begin(&driver, &phases, cancel[0], deadline, fixture->cwd, fixture->cwd) &&
           phases.sequence == BQ_PHASE_SETTLING);
     FILE* records = tmpfile();
@@ -1697,24 +1704,70 @@ static TpRetirementMeasurementResult test_unit_campaign_runtime_launch(TestUnitC
     return result;
 }
 
+/* A small text file `name` in directory. */
+static int test_text_at(int directory, char const* name)
+{
+    int file = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int ok = file >= 0 && write(file, "extra\n", 6) == 6;
+    if (file >= 0 && close(file) != 0) ok = 0;
+    return ok;
+}
+
+/* The runtime launch of command in directory with identity is refused
+ * before any child. */
+static void test_unit_campaign_runtime_refused(TestUnitCampaign* fixture, TpRetirementMeasuredCommand const* command,
+    TpRetirementExecutable const* executable, int directory, TpProcessProgram const* identity, char const* what)
+{
+    TpRetirementMeasurementResult result = test_unit_campaign_runtime_launch(fixture, command, executable, directory,
+                                                                             identity);
+    if (result.status != TP_RETIREMENT_MEASUREMENT_PLAN_INVALID || result.observed.valid)
+        fprintf(stderr, "unit campaign runtime rule: %s launched (status %d)\n", what, (int)result.status);
+    CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+}
+
+/* A fresh step directory `name` in the fixture's work directory holding one
+ * copy of the fixture child as `leaf` (none when leaf is NULL). */
+static int test_unit_campaign_step(TestUnitCampaign const* fixture, char const* name, char const* leaf)
+{
+    int made = mkdirat(fixture->cwd, name, 0700) == 0;
+    int step = made ? openat(fixture->cwd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (step >= 0 && leaf && !test_unit_campaign_program_file(fixture, step, leaf))
+    {
+        close(step);
+        step = -1;
+    }
+    return step;
+}
+
+/* Removes step directory `name` (its files, then itself). */
+static void test_unit_campaign_step_remove(TestUnitCampaign const* fixture, int step, char const* name)
+{
+    static char const* const leaves[] = {"prog.bin", "other.bin", "link.bin", "extra.txt"};
+    for (unsigned index = 0; step >= 0 && index < BUSTER_ARRAY_LENGTH(leaves); ++index) unlinkat(step, leaves[index], 0);
+    if (step >= 0) close(step);
+    unlinkat(fixture->cwd, name, AT_REMOVEDIR);
+}
+
 /* The runtime shape at the launch boundary: lane B's `./<leaf>` command
- * runs the observed program in its step directory (slot 7) and its output
- * is checked; a different argv[0] (another file, the binary slot, no
- * program), a symbolic link, a replaced (pre-planted) file, a file from
- * another step's directory and a compiler command naming a program are each
- * refused before any child, and a program changed after the launch checked
- * it is refused by the child itself (ESTALE). */
+ * runs the observed program in its step directory (slot 7), which holds
+ * only that program, and its output is checked. Each of these is refused
+ * before any child: another argv[0] (another file, the binary slot, no
+ * `./`, a longer path), no program, a symbolic link carrying its target's
+ * identity, another step's file and directory, a compiler command naming a
+ * program, a replaced (planted) file, a file rewritten in place (same
+ * inode), a second link to the program, a group- or world-writable mode, no
+ * owner execute bit and an extra entry in the step directory. A program
+ * changed after the launch checked it is refused by the child (ESTALE). */
 static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
 {
-    int made[2] = {mkdirat(fixture->cwd, "runtime-rule-a", 0700) == 0, mkdirat(fixture->cwd, "runtime-rule-b", 0700) == 0};
-    int step = made[0] ? openat(fixture->cwd, "runtime-rule-a", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int other = made[1] ? openat(fixture->cwd, "runtime-rule-b", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int step = test_unit_campaign_step(fixture, "runtime-rule-a", "prog.bin");
+    int other = test_unit_campaign_step(fixture, "runtime-rule-b", "prog.bin");
+    int linking = test_unit_campaign_step(fixture, "runtime-rule-l", NULL);
     TpRetirementExecutable executable;
     TpProcessProgram program = {0}, foreign = {0}, linked = {0};
-    int ok = step >= 3 && other >= 3 && tp_retirement_executable_init(&executable, fixture->binary, fixture->binary_sha) &&
-        test_unit_campaign_program_file(fixture, step, "prog.bin") &&
-        test_unit_campaign_program_file(fixture, step, "other.bin") &&
-        test_unit_campaign_program_file(fixture, other, "prog.bin") && symlinkat("prog.bin", step, "link.bin") == 0 &&
+    int ok = step >= 3 && other >= 3 && linking >= 3 &&
+        tp_retirement_executable_init(&executable, fixture->binary, fixture->binary_sha) &&
+        symlinkat("../runtime-rule-a/prog.bin", linking, "link.bin") == 0 &&
         test_unit_campaign_program_identity(step, "prog.bin", &program) &&
         test_unit_campaign_program_identity(other, "prog.bin", &foreign);
     /* The link carries its target's identity: only not following it tells
@@ -1736,45 +1789,63 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
         fprintf(stderr, "unit campaign runtime rule: status %d exit %d error %d\n", (int)result.status,
                 result.process.exit_code, result.process.launch_error);
     CHECK(ok && result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !strcmp(result.output_sha256, fixture->runtime_sha));
-    /* Each refused shape starts no child. */
-    char* const shapes[] = {"./other.bin", "/proc/self/fd/3", "prog.bin", "././prog.bin", "./link.bin"};
+    char* const shapes[] = {"./other.bin", "/proc/self/fd/3", "prog.bin", "././prog.bin"};
     for (unsigned index = 0; ok && index < BUSTER_ARRAY_LENGTH(shapes); ++index)
     {
         argv[0] = shapes[index];
         ok = tp_retirement_command_hash(&command, command_sha);
-        result = test_unit_campaign_runtime_launch(fixture, &command, &executable, step, &program);
-        if (result.status != TP_RETIREMENT_MEASUREMENT_PLAN_INVALID)
-            fprintf(stderr, "unit campaign runtime rule: argv[0] %s launched (status %d)\n", shapes[index],
-                    (int)result.status);
-        CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+        test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, shapes[index]);
     }
-    argv[0] = "./prog.bin";
-    ok = ok && tp_retirement_command_hash(&command, command_sha);
-    /* No program, a link, another step's file (identity and directory) and a
-     * compiler command naming a program. */
     argv[0] = "./link.bin";
     ok = ok && tp_retirement_command_hash(&command, command_sha);
-    result = test_unit_campaign_runtime_launch(fixture, &command, &executable, step, &linked);
-    CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, linking, &linked, "a symbolic link");
     argv[0] = "./prog.bin";
     ok = ok && tp_retirement_command_hash(&command, command_sha);
-    TpProcessProgram const* refused[] = {NULL, &foreign};
-    for (unsigned index = 0; ok && index < BUSTER_ARRAY_LENGTH(refused); ++index)
-    {
-        result = test_unit_campaign_runtime_launch(fixture, &command, &executable, step, refused[index]);
-        CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
-    }
-    result = test_unit_campaign_runtime_launch(fixture, &command, &executable, other, &program);
-    CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, NULL, "no program");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &foreign, "another step's file");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, other, &program, "another step's directory");
     TpRetirementMeasuredCommand compiler = fixture->commands[0][2];
     result = test_unit_campaign_runtime_launch(fixture, &compiler, &executable, step, &program);
     CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
-    /* A program replaced after its compile step (a planted file under the
-     * same name) is not the observed one. */
-    ok = ok && unlinkat(step, "prog.bin", 0) == 0 && test_unit_campaign_program_file(fixture, step, "prog.bin");
-    result = ok ? test_unit_campaign_runtime_launch(fixture, &command, &executable, step, &program) :
-                  (TpRetirementMeasurementResult){0};
-    CHECK(ok && result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+    /* An extra entry beside the program. */
+    ok = ok && test_text_at(step, "extra.txt");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "an extra entry");
+    ok = ok && unlinkat(step, "extra.txt", 0) == 0;
+    /* A second link to the program, its identity taken after linking (so
+     * only the link count differs). */
+    TpProcessProgram relinked = program;
+    ok = ok && linkat(step, "prog.bin", fixture->cwd, "runtime-rule-hard.bin", 0) == 0 &&
+        test_unit_campaign_program_identity(step, "prog.bin", &relinked);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &relinked, "a second link");
+    ok = ok && unlinkat(fixture->cwd, "runtime-rule-hard.bin", 0) == 0;
+    /* Modes: group/world-writable and not owner-executable, each observed
+     * after the change. */
+    static mode_t const modes[] = {0722, 0600};
+    for (unsigned index = 0; ok && index < BUSTER_ARRAY_LENGTH(modes); ++index)
+    {
+        TpProcessProgram moded = program;
+        ok = fchmodat(step, "prog.bin", modes[index], 0) == 0 &&
+            test_unit_campaign_program_identity(step, "prog.bin", &moded);
+        test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &moded, index ? "no owner execute bit" : "a writable mode");
+    }
+    ok = ok && fchmodat(step, "prog.bin", 0700, 0) == 0 && test_unit_campaign_program_identity(step, "prog.bin", &program);
+    /* Rewritten in place after it was observed: the same inode, size and
+     * bytes, a new change time. */
+    int rewrite = ok ? openat(step, "prog.bin", O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
+    unsigned char first = 0;
+    ok = rewrite >= 3 && pread(rewrite, &first, 1, 0) == 1 && pwrite(rewrite, &first, 1, 0) == 1;
+    if (rewrite >= 0) close(rewrite);
+    struct stat rewritten;
+    ok = ok && fstatat(step, "prog.bin", &rewritten, AT_SYMLINK_NOFOLLOW) == 0 && rewritten.st_ino == program.inode &&
+        rewritten.st_size == program.size;
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "a file rewritten in place");
+    /* A program replaced after its placement (a planted file under the same
+     * name) is not the observed one. */
+    ok = ok && test_unit_campaign_program_identity(step, "prog.bin", &program) && unlinkat(step, "prog.bin", 0) == 0 &&
+        test_unit_campaign_program_file(fixture, step, "prog.bin");
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "a replaced file");
     /* The child's own recheck: an identity the parent never compared
      * (straight through tp_process_observe_inputs) is refused in the child. */
     TpProcessProgram stale = program;
@@ -1791,13 +1862,9 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
     CHECK(ruleset >= 3 && process.refused && process.launch_error == ESTALE && !observed.valid);
     if (ruleset >= 0) CHECK(close(ruleset) == 0);
     if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "runtime-rule.log", 0) == 0);
-    static char const* const leaves[] = {"prog.bin", "other.bin", "link.bin"};
-    for (unsigned index = 0; step >= 0 && index < BUSTER_ARRAY_LENGTH(leaves); ++index) unlinkat(step, leaves[index], 0);
-    if (other >= 0) unlinkat(other, "prog.bin", 0);
-    if (step >= 0) CHECK(close(step) == 0);
-    if (other >= 0) CHECK(close(other) == 0);
-    if (made[0]) CHECK(unlinkat(fixture->cwd, "runtime-rule-a", AT_REMOVEDIR) == 0);
-    if (made[1]) CHECK(unlinkat(fixture->cwd, "runtime-rule-b", AT_REMOVEDIR) == 0);
+    test_unit_campaign_step_remove(fixture, step, "runtime-rule-a");
+    test_unit_campaign_step_remove(fixture, other, "runtime-rule-b");
+    test_unit_campaign_step_remove(fixture, linking, "runtime-rule-l");
 }
 
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)

@@ -48,10 +48,14 @@
  * the work directory at 7 and as cwd, a new ruleset per launch built before
  * the fork, and the child enters the sandbox before the timer starts
  * (tp_process_observe_inputs). A runtime launch runs lane B's `./{{output}}`
- * command in a fresh step directory where its row's frozen compile command
- * first reproduced the program untimed, executing that observed file
- * (bq_retirement_unit_campaign_program, TpProcessInputs.program), as lane B
- * runs a row's runtime step after its compile. A launch the sandbox refuses is recorded as
+ * command in a fresh step directory holding only its program: the stage's
+ * first compile of that row and side, verified and retained outside every
+ * sandbox (bq_retirement_unit_campaign_retain), then copied and re-verified
+ * outside the timer (bq_retirement_unit_campaign_program,
+ * TpProcessInputs.program), as lane B runs a row's runtime step after its
+ * compile. After every launch the process must have no child left
+ * (bq_retirement_unit_campaign_alone: a `setsid` escapee is swept and fails
+ * the launch). A launch the sandbox refuses is recorded as
  * REFUSED: a ruleset the kernel cannot build before any child starts, and a
  * child that could not be set up, placed or sandboxed with the errno it
  * reported (launched, launch_error).
@@ -83,7 +87,9 @@
  * BqRetirementUnitCampaign, bq_retirement_unit_campaign_live,
  * bq_retirement_unit_campaign_launchable, bq_retirement_unit_campaign_code_step,
  * bq_retirement_unit_campaign_log_chain, bq_retirement_unit_campaign_retire,
- * bq_retirement_unit_campaign_program (a runtime launch's program step),
+ * bq_retirement_unit_campaign_alone (the per-launch descendant check),
+ * bq_retirement_unit_campaign_retain and bq_retirement_unit_campaign_program
+ * (a runtime launch's program),
  * bq_retirement_unit_campaign_store_planned (lane E's pre-timing store plan),
  * bq_retirement_unit_campaign_result (what lanes E and F consume).
  *
@@ -740,8 +746,9 @@ typedef enum BqRetirementUnitCampaignStop
  * child's measurement status, exit code, signal, timeout and cancellation.
  * The unit cannot see a cgroup OOM kill directly: it shows as SIGKILL, and
  * the supervisor's memory events are the authority. A child that finished
- * but whose code observation, log chaining, log close, scratch retirement or
- * program observation was refused keeps its launch facts too, with `after`
+ * but whose code observation, log chaining, log close, scratch retirement,
+ * program retention or descendant check (a child left behind) was refused
+ * keeps its launch facts too, with `after`
  * naming the refused step (BqRetirementUnitCampaignAfter). The failed launch's log
  * (BQ_RETIREMENT_UNIT_CAMPAIGN_LOG) and scratch outputs are kept in place:
  * log_bytes and log_sha256 are the log's full size and digest (empty when
@@ -754,7 +761,8 @@ typedef enum BqRetirementUnitCampaignAfter
     BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CHAIN,
     BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CLOSE,
     BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_RETIRE,
-    BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_PROGRAM
+    BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_PROGRAM,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS
 } BqRetirementUnitCampaignAfter;
 
 typedef struct BqRetirementUnitCampaignFailure
@@ -859,6 +867,13 @@ typedef struct BqRetirementUnitCampaign
     uint64_t deadline_ns, launches[3];
     unsigned step, code_count, code_capacity, transcript_shards[TP_RETIREMENT_CAMPAIGN_STAGES], metrics_shards[3];
     int cancellation_fd, work_directory, log_directory;
+    /* The untimed step's code directory (service-private, outside every
+     * launch's sandbox), which also keeps each stage's runtime programs. */
+    int code_directory;
+    /* A child of the calling process that is not a launch (a functional
+     * fixture's phase peer), exempt from the per-launch descendant check;
+     * zero in the producer, which has none. */
+    pid_t allowed_child;
 } BqRetirementUnitCampaign;
 
 /* Not cancelled (the SIGTERM self-pipe is not readable and not hung up), the
@@ -1294,21 +1309,42 @@ static inline int bq_retirement_unit_campaign_inputs(BqRetirementUnitCampaign co
     return ruleset >= 3;
 }
 
+/* After every launch, outside the timer: the process has no child left but
+ * `allowed_child`. Each launch kills its own process group, so a descendant
+ * that left it (a `setsid` grandchild) survives, keeping its sandbox's rights
+ * over the work directory; the producer is a child subreaper, so it becomes
+ * this process's child as its parents exit. Any such child is killed and
+ * reaped (tp_process_children_sweep) and the launch fails
+ * (BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS). */
+static inline int bq_retirement_unit_campaign_alone(BqRetirementUnitCampaign const* driver)
+{
+    int alone = tp_process_children(driver->allowed_child, NULL, 0) == 0;
+    if (!alone) tp_process_children_sweep(driver->allowed_child);
+    return alone;
+}
+
 /* A timed runtime launch's program. Lane B runs a row's runtime step in the
  * step directory its compile step just wrote (retirement_row_producer.c,
  * bq_retirement_row_compile: same work directory, same held binary slot and
- * sandbox), and the campaign's compiler launches retire their artifacts, so
- * every runtime launch gets a fresh step directory `runtime-<stage>-<sequence>`
- * in the work directory: its row's frozen compile command for the same
- * variant (the only compiler command whose artifact is the runtime command's
- * `./<leaf>`) runs there untimed on the same held binary, must reproduce the
- * frozen artifact, and the file it wrote is observed (a single-link,
- * owner-executable regular file of this user) for the launch to recheck
- * (TpProcessInputs.program). A label-1 runtime command must also be the
- * gate's sealed runtime command for its side (the A/A second label's is not
- * sealed, like its compiler command). A refusal or failure is recorded with
- * purpose BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM and the step directory
- * kept as evidence. */
+ * sandbox). The #619 schedule runs each stage's runtime campaign after its
+ * compiler campaign, and the campaign's compiler launches retire their
+ * artifacts, so the program comes from the stage's own compiler campaign:
+ * the first successful compile of each runtime row per side
+ * (bq_retirement_unit_campaign_retain) is verified against the gate's
+ * sealed artifact digest by hash and fstat of one descriptor and kept,
+ * read-only, as `program-<stage>-<row>-<side>` in the code directory, which
+ * no launch's sandbox covers. No process is added (M2): the program is a
+ * compile the budget already counts. Before each runtime launch, outside the
+ * timer, the service copies it into a fresh step directory
+ * `runtime-<stage>-<sequence>` in the work directory (O_CREAT | O_EXCL,
+ * mode 0700, fsync), re-verifies the hash from the new descriptor and takes
+ * the launch's identity by fstat of that same descriptor
+ * (bq_retirement_unit_campaign_program); the directory then holds only the
+ * program, which the launch requires. A label-1 runtime command must also be
+ * the gate's sealed runtime command for its side (the A/A second label's is
+ * not sealed, like its compiler command). A refusal or failure is recorded
+ * with purpose BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM and the step
+ * directory kept as evidence. */
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM 2u
 typedef struct BqRetirementUnitCampaignProgram
 {
@@ -1317,83 +1353,125 @@ typedef struct BqRetirementUnitCampaignProgram
     int step;
 } BqRetirementUnitCampaignProgram;
 
+static inline int bq_retirement_unit_campaign_program_name(char name[64], unsigned stage, unsigned row, unsigned side)
+{
+    int length = snprintf(name, 64, "program-%u-%u-%u", stage, row, side);
+    return length > 0 && length < 64;
+}
+
+/* The runtime slot whose command runs `./<artifact>` for variant, or
+ * UINT_MAX; its row is the command's unit. */
+static inline unsigned bq_retirement_unit_campaign_runtime_slot(TpRetirementCampaign const* campaign,
+    TpRetirementMeasuredCommand const* commands, char const* artifact, unsigned variant)
+{
+    unsigned slot = ~0u;
+    for (unsigned dense = 0; artifact && dense < campaign->runtime_count; ++dense)
+    {
+        TpRetirementMeasuredCommand const* runtime =
+            &commands[(size_t)(campaign->groups + dense) * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + variant];
+        char const* argument = runtime->arguments ? runtime->arguments[0] : NULL;
+        if (argument && argument[0] == '.' && argument[1] == '/' && !strcmp(argument + 2, artifact)) slot = dense;
+    }
+    return slot;
+}
+
+/* After a successful compiler launch (and its descendant check): the first
+ * artifact of each runtime row and side in this stage is verified (a
+ * single-link regular file of this user whose SHA-256, read from the same
+ * descriptor fstat identified, is the gate's sealed artifact digest for that
+ * row and side) and moved, read-only, to the code directory; *kept tells the
+ * retirement it is gone from the work directory. */
+static inline int bq_retirement_unit_campaign_retain(BqRetirementUnitCampaign* driver,
+    TpRetirementMeasuredCommand const* commands, TpRetirementMeasuredCommand const* command, unsigned stage,
+    unsigned variant, int* kept)
+{
+    TpRetirementCampaign const* campaign = driver->binding->campaign;
+    BqRetirementCorrectness const* gate = driver->binding->gate;
+    unsigned side = stage && variant;
+    unsigned slot = !command->kind && !command->batch ?
+        bq_retirement_unit_campaign_runtime_slot(campaign, commands, command->artifact, variant) : ~0u;
+    unsigned row = slot != ~0u ?
+        commands[(size_t)(campaign->groups + slot) * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + variant].unit : 0;
+    char name[64];
+    struct stat existing, info, moved;
+    int wanted = slot != ~0u && row < gate->prepared.rows && driver->code_directory >= 3 &&
+        bq_retirement_unit_campaign_program_name(name, stage, row, side) &&
+        fstatat(driver->code_directory, name, &existing, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+    int file = wanted ? openat(driver->work_directory, command->artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char digest[65];
+    uint64_t bytes = 0;
+    int ok = !wanted || (file >= 3 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+        info.st_uid == geteuid() && tp_retirement_file_hash(file, digest, &bytes) && bytes &&
+        !strcmp(digest, gate->facts[row].side[side].artifact_sha256) &&
+        linkat(driver->work_directory, command->artifact, driver->code_directory, name, 0) == 0 &&
+        unlinkat(driver->work_directory, command->artifact, 0) == 0 && fchmod(file, 0500) == 0 &&
+        fstat(file, &info) == 0 && fstatat(driver->code_directory, name, &moved, AT_SYMLINK_NOFOLLOW) == 0 &&
+        moved.st_dev == info.st_dev && moved.st_ino == info.st_ino && moved.st_nlink == 1);
+    if (file >= 0 && close(file) != 0) ok = 0;
+    *kept = wanted && ok;
+    return ok;
+}
+
 static inline int bq_retirement_unit_campaign_program(BqRetirementUnitCampaign* driver,
-    TpRetirementMeasuredCommand const* commands, TpRetirementMeasuredCommand const* runtime, unsigned stage,
-    unsigned variant, uint64_t sequence, BqRetirementUnitCampaignFailure const* at,
-    BqRetirementUnitCampaignProgram* program)
+    TpRetirementMeasuredCommand const* runtime, unsigned stage, unsigned variant, uint64_t sequence,
+    BqRetirementUnitCampaignFailure const* at, BqRetirementUnitCampaignProgram* program)
 {
     BqRetirementCampaignBinding const* binding = driver->binding;
-    TpRetirementCampaign const* campaign = binding->campaign;
     BqRetirementCorrectness const* gate = binding->gate;
     unsigned side = stage && variant;
     char const* argument = runtime->arguments ? runtime->arguments[0] : NULL;
     char const* leaf = argument && argument[0] == '.' && argument[1] == '/' ? argument + 2 : NULL;
-    TpRetirementMeasuredCommand const* compile = NULL;
-    unsigned found = 0;
-    for (unsigned group = 0; leaf && group < campaign->groups; ++group)
-    {
-        TpRetirementMeasuredCommand const* candidate = &commands[(size_t)group * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT +
-                                                                 variant];
-        if (!candidate->kind && !candidate->batch && candidate->artifact && !strcmp(candidate->artifact, leaf))
-        {
-            compile = candidate;
-            found += 1;
-        }
-    }
     int sealed = gate && runtime->unit < gate->prepared.rows &&
         ((!stage && variant) || !strcmp(runtime->command_sha256, gate->trusted_rows[runtime->unit].runtime_command_sha256[side]));
     BqRetirementUnitCampaignFailure coordinates = *at;
     coordinates.purpose = BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM;
+    char name[64];
     int named = snprintf(program->name, sizeof(program->name), "runtime-%u-%llu", stage,
                          (unsigned long long)sequence);
-    int ok = runtime->kind == 1 && leaf && found == 1 && sealed && named > 0 && (size_t)named < sizeof(program->name) &&
+    int ok = runtime->kind == 1 && leaf && tp_retirement_artifact_leaf(leaf) && sealed && named > 0 &&
+        (size_t)named < sizeof(program->name) && driver->code_directory >= 3 &&
+        bq_retirement_unit_campaign_program_name(name, stage, runtime->unit, side) &&
         gate->finished && !gate->failed &&
         !memcmp(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256)) &&
         bq_retirement_campaign_held_matches(binding);
-    if (!ok) bq_retirement_unit_campaign_record(driver, &coordinates);
-    ok = ok && compile->timeout_seconds <= ~0u - runtime->timeout_seconds &&
-        bq_retirement_unit_campaign_launchable(driver, compile->timeout_seconds + runtime->timeout_seconds, &coordinates);
     if (ok && mkdirat(driver->work_directory, program->name, 0700) == 0)
         program->step = openat(driver->work_directory, program->name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    int log = ok && program->step >= 3 ? bq_retirement_unit_campaign_launch_log(driver) : -1;
-    TpProcessInputs inputs = {.ruleset = -1};
-    int sandboxed = log >= 3 && bq_retirement_unit_campaign_inputs(driver, binding->held_executables[side].descriptor,
-                                                                   side, log, program->step, compile, &inputs);
-    if (ok && !sandboxed) bq_retirement_unit_campaign_record(driver, &coordinates);
-    TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
-        .process = {.exit_code = -1}};
-    TpRetirementLaunch launch = {compile, &binding->held_executables[side], &inputs, NULL, program->step,
-        campaign->cpu, TP_RETIREMENT_GROUP_SINGLETON};
+    int source = ok && program->step >= 3 ? openat(driver->code_directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int copy = source >= 3 ? openat(program->step, leaf, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0700) : -1;
+    struct stat kept, info;
+    ok = copy >= 3 && fstat(source, &kept) == 0 && S_ISREG(kept.st_mode) && kept.st_nlink == 1 &&
+        kept.st_uid == geteuid() && !(kept.st_mode & 0222);
+    unsigned char block[65536];
+    ssize_t count = 1;
+    while (ok && count > 0)
+    {
+        count = read(source, block, sizeof(block));
+        ok = count >= 0 && (count == 0 || write(copy, block, (size_t)count) == count);
+    }
     char digest[65];
-    int launched = ok && sandboxed;
-    ok = launched && tp_retirement_launch(&launch, NULL, 0, &result, digest);
-    if (inputs.ruleset >= 0) close(inputs.ruleset);
-    struct stat info;
-    int observed = ok && fstatat(program->step, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
-        info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 0022) && (info.st_mode & S_IXUSR);
-    if (launched && (!ok || !observed))
-        bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, log,
-            ok ? BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_PROGRAM : BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE);
-    ok = ok && observed;
+    uint64_t bytes = 0;
+    ok = ok && fchmod(copy, 0700) == 0 && fsync(copy) == 0 && tp_retirement_file_hash(copy, digest, &bytes) &&
+        bytes && !strcmp(digest, gate->facts[runtime->unit].side[side].artifact_sha256) && fstat(copy, &info) == 0;
     if (ok) program->program = (TpProcessProgram){leaf, info.st_dev, info.st_ino, info.st_size, info.st_ctim};
-    unsigned after = log >= 0 && close(log) != 0 ? BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CLOSE :
-        ok && unlinkat(driver->log_directory, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, 0) != 0 ?
-        BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_RETIRE : BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
-    if (ok && after) bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, -1, after);
-    ok = ok && !after;
+    if (copy >= 0 && close(copy) != 0) ok = 0;
+    if (source >= 0) close(source);
+    ok = ok && fsync(program->step) == 0;
+    if (!ok) bq_retirement_unit_campaign_record(driver, &coordinates);
     return ok;
 }
 
-/* A successful runtime launch's step directory goes: its program, what its
- * compile step wrote beside it (a compile's metrics leaf is not a command
- * field) and anything else its files; a directory left inside fails the
- * retirement. */
+/* A successful runtime launch's step directory goes with every file in it
+ * (its program, and anything the program wrote); a directory left inside
+ * fails the retirement. That is stricter than lane B, whose step directories
+ * are swept by the check runner: here the directory held only the program. */
 static inline int bq_retirement_unit_campaign_program_retire(BqRetirementUnitCampaign const* driver,
     BqRetirementUnitCampaignProgram const* program)
 {
     int listed = program->step >= 3 ? fcntl(program->step, F_DUPFD_CLOEXEC, 3) : -1;
     DIR* listing = listed >= 0 ? fdopendir(listed) : NULL;
     if (!listing && listed >= 0) close(listed);
+    /* The duplicate shares the directory offset: start from the first entry. */
+    if (listing) rewinddir(listing);
     int ok = listing != NULL, found = 0;
     for (struct dirent* entry = ok ? readdir(listing) : NULL; ok && entry; entry = readdir(listing))
     {
@@ -1440,6 +1518,7 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
         driver->untimed_batches = batches;
         driver->untimed_batch_count = count;
         driver->untimed_rows = code->rows;
+        driver->code_directory = code->code_directory;
         driver->budget = review->budget;
         driver->sources[0] = sources[0];
         driver->sources[1] = sources[1];
@@ -1480,7 +1559,9 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
             &inputs, driver->work_directory, &result);
         unsigned after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
         if (inputs.ruleset >= 0) close(inputs.ruleset);
-        if (ok && !bq_retirement_unit_campaign_code_step(driver, code, batch))
+        if (ok && !bq_retirement_unit_campaign_alone(driver))
+            after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS;
+        else if (ok && !bq_retirement_unit_campaign_code_step(driver, code, batch))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE;
         else if (ok && !bq_retirement_unit_campaign_log_chain(driver, log, 0))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CHAIN;
@@ -1679,8 +1760,8 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
          * work directory. */
         BqRetirementUnitCampaignProgram program = {.step = -1};
         if (ok && invocation.kind)
-            ok = bq_retirement_unit_campaign_program(driver, commands, command, stage, invocation.variant,
-                                                     invocation.sequence, &coordinates, &program);
+            ok = bq_retirement_unit_campaign_program(driver, command, stage, invocation.variant, invocation.sequence,
+                                                     &coordinates, &program);
         int work = invocation.kind ? program.step : driver->work_directory;
         int log = ok ? bq_retirement_unit_campaign_launch_log(driver) : -1;
         unsigned side = stage && invocation.variant;
@@ -1695,14 +1776,22 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
         ok = launched && bq_retirement_campaign_run(binding, command, &inputs, work, &result);
         if (inputs.ruleset >= 0) close(inputs.ruleset);
         unsigned after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
-        if (ok && stage && !bq_retirement_unit_campaign_timed_code(driver, samples, &invocation, command))
+        int kept = 0;
+        if (ok && !bq_retirement_unit_campaign_alone(driver))
+            after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS;
+        else if (ok && stage && !bq_retirement_unit_campaign_timed_code(driver, samples, &invocation, command))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE;
+        else if (ok && !bq_retirement_unit_campaign_retain(driver, commands, command, stage, invocation.variant, &kept))
+            after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_PROGRAM;
         else if (ok && !bq_retirement_unit_campaign_log_chain(driver, log, 1 + stage))
             after = BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CHAIN;
+        /* A retained program already left the work directory. */
+        TpRetirementMeasuredCommand retired = command ? *command : (TpRetirementMeasuredCommand){0};
+        if (kept) retired.artifact = NULL;
         if (launched && (!ok || after)) bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, log, after);
         ok = ok && !after;
         after = log >= 0 && close(log) != 0 ? BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CLOSE :
-            ok && !(bq_retirement_unit_campaign_retire(driver, command) &&
+            ok && !(bq_retirement_unit_campaign_retire(driver, &retired) &&
                     (!invocation.kind || bq_retirement_unit_campaign_program_retire(driver, &program))) ?
             BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_RETIRE : BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_NONE;
         if (ok && after) bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, -1, after);

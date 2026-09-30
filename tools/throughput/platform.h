@@ -18,7 +18,7 @@
  * path), so the timer covers one pipe wake-up, the exec and the program, and
  * none of the placement or sandbox entry. A runtime launch
  * (TpProcessInputs.program, lane B's `./{{output}}` shape) instead executes
- * the program its compile step left in slot 7, relative to slot 7, after the
+ * the program the caller placed in slot 7, as "./<leaf>" from that cwd, after the
  * child rechecked that file's identity (tp_process_program_same). Without a
  * ruleset the timer starts before the fork, as before.
  */
@@ -290,6 +290,64 @@ static void tp_cancel_handler(int signal_number)
 }
 
 #ifdef __linux__
+#include <dirent.h>
+/* This process's children through /proc, other than `allowed` (0: none). A
+ * child subreaper's escaped descendants (a `setsid` grandchild of a launch)
+ * are among them once their parents exit; zombies count. Up to capacity pids
+ * go to found. Returns the count, or UINT32_MAX when /proc cannot be read. */
+static inline uint32_t tp_process_children(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    DIR* listing = opendir("/proc");
+    uint32_t count = listing ? 0 : UINT32_MAX;
+    long self = (long)getpid();
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        char path[288], text[512];
+        int length = entry->d_name[0] >= '1' && entry->d_name[0] <= '9' ?
+            snprintf(path, sizeof(path), "/proc/%s/stat", entry->d_name) : -1;
+        int file = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        ssize_t read_bytes = file >= 0 ? read(file, text, sizeof(text) - 1u) : -1;
+        if (file >= 0) close(file);
+        text[read_bytes > 0 ? read_bytes : 0] = 0;
+        /* pid (comm) state ppid ...; comm may hold spaces and parens. */
+        char const* close_paren = read_bytes > 0 ? strrchr(text, ')') : NULL;
+        long parent = close_paren && close_paren[1] == ' ' && close_paren[2] && close_paren[3] == ' ' ?
+            strtol(close_paren + 4, NULL, 10) : 0;
+        pid_t pid = (pid_t)strtol(entry->d_name, NULL, 10);
+        if (parent == self && pid != allowed)
+        {
+            if (count < capacity) found[count] = pid;
+            count += 1;
+        }
+    }
+    if (listing) closedir(listing);
+    return count;
+}
+
+/* Kills and reaps every such child until none remain, for a bounded number
+ * of rounds (each round reaps what it found, so a descendant reparented by a
+ * reaped parent is found in the next). Returns whether none remain. */
+#define TP_PROCESS_SWEEP_ROUNDS 256u
+static inline int tp_process_children_sweep(pid_t allowed)
+{
+    int clean = 0, scanned = 1;
+    for (unsigned round = 0; !clean && scanned && round < TP_PROCESS_SWEEP_ROUNDS; ++round)
+    {
+        pid_t found[64];
+        uint32_t count = tp_process_children(allowed, found, 64u);
+        scanned = count != UINT32_MAX;
+        clean = scanned && count == 0;
+        for (uint32_t index = 0; scanned && index < count && index < 64u; ++index)
+        {
+            kill(found[index], SIGKILL);
+            while (waitpid(found[index], NULL, 0) < 0 && errno == EINTR) { }
+        }
+    }
+    return clean;
+}
+#endif
+
+#ifdef __linux__
 /* /proc/PID/stat field 2 may contain spaces and ')' characters. The final
  * ')' closes comm; fields 3 through 21 precede the unsigned starttime token.
  * Parse a bounded byte slice, never a truncated NUL-terminated prefix. */
@@ -373,8 +431,9 @@ static uint64_t tp_process_monotonic_ns(void)
  * their lifetime. This is process plumbing, not the service sandbox or lease. */
 
 /* A layout launch's program (lane B's runtime shape, `./{{output}}`): the
- * leaf its compile step wrote in the work directory (slot 7) and that file's
- * identity, as the caller observed it after the compile step. */
+ * leaf the caller placed in the work directory (slot 7) and that file's
+ * identity, as the caller observed it by fstat of the descriptor it wrote
+ * and hashed. */
 typedef struct TpProcessProgram
 {
     char const* leaf;
@@ -415,7 +474,9 @@ typedef struct TpProcessInputs
      * args[0] must then be exactly "./" and its leaf, and the child, after
      * entering the sandbox, requires the leaf in slot 7 to be the same
      * regular file (no symbolic link; device, inode, size and change time)
-     * and executes it relative to slot 7 (execveat, AT_SYMLINK_NOFOLLOW). */
+     * and executes "./<leaf>" from its cwd, slot 7 (execveat with AT_FDCWD
+     * and AT_SYMLINK_NOFOLLOW, so AT_EXECFN and the start-up stack are
+     * lane B's execve("./<leaf>")). */
     TpProcessProgram const* program;
 } TpProcessInputs;
 
@@ -631,8 +692,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             if (!layout) sigaction(SIGPIPE, &previous_pipe, NULL);
 #ifdef __linux__
             if (layout && inputs->program)
-                syscall(SYS_execveat, BQ_RETIREMENT_ROW_SLOT_WORK, inputs->program->leaf, args, inputs->environment,
-                        AT_SYMLINK_NOFOLLOW);
+                syscall(SYS_execveat, AT_FDCWD, args[0], args, inputs->environment, AT_SYMLINK_NOFOLLOW);
             else if (layout) execve(args[0], args, inputs->environment);
             else if (inputs)
             {

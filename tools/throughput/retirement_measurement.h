@@ -368,13 +368,34 @@ typedef struct TpRetirementLaunch
     unsigned group_kind;
 } TpRetirementLaunch;
 
+/* Whether `directory` holds exactly one entry, `leaf`. */
+static int tp_retirement_directory_only(int directory, char const* leaf)
+{
+    int listed = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* listing = listed >= 0 ? fdopendir(listed) : NULL;
+    if (!listing && listed >= 0) close(listed);
+    /* The duplicate shares the directory offset: start from the first entry. */
+    if (listing) rewinddir(listing);
+    unsigned entries = 0, found = 0;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        int dots = !strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..");
+        entries += !dots;
+        found += !dots && !strcmp(entry->d_name, leaf);
+    }
+    if (listing) closedir(listing);
+    return listing && entries == 1 && found == 1;
+}
+
 /* A runtime launch's program in the work directory (the descriptor that
  * becomes slot 7): args[0] is exactly "./" and the program's leaf (lane B's
- * runtime template, `./{{output}}`), and that leaf is, without following a
- * link, the single-link, owner-executable regular file of this user that the
- * caller observed after the compile step (device, inode, size and change
- * time). A link, a replaced or pre-planted file, or one from another step's
- * directory is refused. */
+ * runtime template, `./{{output}}`), the directory holds that leaf and
+ * nothing else, and it is, without following a link, the single-link,
+ * owner-executable regular file of this user, not group- or world-writable,
+ * that the caller observed by fstat of the descriptor it wrote and hashed
+ * (device, inode, size and change time). A link, a second link, a replaced,
+ * rewritten or pre-planted file, a file from another step's directory, a
+ * bad mode or an extra entry is refused. */
 static int tp_retirement_launch_program(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs)
 {
     TpProcessProgram const* program = inputs->program;
@@ -384,7 +405,8 @@ static int tp_retirement_launch_program(TpRetirementMeasuredCommand const* comma
         fstatat(inputs->directory, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
         info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 0022) && (info.st_mode & S_IXUSR) &&
         info.st_dev == program->device && info.st_ino == program->inode && info.st_size == program->size &&
-        info.st_ctim.tv_sec == program->changed.tv_sec && info.st_ctim.tv_nsec == program->changed.tv_nsec;
+        info.st_ctim.tv_sec == program->changed.tv_sec && info.st_ctim.tv_nsec == program->changed.tv_nsec &&
+        tp_retirement_directory_only(inputs->directory, program->leaf);
     return ok;
 }
 

@@ -313,10 +313,12 @@ the attempt:
    work directory owned by the service user and not group- or
    world-writable, and exactly one of two argv shapes: a compiler command's
    argv[0] is the side's slot (and its output directory the work directory);
-   a runtime command's is `./<leaf>`, the program its row's compile step
-   reproduced untimed in the runtime launch's fresh step directory, which the
-   launch and then the child recheck by identity before executing it
-   relative to slot 7 (see RETIREMENT_PREPARATION.md, "The runtime rule").
+   a runtime command's is `./<leaf>`, the program the service retained from
+   the stage's own compile and copied alone into the runtime launch's fresh
+   step directory, which the launch and then the child recheck by identity
+   before executing it from slot 7 (see RETIREMENT_PREPARATION.md, "The
+   runtime rule"). After every launch the producer must have no child left
+   (a `setsid` escapee), or the launch fails.
 
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
 4. The store bind (above), then lane E's `tp_retirement_compose_plan` over

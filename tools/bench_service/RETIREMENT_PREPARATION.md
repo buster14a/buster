@@ -1396,31 +1396,60 @@ launch accepts exactly two argv shapes (`tp_retirement_launch_layout`): a
 compiler or batch command runs the side's binary slot and names no program,
 and a runtime command runs `./<leaf>` where the launch carries the program
 (`TpProcessInputs.program`: its leaf and the device, inode, size and change
-time observed after its compile step). The launch requires that leaf in the
-step's work directory (slot 7) to be, without following a link, that
-single-link, owner-executable regular file of the service user
-(`tp_retirement_launch_program`); the child rechecks the identity after it
-entered the sandbox (`tp_process_program_same`, `ESTALE` otherwise) and
-executes it relative to slot 7 (`execveat`, `AT_SYMLINK_NOFOLLOW`). Anything
-else is refused before any child.
+time the service took by `fstat` of the descriptor it wrote and hashed). The
+launch requires the step's work directory (slot 7) to hold that leaf and
+nothing else, and the leaf to be, without following a link, that same
+single-link, owner-executable regular file of the service user, not group-
+or world-writable (`tp_retirement_launch_program`); the child rechecks the
+identity after it entered the sandbox (`tp_process_program_same`, `ESTALE`
+otherwise) and executes `./<leaf>` from its cwd, slot 7 (`execveat` with
+`AT_FDCWD` and `AT_SYMLINK_NOFOLLOW`, so `AT_EXECFN` and the start-up stack
+are lane B's `execve("./<leaf>")`). Anything else is refused before any
+child.
 
-Since the campaign's compiler launches retire their artifacts and the #619
-schedule runs the runtime campaign after the compiler one, every runtime
-launch gets a fresh step directory `runtime-<stage>-<sequence>` in the work
-directory (`bq_retirement_unit_campaign_program`): the row's frozen compile
-command for the same variant (the only compiler command whose artifact is the
-runtime command's leaf) runs there untimed on the same held binary and must
-reproduce the frozen artifact; the file is observed; a label-1 runtime
-command must be the gate's sealed runtime command for its side (the A/A
-second label's is not sealed, like its compiler command). The timed runtime
-launch then runs there, and a successful one retires the whole step
-directory. A failure keeps the directory and is recorded with purpose
-`BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM` (the program step) or as the
-runtime launch itself. The runtime commands themselves are lane B's
-resolution of each row's runtime template for its side
-(`bq_retirement_campaign_plan_commands`, whose digests must be the gate's
-sealed ones), and the campaign's frozen commands are compared before every
-launch.
+**Where the program comes from.** The #619 schedule runs each stage's
+runtime campaign after its compiler campaign, and those compiler launches
+already compile every runtime row on each side the stage uses. So the first
+successful compile of each runtime row per side in a stage is retained
+(`bq_retirement_unit_campaign_retain`): after the launch and its descendant
+check, the artifact is opened without following a link, identified by
+`fstat` and hashed through that same descriptor, must be the gate's sealed
+artifact digest for the row and side, and moves (link, then unlink) to the
+code directory as `program-<stage>-<row>-<side>`, mode 0500. The code
+directory is service-private and no launch's sandbox covers it. Before each
+runtime launch, outside the timer, the service copies that program into a
+fresh step directory `runtime-<stage>-<sequence>` in the work directory
+(`O_CREAT | O_EXCL`, mode 0700, `fsync`), re-verifies the digest from the new
+descriptor and takes the launch's identity by `fstat` of it
+(`bq_retirement_unit_campaign_program`); a label-1 runtime command must also
+be the gate's sealed runtime command for its side (the A/A second label's is
+not sealed, like its compiler command). A successful launch retires every
+file of its step directory and the directory; a subdirectory left there fails
+the retirement, stricter than lane B, whose check runner sweeps step
+directories. A failure keeps the directory and is recorded with purpose
+`BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM` (the copy) or as the runtime
+launch itself. The runtime commands are lane B's resolution of each row's
+runtime template for its side (`bq_retirement_campaign_plan_commands`, whose
+digests must be the gate's sealed ones), and the campaign's frozen commands
+are compared before every launch.
+
+**Budget (M2).** Retaining the program adds no process: the reviewed budget
+record's derivation (`retirement_budget.h`, `TP_RETIREMENT_BUDGET_DERIVATION`)
+already counts every compiler process of both stages and every runtime
+process, and the copy is service work outside timing, like the code
+observation. Neither the derivation nor the contract's process counts
+change.
+
+**Descendants.** Each launch kills only its own process group, so a child
+that left it (`setsid`) would survive with its sandbox's rights over the work
+directory. The producer is a child subreaper, so such a child becomes its own
+as its parents exit. After every launch (untimed batch, timed compile, timed
+runtime), outside the timer and before any output of it is kept, the driver
+requires the producer to have no child (`bq_retirement_unit_campaign_alone`,
+`tp_process_children`); a survivor is killed and reaped
+(`tp_process_children_sweep`) and the launch fails with `after`
+`BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS`, retained like any failure.
+The final sweep in `bq_retirement_worker_campaign_run` stays.
 
 The remaining work:
 
@@ -1452,8 +1481,10 @@ fixture admission, the post-A/A document, the freeze, A/B and READY; all
 five documents are written at exactly the sizes the campaign retained before
 timing (`documents-sized.txt`), and the post-sample record and every stream
 kind of both stages are published. Job 85 retains a failing untimed launch,
-job 86 a SIGTERM during A/A, and job 87 the deadline expiring during A/A,
-each with the keeper stopped and nothing left running.
+job 86 a SIGTERM during A/A, job 87 the deadline expiring during A/A, and
+job 88 a detached (`setsid`) sleeper left by its first second-label compile,
+found and killed right after that launch; each with the keeper stopped and
+nothing left running.
 `bq_prep_test_worker_store_plan` covers the declaration, the retained-entry
 equality and the control-entry reservation at the exact store boundary, and
 `bq_prep_campaign_documents` checks sized bytes against written bytes. The

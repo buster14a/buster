@@ -264,8 +264,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
 
 /* The producer process: it drops the lease reference (the unit process keeps
  * the lease), stops with the unit process, becomes a child subreaper and
- * installs the SIGTERM self-pipe before it unblocks SIGTERM. Returns the exit
- * status. */
+ * installs the SIGTERM (and SIGINT) self-pipe before it unblocks SIGTERM.
+ * Returns the exit status. */
 BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
     u64 attempt_token, char const* workspace_root, char const* result_root, int lease_descriptor, int phase_descriptor,
     char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns, pid_t parent, sigset_t const* unblocked)
@@ -284,8 +284,11 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSe
     struct sigaction cancel = {0};
     cancel.sa_handler = bq_retirement_worker_unit_cancel;
     cancel.sa_flags = SA_RESTART;
+    /* SIGINT too: a launch given the cancellation descriptor leaves both to
+     * the caller (tp_process_observe_inputs), so neither may end the producer
+     * without its failure retention. */
     ok = ok && sigemptyset(&cancel.sa_mask) == 0 && sigaction(SIGTERM, &cancel, NULL) == 0 &&
-         sigprocmask(SIG_SETMASK, unblocked, NULL) == 0;
+         sigaction(SIGINT, &cancel, NULL) == 0 && sigprocmask(SIG_SETMASK, unblocked, NULL) == 0;
     char ready_sha256[SHA256_HEX_CAPACITY] = {0};
     BqError result = ok ? bq_retirement_worker_unit_produce(seams, job_id, attempt_token, workspace_root, result_root,
                                                             phase_descriptor, self_pipe[0], preparation_sha256,
