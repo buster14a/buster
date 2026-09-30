@@ -592,7 +592,9 @@ The `tool=` line repeats `n` times. The five lines from `check=` to
   record that does not bind is `BQ_RECIPE_MISMATCH`. A hosted check has
   `argv=0` and `environment=0`, is a `semantic` check, and its pinned output
   is the record's digest. The record schema is provisional until the hosted
-  acceptance workflow publishes it.
+  acceptance workflow publishes it. `retirement_required_checks.py` emits
+  the authority from a reviewed plan (see
+  [Production context generators](#production-context-generators-881)).
 - **Tokens.** An argument or environment value may contain one token:
   `{{binary:0|1}}` (a held matched binary), `{{source:0|1}}` (A's
   materialized root), `{{tool:N}}` or `{{work}}` (the check's new working
@@ -1251,17 +1253,20 @@ untimed-commands digests), lane D's frozen campaign values
 (`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
 `campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
 status line, which must be exactly
-`status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`). A missing line, a
+`status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`, checked by the
+queue's own `bq_recipe_profile_admitted`). A missing line, a
 second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
 return each refuse. `bq_worker_unit` passes the compiled
 profile (`bq_retirement_worker_unit_installed`), which is blocked. A
 production retirement job is therefore still refused with `BQ_BAD_REQUEST`
 before the lease handoff, the keeper, any directory or any child. The
 coordinator's gates use the same completeness gate (see
-[the coordinator side](#coordinator-side-881-pr-4)); the portable queue's
-`bq_recipe_admitted`, `bq_recipe_service` and `bq_request_valid` still refuse
-the recipe in every build. Only the test seams admit it, with a complete
-fixture profile.
+[the coordinator side](#coordinator-side-881-pr-4)). The portable queue's
+`bq_recipe_admitted`, `bq_recipe_service` and `bq_request_valid` admit the
+recipe only when the compiled profile is admitted
+(`bq_recipe_retirement_admitted`), so they still refuse it. Only the test
+seams admit it: the worker's with a complete fixture profile, and queue.c's
+`bq_retirement_profile_test_override` with an admitted stand-in.
 
 **The unit process.** After the pause and the pre-exec lease recheck,
 `bq_retirement_worker_unit_run` performs these steps in order:
@@ -1418,7 +1423,9 @@ stand-in.
    lane F's final binding fills them (see `EXPORT.md`). The
    preparation fixture's context comes from
    `retirement_binding_context_fixture.py`, and its bytes pass the #511
-   validator structurally.
+   validator structurally. A production context comes from
+   `retirement_binding_context.py` (see
+   [Production context generators](#production-context-generators-881)).
 3. **Composition and the authority.** `tp_retirement_compose` (a refusal
    prints its stage), then `tp_retirement_store_receipt_authority` into
    `<attempt>/retirement-authority/` with the result root as the store root:
@@ -1753,14 +1760,36 @@ digest mismatch is `BQ_RECIPE_MISMATCH`. The loaded bytes then go through
 - `bq_worker_recipe_launchable`, which replaces the recipe-name check.
 
 With the compiled profile, a blocked status or no seams, each refuses. The
-portable queue's `bq_request_valid` (submission, journal replay, transport,
-exclusive admission) is `bq_request_valid_admitting(request, false)`. That
-queue is also built without the Linux retirement units, so it cannot
-evaluate the gate, and a retirement request still cannot be submitted.
-Opening submission needs a queue seam that carries the gate's verdict. That
-seam is left to the integration; `bq_worker_result_binding_validate` accepts
-a retirement result only through its complete-profile seam, and its public
-entry still refuses one.
+fourth, `bq_worker_result_binding_validate_pinned`, decides the same way.
+Each decides per recipe (#881 N1): the retirement recipe needs a complete
+seam profile even when the queue's predicate admits it, and the smoke recipe
+keeps `bq_recipe_service`. `bq_retirement_request_valid_pinned` passes the
+completeness verdict to `bq_request_valid_admitting`, which decides the
+retirement recipe by that verdict alone; the other three use
+`bq_worker_recipe_admitted`.
+`bq_worker_unit_pinned` likewise never sends a retirement job down the smoke
+exec path.
+
+**The queue seam (#881 P1).** The portable queue's `bq_request_valid`
+(submission, transport, exclusive admission) is
+`bq_request_valid_admitting(request, bq_recipe_retirement_admitted())`. That
+predicate is true only when the compiled profile carries exactly one
+`status=admitted` line, so a retirement request still cannot be submitted.
+When the compiled profile is admitted, submission, the gateway's
+`submit-retirement`, materialization, dispatch, reconciliation and export all
+open together. The coordinator's gates above still need every pin, and the
+Linux service refuses an admitted but incomplete compiled profile before any
+reservation (`bq_retirement_compiled_servable`: `serve`, the transport's
+submission check, which also accepts retirement only through the exclusive
+submit, and the worker's check of the queued head job before the lease).
+Journal replay accepts a schema-3 retirement SUBMIT whatever the build admits
+(`bq_recipe_real_journal`), so a journal written under an admitted profile
+stays replayable under a blocked build, with its retirement jobs inert. The
+read-only `recipe-identity` operation reports the profile's status
+(`blocked`, `admitted`, or `incomplete` for admitted without every pin) and the
+SHA-256 of the profile, contract and support declaration.
+`bq_worker_result_binding_validate` accepts a retirement result only through
+its complete-profile seam, and its public entry still refuses one.
 
 **Still open.** These are inputs for the `bq_worker_recover` classification:
 
@@ -1774,6 +1803,104 @@ entry still refuses one.
   the handoff. It is now written only after the handoff completes, so a
   record without a `COMPLETE` handoff can only come from tampering or an
   older build. Recovery should still check the two together.
+
+## Production context generators (#881)
+
+Two tools emit the reviewed, pre-campaign inputs the production profile
+pins. Neither runs in the service; an operator runs them once per admitted
+recipe, reviews the output and pins its digest. Each checks the inputs listed
+below and fails closed, printing a message and exiting 1, on a missing or
+disagreeing fact; the tables also say what neither can check. Neither ever
+replaces an existing output file. Install each output read-only and
+single-link (`chmod 0400`), owned by root or the service user: the importers'
+installed-file read (`bq_retirement_reference_read_installed`) refuses
+anything else. `retirement_context_generators_test.py` holds their
+failure-first tests. Before any campaign, the preparation runner
+(`bench_service self-test`) runs both tools' output through the real
+importers and checkers: `bq_prep_worker_unit_generated_checks` and
+`bq_prep_worker_unit_production_context`, in `retirement_worker_unit_tests.h`.
+
+### The binding-context generator
+
+`retirement_binding_context.py --inputs INPUTS --evidence-root ROOT --census
+CENSUS --binaries-record RECORD --profile PROFILE --output OUTPUT` writes
+`native-retirement-performance-v1.binding-context`. The bytes are exactly
+what `bq_retirement_worker_binding_import` and
+`bq_retirement_worker_binding_check` accept:
+
+- the header;
+- one canonical-JSON line per section, in the importer's order;
+- `admission=`;
+- the admission-receipt sentinel as `execution.host`'s first member.
+
+The tool re-parses its own bytes with that layout (`check_context`) before
+it writes them. Like the C reader, the re-parse refuses NaN, Infinity and
+nesting deeper than 256. `--template` prints the INPUTS shape.
+
+ROOT and CENSUS are opened without following a symbolic link. Every path
+component below them is opened with `O_NOFOLLOW`, and each file is checked
+with `fstat`, hashed and read once from that descriptor. The #511 evidence
+checks then read those held bytes from a private snapshot, never the path
+again, so a file swapped after it was hashed is not what gets checked.
+
+| Input | Source | Verified |
+|---|---|---|
+| Contract source | INPUTS path under ROOT, plus commit and tree | Hashed; must equal PROFILE `contract-sha256=` |
+| Six pinned #508 support files | CENSUS `support.tsv`, `manifest.txt`, `inputs.tsv`, `rows.tsv`, `performance-rows.json`, `validator-report.json`, published as `census/<name>` | Hashed; each must equal its PROFILE pin |
+| Other support files, validator source, closure, requested work | INPUTS paths under ROOT | Hashed; #511 support and requested-work checks, including the root digests |
+| Population | Derived from the census performance rows | Row count, rows digest, axes, family and source digests; #511 population check |
+| Subject binaries | INPUTS paths under ROOT | Hashed; must equal RECORD's digests. RECORD (the matched-build import, `BQ-RETIREMENT-BINARIES-V2`, `job` and `token` in 1..2^64-1) is a consistency input, not an authority: nothing here authenticates it. The unit's binding check, which requires the context's digests to equal the gate's held binaries, is the authority |
+| Subject commits, snapshots and build receipts | INPUTS | The snapshots and build receipts must bind each subject's commit, tree and binary to the producer (#511 `_check_subject_receipts`); the two commits and trees must differ |
+| Producer, measurement, admission record | INPUTS paths under ROOT, plus tokens and commits | Hashed; #511 section checks |
+| Service and lease receipts | INPUTS paths under ROOT | Hashed; #511 `_check_execution_evidence`: schema and version, the bound service identity and phases, and a lease the candidate cannot reach |
+| Provenance receipts | INPUTS paths under ROOT | Hashed; #511 `_check_provenance_evidence`: the relation receipt binds both subjects, the producer and the harness; the #510 census and strict receipts name the candidate binary; the replay receipt binds their bytes, the replay bundle, the contract and the candidate |
+| **Host facts (#422)** | INPUTS `host`: `machine_id`, the qualification receipt and the host profile | Required, never defaulted. #511 `_check_execution_evidence`: exact schema, version and fields; the profile's and qualification's machine, profile id and version match the bound ones; native-only, whole-host isolation, qualified, the lease protocol and the pinned native target; the qualification's logical CPU and target equal the profile's. The tool cannot check that the receipts describe the real host |
+| Campaign policy | INPUTS `campaign`: seed, pairs per round, resamples, bootstrap members | Seed a positive uint64; pairs even and in 60..254; resamples in 100000..1000000; bootstrap members equal to the derived family's count |
+
+The decision rules are the approved #511 constants plus the campaign values.
+Every section passes the #511 validator's structural check, and every
+artifact path is unique.
+
+The A/A admission receipt cannot exist before the campaign. That part of
+`_check_execution_evidence` therefore reads a placeholder derived from the
+bound facts and checks nothing here. The producer's admission step checks the
+real receipt, and lane F's #511 validation of the final binding checks it
+again.
+
+The host facts and the qualification and host-profile receipts need #422
+(the qualified host). The campaign values, the census and the binaries need
+9700X data: the frozen #426 values, the full census, and the matched build
+of the admitted pair on the service host. Until those exist, only the test
+record (`retirement_binding_context_fixture.py --production-inputs`) can
+drive the tool. With the record's own binaries its output is byte-identical
+to the fixture generator's.
+
+One admitted context pins exactly one baseline/candidate pair (gap audit
+N9). The subjects' binary digests are in the context, and
+`bq_retirement_worker_binding_check` requires them to equal the gate's held
+binaries. A rebuild that yields other bytes, or another pair, needs a new
+context and a new `binding-context-sha256=` pin.
+
+### The required-checks generator
+
+`retirement_required_checks.py --plan PLAN --checks-dir CHECKS --hosted-record
+RECORD --output OUTPUT [--census CENSUS]` writes
+`native-retirement-performance-v1.required-checks` in the canonical text
+[above](#the-required-check-authority).
+
+| Input | Verified |
+|---|---|
+| PLAN (`bq-retirement-required-checks-plan-v1`): the sealed projection's support and census-rows pins, population seal, native target and row counts; A's candidate commit and tree; tool names; the checks | Every field against the importer's bounds, token grammar and environment order, and the whole set against its coverage rules |
+| CHECKS (installed as `native-retirement-performance-v1.checks/`) | Each named tool is hashed and must be a regular ELF executable; the directory holds nothing else |
+| RECORD (`BQ-RETIREMENT-HOSTED-ACCEPTANCE-V1`, provisional) | Consumed, never produced here. Parsed as whole LF lines: the header, `commit=` and `tree=` naming the plan's candidate, at most one `run=<token>`, and `lane=<target> passed\|failed` lines with canonical targets 1..12. Every hosted check needs a passed lane. A repeated lane, any failed lane, a second commit or tree, an unknown key, an empty line or trailing bytes are refused. This is stricter than the importer, which matches `lane=<target> passed` as a substring and stays as it is while the schema is provisional. The record's digest becomes `hosted=` and each hosted check's output |
+| CENSUS (optional) | The support and census-rows pins must be its `support.tsv` and `rows.tsv` digests |
+
+The population seal is the C projection's
+(`bq_retirement_oracle_population_hash`) and cannot be recomputed in Python.
+The importer re-derives it and refuses a mismatch. The workflow that
+publishes the hosted record is separate work; until it exists, the record
+schema stays provisional. Coverage needs #422 for the native target's native
+checks and 9700X data for the projection facts.
 
 ## Capacity derivation
 
