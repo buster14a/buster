@@ -38,7 +38,9 @@
  * bq_worker_phase_record_digest) and never rewrites a durable success.
  * Before recovery finishes a retirement job, and before bq_worker_finish
  * records any failed, cancelled or interrupted outcome for one (a failed
- * MEASURED handoff in the live run among them),
+ * MEASURED handoff in the live run among them), and before the live run's
+ * failure retention publishes anything (bq_worker_failure_retain, which also
+ * covers a failed stop that skips the finish),
  * bq_worker_retirement_handoff_hold classifies its MEASURED handoff
  * (bq_retirement_coordinator_handoff_class, recovery L2). An incomplete or
  * inconsistent one is poisoned (bq_retirement_poison_write in workspace.c) and
@@ -4263,6 +4265,58 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
     return error;
 }
 
+/* bq_worker_run_pinned's failure retention for a launched job its finish did
+ * not end: after the stop, whether bq_worker_finish ran or not (a failed stop
+ * or a cleanup failure skips it). #881 recovery L2: a retirement job is
+ * classified first on every such path (bq_worker_retirement_handoff_hold). A
+ * held job keeps its evidence as it was: nothing more is published, bound,
+ * advanced or recorded for it. Otherwise the result evidence, the failure
+ * artifacts, the binding and the failure record are retained as before. The
+ * queue always keeps needing reconciliation; returns `error` or the first
+ * retention error. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_retain(BqQueue* queue, BqJob* job, BqWorkerFinalization* finalization,
+                                                     BqError error, bool signal_cancelled, bool production)
+{
+    BqError evidence_reason = error == BQ_CLEANUP_FAILED ? BQ_CLEANUP_FAILED :
+                              error == BQ_RESOURCE_MISMATCH ? BQ_RESOURCE_MISMATCH : BQ_WORKER_MISMATCH;
+    bool held = finalization->retirement_held;
+    if (!held)
+    {
+        BqError holding = bq_worker_retirement_handoff_hold(queue, job, finalization, evidence_reason, &held);
+        if (holding != BQ_OK && error == BQ_OK) error = holding;
+    }
+    if (!finalization->retirement_held)
+    {
+        if (production && job->result_bound)
+        {
+            BqError retained = bq_worker_result_binding_validate(job);
+            if (retained != BQ_OK && error == BQ_OK) error = retained;
+        }
+        else if (production && finalization->result_directory >= 0)
+        {
+            /* Follow the journal, not the signal: a CANCEL that did not
+             * become durable must not be published as cancelled. */
+            BqOutcome retained_outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
+            BqError retained_reason = job->cancel_requested && signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL :
+                                      evidence_reason;
+            BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, finalization);
+            if (retained == BQ_OK && !job->result_bound)
+                retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, finalization);
+            if (retained == BQ_OK && finalization->result_bound && !job->result_bound)
+                retained = bq_result_bind(queue, job, string_from_pointer(finalization->result_root),
+                                          finalization->result_digest, finalization->bundle_digest,
+                                          finalization->full_digest);
+            if (retained != BQ_OK && error == BQ_OK) error = retained;
+        }
+        BqError prior = bq_failure_evidence(queue, job);
+        BqError evidence = prior == BQ_NOT_FOUND ? bq_failure_write(queue, job, evidence_reason) :
+                           prior == BQ_CORRUPT || prior == BQ_IO ? prior : BQ_OK;
+        if (evidence != BQ_OK) error = evidence;
+    }
+    queue->needs_reconciliation = true;
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_cgroup_absent(BqWorkerConfig const* config,
                                                   BqWorkerObserved const* identity)
 {
@@ -5510,39 +5564,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_run_pinned(BqQueue* queue, BqWorkerConfig 
                 error = stopped;
             }
         }
-        /* A job bq_worker_retirement_handoff_hold held keeps its evidence as
-         * it was: nothing more is published or bound for it. */
-        if (queue->state.active_id == job->id && !finalization.retirement_held)
-        {
-            BqError evidence_reason = error == BQ_CLEANUP_FAILED ? BQ_CLEANUP_FAILED :
-                                      error == BQ_RESOURCE_MISMATCH ? BQ_RESOURCE_MISMATCH : BQ_WORKER_MISMATCH;
-            if (production && job->result_bound)
-            {
-                BqError retained = bq_worker_result_binding_validate(job);
-                if (retained != BQ_OK && error == BQ_OK) error = retained;
-            }
-            else if (production && finalization.result_directory >= 0)
-            {
-                /* Follow the journal, not the signal: a CANCEL that did not
-                 * become durable must not be published as cancelled. */
-                BqOutcome retained_outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
-                BqError retained_reason = job->cancel_requested && signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL :
-                                          evidence_reason;
-                BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, &finalization);
-                if (retained == BQ_OK && !job->result_bound)
-                    retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, &finalization);
-                if (retained == BQ_OK && finalization.result_bound && !job->result_bound)
-                    retained = bq_result_bind(queue, job, string_from_pointer(finalization.result_root),
-                                              finalization.result_digest, finalization.bundle_digest,
-                                              finalization.full_digest);
-                if (retained != BQ_OK && error == BQ_OK) error = retained;
-            }
-            BqError prior = bq_failure_evidence(queue, job);
-            BqError evidence = prior == BQ_NOT_FOUND ? bq_failure_write(queue, job, evidence_reason) :
-                               prior == BQ_CORRUPT || prior == BQ_IO ? prior : BQ_OK;
-            if (evidence != BQ_OK) error = evidence;
-            queue->needs_reconciliation = true;
-        }
+        if (queue->state.active_id == job->id)
+            error = bq_worker_failure_retain(queue, job, &finalization, error, signal_cancelled, production);
     }
     if (interrupt_handler && sigaction(SIGINT, &old_interrupt, NULL) != 0) error = BQ_IO;
     if (term_handler)

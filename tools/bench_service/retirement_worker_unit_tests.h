@@ -2638,7 +2638,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_recovery(BqPrepOracleFixture* fixtu
  * which classifies the handoff (COMPLETE without worker-phase-4:
  * inconsistent) and holds it before any transition: poisoned, a
  * worker-mismatch failure record, the job still MEASURING, the workspace and
- * copy kept and the next reservation refused. */
+ * copy kept and the next reservation refused. The run's failure retention
+ * (bq_worker_failure_retain) then publishes, binds, advances and records
+ * nothing more for it, and, when a failed stop skipped the finish, classifies
+ * and holds the job itself before anything is published. */
 BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_live_handoff(BqPrepOracleFixture* fixture,
     BqPrepUnitAttempt const* attempt, BqRetirementWorkerUnitSeams const* seams,
     BqPrepWorkerUnitComposed const* composed)
@@ -2662,7 +2665,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_live_handoff(BqPrepOracleFixture* f
     BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
     BqWorkerConfig config = {.workspace_root = string_from_pointer(fixture->workspaces), .backend = &clock};
     BqWorkerFinalization finalization = {.config = &config, .result_directory = composed->result_directory,
+                                         .result_device = composed->finalization.result_device,
+                                         .result_inode = composed->finalization.result_inode,
                                          .phase_version = BQ_PHASE_VERSION_2, .retirement = seams};
+    memcpy(finalization.result_root, composed->finalization.result_root, sizeof(finalization.result_root));
     memcpy(finalization.retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
     memcpy(finalization.retirement_ready_sha256, composed->finalization.retirement_ready_sha256, SHA256_HEX_CAPACITY);
     bq_prep_worker_unit_clock_mode = 0;
@@ -2683,6 +2689,34 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_live_handoff(BqPrepOracleFixture* f
                   bq_failure_evidence(queue, job) == BQ_WORKER_MISMATCH);
     BQ_PREP_CHECK(bq_reserve(queue, &next, &next_token) == BQ_RECONCILIATION_REQUIRED && !next &&
                   fstatat(fixture->workspaces_fd, workspace, &info, AT_SYMLINK_NOFOLLOW) == 0);
+    /* The run's failure retention after that finish: the held job publishes,
+     * binds, advances and records nothing more (its failure record stays the
+     * hold's). The outcome record would be the first publication. */
+    BqRecipeFiles files = {0};
+    u64 sequence = queue->state.sequence;
+    ok = ok && bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &files) &&
+         fstatat(composed->result_directory, files.outcome, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+    BQ_PREP_CHECK(ok && job &&
+                  bq_worker_failure_retain(queue, job, &finalization, BQ_RECONCILIATION_REQUIRED, false, true) ==
+                  BQ_RECONCILIATION_REQUIRED && finalization.retirement_held && !job->result_bound &&
+                  !finalization.result_bound && job->phase == BQ_MEASURING && queue->state.sequence == sequence &&
+                  bq_failure_evidence(queue, job) == BQ_WORKER_MISMATCH && queue->needs_reconciliation &&
+                  fstatat(composed->result_directory, files.outcome, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                  errno == ENOENT);
+    /* A failed stop skips the finish: the retention itself classifies and
+     * holds the job before anything is published. */
+    ok = ok && bq_prep_worker_unit_recovery_reset(queue, id);
+    BqWorkerFinalization stopped = finalization;
+    stopped.retirement_held = false;
+    queue->needs_reconciliation = false;
+    BQ_PREP_CHECK(ok && job &&
+                  bq_worker_failure_retain(queue, job, &stopped, BQ_CLEANUP_FAILED, false, true) == BQ_CLEANUP_FAILED &&
+                  stopped.retirement_held && !job->result_bound && !stopped.result_bound &&
+                  job->phase == BQ_MEASURING && queue->state.sequence == sequence &&
+                  bq_retirement_poison_read(queue, job, &inconsistent) == BQ_OK && inconsistent &&
+                  bq_failure_evidence(queue, job) == BQ_WORKER_MISMATCH && queue->needs_reconciliation &&
+                  fstatat(composed->result_directory, files.outcome, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                  errno == ENOENT);
     queue->needs_reconciliation = false;
     BQ_PREP_CHECK(bq_prep_worker_unit_aside(queue->directory_fd, measured, false) &&
                   bq_prep_worker_unit_recovery_reset(queue, id));

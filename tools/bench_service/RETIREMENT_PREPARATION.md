@@ -1800,7 +1800,10 @@ record and `tp_retirement_store_authority_state`. Two callers run it:
   retirement job (a durable success included);
 - `bq_worker_finish` itself, before it records any failed, cancelled or
   interrupted outcome. That covers the live run, including a MEASURED
-  handoff that fails inside `bq_worker_phase_accept`.
+  handoff that fails inside `bq_worker_phase_accept`;
+- the live run's failure retention (`bq_worker_failure_retain`), before it
+  publishes any evidence, including when a failed stop or a cleanup failure
+  skipped `bq_worker_finish`.
 
 | `worker-phase-4` | Queue-private copy, journal or `.pending` | Store state | Class |
 |---|---|---|---|
@@ -1834,7 +1837,8 @@ held:
   for an inconsistent one. After a crash between the two writes, the existing
   poison record's class decides;
 - nothing is advanced, published, bound or removed: the attempt workspace,
-  the result root and the queue-private copy and journal stay as evidence;
+  the result root and the queue-private copy and journal stay as evidence,
+  and the live run's failure retention adds nothing for a held job;
 - the caller returns `BQ_RECONCILIATION_REQUIRED` (or the write error) with
   the queue still needing reconciliation, so `bq_reserve` admits no further
   job. Every later recovery finds the poison record and holds again.
@@ -1845,7 +1849,8 @@ A poisoned job never surfaces as succeeded or exported:
 - `bq_workspace_reconcile` never finishes it succeeded. A durable success at
   FINALIZING gets a `worker-mismatch` failure record and is failed; one at
   CLEANING is finished interrupted; earlier phases reconcile interrupted, and
-  a cancelled job cancelled;
+  a cancelled job cancelled. A failed job missing its failure record stays
+  corrupt: the poison never supplies that record;
 - `bq_export_authorize` refuses it (`BQ_EXPORT_INVALID`).
 
 **The operator path is closed for now.** `bq_workspace_reconcile` refuses
@@ -1873,7 +1878,9 @@ Tests:
 - `bq_prep_worker_unit_live_handoff` sends job 82's MEASURED packet through
   `bq_worker_phase_accept` again with `worker-phase-4` missing. The handoff
   refuses, and `bq_worker_finish` then holds the failed job before any
-  transition.
+  transition. `bq_worker_failure_retain` then publishes, binds, advances and
+  records nothing more for it. With the finish skipped (a failed stop), the
+  retention classifies and holds the job itself before publishing anything.
 - `bq_test_retirement_poison_hold` (`tests.c`) covers leftovers and records
   without the producer:
   - a `.pending` temporary alone is incomplete;
@@ -1887,7 +1894,9 @@ Tests:
   - `bq_worker_finish` holds a failing job.
 - `bq_test_retirement_poison_reconcile` drives a smoke-recipe durable success
   at FINALIZING and at CLEANING with a poison record. Each reconciles failed
-  and interrupted respectively, never succeeded, and export refuses it.
+  and interrupted respectively, never succeeded, and export refuses it. A
+  poisoned failed job at CLEANING without its failure record reconciles
+  `BQ_CORRUPT` and is left unchanged.
   `bq_test_export` checks the export refusal on a bound, finished result.
 
 ## Production context generators (#881)

@@ -5859,10 +5859,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_hold(void)
  * left at FINALIZING or CLEANING normally reconciles FINISHED/SUCCEEDED
  * without any finalization. With a poison record present it reconciles
  * failed (FINALIZING, with a worker-mismatch failure record) or interrupted
- * (CLEANING), never succeeded, and export refuses it. */
+ * (CLEANING), never succeeded, and export refuses it. A poisoned failed job
+ * at CLEANING without its failure record stays corrupt: the poison never
+ * supplies the missing record. */
 BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_reconcile(void)
 {
-    for (u32 index = 0; index < 2; index += 1)
+    for (u32 index = 0; index < 3; index += 1)
     {
         BqWorkerFixture fixture;
         if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
@@ -5874,16 +5876,33 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_reconcile(void)
                      bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id,
                                     &token) == BQ_OK);
             BqJob* job = bq_job(&queue->state, id);
-            BqPhase last = index ? BQ_CLEANING : BQ_FINALIZING;
+            BqPhase last = index == 1 ? BQ_CLEANING : index == 2 ? BQ_MEASURING : BQ_FINALIZING;
             for (BqPhase phase = BQ_SETTLING; job && phase <= last; phase = (BqPhase)(phase + 1))
             {
                 BQ_CHECK(bq_real_advance(queue, job, phase, phase >= BQ_FINALIZING ? BQ_SUCCEEDED : BQ_NO_OUTCOME) ==
                          BQ_OK);
                 job = bq_job(&queue->state, id);
             }
+            if (index == 2 && job)
+            {
+                BQ_CHECK(bq_real_advance(queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+                job = bq_job(&queue->state, id);
+            }
             BQ_CHECK(job && bq_retirement_poison_write(queue, job, true, true, "damaged") == BQ_OK);
             bq_close(queue);
             BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+            if (index == 2)
+            {
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, id, token) == BQ_CORRUPT &&
+                         job && job->phase == BQ_CLEANING && job->outcome == BQ_FAILED &&
+                         bq_failure_evidence(queue, job) == BQ_CORRUPT && queue->needs_reconciliation);
+                char poison[48];
+                BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, id) &&
+                         unlinkat(queue->directory_fd, poison, 0) == 0);
+                bq_test_worker_end(&fixture);
+                continue;
+            }
             BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, id, token) == BQ_OK);
             job = bq_job(&queue->state, id);
             BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == (index ? BQ_INTERRUPTED : BQ_FAILED) &&

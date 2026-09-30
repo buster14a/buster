@@ -1563,8 +1563,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
         error = bq_cleanup_record(queue, job, &workspaces_info, &workspace_info, true);
         cleanup = error == BQ_OK ? BQ_OK : cleanup;
     }
+    /* A failed job without its failure record stays corrupt (above); only a
+     * durable success gains the poison's failure record. */
     if (error == BQ_OK && poisoned && !job->cancel_requested && failure == BQ_NOT_FOUND &&
-        (job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING))
+        job->outcome == BQ_SUCCEEDED && (job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING))
     {
         error = bq_failure_write(queue, job, BQ_WORKER_MISMATCH);
         failure = error == BQ_OK ? BQ_WORKER_MISMATCH : failure;
