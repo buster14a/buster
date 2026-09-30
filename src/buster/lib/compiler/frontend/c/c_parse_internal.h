@@ -60,7 +60,6 @@ struct CTestTypeConstantQuery
 {
     CIntegerConstant constant;
     bool model_unchanged;
-    bool machine_unchanged;
 };
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);

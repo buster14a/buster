@@ -1920,7 +1920,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* resul
 BUSTER_C_INTERNAL CTypeId c_parse_type_name_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                          u32 start, u32 end, u32* declarator_start);
 
-BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(Arena* arena,
                                                                  CPreprocessResult preprocess, CParseResult* result,
                                                                  CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -21966,8 +21966,10 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
 
 // The declaration machine's frames, slots, mutation limit and caches never
 // participate in this query. The copied model shares immutable published rows;
-// readers can only append beyond its counts, and table growth changes only the
-// copy's pointers. Scalar-query publication and work counters are private too.
+// growable tables are sealed at their counts so the first append copies them
+// into private storage. Fixed append buffers are copied before use. A caller's
+// spare capacity may already hold rows published after its model checkpoint.
+// Scalar-query publication and work counters are private too.
 // New tag bodies are refused by the TYPE-mode scalar step before it can enter
 // the declaration parser. Only signed magnitude, rank and target width escape.
 // The caller supplies the semantic model at the expression's declaration point.
@@ -21987,6 +21989,28 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         CParseResult query = *result;
         query.arena = model_temporary.arena;
         query.protected_type_constant_query = true;
+        query.type_capacity = query.type_count;
+        query.array_bound_capacity = query.array_bound_count;
+        query.type_alignment_capacity = query.type_alignment_count;
+        query.noreturn_function_type_capacity = query.noreturn_function_type_count;
+        // Parameters, alignment operands and diagnostics use bounded append
+        // buffers rather than reserve helpers. Their existing rows remain
+        // readable, but even their unused slots must belong to this query.
+        if (query.parameter_capacity)
+        {
+            query.parameters = arena_allocate(query.arena, CParameter, query.parameter_capacity);
+            if (query.parameter_count) memcpy(query.parameters, result->parameters, sizeof(CParameter) * query.parameter_count);
+        }
+        if (query.alignment_capacity)
+        {
+            query.alignments = arena_allocate(query.arena, CAlignmentSpecifier, query.alignment_capacity);
+            if (query.alignment_count) memcpy(query.alignments, result->alignments, sizeof(CAlignmentSpecifier) * query.alignment_count);
+        }
+        if (query.diagnostic_capacity)
+        {
+            query.diagnostics = arena_allocate(query.arena, CDiagnostic, query.diagnostic_capacity);
+            if (query.diagnostic_count) memcpy(query.diagnostics, result->diagnostics, sizeof(CDiagnostic) * query.diagnostic_count);
+        }
         // Stable indexes contain mutable headers, and spelling caches write
         // shared token rows even during reads. Neither belongs to this query.
         // An incomplete private index requests the scope-aware fallback.
@@ -22060,11 +22084,10 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
     return constant;
 }
 
-BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(CTypeParseMachine* machine, Arena* arena,
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(Arena* arena,
                                                                  CPreprocessResult preprocess, CParseResult* result,
                                                                  CScopeId scope, u32 start, u32 end)
 {
-    BUSTER_UNUSED(machine);
     return c_parse_type_integer_constant_query(arena, preprocess, result, scope, start, end, 0, 0);
 }
 
@@ -22080,17 +22103,18 @@ CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessR
         u64 bytes;
     };
     CTestTypeConstantSnapshot snapshots[] = {
-        {result->types, 0, (u64)result->type_count * sizeof(CType)},
-        {result->array_bounds, 0, (u64)result->array_bound_count * sizeof(CArrayBound)},
-        {result->type_alignments, 0, (u64)result->type_alignment_count * sizeof(CTypeAlignment)},
-        {result->members, 0, (u64)result->member_count * sizeof(CMember)},
-        {result->enum_members, 0, (u64)result->enum_member_count * sizeof(CEnumMember)},
-        {result->parameters, 0, (u64)result->parameter_count * sizeof(CParameter)},
-        {result->entities, 0, (u64)result->entity_count * sizeof(CEntity)},
-        {result->scopes, 0, (u64)result->scope_count * sizeof(CScope)},
-        {result->alignments, 0, (u64)result->alignment_count * sizeof(CAlignmentSpecifier)},
-        {result->aggregate_attributes, 0, (u64)result->aggregate_attribute_count * sizeof(CAggregateAttributes)},
-        {result->diagnostics, 0, (u64)result->diagnostic_count * sizeof(CDiagnostic)},
+        {result->types, 0, (u64)result->type_capacity * sizeof(CType)},
+        {result->array_bounds, 0, (u64)result->array_bound_capacity * sizeof(CArrayBound)},
+        {result->type_alignments, 0, (u64)result->type_alignment_capacity * sizeof(CTypeAlignment)},
+        {result->noreturn_function_types, 0, (u64)result->noreturn_function_type_capacity * sizeof(CTypeId)},
+        {result->members, 0, (u64)result->member_capacity * sizeof(CMember)},
+        {result->enum_members, 0, (u64)result->enum_member_capacity * sizeof(CEnumMember)},
+        {result->parameters, 0, (u64)result->parameter_capacity * sizeof(CParameter)},
+        {result->entities, 0, (u64)result->entity_capacity * sizeof(CEntity)},
+        {result->scopes, 0, (u64)result->scope_capacity * sizeof(CScope)},
+        {result->alignments, 0, (u64)result->alignment_capacity * sizeof(CAlignmentSpecifier)},
+        {result->aggregate_attributes, 0, (u64)result->aggregate_attribute_capacity * sizeof(CAggregateAttributes)},
+        {result->diagnostics, 0, (u64)result->diagnostic_capacity * sizeof(CDiagnostic)},
         {result->token_classes, 0, result->token_classes ? preprocess.token_count : 0},
         {result->expression_scalar_types, 0, result->expression_scalar_types ? sizeof(CTypeId) * C_TYPE_COUNT : 0},
         {result->aggregate_lookup, 0, result->aggregate_lookup ? sizeof(CAggregateLookup) : 0},
@@ -22103,7 +22127,7 @@ CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessR
         {result->symbols, 0, result->symbols ? sizeof(CSymbolTable) : 0},
         {result->type_layout_statistics, 0, result->type_layout_statistics ? sizeof(CTypeLayoutStatistics) : 0},
         {result->binding_by_symbol, 0, (u64)result->binding_capacity * sizeof(CEntityId)},
-        {result->binding_undo, 0, (u64)result->binding_undo_count * sizeof(CParseBindingUndo)},
+        {result->binding_undo, 0, (u64)result->binding_undo_capacity * sizeof(CParseBindingUndo)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(snapshots); index += 1)
     {
@@ -22116,26 +22140,9 @@ CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessR
     }
     CParseResult before;
     memcpy(&before, result, sizeof(before));
-    CTypeParseFrame frame = {.kind = C_TYPE_PARSE_FRAME_SCALAR, .start = start, .end = end};
-    CTypeParseMachine machine = {
-        .frames = &frame,
-        .scratch_arena = scratch,
-        .result_type = {.value = 123},
-        .result_index = 456,
-        .frame_count = 1,
-        .frame_capacity = 1,
-        .mutation_count = 7,
-        .mutation_type_limit = 89,
-        .result_valid = true,
-    };
-    CTypeParseMachine machine_before;
-    CTypeParseFrame frame_before;
-    memcpy(&machine_before, &machine, sizeof(machine_before));
-    memcpy(&frame_before, &frame, sizeof(frame_before));
     CTestTypeConstantQuery report;
-    report.constant = c_parse_type_integer_constant(&machine, scratch, preprocess, result, scope, start, end);
+    report.constant = c_parse_type_integer_constant(scratch, preprocess, result, scope, start, end);
     report.model_unchanged = memcmp(&before, result, sizeof(before)) == 0;
-    report.machine_unchanged = memcmp(&machine, &machine_before, sizeof(machine)) == 0 && memcmp(&frame, &frame_before, sizeof(frame)) == 0;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(snapshots); index += 1)
     {
         CTestTypeConstantSnapshot snapshot = snapshots[index];

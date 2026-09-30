@@ -248,7 +248,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   generic-constant cases cover this path (GitHub #797).
   `c_parse_type_integer_constant` owns an independent
   `C_CONSTANT_EVALUATION_TYPE` machine over a by-value semantic model. It
-  share existing rows for reads and append temporary rows past copied counts;
+  shares existing rows for reads and seals growable capacities at copied counts,
+  forcing the first append into private storage. Fixed parameter, alignment and
+  diagnostic buffers are copied too; slots after a checkpoint's counts may
+  belong to a later model that shares those buffers. Its
   aggregate/definition indexes, token/scalar caches, symbol interning and layout
   work counters are detached. Casts, generic controllers/association types and
   `typeof` use the same private explicit frames, with machineless scalar reads
@@ -275,8 +278,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   copies, so the actual vector reader also refuses indirect arguments in stored
   array-bound ranges outside the query span. Already declared vector types remain
   readable.
-  `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
-  active machine on successful and refused queries (GitHub #1247).
+  The query accepts no live declaration machine. Its isolation fixture snapshots
+  full shared buffers and indexes on successful and refused queries, including
+  a shortened checkpoint whose buffers contain later type rows (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a

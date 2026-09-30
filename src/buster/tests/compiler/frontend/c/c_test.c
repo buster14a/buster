@@ -16211,9 +16211,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
 // answers and every piece of machine and result state they leave must agree.
 // A whole compile through the driver must also produce identical objects and
 // diagnostics in both modes.
-// Type-embedded constants query an immutable model while a declaration frame
-// is active. Pin the values independently and snapshot the shared prefixes,
-// lookup slots and machine state on both successful and refused queries.
+// Type-embedded constants have no live declaration-machine input. Pin the
+// values independently and snapshot the full shared buffers, including spare
+// slots a later model may own, on both successful and refused queries.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16237,6 +16237,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("(K) + 5"), 10, true},
         {S8("sizeof \"abcde\""), 6, true},
         {S8("sizeof((int[3]){1,2,3})"), 12, true},
+        {S8("sizeof(int (*)(int, int))"), 8, true},
+        {S8("(unsigned float)1"), 0, false},
         {S8("sizeof(0 ? obj : obj)"), 4, true},
         {S8("sizeof(struct F *)"), 8, true},
         {S8("sizeof(struct F)"), 2, true},
@@ -16360,7 +16362,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                 }
                 CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
                 BUSTER_TEST(arguments, query.model_unchanged);
-                BUSTER_TEST(arguments, query.machine_unchanged);
                 BUSTER_TEST_RAW(arguments, query.constant.valid == test.valid,
                     string_format(temporary.arena, S8("protected query {S8} variant={u32} expected={u32} actual={u32}"),
                         test.expression, variant, (u32)test.valid, (u32)query.constant.valid));
@@ -16370,6 +16371,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                     BUSTER_TEST(arguments, query.constant.magnitude_high == test.magnitude_high);
                     BUSTER_TEST(arguments, query.constant.magnitude == test.value);
                 }
+            }
+            if (string_equal(test.expression, S8("sizeof(struct Missing *)")))
+            {
+                // A declaration-point copy can share its type buffer with
+                // the finished owner. Keep only the initial int row visible;
+                // all subsequent occupied rows must survive private forwards.
+                parse = checkpoint;
+                BUSTER_TEST(arguments, parse.type_count > 1 && parse.types[0].kind == C_TYPE_INT);
+                parse.type_count = 1;
+                CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
+                BUSTER_TEST(arguments, query.model_unchanged);
+                BUSTER_TEST(arguments, query.constant.valid && query.constant.magnitude == 8);
             }
         }
         scratch_end(temporary);
