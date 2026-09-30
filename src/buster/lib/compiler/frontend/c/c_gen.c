@@ -5020,7 +5020,8 @@ BUSTER_C_INTERNAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u32
 {
     CEntityId bound = c_ir_identifier_entity(builder, token_index);
     CEntityId result;
-    if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL)
+    if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL &&
+        builder->parse.entities[bound.value].declaration_token_plus_one == token_index + 1)
     {
         result = bound;
     }
@@ -31171,6 +31172,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
                 CType value = builder->parse.types[type.value];
                 if (value.array_bound >= builder->parse.array_bound_count)
                 {
+                    builder->failure_message = S8("variable-length array has no bound expression");
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
@@ -31181,12 +31183,14 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         }
         if (!result->dimension_count || result->dimension_count >= capacity)
         {
+            builder->failure_message = S8("variable-length array has an unsupported dimension count");
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
         if (!element || !element->layout.resolved || !element->layout.size)
         {
+            builder->failure_message = S8("variable-length array element has no resolved object layout");
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -31262,6 +31266,10 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         builder->preparing_calls = state->typeof_previous_preparing_calls;
         if (!machine->child_result.success)
         {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not evaluate the variable-length typeof operand");
+            }
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -31316,6 +31324,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
                 state->dimension += 1;
                 continue;
             }
+            builder->failure_message = S8("variable-length array requires a complete bound expression");
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -36211,8 +36220,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         if (!c_ir_prepare_vla_layout(builder, local_entity->type, name, false, false,
                                    state->specifier_start, state->specifier_end, &layout))
         {
-            builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}'"),
-                                                     c_token_spelling(builder->preprocess.spelling_base, name));
+            builder->failure_message = builder->failure_message.length
+                ? string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}': {S8}"),
+                    c_token_spelling(builder->preprocess.spelling_base, name), builder->failure_message)
+                : string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}'"),
+                    c_token_spelling(builder->preprocess.spelling_base, name));
             return false;
         }
         if (!c_ir_emit_vla_storage(builder, &layout, local_type, variable_element_type, entity, name, local_alignment))

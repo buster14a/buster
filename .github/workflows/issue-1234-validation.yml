@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CANDIDATE_SHA: 6bf047585225078545a4b3bbebd9d0b99ca8b163
+      CANDIDATE_SHA: fcc78becb185226d6123b8e5320e4a2a6490df85
       BASELINE_SHA: 7157b1d581f397c0b7f9d0d4ae98536b9179b77a
       ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -21,7 +21,7 @@ jobs:
         run: test "$CI_ENABLED" = true
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 6bf047585225078545a4b3bbebd9d0b99ca8b163
+          ref: fcc78becb185226d6123b8e5320e4a2a6490df85
           path: candidate
           persist-credentials: false
       - name: Install Clang 22 from LLVM's signed package repository
@@ -99,24 +99,21 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1234-focused-6bf047585225078545a4b3bbebd9d0b99ca8b163
+          name: issue-1234-focused-fcc78becb185226d6123b8e5320e4a2a6490df85
           path: ${{ runner.temp }}/vla-validation/
           if-no-files-found: error
           retention-days: 7
       - name: Candidate full Release suite
-        if: ${{ !cancelled() }}
         working-directory: candidate
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-candidate-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-tests.log"
       - name: Candidate self-host fixed point
-        if: ${{ !cancelled() }}
         working-directory: candidate
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-candidate-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-validation/candidate-selfhost.log"
       - name: Candidate ASan UBSan full suite
-        if: ${{ !cancelled() }}
         working-directory: candidate
         run: |
           set -euo pipefail
@@ -126,7 +123,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1234-validation-6bf047585225078545a4b3bbebd9d0b99ca8b163
+          name: issue-1234-validation-fcc78becb185226d6123b8e5320e4a2a6490df85
           path: ${{ runner.temp }}/vla-validation/
           if-no-files-found: error
           retention-days: 7
