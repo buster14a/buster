@@ -66,7 +66,8 @@ static void patch(const char *source, const char *header_path, unsigned mode) {
 }
 static unsigned number(const char *s) {
     char *end = 0; errno = 0; unsigned long n = strtoul(s, &end, 10);
-    if (errno || !*s || *end || n > 65536) die("integer outside 0..65536"); return (unsigned)n;
+    if (errno || !*s || *end || n > 65536) die("integer outside 0..65536");
+    return (unsigned)n;
 }
 static void generate(const char *path, unsigned functions, unsigned references, unsigned shape) {
     if (!functions || shape > 1) die("generator dimensions");
@@ -101,7 +102,8 @@ static uint64_t counts(const char *path, uint64_t *calls) {
         if (n != 10 || overflow || total > UINT64_MAX - h || *calls > UINT64_MAX - q) die("bad count row");
         total += h; *calls += q; printf("%s", line);
     }
-    if (ferror(f)) die("count read"); fclose(f); return total;
+    if (ferror(f)) die("count read");
+    fclose(f); return total;
 }
 static void hosted(void) {
     const char *actions = getenv("GITHUB_ACTIONS"); if (!actions || strcmp(actions, "true")) die("requires authorized GitHub hosted workflow");

@@ -127,9 +127,53 @@ The first production attempt stopped before any compiler source patch because th
 
 At this report's creation that retry is running. **No production-writer count, byte-equivalence pass, self-host pass, full-suite pass or end-to-end speedup is claimed by this version of the report.** Subsequent actual status belongs in the PR evidence update, not inferred from the configured checks.
 
+## Terminal production run (recorded when landing)
+
+Run [36205913976](https://github.com/buster14a/buster/actions/runs/36205913976), job 108302296111, research head `579f16ba5a41511b7003038f48d42b93785465b6`, GitHub-hosted Ubuntu 26.04, completed with conclusion **success** and printed `CFI_PRODUCTION_PASS`. Every step of `probe hosted` exits on the first failed command or contract, so reaching that line means each gate below passed on worktrees detached at pinned main `ade6ac4b6ecb21f30b61b656439bac476c145e2f`:
+
+- baseline `test_self_host --config Release` before any source patch;
+- Release `ide` builds of all three patched variants (counted original, forward hint, lazy index);
+- 60 generated legal-C cases (5 function counts x 2 reference counts x 2 body shapes x 3 targets), each with byte-identical objects across all three variants, equal Mach-O call counts, index headers not above baseline, and zero calls on the ELF control;
+- byte-identical held-out `tests/basic_c_call_abi.c` objects across the three variants;
+- `test_self_host --config Release` and `build --config Release -t test_all` of the lazy-index variant.
+
+Production-writer header counts per `__eh_frame` section (identical for x86-64 and AArch64 Mach-O, both body shapes, and 0 or 1,024 global references; calls equal the function count):
+
+| Functions | Writer calls | Original headers | Hint headers | Index headers |
+|---:|---:|---:|---:|---:|
+| 16 | 16 | 152 | 17 | 17 |
+| 64 | 64 | 2,144 | 65 | 65 |
+| 256 | 256 | 33,152 | 257 | 257 |
+| 1,024 | 1,024 | 525,824 | 1,025 | 1,025 |
+| 4,096 | 4,096 | 8,394,752 | 4,097 | 4,097 |
+
+The original counts equal F(F+3)/2 exactly, confirming the source model on real writer output. Global function-pointer references add no `__eh_frame` lookups. The writer issues its queries in ascending FDE order, so the zero-allocation forward hint already reaches the linear minimum there; the lazy index adds allocation without reducing writer header work. The index only matters for non-monotone query streams, which this run did not observe in the writer. The reader call site was not instrumented.
+
+Artifact `cfi-prefix-index-36205913976-1`, ID `10893774988`, 407 files, archive SHA-256 `644287c19a864e6fcee1392619b413e61ac2cd18776a2ae7459f3649b3e1186e`, seven-day retention. The table above is transcribed from the job log's `CFI_CASE` rows.
+
+These are diagnostic operation counts on pinned main, not timings. No end-to-end speedup is claimed, and none of these results was rerun on a later main.
+
+## Landing state
+
+The research record lands without production compiler changes. The branch-scoped hosted workflow `.github/workflows/research-cfi-prefix-index.yml` was removed before landing: it triggered on branch pushes and verifies the pinned `object.c` blob, so it cannot run against a later main. It remains recoverable at commit `76e4a26f873cd793b3f30377d0bf912d834cdb3b`.
+
 ## Reproduction
 
-Use the branch-scoped workflow on an authorized hosted executor. It bootstraps build.c with the documented hosted Clang exception, installs the existing mold prerequisite, and calls the repository's native driver for compiler builds. It verifies the pinned object source blob and retains evidence even on failure.
+The helper differential runs from the repository root on any revision whose `object_mach_eh_frame_record_start` still has the extraction anchors (`probe extract` fails closed otherwise). It needs a host C compiler with ASan/UBSan runtimes:
+
+```sh
+mkdir -p /tmp/cfi
+cc -std=c11 -O1 -g -Wall -Wextra -Werror \
+  tools/research/cfi-prefix-index/probe.c -o /tmp/cfi/probe
+/tmp/cfi/probe extract src/buster/lib/compiler/object/object.c \
+  tools/research/cfi-prefix-index/prototype.h /tmp/cfi/generated-probe.h
+cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -fno-omit-frame-pointer -I/tmp/cfi \
+  tools/research/cfi-prefix-index/differential.c -o /tmp/cfi/differential
+/tmp/cfi/differential > /tmp/cfi/helper-counts.log
+```
+
+It prints `CFI_HELPER_PASS checks=463206` and 840 `CFI_HELPER` rows. On main `d68265991e874f1151186b7765a82483c51ca14f` (current `object.c` blob `ff2b06feca6b9b3baf306c60356c6e965ff8746e`), GCC 13.3 with ASan/UBSan and Clang 18 (probe only) reproduced that pass and the reverse-order counts above; `probe patch` also still applied all three modes. That checks the helper and anchors only; the production-writer run was not repeated on that revision.
 
 The executable research driver exposes:
 
@@ -140,15 +184,6 @@ probe generate <output.c> <function-count> <global-reference-count> <shape:0|1>
 probe hosted
 ```
 
-For example, on the hosted executor:
-
-```sh
-clang -std=c11 -O1 -g -Wall -Wextra -Werror \
-  tools/research/cfi-prefix-index/probe.c -o "$RUNNER_TEMP/cfi-probe"
-"$RUNNER_TEMP/cfi-probe" generate minimal.c 2 0 0
-"$RUNNER_TEMP/cfi-probe" generate references.c 256 1024 1
-```
-
-`patch` requires unique exact source anchors and fails rather than guessing after source changes. The hosted path has one integration writer and three disjoint detached worktrees. Generated source, object files, logs, source diffs and compiler hashes are retained by the workflow.
+`patch` requires unique exact source anchors and fails rather than guessing after source changes. `probe hosted` is the production-writer experiment: it refuses to run outside GitHub Actions, checks that the checked-out `object.c` is the pinned blob, and creates three detached worktrees at the pinned commit, so it reproduces only the pinned experiment. To rerun it, restore the workflow from `76e4a26f873cd793b3f30377d0bf912d834cdb3b` on a research branch whose checkout carries the pinned blob and push that branch. To measure a later main, update `PIN`, the blob checks and the anchors together, and record the new revision rather than reusing the numbers above.
 
 No approved exclusively leased 9700X path was used. No desktop compiler test or benchmark and no ad-hoc SSH was used. Operation-count reductions are not measured speedups. C-only/no-new-production-dependency, canonical validation, portability, self-hosting requirements and lane contracts remain unchanged; the packet is a draft experiment, not admission or acceptance evidence.
