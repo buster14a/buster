@@ -1,0 +1,39 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index 7d3d9e8..04a7411 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -5050,7 +5050,34 @@ BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
+     return digit;
+ }
+
++BUSTER_C_INTERNAL bool c_conditional_number_census_core(String8 spelling, u64* value);
++#include <stdio.h>
++#include <stdlib.h>
+ BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
++{
++    static FILE* census_file;
++    static int census_state;
++    if (!census_state)
++    {
++        char const* path = getenv("BUSTER_NUMBER_CENSUS");
++        census_file = path ? fopen(path, "w") : 0;
++        census_state = 1;
++    }
++    u64 local = 0;
++    bool ok = c_conditional_number_census_core(spelling, &local);
++    if (census_file)
++    {
++        fwrite(spelling.pointer, 1, spelling.length, census_file);
++        fprintf(census_file, "\t%d\t%llu\n", ok, (unsigned long long)(ok ? local : 0));
++        fflush(census_file);
++    }
++    if (ok)
++    {
++        *value = local;
++    }
++    return ok;
++}
++BUSTER_C_INTERNAL bool c_conditional_number_census_core(String8 spelling, u64* value)
+ {
+     u32 base = 10;
+     u64 index = 0;
