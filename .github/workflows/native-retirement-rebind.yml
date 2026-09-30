@@ -169,11 +169,16 @@ jobs:
             echo "::notice::Main advanced from $base to $current_main; re-resolving trusted PR policy."
             git -C trusted fetch --quiet --no-tags --depth 1 origin "$current_main"
             git -C trusted checkout --quiet --force --detach "$current_main"
-            git -C candidate fetch --quiet --no-tags origin "$current_main"
             base=$(git -C trusted rev-parse HEAD)
             current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
             [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
           done
+          # candidate/ was fetched before trusted/ resolved main, so a push
+          # landing between the two checkouts leaves that main missing from
+          # candidate/ even when the loop above never runs (#2010).
+          if ! git -C candidate cat-file -e "$base^{commit}" 2>/dev/null; then
+            git -C candidate fetch --quiet --no-tags origin "$base"
+          fi
           rows="$RUNNER_TEMP/native-retirement-status-rows.json"
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/statuses/$CANDIDATE_HEAD?per_page=100" > "$rows"

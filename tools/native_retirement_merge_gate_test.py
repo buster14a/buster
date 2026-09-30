@@ -706,7 +706,8 @@ class WorkflowPolicyTests(unittest.TestCase):
                     # The PR event still names the old main, while a verified
                     # writer has published a head based on the newer checkout.
                     # The fake git keeps each checkout's HEAD in a state file so
-                    # a re-resolved trusted checkout is observable; with
+                    # a re-resolved trusted checkout is observable, and each
+                    # checkout's commits in an objects file; with
                     # MAIN_KEEPS_MOVING every ls-remote reports a new main.
                     prefix = r'''
 git() {
@@ -722,13 +723,18 @@ git() {
             else
                 printf "%s\trefs/heads/main\n" "$REMOTE_MAIN_SHA"
             fi ;;
-        fetch) printf "%s\n" "${@: -1}" >> "$RUNNER_TEMP/$dir-fetches" ;;
+        cat-file) grep -qxF "${3%"^{commit}"}" "$RUNNER_TEMP/$dir-objects" ;;
+        fetch)
+            printf "%s\n" "${@: -1}" >> "$RUNNER_TEMP/$dir-fetches"
+            printf "%s\n" "${@: -1}" >> "$RUNNER_TEMP/$dir-objects" ;;
         checkout) printf "%s\n" "${@: -1}" > "$RUNNER_TEMP/$dir-head" ;;
         *) return 1 ;;
     esac
 }
 gh() { printf "[[]]\n"; }
 printf "%s\n" "$TRUSTED_MAIN_SHA" > "$RUNNER_TEMP/trusted-head"
+printf "%s\n" "${CANDIDATE_OBJECTS:-}" > "$RUNNER_TEMP/candidate-objects"
+rm -f "$RUNNER_TEMP/trusted-fetches" "$RUNNER_TEMP/candidate-fetches"
 '''
                     env = {**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
                            "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
@@ -744,6 +750,17 @@ printf "%s\n" "$TRUSTED_MAIN_SHA" > "$RUNNER_TEMP/trusted-head"
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if event == "pull_request":
                         self.assertFalse((root / "trusted-fetches").exists())
+                        # Main advanced between the candidate and trusted
+                        # checkouts: the loop has nothing to re-resolve, but
+                        # the candidate must still receive trusted main (#2010).
+                        self.assertEqual((root / "candidate-fetches").read_text(), "c" * 40 + "\n")
+                        present = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
+                            env={**env, "CANDIDATE_OBJECTS": "c" * 40},
+                            capture_output=True, text=True,
+                        )
+                        self.assertEqual(present.returncode, 0, present.stderr)
+                        self.assertFalse((root / "candidate-fetches").exists())
                         # Main advancing once re-resolves the trusted policy
                         # and admits against the new main (#1971).
                         moved = subprocess.run(
