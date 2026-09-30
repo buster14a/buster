@@ -727,34 +727,48 @@ u32 debug_register_dwarf_number(Target target, DebugRegister reg)
     return UINT32_MAX;
 }
 
+// CodeView numbers registers in its own order (CV_HREG_e in Microsoft's
+// cvconst.h, mirrored by LLVM's CodeViewRegisters.def), which is neither the
+// hardware encoding order DebugRegister follows nor DWARF's: RBX precedes RCX,
+// XMM8-15 are not contiguous with XMM0-7, and ARM64 X0 is 50, not 0 (#1440).
+// The tables below are that enumeration, not arithmetic over ours.
 u32 debug_register_codeview_number(Target target, DebugRegister reg)
 {
     u32 register_index = (u32)reg;
+    u32 result = UINT32_MAX;
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
+        // RAX RCX RDX RBX RSP RBP RSI RDI R8..R15, in DebugRegister order.
+        static const u16 gpr[] = {328, 330, 331, 329, 335, 334, 332, 333, 336, 337, 338, 339, 340, 341, 342, 343};
         if (register_index >= (u32)DEBUG_REGISTER_X86_RAX && register_index <= (u32)DEBUG_REGISTER_X86_R15)
         {
-            return 328 + register_index - (u32)DEBUG_REGISTER_X86_RAX;
+            result = gpr[register_index - (u32)DEBUG_REGISTER_X86_RAX];
         }
-        if (register_index >= (u32)DEBUG_REGISTER_X86_XMM0 && register_index <= (u32)DEBUG_REGISTER_X86_XMM15)
+        else if (register_index >= (u32)DEBUG_REGISTER_X86_XMM0 && register_index <= (u32)DEBUG_REGISTER_X86_XMM7)
         {
-            return 154 + register_index - (u32)DEBUG_REGISTER_X86_XMM0;
+            result = 154 + register_index - (u32)DEBUG_REGISTER_X86_XMM0;
+        }
+        else if (register_index >= (u32)DEBUG_REGISTER_X86_XMM8 && register_index <= (u32)DEBUG_REGISTER_X86_XMM15)
+        {
+            result = 252 + register_index - (u32)DEBUG_REGISTER_X86_XMM8;
         }
     }
     else if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
+        // X0..X28 are 50..78, then FP (X29) 79, LR (X30) 80, SP 81; a vector
+        // register is named by its full 128-bit Q view, Q0..Q31 180..211.
         if (register_index >= (u32)DEBUG_REGISTER_AARCH64_X0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_X30)
         {
-            return register_index - (u32)DEBUG_REGISTER_AARCH64_X0;
+            result = 50 + register_index - (u32)DEBUG_REGISTER_AARCH64_X0;
         }
-        if (register_index == (u32)DEBUG_REGISTER_AARCH64_SP)
+        else if (register_index == (u32)DEBUG_REGISTER_AARCH64_SP)
         {
-            return 31;
+            result = 81;
         }
-        if (register_index >= (u32)DEBUG_REGISTER_AARCH64_V0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_V31)
+        else if (register_index >= (u32)DEBUG_REGISTER_AARCH64_V0 && register_index <= (u32)DEBUG_REGISTER_AARCH64_V31)
         {
-            return 64 + register_index - (u32)DEBUG_REGISTER_AARCH64_V0;
+            result = 180 + register_index - (u32)DEBUG_REGISTER_AARCH64_V0;
         }
     }
-    return UINT32_MAX;
+    return result;
 }
