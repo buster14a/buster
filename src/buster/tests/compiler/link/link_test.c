@@ -4296,6 +4296,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_precedence(UnitTestArgumen
     return result;
 }
 
+// Legacy function-symbol FDEs follow the strong winner and become ambiguous.
+// Reject them in either input order; local section anchors retain distinct PCs.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_weak_unwind(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 text[16] = {0};
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
+    {
+        Target target = {.cpu_arch = architectures[arch], .os = OPERATING_SYSTEM_LINUX};
+        CodegenFunctionDescriptor function = {.code_size = sizeof(text)};
+        DwarfCfiResult cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){.functions = &function, .target = target, .function_count = 1});
+        if (BUSTER_REQUIRE(arguments, cfi.valid && cfi.relocation_count == 1))
+        {
+            ObjectSymbol weak_symbols[] = {
+                {.name = S8("main"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .weak = true},
+                {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            };
+            ObjectSymbol strong_symbols[] = {
+                {.name = S8("main"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            };
+            for (u32 anchored = 0; anchored < 2; anchored += 1)
+            {
+                ObjectRelocation relocation = {
+                    .offset = cfi.relocations[0].offset,
+                    .section = OBJECT_SECTION_UNWIND,
+                    .symbol = anchored ? 1u : 0u,
+                    .kind = arch ? OBJECT_RELOCATION_AARCH64_PREL32 : OBJECT_RELOCATION_X86_64_PC32,
+                };
+                ObjectFile weak = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), weak_symbols,
+                                                        BUSTER_ARRAY_LENGTH(weak_symbols), &relocation, 1);
+                ObjectFile strong = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), strong_symbols,
+                                                          BUSTER_ARRAY_LENGTH(strong_symbols), &relocation, 1);
+                weak.sections[OBJECT_SECTION_UNWIND].data = cfi.bytes;
+                strong.sections[OBJECT_SECTION_UNWIND].data = cfi.bytes;
+                for (u32 order = 0; order < 2; order += 1)
+                {
+                    ObjectFile inputs[] = {order ? strong : weak, order ? weak : strong};
+                    LinkObjectResult merged = link_objects(arguments->arena, inputs, BUSTER_ARRAY_LENGTH(inputs), (LinkOptions){0});
+                    if (BUSTER_REQUIRE(arguments, merged.error == LINK_ERROR_NONE))
+                    {
+                        NativeExecutableLinkResult linked =
+                            link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+                        if (!anchored)
+                        {
+                            BUSTER_TEST(arguments, linked.error == LINK_ERROR_RELOCATION && !linked.executable.length);
+                        }
+                        else if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+                        {
+                            u64 header = 0;
+                            if (BUSTER_REQUIRE(arguments, link_test_elf_section_find(linked.executable, S8(".eh_frame_hdr"), 0, &header)))
+                            {
+                                u64 offset = link_read_u64(linked.executable.pointer, header + 24);
+                                u64 size = link_read_u64(linked.executable.pointer, header + 32);
+                                if (BUSTER_REQUIRE(arguments, size == 28 && offset <= linked.executable.length && size <= linked.executable.length - offset))
+                                {
+                                    BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, offset + 8) == 2);
+                                    BUSTER_TEST(arguments, (s32)link_read_u32(linked.executable.pointer, offset + 12) <
+                                                               (s32)link_read_u32(linked.executable.pointer, offset + 20));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4335,6 +4406,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initializer_array_symbol = link_test_elf_initializer_array_symbol(arguments);
     result.succeeded_test_count += initializer_array_symbol.succeeded_test_count;
     result.test_count += initializer_array_symbol.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_weak_unwind);
     UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);
     result.succeeded_test_count += merged_symbol_table.succeeded_test_count;
     result.test_count += merged_symbol_table.test_count;

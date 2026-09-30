@@ -7,7 +7,8 @@
 // target/format family: static and dynamic ELF64 for x86-64 and AArch64,
 // hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
 // writers share the helpers above them — AArch64 branch range checks and
-// veneers, ELF .eh_frame table construction, PE export/import plumbing,
+// veneers, ELF .eh_frame table construction (duplicate initial locations are
+// refused by link_elf_eh_frame_header_write), PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
@@ -3556,7 +3557,10 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         LinkElfEhFrameEntry* entry = table->entries + entry_index;
         u64 output = header_offset + 12 + (u64)entry_index * 8;
         u64 fde_address = unwind_address + entry->fde_offset;
-        if (!link_elf_signed_difference(entry->function_address, header_address, &relative))
+        // A duplicate key makes the selected CFA program depend on unwinder
+        // search order. Refuse legacy or foreign ambiguous FDEs (issue 1233).
+        if ((entry_index && entry->function_address == table->entries[entry_index - 1].function_address) ||
+            !link_elf_signed_difference(entry->function_address, header_address, &relative))
         {
             return false;
         }
