@@ -330,7 +330,7 @@ BUSTER_GLOBAL_LOCAL BqRetirementCampaignRequest bq_prep_campaign_request(BqPrepC
     BqRetirementCampaignRequest request = {campaign->gate, &campaign->campaign, &campaign->plan,
         &campaign->stages[0].samples, &campaign->stages[1].samples, campaign->commands[0], campaign->commands[1],
         campaign->snapshots, slots * 4, campaign->identities, slots, &campaign->review, campaign->plan_sha,
-        campaign->context_sha};
+        campaign->context_sha, &campaign->row_plan};
     return request;
 }
 
@@ -829,6 +829,7 @@ enum
     BQ_PREP_CAMPAIGN_UNIT_GATE_COPY,
     BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED,
     BQ_PREP_CAMPAIGN_PLAN_OVERRIDE, BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE, BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE,
+    BQ_PREP_CAMPAIGN_NO_ROW_PLAN, BQ_PREP_CAMPAIGN_MEMORY,
     BQ_PREP_CAMPAIGN_MODES
 };
 
@@ -914,6 +915,19 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
         mode == BQ_PREP_CAMPAIGN_UNIT_GATE_COPY ? &whole : &campaign->unit_gate;
     BqRetirementCorrectness copied = campaign->unit_gate.correctness;
     if (mode == BQ_PREP_CAMPAIGN_CALLER_GATE) request.gate = &copied;
+    /* No row plan; the candidate side of the first slot given another
+     * address-space bound than the baseline's and the plan template's. */
+    if (mode == BQ_PREP_CAMPAIGN_NO_ROW_PLAN) request.row_plan = NULL;
+    size_t per_stage = campaign->plan_commands.count;
+    TpRetirementMeasuredCommand* altered = mode == BQ_PREP_CAMPAIGN_MEMORY && per_stage ?
+        malloc(per_stage * sizeof(*altered)) : NULL;
+    if (altered)
+    {
+        memcpy(altered, request.ab_commands, per_stage * sizeof(*altered));
+        altered[1].memory_mib = altered[0].memory_mib * 2u;
+        request.ab_commands = altered;
+    }
+    BQ_PREP_CHECK(mode != BQ_PREP_CAMPAIGN_MEMORY || altered);
     if (mode == BQ_PREP_CAMPAIGN_UNIT_GATE_COPY) request.gate = &whole.correctness;
     u64 deadline = bq_phase_clock() + 300000000000ull;
     BqError result = mode == BQ_PREP_CAMPAIGN_BLOCKED_PROFILE ?
@@ -928,6 +942,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
         bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
     }
     free(moved);
+    free(altered);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     return result;
 }
@@ -936,7 +951,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
 {
     static BqError const expected[BQ_PREP_CAMPAIGN_MODES] = {BQ_OK, BQ_INVALID_TRANSITION, BQ_INVALID_TRANSITION,
         BQ_INVALID_TRANSITION, BQ_WORKSPACE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
-        BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
+        BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH,
+        BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
         BQ_RECIPE_MISMATCH};
     for (u32 mode = 0; mode < BQ_PREP_CAMPAIGN_MODES; mode += 1)
     {
@@ -987,8 +1003,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
  * roots, and the untimed production batch launches the held baseline in the
  * canonical layout and sandbox. The fixture's matched builds are text files,
  * so the child cannot exec (exit 125): the driver stops with the launch's
- * coordinates and process facts and keeps its log. */
-BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign, int cancel)
+ * coordinates and process facts and keeps its log. Refusals, each recorded
+ * as REFUSED without a hang: trial 1 caps the Landlock ABI below
+ * BQ_RETIREMENT_SANDBOX_MIN_ABI, so the ruleset is refused before any child;
+ * trial 2 runs on a CPU the process may not use, so the child refuses before
+ * it reports and the driver keeps its errno. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign, int cancel,
+    u32 trial)
 {
     BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
     u64 job = attempt->job.id, token = attempt->job.token;
@@ -1041,19 +1062,42 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
     FILE* records = tmpfile();
     unsigned char reproduced[2];
     TpRetirementUntimed untimed;
-    ok = ok && records && bq_retirement_campaign_job_label(label, job) &&
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    bool unusable = trial != 2 || (sched_getaffinity(0, sizeof(allowed), &allowed) == 0 &&
+                                   !CPU_ISSET(CPU_SETSIZE - 1, &allowed));
+    int cpu = trial == 2 ? CPU_SETSIZE - 1 : tp_first_allowed_cpu();
+    ok = ok && unusable && records && bq_retirement_campaign_job_label(label, job) &&
         tp_retirement_untimed_init(&untimed, records, NULL, &campaign->budget, 1, reproduced, label, token,
-            "boot-fixture", tp_first_allowed_cpu(), tp_process_monotonic_ns(), UINT64_MAX - 1, 0);
+            "boot-fixture", cpu, tp_process_monotonic_ns(), UINT64_MAX - 1, 0);
     BQ_PREP_CHECK(ok);
+    if (trial == 1) bq_retirement_sandbox_abi_ceiling = BQ_ROW_TEST_OLD_ABI;
+    u64 begun = bq_phase_clock();
     bool ran = ok && bq_retirement_unit_campaign_untimed(&driver, &untimed, batches, 4, &campaign->held,
                                                          campaign->ready.sources, campaign->gate, &review, &none,
                                                          &code);
+    u64 spent = bq_phase_clock() - begun;
+    bq_retirement_sandbox_abi_ceiling = UINT32_MAX;
     BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(&driver);
     struct stat kept;
-    if (ok && failure.exit_code != 125)
+    if (trial)
+    {
+        if (failure.reason != BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED)
+            fprintf(stderr, "RETIREMENT_PREP campaign driver refusal %u stop %u status %d error %d\n", trial,
+                    failure.reason, failure.status, failure.launch_error);
+        BQ_PREP_CHECK(ok && !ran && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && untimed.failed &&
+                      failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED &&
+                      failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING && !failure.stage && !failure.group &&
+                      !failure.variant && failure.purpose == TP_RETIREMENT_UNTIMED_PRODUCTION && !failure.sequence &&
+                      !failure.timed_out && !failure.cancelled && !driver.launches[0] && !driver.code_count &&
+                      spent < 2000000000ull &&
+                      (trial == 1 ? !failure.launched : failure.launched && failure.launch_error == EINVAL));
+    }
+    else if (ok && failure.exit_code != 125)
         fprintf(stderr, "RETIREMENT_PREP campaign driver stop %u status %d exit %d signal %d error %d\n", failure.reason,
                 failure.status, failure.exit_code, failure.signal_number, failure.launch_error);
-    BQ_PREP_CHECK(ok && !ran && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && untimed.failed &&
+    if (!trial)
+        BQ_PREP_CHECK(ok && !ran && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && untimed.failed &&
                   failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
                   failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING && !failure.stage && !failure.group &&
                   !failure.variant && failure.purpose == TP_RETIREMENT_UNTIMED_PRODUCTION && !failure.sequence &&
@@ -1063,7 +1107,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
                   kept.st_size == (off_t)failure.log_bytes && tp_retirement_digest(failure.log_sha256));
     /* Nothing further runs on a failed driver. */
     BQ_PREP_CHECK(!bq_retirement_unit_campaign_measuring(&driver) && phases.sequence == BQ_PHASE_SETTLING &&
-                  bq_retirement_unit_campaign_failure(&driver).reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH);
+                  bq_retirement_unit_campaign_failure(&driver).reason ==
+                  (trial ? BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED : BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH));
     if (records) fclose(records);
     bq_prep_campaign_drop(campaign);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
@@ -1491,7 +1536,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
             bq_prep_campaign_binds(context, campaign, cancel[0]);
         }
         bq_prep_campaign_drop(campaign);
-        bq_prep_campaign_driver(context, campaign, cancel[0]);
+        for (u32 trial = 0; trial < 3; trial += 1) bq_prep_campaign_driver(context, campaign, cancel[0], trial);
     }
     if (campaign) bq_prep_campaign_release(campaign);
     if (oracle.owned) BQ_PREP_CHECK(bq_retirement_unit_oracle_release(&oracle));

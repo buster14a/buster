@@ -649,9 +649,12 @@ pinned digest. stderr is its log, bounded to 16 MiB.
 `bq_retirement_sandbox_enter` applies it just before exec, after
 `PR_SET_NO_NEW_PRIVS`. Both live in `tools/throughput/retirement_sandbox.h`
 with the canonical slot constants and the slot placement
-(`bq_retirement_sandbox_slots`) and child normalization
-(`bq_retirement_sandbox_normalize`) helpers, so the row producer and lane D's
-measured launches share one implementation. What it covers:
+(`bq_retirement_sandbox_slots`), so the row producer and lane D's measured
+launches share one implementation of each. Lane D's child normalization
+(`bq_retirement_sandbox_normalize`) sits beside them; it follows
+`bq_retirement_build_child`'s signal, mask, umask and close-on-exec policy but
+also resets `SIGALRM` and sets `RLIMIT_CORE` and `RLIMIT_AS`, which the row
+spawn sets after `bq_retirement_build_child`. What it covers:
 
 - **Kernel.** It requires Landlock ABI 6 (`BQ_RETIREMENT_SANDBOX_MIN_ABI`),
   the first ABI with the signal and abstract-socket scopes. An older kernel,
@@ -932,11 +935,20 @@ label:
   compile's output directory to be the work directory.
 - **Timer.** Everything above happens before the timer: the ruleset is built
   before the fork, and the child reports over a pipe only once it is placed
-  and inside its sandbox. The parent then reads that byte, takes the start
+  and inside its sandbox. The parent then reads that report, takes the start
   time, arms the timeout and writes the go byte; the child reads it and calls
   `execve`. The measured interval is that one pipe wake-up, the exec and the
-  program. A child that cannot enter the sandbox never reports and is a
-  launch error (`EACCES`); the driver records it as refused.
+  program.
+- **Refusal.** The report is 0, or the errno of the first child step that
+  failed (affinity, process group, log, stdin, normalization, parking or
+  placing a slot, `fchdir`, no new privileges, Landlock or seccomp); the child
+  closes its end right after writing it. The parent waits for the report
+  together with the cancellation descriptor, bounded by the launch's timeout,
+  so a child that fails before reporting never blocks it: the launch returns
+  as refused (`TpProcess.refused`) with that errno as its launch error, and
+  the driver records it as `REFUSED`. A cancellation during the wait is a
+  cancellation, a child that exits without a report is `ECHILD` and one that
+  never reports is `ETIMEDOUT`.
 
 The preparation runner's campaign fixture issues the gate over a row plan
 that follows the validator's timed partition and checks, for a timed batch

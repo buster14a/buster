@@ -69,7 +69,19 @@ typedef struct TpProcess
     /* The caller's cancellation descriptor became readable while the child
      * ran, so the process group was killed (TpProcessInputs.cancellation). */
     int cancelled;
+    /* A layout child refused before exec: it could not be set up, placed or
+     * sandboxed, and launch_error is the errno it reported. */
+    int refused;
 } TpProcess;
+
+#ifdef __linux__
+/* The errno of a failed step, never zero. */
+static inline int32_t tp_process_errno(void)
+{
+    int32_t error = errno ? (int32_t)errno : (int32_t)EACCES;
+    return error;
+}
+#endif
 
 static inline int tp_mkdir(char const* path)
 {
@@ -473,20 +485,25 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     if (pid == 0)
     {
         close(ready[1]);
-        int go = ready[0], report = -1;
+        int go = ready[0], report = -1, parked_ends = 1;
 #ifdef __linux__
         /* Under a layout both handshake ends are parked above the slots
-         * first, so placing the slots cannot overwrite them. */
+         * first, so placing the slots cannot overwrite them. An end that
+         * cannot be parked stays where it is and the child places nothing:
+         * it still reports its refusal and exits. */
         if (layout)
         {
             close(armed[0]);
             go = fcntl(ready[0], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH);
-            report = fcntl(armed[1], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH);
-            close(ready[0]);
-            close(armed[1]);
+            report = go >= 0 ? fcntl(armed[1], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH) : -1;
+            parked_ends = go >= 0 && report >= 0;
+            if (go >= 0) close(ready[0]);
+            else go = ready[0];
+            if (report >= 0) close(armed[1]);
+            else report = armed[1];
         }
 #endif
-        int child_ok = go >= 0 && setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 &&
+        int child_ok = go >= 0 && parked_ends && setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 &&
             dup2(log, STDERR_FILENO) >= 0;
         close(log);
         if (child_ok && directory)
@@ -504,6 +521,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             if (cpu >= CPU_SETSIZE)
             {
                 child_ok = 0;
+                errno = EINVAL;
             }
             else
             {
@@ -518,18 +536,25 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         if (layout)
         {
             /* The canonical layout and sandbox, all before the timer: /dev/null
-             * stdin, lane B's normalized state, the four slots (the ruleset
-             * parked), cwd the work slot, then no new privileges, Landlock and
-             * the seccomp filter; then report ready. */
-            int input = child_ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
-            child_ok = input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
+             * stdin, the normalized state (bq_retirement_sandbox_normalize),
+             * the four slots (the ruleset parked), cwd the work slot, then no
+             * new privileges, Landlock and the seccomp filter. The child then
+             * reports 0, or the errno of the first step that failed, and
+             * closes its end at once, so the parent never waits on a child
+             * that stopped before reporting. */
+            int32_t failure = child_ok ? 0 : tp_process_errno();
+            int input = !failure ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+            if (!failure && !(input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO)) failure = tp_process_errno();
             if (input >= 0) close(input);
-            child_ok = child_ok && bq_retirement_sandbox_normalize(0077, inputs->memory_bytes);
+            if (!failure && !bq_retirement_sandbox_normalize(0077, inputs->memory_bytes)) failure = tp_process_errno();
             int const held[4] = {inputs->executable, inputs->sources[0], inputs->sources[1], inputs->directory};
-            int parked = child_ok ? bq_retirement_sandbox_slots(held, (uint32_t)inputs->side, inputs->ruleset) : -1;
-            child_ok = parked >= 0 && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) == 0 && bq_retirement_sandbox_enter(parked);
-            char mark = 1;
-            child_ok = child_ok && write(report, &mark, 1) == 1;
+            int parked = !failure ? bq_retirement_sandbox_slots(held, (uint32_t)inputs->side, inputs->ruleset) : -1;
+            if (!failure && parked < 0) failure = tp_process_errno();
+            if (!failure && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0) failure = tp_process_errno();
+            if (!failure && !bq_retirement_sandbox_enter(parked)) failure = tp_process_errno();
+            ssize_t written = write(report, &failure, sizeof(failure));
+            child_ok = !failure && written == (ssize_t)sizeof(failure);
+            close(report);
         }
 #endif
         char byte;
@@ -605,26 +630,57 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         }
 #endif
 #ifdef __linux__
-        /* A layout child reports ready once it is placed and sandboxed; only
-         * then does the timer start, so neither the placement nor the sandbox
-         * entry is measured. A child that could not enter reports nothing:
-         * launch error EACCES. */
+        /* A layout child reports once it is placed and sandboxed; only then
+         * does the timer start, so neither the placement nor the sandbox
+         * entry is measured. The report is 0, or the errno of the step that
+         * failed: the child refused (TpProcess.refused), with that errno as
+         * the launch error. The wait also watches the cancellation
+         * descriptor and is bounded by the launch's timeout (at least one
+         * second): a cancellation is reported as such, a child that never
+         * reports as ETIMEDOUT and one that exits without a report as
+         * ECHILD. */
         if (layout)
         {
             close(armed[1]);
             armed[1] = -1;
-            char mark = 0;
-            ssize_t reported;
-            do
+            int32_t reported = -1;
+            size_t received = 0;
+            int cancel_fd = inputs->cancellation >= 3 ? inputs->cancellation : -1, expired = 0, stopped = 0;
+            uint64_t bound = (uint64_t)(timeout_seconds ? timeout_seconds : 1u) * UINT64_C(1000000000);
+            uint64_t deadline = tp_process_monotonic_ns() + bound;
+            int waiting = identity_ok;
+            while (waiting)
             {
-                reported = identity_ok ? read(armed[0], &mark, 1) : -1;
-            } while (identity_ok && reported < 0 && errno == EINTR);
+                uint64_t now = tp_process_monotonic_ns();
+                uint64_t left = now < deadline ? (deadline - now) / UINT64_C(1000000) + 1u : 0;
+                struct pollfd waits[2] = {{.fd = armed[0], .events = POLLIN}, {.fd = cancel_fd, .events = POLLIN}};
+                int count = left ? poll(waits, 2, left > 86400000u ? 86400000 : (int)left) : 0;
+                if (count < 0 && errno != EINTR) waiting = 0;
+                else if (count == 0)
+                {
+                    expired = 1;
+                    waiting = 0;
+                }
+                else if (count > 0 && waits[1].revents)
+                {
+                    stopped = 1;
+                    waiting = 0;
+                }
+                else if (count > 0 && waits[0].revents)
+                {
+                    ssize_t got = read(armed[0], (char*)&reported + received, sizeof(reported) - received);
+                    if (got > 0) received += (size_t)got;
+                    waiting = got > 0 ? received < sizeof(reported) : got < 0 && errno == EINTR;
+                }
+            }
             close(armed[0]);
             armed[0] = -1;
-            if (identity_ok && (reported != 1 || mark != 1))
+            if (identity_ok && !(received == sizeof(reported) && reported == 0))
             {
                 identity_ok = 0;
-                result.launch_error = EACCES;
+                result.refused = received == sizeof(reported) && reported > 0;
+                result.cancelled = stopped;
+                result.launch_error = result.refused ? reported : stopped ? 0 : expired ? ETIMEDOUT : ECHILD;
             }
             start = timestamp_take();
             if (identity_ok && observation)

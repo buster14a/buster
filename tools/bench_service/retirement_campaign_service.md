@@ -108,8 +108,12 @@ rechecks the channel; that the held pair and record are this attempt's import
 identities); that the record still stands at its content address with the
 imported bytes (`bq_retirement_campaign_ready_standing`); that the request's
 gate is the unit gate's own correctness gate and the unit gate still joins;
-and
-that the pre-sample binding time follows the MEASURING acknowledgement. It
+that every command is the one lane B's row plan (`request->row_plan`)
+resolves for that unit gate (`bq_retirement_campaign_plan_commands_match`:
+slot, kind, unit, variant, directory, recomputed command digest, output
+digest, exit status, timeout and address-space bound), so each launch's
+`RLIMIT_AS` is the plan template's for its row and side; and that the
+pre-sample binding time follows the MEASURING acknowledgement. It
 derives the plan, plan digest and pre-sample context itself (below), refuses
 any caller value that differs, binds through the shared tail and marks the
 binding with the record's digest (`unit_ready_sha256`). The driver's attach
@@ -297,8 +301,13 @@ the attempt:
    the timer starts (`tp_process_observe_inputs`): it reports over a pipe once
    sandboxed, the parent then takes the start time, arms the timeout and lets
    it `execve`, so the measured interval is one pipe wake-up, the exec and the
-   program. A child that cannot enter the sandbox never reports; the launch is
-   a launch error and the driver records it as refused. The launch requires
+   program. A child that fails before it reports (affinity, placement,
+   normalization or sandbox entry) reports that step's errno and closes its
+   end; the parent's wait for the report also watches the cancellation
+   descriptor and is bounded by the launch's timeout, so it never hangs. The
+   launch returns as refused (`TpProcess.refused`, the errno as its launch
+   error) and the driver records it as `REFUSED`, as it does a ruleset the
+   kernel cannot build before any child starts. The launch requires
    the command's directory to be exactly `BQ_RETIREMENT_ROW_WORK_PATH`, its
    argv[0] the side's slot, the work directory owned by the service user and
    not group- or world-writable, and a compile's output directory to be the
@@ -436,12 +445,17 @@ layout child reports, for each side, exactly descriptors 0, 1, 2, its
 side's slot, 5, 6 and 7, cwd `/proc/self/fd/7`, a file outside its sandbox
 denied and a connection to a listening unix socket outside it denied; a
 command naming the other side's slot is refused before any child. The
-fixture's address-space bound is 8 GiB, and none under the sanitizers,
-whose shadow memory needs the whole address space. A sanitized fixture child
-inside the sandbox also runs without LeakSanitizer, which needs `/proc`
-(`__asan_default_options` in `retirement_measurement_test.h` turns it off
-only for a process that cannot open `/proc/self/status`). Launch timeouts are 30 s,
-so the 1,468 pinned
+fixture's address-space bound is 8 GiB, which the layout child reports back
+as its `RLIMIT_AS`, and none under the sanitizers, whose shadow memory needs
+the whole address space. Each child-side refusal returns at once as
+refused with its errno and no timer: a CPU beyond `CPU_SETSIZE` and one the
+process may not use (`EINVAL`), a ruleset descriptor that is no Landlock
+ruleset (`EBADFD`, from `landlock_restrict_self` in the child) and
+descriptors capped at the parking floor (`EINVAL`). A sanitized fixture
+child inside the sandbox also runs without LeakSanitizer, which needs
+`/proc`: `__asan_default_options` in `retirement_measurement_test.h` turns
+it off only for a process that holds descriptors 5, 6 and 7 and cannot open
+`/proc/self/status`. Launch timeouts are 30 s, so the 1,468 pinned
 launches do not time out under sanitizers and load, and a complete run that
 stops prints its retained failure. Its plan tests refuse `U = 0` and
 object-group members out of order or after a control input.
@@ -465,7 +479,10 @@ SETTLING through the import to the first untimed launch of the imported held
 baseline. The census fixture's matched builds are text files, so that launch
 exits 125 and the driver keeps its coordinates, process facts and log; that
 launch runs in the canonical layout with the roots the import held, which a
-refused import never holds. Its unit gate is lane B's pinned issuer on this
+refused import never holds. Two more runs are refused, each recorded as
+`REFUSED` within two seconds: with the Landlock ABI capped below 6 the
+ruleset is refused before any child, and on a CPU the process may not use
+the child refuses before it reports (launched, `EINVAL`). Its unit gate is lane B's pinned issuer on this
 attempt (`bq_prep_campaign_issue`): B's stand-in required checks run in the
 unit, and a row plan over the validator's timed partition of the pinned rows
 (`bq_prep_campaign_plan_text`: one batch group and template per timed object
@@ -481,7 +498,9 @@ label), that every command hashes as B's `bq_retirement_row_command_digest`
 in the work slot, and that the plan's A/A aggregate is the gate's. A record
 whose `correctness=` seal changed is corrupt, since the replay recomputes the
 seal from the persisted row evidence. The bind also refuses another unit-gate
-seal and a caller-held copy of the correctness gate. No timed child runs
+seal, a caller-held copy of the correctness gate, a request without the row
+plan, and commands whose candidate side carries another address-space bound
+than the plan template's (`bq_retirement_campaign_plan_commands_match`). No timed child runs
 there. All fixture digests, pins and admissions are test data,
 never a verdict.
 

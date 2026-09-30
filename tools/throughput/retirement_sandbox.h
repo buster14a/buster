@@ -12,9 +12,11 @@
  *
  * Entry points (all in the forked child except the ruleset):
  *   bq_retirement_sandbox            the Landlock ruleset of one child
- *   bq_retirement_sandbox_normalize  default signal dispositions, empty mask,
- *                                    the umask, close-on-exec from 3, no core
- *                                    and the address-space limit
+ *   bq_retirement_sandbox_normalize  lane D's child normalization: default
+ *                                    signal dispositions (SIGALRM too), empty
+ *                                    mask, the umask, close-on-exec from 3, no
+ *                                    core and the address-space limit (lane B
+ *                                    uses bq_retirement_build_child)
  *   bq_retirement_sandbox_slots      every held descriptor and the ruleset
  *                                    moved above BQ_RETIREMENT_ROW_SLOT_HIGH,
  *                                    then the four into the canonical slots
@@ -195,10 +197,17 @@ static inline int bq_retirement_sandbox(int const* executables, uint32_t executa
     return ok ? ruleset : -1;
 }
 
-/* In the forked child: the normalized state lane B's steps run in. Default
- * dispositions for the signals the parent handles or ignores, an empty
- * signal mask, the umask, close-on-exec for every descriptor above stderr,
- * no core file and memory_bytes of address space (0 leaves it unlimited). */
+/* In the forked child of lane D's layout launch (tp_process_observe_inputs):
+ * default dispositions for the signals the parent handles or ignores, an
+ * empty signal mask, the umask, close-on-exec for every descriptor above
+ * stderr, no core file and memory_bytes of address space (0 leaves it
+ * unlimited). This follows lane B's bq_retirement_build_child
+ * (retirement_matched_build.c), which its checks and row steps run through,
+ * but is not that function: build_child also takes its own process group,
+ * the log as stdout and stderr, /dev/null as stdin and its working
+ * directory, which the throughput launch does itself; this one also resets
+ * SIGALRM (the throughput parent's timeout handler) and sets RLIMIT_CORE and
+ * RLIMIT_AS, which lane B's check and row spawns set after build_child. */
 static inline bool bq_retirement_sandbox_normalize(mode_t file_umask, uint64_t memory_bytes)
 {
     sigset_t empty;

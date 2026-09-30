@@ -163,30 +163,34 @@ static int test_retirement_batch_child(int argc, char** argv)
     return result;
 }
 
-#if defined(BUSTER_SANITIZE)
+#if BUSTER_SANITIZE
 /* A fixture child inside the canonical layout's sandbox cannot read /proc.
  * LeakSanitizer's exit-time check stops the world through /proc/<pid>/task
  * and aborts without it, and ASan cannot read ASAN_OPTIONS there
- * (/proc/self/environ), so the runtime asks here: a process that cannot
- * open /proc/self/status runs without the leak check, and every other
- * process, the test runner included, keeps the defaults. Every other
- * sanitizer check stays on in the sandboxed child, and the same child code
- * is leak-checked when it runs outside the sandbox. A raw system call: this
- * runs during the sanitizer's own initialization. */
+ * (/proc/self/environ), so the runtime asks here. Leak detection is off only
+ * for a process that holds the canonical layout's A roots and work slot
+ * (descriptors 5, 6 and 7) and cannot open /proc/self/status: a sandboxed
+ * layout child. Every other process, the test runner included, keeps the
+ * defaults; every other sanitizer check stays on in the sandboxed child, and
+ * the same child code is leak-checked when it runs outside the sandbox. Raw
+ * system calls: this runs during the sanitizer's own initialization. */
 char const* __asan_default_options(void);
 char const* __asan_default_options(void)
 {
-    long proc = syscall(SYS_openat, AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC);
-    if (proc >= 0) syscall(SYS_close, proc);
-    char const* options = proc >= 0 ? "" : "detect_leaks=0";
+    int slots = 1;
+    for (long slot = BQ_RETIREMENT_ROW_SLOT_SOURCE; slots && slot <= BQ_RETIREMENT_ROW_SLOT_WORK; slot += 1)
+        slots = syscall(SYS_fcntl, slot, F_GETFD) >= 0;
+    long proc = slots ? syscall(SYS_openat, AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC) : 0;
+    if (slots && proc >= 0) syscall(SYS_close, proc);
+    char const* options = slots && proc < 0 ? "detect_leaks=0" : "";
     return options;
 }
 #endif
 
 /* A child in the canonical layout reports what it sees: its open
  * descriptors (0..1023), whether its cwd is slot 7, whether it may open
- * `outside` (a file beyond its sandbox) and whether it may make a socket and
- * connect to the unix socket `socket_path`. */
+ * `outside` (a file beyond its sandbox), whether it may make a socket and
+ * connect to the unix socket `socket_path`, and its address-space limit. */
 static int test_retirement_layout_child(char const* outside, char const* socket_path)
 {
     char fds[256];
@@ -215,9 +219,15 @@ static int test_retirement_layout_child(char const* outside, char const* socket_
         connected = connect(sock, (struct sockaddr*)&address, sizeof(address)) == 0;
         close(sock);
     }
-    int ok = printf("fds=%s\ncwd=%s\nopen=%s\nsocket=%s\n", fds, cwd ? "slot" : "other",
+    struct rlimit memory;
+    char bound[32];
+    int limited = getrlimit(RLIMIT_AS, &memory) == 0;
+    if (limited && memory.rlim_cur == RLIM_INFINITY) snprintf(bound, sizeof(bound), "unlimited");
+    else if (limited) snprintf(bound, sizeof(bound), "%llu", (unsigned long long)memory.rlim_cur);
+    else snprintf(bound, sizeof(bound), "error");
+    int ok = printf("fds=%s\ncwd=%s\nopen=%s\nsocket=%s\nas=%s\n", fds, cwd ? "slot" : "other",
         opened ? "allowed" : open_errno == EACCES ? "denied" : "error",
-        connected ? "connected" : sock >= 0 ? "made" : socket_errno == EPERM ? "denied" : "error") > 0 &&
+        connected ? "connected" : sock >= 0 ? "made" : socket_errno == EPERM ? "denied" : "error", bound) > 0 &&
         fflush(stdout) == 0;
     return ok;
 }

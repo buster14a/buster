@@ -86,6 +86,10 @@ typedef struct BqRetirementCampaignRequest
     TpRetirementCampaignReview const* review;
     char const* plan_sha256;
     char const* context_sha256;
+    /* The store bind only: lane B's row plan the unit gate was issued on.
+     * Every command must be the one it resolves (the queue entry leaves it
+     * NULL). */
+    BqRetirementRowPlan const* row_plan;
 } BqRetirementCampaignRequest;
 
 static inline int bq_retirement_campaign_service_active(BqQueue* queue, uint64_t job_id,
@@ -179,7 +183,8 @@ static inline BqError bq_retirement_campaign_service_bind_pinned(BqQueue* queue,
     BqRetirementHeldBinaries* held, BqRetirementCampaignBinding* binding)
 {
     BqRetirementCampaignRequest request = {gate, campaign, plan, aa, ab, aa_commands, ab_commands,
-        command_workspace, command_count, identity_workspace, identity_count, review, plan_sha256, context_sha256};
+        command_workspace, command_count, identity_workspace, identity_count, review, plan_sha256, context_sha256,
+        NULL};
     BqJob* job = queue ? bq_job(&queue->state, job_id) : NULL;
     bool binding_available = binding && !binding->campaign && !binding->held_binaries;
     bool held_started = false;
@@ -782,12 +787,18 @@ static inline int bq_retirement_campaign_ready_holds(BqRetirementCampaignReady c
     return ok;
 }
 
+static inline int bq_retirement_campaign_plan_commands_match(BqRetirementRowPlan const* plan,
+    BqRetirementUnitGate const* unit_gate, BqRetirementCampaignRequest const* request);
+
 /* The cheap store-based bind under the MEASURING acknowledgement, after the
  * import and the untimed batches. It rechecks the channel, that held and
  * ready are this attempt's import, that the record still stands with its
  * imported bytes, the unit gate join (request->gate must be that unit
  * gate's own correctness gate) and held pair, and that the pre-sample
- * binding follows the MEASURING acknowledgement; derives the plan and
+ * binding follows the MEASURING acknowledgement, that every command is the
+ * one lane B's row plan (request->row_plan) resolves for the unit gate, so
+ * its address-space bound is the plan template's for that row and side
+ * (bq_retirement_campaign_plan_commands_match); derives the plan and
  * pre-sample context (untimed is the finished untimed record stream) and
  * refuses any caller value that differs; then binds and marks the binding
  * with the record's digest (the driver's attach requires the mark). A
@@ -810,6 +821,8 @@ static inline BqError bq_retirement_campaign_service_bind_unit_pinned(BqRetireme
         result = BQ_SOURCE_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_campaign_ready_unit_gate(ready, unit_gate);
     if (result == BQ_OK && !bq_retirement_campaign_ready_holds(ready, held)) result = BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK && !bq_retirement_campaign_plan_commands_match(request->row_plan, unit_gate, request))
+        result = BQ_RECIPE_MISMATCH;
     BqRetirementUnitCampaignPins pins = {0};
     if (result == BQ_OK && !bq_retirement_unit_campaign_pins(unit->profile, &pins)) result = BQ_RECIPE_MISMATCH;
     TpRetirementPlan plan = {0};
@@ -1055,6 +1068,36 @@ static inline int bq_retirement_campaign_plan_commands(BqRetirementRowPlan const
         out->runtime_count = runtime_count;
     }
     else if (fresh) bq_retirement_campaign_plan_commands_release(out);
+    return ok;
+}
+
+/* The request's commands are exactly the ones the row plan resolves for
+ * this unit gate: slot by slot, the same kind, unit and variant, directory,
+ * command digest (recomputed from the command's own fields), output digest,
+ * exit status, timeout and address-space bound. The launch then requires its
+ * bound to be its command's (tp_retirement_launch_layout), so every child's
+ * RLIMIT_AS is the plan template's for its row and side. */
+static inline int bq_retirement_campaign_plan_commands_match(BqRetirementRowPlan const* plan,
+    BqRetirementUnitGate const* unit_gate, BqRetirementCampaignRequest const* request)
+{
+    BqRetirementCampaignPlanCommands derived = {0};
+    int ok = plan && request && request->aa_commands && request->ab_commands &&
+        bq_retirement_campaign_plan_commands(plan, unit_gate, &derived) &&
+        request->command_count == derived.count * TP_RETIREMENT_CAMPAIGN_STAGES;
+    for (size_t index = 0; ok && index < derived.count * TP_RETIREMENT_CAMPAIGN_STAGES; index += 1)
+    {
+        TpRetirementMeasuredCommand const* want = derived.commands + index;
+        TpRetirementMeasuredCommand const* have = (index < derived.count ? request->aa_commands :
+                                                   request->ab_commands) + index % derived.count;
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        ok = have->unit == want->unit && have->kind == want->kind && have->variant == want->variant &&
+            have->exit_status == want->exit_status && have->timeout_seconds == want->timeout_seconds &&
+            have->memory_mib == want->memory_mib && have->directory && !strcmp(have->directory, want->directory) &&
+            have->command_sha256 && have->output_sha256 && !strcmp(have->command_sha256, want->command_sha256) &&
+            !strcmp(have->output_sha256, want->output_sha256) && tp_retirement_command_hash(have, digest) &&
+            !strcmp(digest, want->command_sha256);
+    }
+    bq_retirement_campaign_plan_commands_release(&derived);
     return ok;
 }
 #endif

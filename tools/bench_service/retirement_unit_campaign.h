@@ -47,7 +47,10 @@
  * binary at 3 or 4, A's roots (the imported record's sources) at 5 and 6 and
  * the work directory at 7 and as cwd, a new ruleset per launch built before
  * the fork, and the child enters the sandbox before the timer starts
- * (tp_process_observe_inputs). A launch the sandbox refuses is recorded.
+ * (tp_process_observe_inputs). A launch the sandbox refuses is recorded as
+ * REFUSED: a ruleset the kernel cannot build before any child starts, and a
+ * child that could not be set up, placed or sandboxed with the errno it
+ * reported (launched, launch_error).
  * Every launch is refused when it could outlive the absolute deadline, and
  * its child is killed when the cancellation descriptor becomes readable
  * (TpProcessInputs.cancellation). The first failure is retained with its
@@ -707,7 +710,9 @@ typedef enum BqRetirementUnitCampaignStep
 } BqRetirementUnitCampaignStep;
 
 /* Why the driver stopped. REFUSED: a step or its inputs were refused (order,
- * plan, binding, admission, store plan). CANCELLED and DEADLINE stop before a
+ * plan, binding, admission, store plan), or a launch's sandbox was: its
+ * ruleset could not be built, or its child refused before exec (launched,
+ * with the child's errno as launch_error). CANCELLED and DEADLINE stop before a
  * launch; CHANNEL is a failed phase exchange; LAUNCH is a launched child that
  * failed or whose output, metrics or record was refused (its process facts
  * say which). */
@@ -943,7 +948,8 @@ static inline void bq_retirement_unit_campaign_launch_failed(BqRetirementUnitCam
         }
     }
     coordinates->after = after;
-    coordinates->reason = BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH;
+    coordinates->reason = result->process.refused ? BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED :
+        BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH;
     coordinates->launched = result->status != TP_RETIREMENT_MEASUREMENT_PLAN_INVALID;
     coordinates->status = (int)result->status;
     coordinates->exit_code = result->process.exit_code;

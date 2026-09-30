@@ -330,7 +330,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     fixture->label_environment[2] = "TP_RETIREMENT_TEST=explicit";
     /* The row plan templates' address-space bound; unlimited under the
      * sanitizers, whose shadow memory needs the whole address space. */
-#if defined(BUSTER_SANITIZE)
+#if BUSTER_SANITIZE
     unsigned memory_mib = 0;
 #else
     unsigned memory_mib = 8192;
@@ -1499,13 +1499,62 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     }
 }
 
+/* A layout child that fails before it reports: it reports the failing
+ * step's errno and closes its end, so the launch returns at once as a
+ * refusal with that errno (TpProcess.refused), never waits for a report
+ * that cannot come and starts no timer. mode 0: a CPU beyond CPU_SETSIZE;
+ * 1: a CPU the process may not use (sched_setaffinity refuses); 2: a ruleset
+ * descriptor that is no Landlock ruleset (landlock_restrict_self refuses in
+ * the child); 3: descriptors capped at the parking floor, so the child
+ * cannot park its handshake ends above the slots. */
+static void test_unit_campaign_layout_refusal(TestUnitCampaign* fixture, unsigned mode)
+{
+    char* argv[] = {"/proc/self/fd/3", "retirement-child", "layout", "/nonexistent", "/nonexistent",
+        fixture->leak_text, NULL};
+    int executable = fixture->binary;
+    int log = openat(fixture->cwd, "refusal.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int ruleset = log < 3 ? -1 : mode == 2 ? fcntl(log, F_DUPFD_CLOEXEC, 3) :
+        bq_retirement_sandbox(&executable, 1, fixture->sources, fixture->cwd, NULL);
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    int usable = mode != 1 || (sched_getaffinity(0, sizeof(allowed), &allowed) == 0 &&
+        !CPU_ISSET(CPU_SETSIZE - 1, &allowed));
+    int cpu = mode == 0 ? 100000 : mode == 1 ? CPU_SETSIZE - 1 : fixture->cpu;
+    struct rlimit files = {0, 0};
+    int capped = mode == 3 && getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur > BQ_RETIREMENT_ROW_SLOT_HIGH;
+    if (capped)
+    {
+        struct rlimit floor = {BQ_RETIREMENT_ROW_SLOT_HIGH, files.rlim_max};
+        capped = setrlimit(RLIMIT_NOFILE, &floor) == 0;
+    }
+    TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, 0,
+        {fixture->sources[0], fixture->sources[1]}, ruleset, 0};
+    TpProcessObservation observed = {0};
+    uint64_t begun = tp_process_monotonic_ns();
+    TpProcess process = log >= 3 && ruleset >= 3 && usable && (mode != 3 || capped) ?
+        tp_process_observe_inputs(argv, NULL, NULL, 5, cpu, 0, &observed, &inputs) : (TpProcess){0};
+    uint64_t spent = tp_process_monotonic_ns() - begun;
+    if (capped) CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
+    int expected = mode == 2 ? EBADFD : EINVAL;
+    if (!(process.refused && process.launch_error == expected))
+        fprintf(stderr, "unit campaign layout refusal %u: refused %d error %d exit %d\n", mode, process.refused,
+                process.launch_error, process.exit_code);
+    CHECK(log >= 3 && ruleset >= 3 && usable && (mode != 3 || capped) && process.refused &&
+          process.launch_error == expected && !observed.valid && !process.timed_out && !process.cancelled &&
+          spent < UINT64_C(2000000000));
+    if (ruleset >= 0) CHECK(close(ruleset) == 0);
+    if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "refusal.log", 0) == 0);
+}
+
 /* One launch per side in lane B's canonical layout, as the driver makes it:
  * the child sees exactly stdin, stdout, stderr, its side's binary slot, A's
  * two roots and the work slot, its cwd is the work slot, and its sandbox
  * denies a file beside the work directory (a stand-in for the reference
  * oracle's output) and every socket, so it cannot reach a listening unix
- * socket outside it. The timer starts only after the child entered the
- * sandbox (tp_process_observe_inputs). */
+ * socket outside it. Its address-space limit is the launch's bound (8 GiB,
+ * none under the sanitizers, whose shadow memory needs the whole address
+ * space). The timer starts only after the child entered the sandbox
+ * (tp_process_observe_inputs). Then each child-side refusal. */
 static void test_unit_campaign_layout(TestUnitCampaign* fixture)
 {
     /* The stand-in oracle output and the listening socket live beside the
@@ -1530,18 +1579,26 @@ static void test_unit_campaign_layout(TestUnitCampaign* fixture)
         int executable = side ? fixture->candidate : fixture->binary;
         int log = openat(fixture->cwd, "layout.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         int ruleset = bq_retirement_sandbox(&executable, 1, fixture->sources, fixture->cwd, NULL);
+#if BUSTER_SANITIZE
+        uint64_t memory = 0;
+#else
+        uint64_t memory = UINT64_C(8192) << 20;
+#endif
         TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, (int)side,
-            {fixture->sources[0], fixture->sources[1]}, ruleset, 0};
+            {fixture->sources[0], fixture->sources[1]}, ruleset, memory};
         TpProcessObservation observed;
         TpProcess process = log >= 3 && ruleset >= 3 ?
             tp_process_observe_inputs(argv, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
-        char text[512], expected[512];
+        char text[512], expected[512], bound[32];
         ssize_t length = log >= 3 ? pread(log, text, sizeof(text) - 1, 0) : -1;
         text[length > 0 ? length : 0] = 0;
-        snprintf(expected, sizeof(expected), "fds=0,1,2,%u,5,6,7\ncwd=slot\nopen=denied\nsocket=denied\n", 3 + side);
+        if (memory) snprintf(bound, sizeof(bound), "%llu", (unsigned long long)memory);
+        else snprintf(bound, sizeof(bound), "unlimited");
+        snprintf(expected, sizeof(expected), "fds=0,1,2,%u,5,6,7\ncwd=slot\nopen=denied\nsocket=denied\nas=%s\n",
+                 3 + side, bound);
         if (strcmp(text, expected)) fprintf(stderr, "unit campaign layout child %u saw:\n%s", side, text);
-        CHECK(log >= 3 && ruleset >= 3 && observed.valid && !process.launch_error && !process.exit_code &&
-              !process.signal_number && !strcmp(text, expected));
+        CHECK(log >= 3 && ruleset >= 3 && observed.valid && !process.launch_error && !process.refused &&
+              !process.exit_code && !process.signal_number && !strcmp(text, expected));
         /* A binary slot that is not the side's is refused before any child. */
         argv[0] = side ? "/proc/self/fd/3" : "/proc/self/fd/4";
         TpProcess refused = log >= 3 && ruleset >= 3 ?
@@ -1554,6 +1611,7 @@ static void test_unit_campaign_layout(TestUnitCampaign* fixture)
     unlink(socket_path);
     unlink(outside);
     rmdir(socket_directory);
+    for (unsigned mode = 0; mode < 4; ++mode) test_unit_campaign_layout_refusal(fixture, mode);
 }
 
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)
