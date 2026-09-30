@@ -16326,7 +16326,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         if (start < end && scope.value < parse.scope_count)
         {
             CParseResult checkpoint = parse;
-            for (u32 variant = 0; variant < 3; variant += 1)
+            for (u32 variant = 0; variant < 4; variant += 1)
             {
                 parse = checkpoint;
                 CTypeId scalar_types[C_TYPE_COUNT];
@@ -16344,6 +16344,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                 {
                     // Lazy delimiter indexing must publish only privately.
                     parse.position_index = &positions;
+                }
+                else if (variant == 3)
+                {
+                    // A caller without an index still receives private
+                    // delimiter matching without changing its null pointer.
+                    parse.position_index = 0;
                 }
                 CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
                 BUSTER_TEST(arguments, query.model_unchanged);

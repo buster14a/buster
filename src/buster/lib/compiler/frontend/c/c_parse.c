@@ -1097,7 +1097,7 @@ BUSTER_CT_CHECK(sizeof(bool) == 1);
 // The query flag occupies padding after the existing final bool; published
 // model copies keep their original size on every supported host ABI.
 BUSTER_CT_CHECK(sizeof(CParseResult) ==
-    ((offsetof(CParseResult, analysis_complete) + sizeof(bool) + BUSTER_ALIGN_OF(CParseResult) - 1) & ~(BUSTER_ALIGN_OF(CParseResult) - 1)));
+    ((BUSTER_OFFSET_OF(CParseResult, analysis_complete) + sizeof(bool) + BUSTER_ALIGN_OF(CParseResult) - 1) & ~(BUSTER_ALIGN_OF(CParseResult) - 1)));
 
 // Puts `type_index` back on the pending list unless it already stands there.
 // The list holds distinct ids below `capacity`, so it cannot overflow the
@@ -21097,16 +21097,19 @@ BUSTER_C_INTERNAL bool c_parse_constant_integer_operation_valid(CParseResult* re
 {
     IrType scalar = c_parse_constant_scalar_type(result, target, left.type);
     IrType right_scalar = c_parse_constant_scalar_type(result, target, right.type);
-    bool valid = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN;
+    bool scalar_width = scalar.bit_width && (scalar.bit_width <= 64 || scalar.bit_width == 128);
+    bool valid = (scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN) && scalar_width;
     bool wide = scalar.bit_width == 128;
-    u64 a_sign = wide ? left.integer_high >> 63 : scalar.bit_width ? (left.integer >> (scalar.bit_width - 1)) & 1 : 0;
+    u64 a_sign = valid ? wide ? left.integer_high >> 63 : (left.integer >> (scalar.bit_width - 1)) & 1 : 0;
     bool negative_a = scalar.is_signed && a_sign;
     bool shift = token.punctuator == C_PUNCTUATOR_SHIFT_LEFT || token.punctuator == C_PUNCTUATOR_SHIFT_RIGHT;
     if (shift)
     {
-        bool negative_b = right_scalar.is_signed && (right_scalar.bit_width == 128 ? right.integer_high >> 63
-            : right_scalar.bit_width ? (right.integer >> (right_scalar.bit_width - 1)) & 1 : 0);
-        valid &= !right.is_float && !negative_b && !right.integer_high && right.integer < scalar.bit_width;
+        bool right_width = right_scalar.bit_width && (right_scalar.bit_width <= 64 || right_scalar.bit_width == 128);
+        bool right_integer = (right_scalar.kind == IR_TYPE_INTEGER || right_scalar.kind == IR_TYPE_BOOLEAN) && right_width;
+        bool negative_b = right_integer && right_scalar.is_signed && (right_scalar.bit_width == 128 ? right.integer_high >> 63
+            : (right.integer >> (right_scalar.bit_width - 1)) & 1);
+        valid &= right_integer && !right.is_float && !negative_b && !right.integer_high && right.integer < scalar.bit_width;
         if (valid && scalar.is_signed && token.punctuator == C_PUNCTUATOR_SHIFT_LEFT)
         {
             u32 count = (u32)right.integer;
@@ -21987,12 +21990,12 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         query.definition_index = 0;
         query.token_classes = 0;
         query.symbols = 0;
-        CTokenPositionIndex positions;
+        CTokenPositionIndex positions = {0};
         if (query.position_index)
         {
             positions = *query.position_index;
-            query.position_index = &positions;
         }
+        query.position_index = &positions;
         while (start + 1 < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                c_parse_matching_delimiter_indexed(&query, preprocess, start) == end - 1)
         {
