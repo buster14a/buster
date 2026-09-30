@@ -14,6 +14,7 @@ production binding validator over lane F's final binding
 ``a1_export_ledger`` maps the A1 campaign model (metrics shards, untimed
 records) onto the export limits, printed by the ``a1-capacity`` subcommand.
 ``composer_binding_path`` holds the binding to E's fixed result location.
+retirement_lane_f.py writes the lane F directory ``--lane-f`` names.
 """
 
 import argparse
@@ -509,25 +510,29 @@ def lane_f_import(lane_f, destination):
                 fail("lane F directory may hold only single-link regular files")
             if name in present:
                 fail("lane F file collides with the service result")
+        # Lane F's downloaded replay archive is as large as the sealed
+        # closure, so every file is streamed in fixed chunks.
         for name in names:
             data_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=source)
             try:
-                with os.fdopen(data_fd, "rb", closefd=False) as stream:
-                    data = stream.read()
+                try:
+                    out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                  0o400, dir_fd=target)
+                except FileExistsError:
+                    fail("lane F file collides with the service result")
+                try:
+                    while True:
+                        block = os.read(data_fd, CHUNK)
+                        if not block:
+                            break
+                        offset = 0
+                        while offset < len(block):
+                            offset += os.write(out, block[offset:])
+                    os.fsync(out)
+                finally:
+                    os.close(out)
             finally:
                 os.close(data_fd)
-            try:
-                out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400,
-                              dir_fd=target)
-            except FileExistsError:
-                fail("lane F file collides with the service result")
-            try:
-                offset = 0
-                while offset < len(data):
-                    offset += os.write(out, data[offset:])
-                os.fsync(out)
-            finally:
-                os.close(out)
         os.fsync(target)
     finally:
         os.close(target)
@@ -632,7 +637,12 @@ def replay(args):
          "--evidence-root", str(args.destination),
          "--repository-root", str(args.repository_root),
          "--trusted-execution-receipt-sha256", trusted_sha256],
-        check=True, capture_output=True, text=True, timeout=86400)
+        check=False, capture_output=True, text=True, timeout=86400)
+    if validation.returncode != 0:
+        # The validator's own diagnostic is the refusal; it is never hidden
+        # behind the exit status.
+        lines = validation.stderr.strip().splitlines() or ["the validator exited without a diagnostic"]
+        fail(f"production binding validator refused the final binding: {lines[-1]}")
     result = json.loads(validation.stdout)
     if result["proof"] != "independent-evidence-and-receipts-checked" or \
             not all(result[key] for key in ("rows_recomputed", "support_checked",
