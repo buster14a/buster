@@ -9,6 +9,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -10026,6 +10027,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(feature_query_values); query_index += 1)
     {
         c_test_preprocessed_token(arguments, &result, feature_queries, query_index, C_TOKEN_PREPROCESSING_NUMBER, feature_query_values[query_index]);
+    }
+    String8 repeated_query_unit = S8("#if __has_include(\"basic_c_include.h\")\n"
+                                     "1\n"
+                                     "#endif\n"
+                                     "#include <feature_next.h>\n");
+    u32 repeated_query_count = 256;
+    u64 repeated_query_length = repeated_query_unit.length * repeated_query_count;
+    char8* repeated_query_bytes = arena_allocate(arguments->arena, char8, repeated_query_length);
+    for (u32 query_index = 0; query_index < repeated_query_count; query_index += 1)
+    {
+        memcpy(repeated_query_bytes + (u64)query_index * repeated_query_unit.length, repeated_query_unit.pointer, repeated_query_unit.length);
+    }
+    FileMapTestCounters repeated_query_maps_before = file_map_test_counters();
+    CPreprocessResult repeated_queries = c_preprocess(arguments->arena,
+                                                      (String8){.pointer = repeated_query_bytes, .length = repeated_query_length},
+                                                      (CPreprocessOptions){
+                                                          .include_paths = feature_include_paths,
+                                                          .source_path = S8("tests/repeated_feature_queries.c"),
+                                                          .include_path_count = BUSTER_ARRAY_LENGTH(feature_include_paths),
+                                                      });
+    FileMapTestCounters repeated_query_maps_after = file_map_test_counters();
+    u64 repeated_query_mapped = repeated_query_maps_after.mapped - repeated_query_maps_before.mapped;
+    u64 repeated_query_unmapped = repeated_query_maps_after.unmapped - repeated_query_maps_before.unmapped;
+    BUSTER_TEST(arguments, repeated_queries.diagnostic_count == 0);
+    BUSTER_TEST(arguments, repeated_queries.token_count == (u64)repeated_query_count * 2 + 1);
+    BUSTER_TEST(arguments, repeated_query_mapped == repeated_query_unmapped);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Each unit maps the __has_include probe, the included header and its
+    // __has_include_next probe.
+    BUSTER_TEST(arguments, repeated_query_mapped == (u64)repeated_query_count * 3);
+#endif
+    for (u32 query_index = 0; query_index < repeated_query_count; query_index += 1)
+    {
+        c_test_preprocessed_token(arguments, &result, repeated_queries, (u64)query_index * 2, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
+        c_test_preprocessed_token(arguments, &result, repeated_queries, (u64)query_index * 2 + 1, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
     }
     String8 builtin_include_next_system_paths[] = {
         S8("tests/include_second"),
