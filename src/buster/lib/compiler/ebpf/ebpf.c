@@ -2601,9 +2601,17 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
                           global->symbol);
                 return false;
             }
-            for (u32 byte = 0; byte < (u32)size; byte += 1)
             {
-                destination[byte] = (u8)(global->initializer_bits >> (byte * 8));
+                // An integer initializer is a sign and a magnitude; its bytes
+                // are that number at the object's width, as every other object
+                // writer emits it (`int g = -1;` is ff ff ff ff, not 01 00 00 00).
+                u64 bits = global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER
+                               ? ir_integer_from_magnitude((IrInteger){.low = global->initializer_bits}, global->initializer_is_negative, (u32)size * 8).low
+                               : global->initializer_bits;
+                for (u32 byte = 0; byte < (u32)size; byte += 1)
+                {
+                    destination[byte] = (u8)(bits >> (byte * 8));
+                }
             }
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:

@@ -236,7 +236,9 @@ probes is still its own `powershell.exe` step process with its own files, but
 they launch together from `setUpClass`: one Windows PowerShell start takes
 about 23 s on the hosted AArch64 runner, and serial starts pushed the shared
 workflow-tools step past its five-minute budget
-([#2021](https://github.com/buster14a/buster/issues/2021)).
+([#2021](https://github.com/buster14a/buster/issues/2021)). That step now
+runs its suites in concurrent lanes; see
+[bootstrap wrapper CI](ci-bootstrap-wrapper.md#independent-required-gate).
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different

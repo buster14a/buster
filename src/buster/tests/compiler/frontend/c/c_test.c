@@ -2321,6 +2321,142 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_diagnostic_growth(UnitTestArgument
     return result;
 }
 
+// c_preprocess releases its phase arena before it returns, and semantic
+// analysis releases each layout query's tables, so every fact a later phase
+// reads must be owned outside that arena. The first run overwrites whatever
+// it releases (arena_test_fill_releases); the second has no caller phase
+// arena. A fact borrowed from released memory would read the fill and differ.
+// The source reaches every sealed structure: expansion stamps, a #line text
+// region, a builtin include (file table, metrics rows, checkpoints shared by
+// the regions its includer splits into), pack changes, push/pop_macro and a
+// #warning message the phase built; its bounds and assertions drive layout
+// queries whose tables the semantic phase releases.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#define PAIR(a, b) ((a) + (b))\n"
+                        "#pragma pack(push, 2)\n"
+                        "struct packed { char c; int i; };\n"
+                        "#pragma pack(pop)\n"
+                        "#include <stddef.h>\n"
+                        "#line 40 \"renamed.c\"\n"
+                        "struct inner { long long l; char tail[3]; };\n"
+                        "struct outer { struct inner items[sizeof(struct inner) / 8]; char bytes[_Alignof(struct inner) + 1]; };\n"
+                        "_Static_assert(sizeof(struct outer) == 2 * sizeof(struct inner) + 16, \"layout\");\n"
+                        "int value = PAIR(1, 2);\n"
+                        "#warning sealed warning text\n"
+                        "#pragma push_macro(\"PAIR\")\n"
+                        "#undef PAIR\n"
+                        "#pragma pop_macro(\"PAIR\")\n"
+                        "size_t after = PAIR(3, 4) + sizeof(struct outer) + sizeof(struct packed);\n"
+                        "int f(struct outer* o) { return o->items[1].tail[2] + (int)offsetof(struct outer, bytes); }\n");
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .flags = {.no_pool = 1}});
+    Arena* phase = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .flags = {.no_pool = 1}});
+    BUSTER_TEST(arguments, arena != 0 && phase != 0);
+    if (arena && phase)
+    {
+        CPreprocessOptions options = {
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+            .source_path = S8("phase-release.c"),
+        };
+        u64 phase_start = phase->position;
+        CPreprocessOptions phased = options;
+        phased.phase_arena = phase;
+        arena_test_fill_releases(true);
+        CPreprocessResult sealed = c_preprocess(arena, source, phased);
+        arena_test_fill_releases(false);
+        u64 released_end = arena_dirty_position(phase);
+        CPreprocessResult reference = c_preprocess(arena, source, options);
+        CPreprocessDetail const* sealed_detail = c_preprocess_detail(sealed);
+        CPreprocessDetail const* reference_detail = c_preprocess_detail(reference);
+        BUSTER_TEST(arguments, phase->position == phase_start && released_end > phase_start);
+        // Temporary rewinds inside the phase can raise its high-water mark
+        // above the extent it finally releases.
+        BUSTER_TEST(arguments, sealed_detail->boundary.released_bytes != 0 && sealed_detail->boundary.released_bytes <= released_end - phase_start);
+        BUSTER_TEST(arguments, sealed_detail->boundary.sealed_bytes != 0 && sealed_detail->boundary.sealed_objects != 0);
+        BUSTER_TEST(arguments, sealed_detail->boundary.references >= sealed_detail->boundary.sealed_objects);
+        BUSTER_TEST(arguments, reference_detail->boundary.released_bytes != 0);
+        BUSTER_TEST(arguments, sealed.recovery && sealed.recovery->phase_arena == phase && reference.recovery && !reference.recovery->phase_arena);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&sealed, (u8*)phase + phase_start, (u8*)phase + released_end) == 0);
+        BUSTER_TEST(arguments, sealed.error_count == 0 && sealed.warning_count == 1 && sealed.diagnostic_count == reference.diagnostic_count);
+        for (u64 index = 0; index < BUSTER_MIN(sealed.diagnostic_count, reference.diagnostic_count); index += 1)
+        {
+            BUSTER_STRING_TEST(arguments, sealed.diagnostics[index].message, reference.diagnostics[index].message);
+            BUSTER_TEST(arguments, sealed.diagnostics[index].location.line == reference.diagnostics[index].location.line &&
+                                       sealed.diagnostics[index].location.file == reference.diagnostics[index].location.file);
+        }
+        BUSTER_TEST(arguments, sealed.file_count >= 2 && sealed.file_count == reference.file_count);
+        for (u32 index = 0; index < BUSTER_MIN(sealed.file_count, reference.file_count); index += 1)
+        {
+            BUSTER_STRING_TEST(arguments, sealed.files[index], reference.files[index]);
+        }
+        BUSTER_TEST(arguments, sealed.pack_change_count != 0 && sealed.pack_change_count == reference.pack_change_count);
+        for (u32 index = 0; index < BUSTER_MIN(sealed.pack_change_count, reference.pack_change_count); index += 1)
+        {
+            BUSTER_TEST(arguments, sealed.pack_changes[index].token_index == reference.pack_changes[index].token_index &&
+                                       sealed.pack_changes[index].alignment == reference.pack_changes[index].alignment);
+        }
+        BUSTER_TEST(arguments, sealed_detail->lexed_file_count >= 2 && sealed_detail->lexed_file_count == reference_detail->lexed_file_count);
+        for (u32 index = 0; index < BUSTER_MIN(sealed_detail->lexed_file_count, reference_detail->lexed_file_count); index += 1)
+        {
+            BUSTER_STRING_TEST(arguments, sealed_detail->lexed_files[index].path, reference_detail->lexed_files[index].path);
+            BUSTER_TEST(arguments, sealed_detail->lexed_files[index].lex_count == reference_detail->lexed_files[index].lex_count);
+        }
+        BUSTER_TEST(arguments, sealed.token_count == reference.token_count);
+        bool tokens_equal = sealed.token_count == reference.token_count;
+        for (u64 index = 0; tokens_equal && index < sealed.token_count; index += 1)
+        {
+            CToken left = sealed.tokens[index];
+            CToken right = reference.tokens[index];
+            CSourceLocation left_location = c_preprocess_token_location(&sealed, left);
+            CSourceLocation right_location = c_preprocess_token_location(&reference, right);
+            tokens_equal = left.kind == right.kind && left.symbol == right.symbol &&
+                           string_equal(c_token_spelling(sealed.spelling_base, left), c_token_spelling(reference.spelling_base, right)) &&
+                           left_location.line == right_location.line && left_location.column == right_location.column &&
+                           left_location.file == right_location.file;
+        }
+        BUSTER_TEST(arguments, tokens_equal);
+        // Semantic analysis reuses the unit's phase arena for its layout
+        // queries and releases it again; lowering then consumes the model.
+        arena_test_fill_releases(true);
+        CParseResult sealed_parse = c_parse(arena, sealed);
+        arena_test_fill_releases(false);
+        CParseResult reference_parse = c_parse(arena, reference);
+        BUSTER_TEST(arguments, phase->position == phase_start);
+        BUSTER_TEST(arguments, sealed_parse.diagnostic_count == 0 && reference_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, sealed_parse.type_count == reference_parse.type_count && sealed_parse.entity_count == reference_parse.entity_count);
+        // Both runs had a phase arena for the queries -- the caller's, and a
+        // private one -- and released the same queries from it.
+        BUSTER_TEST(arguments, sealed_parse.phase_releases > 1 && sealed_parse.phase_releases == reference_parse.phase_releases);
+        BUSTER_TEST(arguments, sealed_parse.phase_released_bytes != 0 && reference_parse.phase_released_bytes != 0);
+        CIRLowerResult sealed_ir = c_lower_to_ir(arena, S8("phase-release.c"), sealed, sealed_parse, target_native);
+        CIRLowerResult reference_ir = c_lower_to_ir(arena, S8("phase-release.c"), reference, reference_parse, target_native);
+        BUSTER_TEST(arguments, sealed_ir.program && reference_ir.program && !sealed_ir.diagnostic_count && !reference_ir.diagnostic_count);
+        if (sealed_ir.program && reference_ir.program)
+        {
+            IrModule* left = &sealed_ir.program->modules[0];
+            IrModule* right = &reference_ir.program->modules[0];
+            BUSTER_TEST(arguments, left->global_count == right->global_count && left->function_count == right->function_count);
+            for (u32 index = 0; index < BUSTER_MIN(left->global_count, right->global_count); index += 1)
+            {
+                IrType* left_type = ir_type_from_id(&sealed_ir.program->types, left->globals[index].type);
+                IrType* right_type = ir_type_from_id(&reference_ir.program->types, right->globals[index].type);
+                BUSTER_TEST(arguments, left_type && right_type && left_type->layout.size == right_type->layout.size &&
+                                           left_type->layout.alignment == right_type->layout.alignment);
+            }
+            for (u32 index = 0; index < BUSTER_MIN(left->function_count, right->function_count); index += 1)
+            {
+                BUSTER_STRING_TEST(arguments, left->functions[index].name, right->functions[index].name);
+                BUSTER_TEST(arguments, left->functions[index].instruction_count == right->functions[index].instruction_count);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(phase, 1));
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9535,6 +9671,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     }
     return result;
 }
+
+#include <buster/tests/compiler/frontend/c/c_integer_semantics_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
 {
@@ -28226,12 +28364,14 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_phase_arena_release);
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
     BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);

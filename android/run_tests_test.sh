@@ -58,6 +58,14 @@ if [[ -n ${BUSTER_ANDROID_STATUS_FAKE_TOOL:-} ]]; then
                             fi
                             sleep 0.1
                         done
+                        if [[ -n ${FAKE_ANDROID_REUSED_PID:-} ]]; then
+                            # Original child is terminal. Simulate kernel PID
+                            # reuse at the payload -> workflow cleanup boundary.
+                            marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:?}
+                            read -r original_pid original_identity <"$marker.identity"
+                            printf '%s %s\n' "$FAKE_ANDROID_REUSED_PID" "$original_identity" >"$marker.identity"
+                            printf '%s\n' "$FAKE_ANDROID_REUSED_PID" >"$marker"
+                        fi
                         printf 'BUSTER_ANDROID_TEST_RESULT:0\n'
                         exit 0
                     fi
@@ -461,6 +469,7 @@ assert_no_owned_producer "$state"
 # Batch and real workflow-body regressions are kept outside the frozen shared
 # mobile support files. Each invocation owns its SDK, AVD, outputs, and PIDs.
 export BUSTER_ANDROID_STATUS_HARNESS="$repo_root/android/run_tests_test.sh"
+export BUSTER_ANDROID_IDENTITY_TEST="$repo_root/android/emulator_identity_test.py"
 export BUSTER_ANDROID_SHARED_FAKE="$repo_root/tests/mobile_ci_fake_tool.sh"
 fake_bin="$test_root/bin"
 mkdir -p "$fake_bin"
@@ -693,7 +702,7 @@ test_android_workflow_body() (
             expected_status=1
             expected_result='ANDROID_CI_RESULT phase=tests payload_status=1 cleanup_status=not-run status=1'
             ;;
-        already-stopped)
+        already-stopped|pid-reused)
             export FAKE_ANDROID_STOP_AFTER_CONFIG=Release
             expected_status=0
             expected_result='ANDROID_CI_RESULT phase=tests payload_status=0 cleanup_status=0 status=0'
@@ -715,6 +724,11 @@ test_android_workflow_body() (
     esac
     sleep 60 &
     control_pid=$!
+    if [[ $case_name == pid-reused ]]; then
+        export FAKE_ANDROID_REUSED_PID=$control_pid
+        # ps lstart on the portable/macOS path has one-second resolution.
+        sleep 2
+    fi
     set +e
     (cd "$repo_root" && timeout --kill-after=1s 15s bash "$body") >"$state/body.log" 2>&1
     body_status=$?
@@ -750,8 +764,12 @@ test_android_workflow_body() (
             assert_file_contains 'adb emulator shutdown failed with exit status 7' "$state/body.log"
             assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=1)' "$state/body.log"
             ;;
-        already-stopped)
+        already-stopped|pid-reused)
             assert_file_contains 'is no longer running' "$state/body.log"
+            if grep -qF 'emu kill' "$state/adb.log"; then
+                echo "assertion failed: terminal/reused PID caused another adb shutdown" >&2
+                exit 1
+            fi
             ;;
         interruption)
             assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=143)' "$state/body.log"
@@ -859,7 +877,8 @@ try:
         if time.monotonic() >= deadline:
             raise AssertionError('owned child did not reach the zombie state')
         time.sleep(0.01)
-    marker.write_text(str(child) + '\n')
+    subprocess.run(['python3', os.environ['BUSTER_ANDROID_IDENTITY_TEST'],
+                    '--write-marker', str(child), str(marker)], check=True)
     result = subprocess.run(['bash', sys.argv[1], 'stop'],
                             capture_output=True, text=True, timeout=10)
     log = result.stdout + result.stderr
@@ -907,7 +926,8 @@ if child == 0:
         time.sleep(60)
 
 try:
-    marker.write_text(str(child) + '\n')
+    subprocess.run(['python3', os.environ['BUSTER_ANDROID_IDENTITY_TEST'],
+                    '--write-marker', str(child), str(marker), '--portable'], check=True)
     env = os.environ.copy()
     env['FAKE_ANDROID_RACE_PID'] = str(child)
     env['FAKE_ANDROID_RACE_STATE'] = str(state)
@@ -960,6 +980,8 @@ exec "$real_ps" "$@"
 ''')
     (fake_bin / 'adb').chmod(0o755)
     (fake_bin / 'ps').chmod(0o755)
+    (fake_bin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+    (fake_bin / 'uname').chmod(0o755)
 
     result = subprocess.run(['bash', sys.argv[1], 'stop'], env=env,
                             capture_output=True, text=True, timeout=15)
@@ -1014,7 +1036,8 @@ os.close(write_fd)
 try:
     assert os.read(read_fd, 1) == b'1'
     os.close(read_fd)
-    marker.write_text(str(child) + '\n')
+    subprocess.run(['python3', os.environ['BUSTER_ANDROID_IDENTITY_TEST'],
+                    '--write-marker', str(child), str(marker)], check=True)
     (fake_bin / 'adb').write_text(r'''#!/usr/bin/env bash
 set -euo pipefail
 if [[ ${1:-} == emu && ${2:-} == kill ]]; then
@@ -1059,13 +1082,14 @@ test_android_batch_status payload-failure 1 1 0
 test_android_batch_status debug-timeout 1 1 0
 test_android_batch_status missing-marker 1 1 0
 for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup-exit7 \
-    cleanup-timeout failure-and-cleanup7 already-stopped interruption payload-23-cleanup7; do
+    cleanup-timeout failure-and-cleanup7 already-stopped pid-reused interruption payload-23-cleanup7; do
     test_android_workflow_body "$workflow_case"
 done
 
 test_android_zombie_cleanup
 test_android_terminal_state_is_monotonic
 test_android_sigkill_final_verification
+python3 "$BUSTER_ANDROID_IDENTITY_TEST"
 test_android_batch_interruption debug-int 130 0 130 Debug 0
 test_android_batch_interruption debug-term 143 0 143 Debug 0
 test_android_batch_interruption debug-term-cleanup-failure 143 0 143 Debug 1

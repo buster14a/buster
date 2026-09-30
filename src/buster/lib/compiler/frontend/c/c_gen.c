@@ -570,6 +570,7 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
 
 BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
 {
+    IR_SEMANTIC_RECORD(TARGET_SCALAR_QUERIES, 1);
     TargetDataLayout layout = target_data_layout(target);
     *ir_kind = IR_TYPE_INTEGER;
     *bit_width = 0;
@@ -9385,6 +9386,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builde
     instruction.immediates = immediate;
     instruction.immediate_count = 1;
     instruction.immediate_is_negative = is_negative;
+    // A spelling outside the type's range -- a bit-field clear mask built as
+    // the u64 `~mask` for an 8-bit access -- means its bits reduced to the
+    // width, but a reader that materializes the raw magnitude would set the
+    // bits above it. Emit the reduced value so every reader, and the
+    // validator's range rule, sees one number.
+    u32 width = ir_integer_type_width(ir_type_from_id(&builder->program->types, type));
+    if (width && !ir_integer_constant_canonical(&instruction, width))
+    {
+        immediate[0] = ir_integer_from_magnitude((IrInteger){.low = value}, is_negative, width).low;
+        instruction.immediate_is_negative = false;
+    }
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
@@ -18620,7 +18632,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate(CIntegerIrBuilder* build
         }
         else if (value.kind == C_IR_CONSTANT_INTEGER)
         {
-            last_value = value.integer;
+            // Every caller branches on the truth of the value, which for a
+            // 128-bit constant includes its high limb.
+            last_value = !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
             have_last = true;
         }
         else
@@ -22289,89 +22303,29 @@ BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLo
     }
 }
 
+// The operation an operator lowers to at a signed operation type; an
+// unsigned operation type re-selects from the same table (c_integer_operation)
+// in c_ir_apply_operation, and floating/vector types remap from these rows.
+// Operators without a canonical arithmetic row (casts, places, the comma)
+// succeed with neither operation set.
 BUSTER_C_INTERNAL bool c_ir_operation(CConditionalOperator operation, IrUnaryOperation* unary, IrBinaryOperation* binary)
 {
-    *unary = IR_UNARY_COUNT;
-    *binary = IR_BINARY_COUNT;
+    bool result = c_integer_operation(operation, true, unary, binary);
     switch (operation)
     {
     case C_CONDITIONAL_UNARY_PLUS:
-        return true;
-    case C_CONDITIONAL_UNARY_MINUS:
-        *unary = IR_UNARY_INTEGER_NEGATE;
-        return true;
-    case C_CONDITIONAL_BITWISE_NOT:
-        *unary = IR_UNARY_INTEGER_BITWISE_NOT;
-        return true;
     case C_CONDITIONAL_ADDRESS_OF:
     case C_CONDITIONAL_DEREFERENCE:
     case C_CONDITIONAL_CAST:
     case C_CONDITIONAL_REAL_PART:
     case C_CONDITIONAL_IMAGINARY_PART:
-        return true;
-    case C_CONDITIONAL_MULTIPLY:
-        *binary = IR_BINARY_INTEGER_MULTIPLY;
-        return true;
-    case C_CONDITIONAL_DIVIDE:
-        *binary = IR_BINARY_SIGNED_DIVIDE;
-        return true;
-    case C_CONDITIONAL_REMAINDER:
-        *binary = IR_BINARY_SIGNED_REMAINDER;
-        return true;
-    case C_CONDITIONAL_ADD:
-        *binary = IR_BINARY_INTEGER_ADD;
-        return true;
-    case C_CONDITIONAL_SUBTRACT:
-        *binary = IR_BINARY_INTEGER_SUBTRACT;
-        return true;
-    case C_CONDITIONAL_SHIFT_LEFT:
-        *binary = IR_BINARY_SHIFT_LEFT;
-        return true;
-    case C_CONDITIONAL_SHIFT_RIGHT:
-        *binary = IR_BINARY_SIGNED_SHIFT_RIGHT;
-        return true;
-    case C_CONDITIONAL_BITWISE_AND:
-        *binary = IR_BINARY_INTEGER_BITWISE_AND;
-        return true;
-    case C_CONDITIONAL_BITWISE_XOR:
-        *binary = IR_BINARY_INTEGER_BITWISE_XOR;
-        return true;
-    case C_CONDITIONAL_BITWISE_OR:
-        *binary = IR_BINARY_INTEGER_BITWISE_OR;
-        return true;
-    case C_CONDITIONAL_LESS:
-        *binary = IR_BINARY_SIGNED_LESS;
-        return true;
-    case C_CONDITIONAL_LESS_EQUAL:
-        *binary = IR_BINARY_SIGNED_LESS_EQUAL;
-        return true;
-    case C_CONDITIONAL_GREATER:
-        *binary = IR_BINARY_SIGNED_GREATER;
-        return true;
-    case C_CONDITIONAL_GREATER_EQUAL:
-        *binary = IR_BINARY_SIGNED_GREATER_EQUAL;
-        return true;
-    case C_CONDITIONAL_EQUAL:
-        *binary = IR_BINARY_INTEGER_EQUAL;
-        return true;
-    case C_CONDITIONAL_NOT_EQUAL:
-        *binary = IR_BINARY_INTEGER_NOT_EQUAL;
-        return true;
-    case C_CONDITIONAL_OPEN:
-    case C_CONDITIONAL_INDEX_OPEN:
-    case C_CONDITIONAL_LOGICAL_AND:
-    case C_CONDITIONAL_LOGICAL_OR:
-    case C_CONDITIONAL_QUESTION:
-    case C_CONDITIONAL_SELECT:
-    case C_CONDITIONAL_OPERATOR_COUNT:
-        return false;
     case C_CONDITIONAL_COMMA:
-        return true;
-    case C_CONDITIONAL_LOGICAL_NOT:
-        *unary = IR_UNARY_BOOLEAN_NOT;
-        return true;
+        result = true;
+        break;
+    default:
+        break;
     }
-    return false;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_vector_mask_type(CIntegerIrBuilder* builder, IrType* vector)
@@ -22751,6 +22705,15 @@ BUSTER_C_INTERNAL s64 c_ir_integer_signed_value(u64 value, IrType* type)
     return (s64)value;
 }
 
+// The integer an already-emitted value computes, when it is built only from
+// integer constants, integer conversions and integer unary/binary operations:
+// the null-pointer-constant tests and label-place offsets ask this of canonical
+// rows rather than of source tokens. Each row is read through the shared
+// ir_integer_* semantics at its own canonical width, so a conversion means
+// what the conversion operation says -- a signed widening sign-extends -- and
+// a 128-bit operand keeps both limbs. A division by zero, a signed quotient
+// that overflows and an out-of-range shift count have no value; neither does
+// a result that needs more than 64 bits, which the u64 answer cannot carry.
 BUSTER_C_INTERNAL bool c_ir_value_integer_constant_evaluate(CIntegerIrBuilder* builder, IrValueId root, u64* result_out)
 {
     typedef struct CIrValueConstantTask CIrValueConstantTask;
@@ -22760,241 +22723,97 @@ BUSTER_C_INTERNAL bool c_ir_value_integer_constant_evaluate(CIntegerIrBuilder* b
         bool expanded;
     };
     TemporalArena evaluation_temporary = arena_begin_temporal(builder->arena);
-#define C_IR_VALUE_CONSTANT_RETURN(value)                                                                                                                       \
-    do                                                                                                                                                          \
-    {                                                                                                                                                           \
-        bool c_ir_value_constant_result = (value);                                                                                                              \
-        scratch_end(evaluation_temporary);                                                                                                                      \
-        return c_ir_value_constant_result;                                                                                                                      \
-    } while (0)
-    if (root.value >= builder->function->value_count || builder->function->value_count > (UINT32_MAX - 1) / 3)
-    {
-        C_IR_VALUE_CONSTANT_RETURN(false);
-    }
-    u32 capacity = builder->function->value_count * 3 + 1;
-    CIrValueConstantTask* tasks = arena_allocate(evaluation_temporary.arena, CIrValueConstantTask, capacity);
-    u64* values = arena_allocate(evaluation_temporary.arena, u64, capacity);
-    u32 task_count = 1;
+    bool valid = root.value < builder->function->value_count && builder->function->value_count <= (UINT32_MAX - 1) / 3;
+    u32 capacity = valid ? builder->function->value_count * 3 + 1 : 0;
+    CIrValueConstantTask* tasks = valid ? arena_allocate(evaluation_temporary.arena, CIrValueConstantTask, capacity) : 0;
+    IrInteger* values = valid ? arena_allocate(evaluation_temporary.arena, IrInteger, capacity) : 0;
+    u32 task_count = valid;
     u32 value_count = 0;
-    tasks[0] = (CIrValueConstantTask){
-        .value = root,
-    };
-    while (task_count)
+    IR_SEMANTIC_RECORD(VALUE_QUERY_EVALUATIONS, 1);
+    if (valid)
+    {
+        tasks[0] = (CIrValueConstantTask){.value = root};
+    }
+    while (valid && task_count)
     {
         CIrValueConstantTask task = tasks[--task_count];
-        if (task.value.value >= builder->function->value_count)
-        {
-            C_IR_VALUE_CONSTANT_RETURN(false);
-        }
-        IrValue* value = builder->function->values + task.value.value;
-        if (value->definition.value >= builder->function->instruction_count)
-        {
-            C_IR_VALUE_CONSTANT_RETURN(false);
-        }
-        IrInstruction* instruction = builder->function->instructions + value->definition.value;
-        IrType* type = ir_type_from_id(&builder->program->types, value->canonical_type);
-        bool integer_type = type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_ENUM);
-        if (!integer_type)
-        {
-            C_IR_VALUE_CONSTANT_RETURN(false);
-        }
-        if (!task.expanded)
+        IrValue* value = task.value.value < builder->function->value_count ? builder->function->values + task.value.value : 0;
+        IrInstruction* instruction = value && value->definition.value < builder->function->instruction_count
+                                         ? builder->function->instructions + value->definition.value
+                                         : 0;
+        u32 width = value ? ir_integer_type_width(ir_type_from_id(&builder->program->types, value->canonical_type)) : 0;
+        valid = instruction && width;
+        IR_SEMANTIC_RECORD(VALUE_QUERY_NODES, !task.expanded);
+        if (valid && !task.expanded)
         {
             if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
             {
-                if (instruction->immediate_count != 1 || value_count >= capacity)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                u64 constant = instruction->immediates[0];
-                if (instruction->immediate_is_negative)
-                {
-                    constant = 0 - constant;
-                }
-                values[value_count++] = constant & c_ir_integer_type_mask(type);
-                continue;
+                valid = instruction->immediate_count == 1 && value_count < capacity &&
+                        ir_integer_constant_decode(instruction, width, values + value_count);
+                value_count += valid;
             }
-            bool supported = (instruction->opcode == IR_OPCODE_CAST && instruction->operand_count == 1 &&
-                              instruction->conversion_operation != IR_CONVERSION_INTEGER_TO_POINTER &&
-                              instruction->conversion_operation != IR_CONVERSION_POINTER_TO_INTEGER) ||
-                             (instruction->opcode == IR_OPCODE_UNARY && instruction->operand_count == 1) ||
-                             (instruction->opcode == IR_OPCODE_BINARY && instruction->operand_count == 2);
-            if (!supported || task_count + instruction->operand_count + 1 > capacity)
+            else
             {
-                C_IR_VALUE_CONSTANT_RETURN(false);
+                valid = ((instruction->opcode == IR_OPCODE_CAST && instruction->operand_count == 1) ||
+                         (instruction->opcode == IR_OPCODE_UNARY && instruction->operand_count == 1) ||
+                         (instruction->opcode == IR_OPCODE_BINARY && instruction->operand_count == 2)) &&
+                        task_count + instruction->operand_count + 1 <= capacity;
+                if (valid)
+                {
+                    tasks[task_count++] = (CIrValueConstantTask){.value = task.value, .expanded = true};
+                    for (u32 operand_index = instruction->operand_count; operand_index; operand_index -= 1)
+                    {
+                        tasks[task_count++] = (CIrValueConstantTask){.value = instruction->operands[operand_index - 1]};
+                    }
+                }
             }
-            tasks[task_count++] = (CIrValueConstantTask){
-                .value = task.value,
-                .expanded = true,
-            };
-            for (u32 operand_index = instruction->operand_count; operand_index; operand_index -= 1)
+        }
+        else if (valid)
+        {
+            IrValue* left_value = builder->function->values + instruction->operands[0].value;
+            IrValue* right_value = builder->function->values + instruction->operands[instruction->operand_count - 1].value;
+            u32 left_width = ir_integer_type_width(ir_type_from_id(&builder->program->types, left_value->canonical_type));
+            u32 right_width = ir_integer_type_width(ir_type_from_id(&builder->program->types, right_value->canonical_type));
+            valid = value_count >= instruction->operand_count && left_width && right_width;
+            IrIntegerResult result = {.faults = IR_INTEGER_FAULT_UNSUPPORTED};
+            if (valid)
             {
-                tasks[task_count++] = (CIrValueConstantTask){
-                    .value = instruction->operands[operand_index - 1],
-                };
+                IrInteger right = values[--value_count];
+                IrInteger left = instruction->operand_count == 2 ? values[--value_count] : right;
+                if (instruction->opcode == IR_OPCODE_CAST)
+                {
+                    result = ir_integer_convert((IrConversionOperation)instruction->conversion_operation, left, left_width, width);
+                }
+                else if (instruction->opcode == IR_OPCODE_UNARY)
+                {
+                    result = ir_integer_unary((IrUnaryOperation)instruction->unary_operation, left, left_width);
+                }
+                else
+                {
+                    result = ir_integer_binary((IrBinaryOperation)instruction->binary_operation, left, right, left_width, right_width);
+                    bool signed_division = instruction->binary_operation == IR_BINARY_SIGNED_DIVIDE || instruction->binary_operation == IR_BINARY_SIGNED_REMAINDER;
+                    if (signed_division && (result.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW))
+                    {
+                        result.faults |= IR_INTEGER_FAULT_UNSUPPORTED;
+                    }
+                }
             }
-            continue;
-        }
-        if (value_count < instruction->operand_count)
-        {
-            C_IR_VALUE_CONSTANT_RETURN(false);
-        }
-        u64 right = values[--value_count];
-        u64 left = instruction->operand_count == 2 ? values[--value_count] : right;
-        u64 result = 0;
-        u64 mask = c_ir_integer_type_mask(type);
-        if (instruction->opcode == IR_OPCODE_CAST)
-        {
-            result = right & mask;
-        }
-        else if (instruction->opcode == IR_OPCODE_UNARY)
-        {
-            switch (instruction->unary_operation)
+            valid = valid && !(result.faults & (IR_INTEGER_FAULT_UNSUPPORTED | IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_SHIFT_COUNT |
+                                                IR_INTEGER_FAULT_ZERO_COUNT)) &&
+                    value_count < capacity;
+            if (valid)
             {
-            case IR_UNARY_INTEGER_NEGATE:
-                result = (0 - right) & mask;
-                break;
-            case IR_UNARY_INTEGER_BITWISE_NOT:
-                result = ~right & mask;
-                break;
-            case IR_UNARY_BOOLEAN_NOT:
-                result = !right;
-                break;
-            default:
-                C_IR_VALUE_CONSTANT_RETURN(false);
+                values[value_count++] = ir_integer_mask(result.bits, width);
             }
         }
-        else
-        {
-            IrType* left_type = ir_type_from_id(&builder->program->types, builder->function->values[instruction->operands[0].value].canonical_type);
-            IrType* right_type = ir_type_from_id(&builder->program->types, builder->function->values[instruction->operands[1].value].canonical_type);
-            s64 signed_left = c_ir_integer_signed_value(left, left_type);
-            s64 signed_right = c_ir_integer_signed_value(right, right_type);
-            u32 shift_width = left_type ? left_type->bit_width : 0;
-            switch (instruction->binary_operation)
-            {
-            case IR_BINARY_INTEGER_ADD:
-                result = (left + right) & mask;
-                break;
-            case IR_BINARY_INTEGER_SUBTRACT:
-                result = (left - right) & mask;
-                break;
-            case IR_BINARY_INTEGER_MULTIPLY:
-                result = (left * right) & mask;
-                break;
-            case IR_BINARY_SIGNED_DIVIDE:
-                if (!signed_right || (signed_left == INT64_MIN && signed_right == -1))
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = (u64)(signed_left / signed_right) & mask;
-                break;
-            case IR_BINARY_UNSIGNED_DIVIDE:
-                if (!right)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = left / right & mask;
-                break;
-            case IR_BINARY_SIGNED_REMAINDER:
-                if (!signed_right || (signed_left == INT64_MIN && signed_right == -1))
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = (u64)(signed_left % signed_right) & mask;
-                break;
-            case IR_BINARY_UNSIGNED_REMAINDER:
-                if (!right)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = left % right & mask;
-                break;
-            case IR_BINARY_SHIFT_LEFT:
-                if (right >= shift_width)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = left << right & mask;
-                break;
-            case IR_BINARY_SIGNED_SHIFT_RIGHT:
-                if (right >= shift_width)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = (u64)(signed_left >> right) & mask;
-                break;
-            case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
-                if (right >= shift_width)
-                {
-                    C_IR_VALUE_CONSTANT_RETURN(false);
-                }
-                result = left >> right & mask;
-                break;
-            case IR_BINARY_INTEGER_BITWISE_AND:
-                result = left & right & mask;
-                break;
-            case IR_BINARY_INTEGER_BITWISE_OR:
-                result = (left | right) & mask;
-                break;
-            case IR_BINARY_INTEGER_BITWISE_XOR:
-                result = (left ^ right) & mask;
-                break;
-            case IR_BINARY_BOOLEAN_AND:
-                result = left && right;
-                break;
-            case IR_BINARY_BOOLEAN_OR:
-                result = left || right;
-                break;
-            case IR_BINARY_INTEGER_EQUAL:
-            case IR_BINARY_BOOLEAN_EQUAL:
-                result = left == right;
-                break;
-            case IR_BINARY_INTEGER_NOT_EQUAL:
-            case IR_BINARY_BOOLEAN_NOT_EQUAL:
-                result = left != right;
-                break;
-            case IR_BINARY_SIGNED_LESS:
-                result = signed_left < signed_right;
-                break;
-            case IR_BINARY_SIGNED_LESS_EQUAL:
-                result = signed_left <= signed_right;
-                break;
-            case IR_BINARY_SIGNED_GREATER:
-                result = signed_left > signed_right;
-                break;
-            case IR_BINARY_SIGNED_GREATER_EQUAL:
-                result = signed_left >= signed_right;
-                break;
-            case IR_BINARY_UNSIGNED_LESS:
-                result = left < right;
-                break;
-            case IR_BINARY_UNSIGNED_LESS_EQUAL:
-                result = left <= right;
-                break;
-            case IR_BINARY_UNSIGNED_GREATER:
-                result = left > right;
-                break;
-            case IR_BINARY_UNSIGNED_GREATER_EQUAL:
-                result = left >= right;
-                break;
-            default:
-                C_IR_VALUE_CONSTANT_RETURN(false);
-            }
-        }
-        if (value_count >= capacity)
-        {
-            C_IR_VALUE_CONSTANT_RETURN(false);
-        }
-        values[value_count++] = result;
     }
-    if (value_count != 1)
+    valid = valid && value_count == 1 && values[0].high == 0;
+    if (valid)
     {
-        C_IR_VALUE_CONSTANT_RETURN(false);
+        *result_out = values[0].low;
     }
-    *result_out = values[0];
-    C_IR_VALUE_CONSTANT_RETURN(true);
-#undef C_IR_VALUE_CONSTANT_RETURN
+    scratch_end(evaluation_temporary);
+    return valid;
 }
 
 // The IEEE class of one constant float operand, which is all the
@@ -23922,34 +23741,12 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             }
         }
     }
-    else if (!operation_type_value->is_signed)
+    else if (!operation_type_value->is_signed && binary != IR_BINARY_COUNT)
     {
-        switch (binary)
-        {
-        case IR_BINARY_SIGNED_DIVIDE:
-            binary = IR_BINARY_UNSIGNED_DIVIDE;
-            break;
-        case IR_BINARY_SIGNED_REMAINDER:
-            binary = IR_BINARY_UNSIGNED_REMAINDER;
-            break;
-        case IR_BINARY_SIGNED_SHIFT_RIGHT:
-            binary = IR_BINARY_UNSIGNED_SHIFT_RIGHT;
-            break;
-        case IR_BINARY_SIGNED_LESS:
-            binary = IR_BINARY_UNSIGNED_LESS;
-            break;
-        case IR_BINARY_SIGNED_LESS_EQUAL:
-            binary = IR_BINARY_UNSIGNED_LESS_EQUAL;
-            break;
-        case IR_BINARY_SIGNED_GREATER:
-            binary = IR_BINARY_UNSIGNED_GREATER;
-            break;
-        case IR_BINARY_SIGNED_GREATER_EQUAL:
-            binary = IR_BINARY_UNSIGNED_GREATER_EQUAL;
-            break;
-        default:
-            break;
-        }
+        // The unsigned form of the operator, from the table every constant
+        // evaluator also selects through.
+        IrUnaryOperation unsigned_unary = IR_UNARY_COUNT;
+        c_integer_operation(operation, false, &unsigned_unary, &binary);
     }
     bool comparison = binary == IR_BINARY_INTEGER_EQUAL || binary == IR_BINARY_INTEGER_NOT_EQUAL || binary == IR_BINARY_FLOAT_EQUAL ||
                       binary == IR_BINARY_FLOAT_NOT_EQUAL || (binary >= IR_BINARY_SIGNED_LESS && binary <= IR_BINARY_FLOAT_GREATER_EQUAL);
@@ -33158,7 +32955,7 @@ BUSTER_C_INTERNAL bool c_ir_range_is_null_pointer_constant_attempt(CIntegerIrBui
     {
         return value.kind == C_IR_CONSTANT_POINTER && value.symbol.value == IR_ID_UNDERLYING_INVALID && !value.addend && !value.integer;
     }
-    return value.kind == C_IR_CONSTANT_INTEGER && !value.integer;
+    return value.kind == C_IR_CONSTANT_INTEGER && ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
 }
 
 // Pointer selection shares one semantic merge between expression typing and
@@ -41267,14 +41064,27 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
     {
         return false;
     }
+    // The static image of `(T *)integer` is the run-time conversion's: the
+    // integer is extended by its own signedness to the pointer width, or
+    // its high bits are discarded -- `(void *)-1` is all ones, not the
+    // 32-bit image of the int (the same c_ir_emit_cast conversion the
+    // run-time path performs, through the shared integer semantics).
     u32 pointer_size = builder->program->data_layout.pointer.size;
-    if (!pointer_size || pointer_size > sizeof(value.integer) || (pointer_size < sizeof(value.integer) &&
-                                                                    value.integer > (((u64)1 << (pointer_size * 8)) - 1)))
+    IrType* source = ir_type_from_id(&builder->program->types, value.type);
+    u32 source_width = ir_integer_type_width(source);
+    u32 pointer_width = pointer_size * 8;
+    if (!pointer_size || pointer_size > sizeof(value.integer) || !source_width)
     {
         return false;
     }
-    *value_out = value.integer;
-    return true;
+    IrConversionOperation conversion = source_width > pointer_width    ? IR_CONVERSION_INTEGER_TRUNCATE
+                                       : source_width == pointer_width ? IR_CONVERSION_INTEGER_REINTERPRET
+                                       : source->is_signed             ? IR_CONVERSION_INTEGER_SIGN_EXTEND
+                                                                       : IR_CONVERSION_INTEGER_ZERO_EXTEND;
+    IrIntegerResult converted =
+        ir_integer_convert(conversion, (IrInteger){.low = value.integer, .high = value.integer_high}, source_width, pointer_width);
+    *value_out = converted.bits.low;
+    return !(converted.faults & IR_INTEGER_FAULT_UNSUPPORTED);
 }
 
 BUSTER_C_INTERNAL void c_ir_store_pointer_bits(CIntegerIrBuilder* builder, IrType* type, u8* bytes, u64 offset, u64 value)
@@ -46833,6 +46643,7 @@ BUSTER_C_SHARED bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CCon
 
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source_input, IrTypeId target_type, CIrConstantValue* result)
 {
+    IR_SEMANTIC_RECORD(LOWERING_CONVERSIONS, 1);
     CIrConstantValue source = *source_input;
     IrType* target = ir_type_from_id(&builder->program->types, target_type);
     IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
@@ -47038,24 +46849,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                 if (success)
                 {
                     type = ir_type_from_id(&builder->program->types, value->type);
-                    if (operation == C_CONDITIONAL_UNARY_MINUS)
-                    {
-                        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
-                        {
-                            CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
-                            value->integer = negated.low;
-                            value->integer_high = negated.high;
-                        }
-                        else
-                            value->integer = 0 - value->integer;
-                    }
-                    else if (operation == C_CONDITIONAL_BITWISE_NOT)
-                    {
-                        value->integer = ~value->integer;
-                        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
-                            value->integer_high = ~value->integer_high;
-                    }
-                    value->integer &= c_ir_integer_type_mask(type);
+                    CIntegerConstantResult computed =
+                        c_integer_constant_unary(operation, (IrInteger){.low = value->integer, .high = value->integer_high}, ir_integer_type_width(type));
+                    success = computed.constant;
+                    value->integer = computed.bits.low;
+                    value->integer_high = computed.bits.high;
                 }
             }
         }
@@ -47343,212 +47141,31 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     {
         return false;
     }
-    if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+    // Integer arithmetic is the shared C operator semantics (ir_integer.c via
+    // c_integer_constant_binary), the same the parser's constant evaluator
+    // and preprocessing use. A division by zero or a shift count outside the
+    // promoted width is not a constant, which is UNKNOWN here so that a
+    // short circuit or a discarded comma operand can still absorb it.
+    IrType* count_type = shift ? ir_type_from_id(&builder->program->types, promoted_right_type) : type;
+    CIntegerConstantResult computed =
+        c_integer_constant_binary(operation, (IrInteger){.low = left.integer, .high = left.integer_high},
+                                  (IrInteger){.low = right.integer, .high = right.integer_high}, ir_integer_type_width(type), type->is_signed,
+                                  ir_integer_type_width(count_type));
+    bool success = !(computed.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+    if (success && !computed.constant)
     {
-        CIrWideInteger left_wide = {.low = left.integer, .high = left.integer_high};
-        CIrWideInteger right_wide = {.low = right.integer, .high = right.integer_high};
-        CIrWideInteger value = {0};
-        bool comparison = false;
-        bool is_comparison = false;
-        switch (operation)
-        {
-        case C_CONDITIONAL_MULTIPLY: value = c_ir_wide_multiply(left_wide, right_wide); break;
-        case C_CONDITIONAL_DIVIDE:
-        case C_CONDITIONAL_REMAINDER:
-        {
-            if (!right_wide.low && !right_wide.high)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            bool left_negative = type->is_signed && (left_wide.high >> 63);
-            bool right_negative = type->is_signed && (right_wide.high >> 63);
-            if (type->is_signed && left_wide.low == 0 && left_wide.high == ((u64)1 << 63) && right_wide.low == UINT64_MAX &&
-                right_wide.high == UINT64_MAX)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            CIrWideInteger dividend = left_negative ? c_ir_wide_negate(left_wide) : left_wide;
-            CIrWideInteger divisor = right_negative ? c_ir_wide_negate(right_wide) : right_wide;
-            CIrWideInteger quotient = {0};
-            CIrWideInteger remainder = {0};
-            c_ir_wide_divide(dividend, divisor, &quotient, &remainder);
-            if (left_negative != right_negative) quotient = c_ir_wide_negate(quotient);
-            if (left_negative) remainder = c_ir_wide_negate(remainder);
-            value = operation == C_CONDITIONAL_DIVIDE ? quotient : remainder;
-        }
-        break;
-        case C_CONDITIONAL_ADD:
-            value.low = left_wide.low + right_wide.low;
-            value.high = left_wide.high + right_wide.high + (value.low < left_wide.low);
-            break;
-        case C_CONDITIONAL_SUBTRACT: value = c_ir_wide_subtract(left_wide, right_wide); break;
-        case C_CONDITIONAL_SHIFT_LEFT:
-            if (right_wide.high || right_wide.low >= 128)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            if (right_wide.low >= 64)
-            {
-                value.high = left_wide.low << (u32)(right_wide.low - 64);
-                value.low = 0;
-            }
-            else if (right_wide.low)
-            {
-                value.high = (left_wide.high << (u32)right_wide.low) | (left_wide.low >> (u32)(64 - right_wide.low));
-                value.low = left_wide.low << (u32)right_wide.low;
-            }
-            else
-                value = left_wide;
-            break;
-        case C_CONDITIONAL_SHIFT_RIGHT:
-            if (right_wide.high || right_wide.low >= 128)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            if (right_wide.low >= 64)
-            {
-                value.low = type->is_signed ? (u64)((s64)left_wide.high >> (u32)(right_wide.low - 64))
-                                             : left_wide.high >> (u32)(right_wide.low - 64);
-                value.high = type->is_signed && (left_wide.high >> 63) ? UINT64_MAX : 0;
-            }
-            else if (right_wide.low)
-            {
-                value.low = (left_wide.low >> (u32)right_wide.low) | (left_wide.high << (u32)(64 - right_wide.low));
-                value.high = type->is_signed ? (u64)((s64)left_wide.high >> (u32)right_wide.low)
-                                             : left_wide.high >> (u32)right_wide.low;
-            }
-            else
-                value = left_wide;
-            break;
-        case C_CONDITIONAL_BITWISE_AND:
-            value.low = left_wide.low & right_wide.low;
-            value.high = left_wide.high & right_wide.high;
-            break;
-        case C_CONDITIONAL_BITWISE_XOR:
-            value.low = left_wide.low ^ right_wide.low;
-            value.high = left_wide.high ^ right_wide.high;
-            break;
-        case C_CONDITIONAL_BITWISE_OR:
-            value.low = left_wide.low | right_wide.low;
-            value.high = left_wide.high | right_wide.high;
-            break;
-        case C_CONDITIONAL_EQUAL:
-            comparison = left_wide.low == right_wide.low && left_wide.high == right_wide.high;
-            is_comparison = true;
-            break;
-        case C_CONDITIONAL_NOT_EQUAL:
-            comparison = left_wide.low != right_wide.low || left_wide.high != right_wide.high;
-            is_comparison = true;
-            break;
-        case C_CONDITIONAL_LESS:
-        case C_CONDITIONAL_LESS_EQUAL:
-        case C_CONDITIONAL_GREATER:
-        case C_CONDITIONAL_GREATER_EQUAL:
-        {
-            bool less = type->is_signed && (s64)left_wide.high != (s64)right_wide.high
-                            ? (s64)left_wide.high < (s64)right_wide.high
-                            : c_ir_wide_less(left_wide, right_wide);
-            bool equal = left_wide.low == right_wide.low && left_wide.high == right_wide.high;
-            comparison = operation == C_CONDITIONAL_LESS          ? less
-                         : operation == C_CONDITIONAL_LESS_EQUAL    ? less || equal
-                         : operation == C_CONDITIONAL_GREATER       ? !less && !equal
-                                                                    : !less;
-            is_comparison = true;
-        }
-        break;
-        default: return false;
-        }
-        if (is_comparison)
-        {
-            *result = c_ir_constant_integer(builder->s32_type, comparison);
-            return true;
-        }
-        *result = c_ir_constant_integer(common, value.low);
-        result->integer_high = value.high;
-        return true;
+        *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
     }
-    u64 mask = c_ir_integer_type_mask(type);
-    u64 value = 0;
-    s64 signed_left = c_ir_integer_signed_value(left.integer, type);
-    s64 signed_right = c_ir_integer_signed_value(right.integer, type);
-    switch (operation)
+    else if (success && computed.comparison)
     {
-    case C_CONDITIONAL_MULTIPLY: value = left.integer * right.integer; break;
-    case C_CONDITIONAL_DIVIDE:
-        if (type->is_signed)
-        {
-            if (!signed_right || (signed_left == INT64_MIN && signed_right == -1))
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            value = (u64)(signed_left / signed_right);
-        }
-        else
-        {
-            if (!right.integer)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            value = left.integer / right.integer;
-        }
-        break;
-    case C_CONDITIONAL_REMAINDER:
-        if (type->is_signed)
-        {
-            if (!signed_right || (signed_left == INT64_MIN && signed_right == -1))
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            value = (u64)(signed_left % signed_right);
-        }
-        else
-        {
-            if (!right.integer)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
-            value = left.integer % right.integer;
-        }
-        break;
-    case C_CONDITIONAL_ADD: value = left.integer + right.integer; break;
-    case C_CONDITIONAL_SUBTRACT: value = left.integer - right.integer; break;
-    case C_CONDITIONAL_SHIFT_LEFT:
-        if (right.integer_high || right.integer >= type->bit_width)
-        {
-            *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-            return true;
-        }
-        value = left.integer << right.integer;
-        break;
-    case C_CONDITIONAL_SHIFT_RIGHT:
-        if (right.integer_high || right.integer >= type->bit_width)
-        {
-            *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-            return true;
-        }
-        value = type->is_signed ? (u64)(signed_left >> right.integer) : left.integer >> right.integer;
-        break;
-    case C_CONDITIONAL_BITWISE_AND: value = left.integer & right.integer; break;
-    case C_CONDITIONAL_BITWISE_XOR: value = left.integer ^ right.integer; break;
-    case C_CONDITIONAL_BITWISE_OR: value = left.integer | right.integer; break;
-    case C_CONDITIONAL_EQUAL: *result = c_ir_constant_integer(builder->s32_type, left.integer == right.integer); return true;
-    case C_CONDITIONAL_NOT_EQUAL: *result = c_ir_constant_integer(builder->s32_type, left.integer != right.integer); return true;
-    case C_CONDITIONAL_LESS: *result = c_ir_constant_integer(builder->s32_type, type->is_signed ? signed_left < signed_right : left.integer < right.integer); return true;
-    case C_CONDITIONAL_LESS_EQUAL: *result = c_ir_constant_integer(builder->s32_type, type->is_signed ? signed_left <= signed_right : left.integer <= right.integer); return true;
-    case C_CONDITIONAL_GREATER: *result = c_ir_constant_integer(builder->s32_type, type->is_signed ? signed_left > signed_right : left.integer > right.integer); return true;
-    case C_CONDITIONAL_GREATER_EQUAL: *result = c_ir_constant_integer(builder->s32_type, type->is_signed ? signed_left >= signed_right : left.integer >= right.integer); return true;
-    default: return false;
+        *result = c_ir_constant_integer(builder->s32_type, computed.bits.low);
     }
-    *result = c_ir_constant_integer(common, value & mask);
-    return true;
+    else if (success)
+    {
+        *result = c_ir_constant_integer(common, computed.bits.low);
+        result->integer_high = computed.bits.high;
+    }
+    return success;
 }
 
 typedef struct CIrConstantComplexInitializerValue CIrConstantComplexInitializerValue;
@@ -48218,6 +47835,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_is_null_pointer_constant(CIntegerIrBuilder*
 BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, CIrConstantOperator operation, CIrConstantValue* values,
                                                        u32* value_count)
 {
+    IR_SEMANTIC_RECORD(LOWERING_CONSTANT_NODES, 1);
     bool success = false;
     if (operation.operation == C_CONDITIONAL_SELECT)
     {
@@ -48829,6 +48447,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder
 
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out)
 {
+    IR_SEMANTIC_RANGE(LOWERING_CONSTANT, builder->preprocess.tokens, start, end);
     CIrQueryFrame result = {0};
     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_CONSTANT}, &result) || !result.success)
     {
@@ -50049,6 +49668,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
 {
+    IR_SEMANTIC_RANGE(LOWERING_BOUND, builder->preprocess.tokens, bound.token_start, bound.token_start + bound.token_count);
     CIrQueryFrame result = {0};
     if (!c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result) || !result.success)
     {

@@ -2097,6 +2097,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
+    UnitTestResult ebpf_integer_images = codegen_test_ebpf_integer_images(arguments);
+    result.succeeded_test_count += ebpf_integer_images.succeeded_test_count;
+    result.test_count += ebpf_integer_images.test_count;
     UnitTestResult stack_liveness = codegen_test_ebpf_stack_liveness(arguments);
     result.succeeded_test_count += stack_liveness.succeeded_test_count;
     result.test_count += stack_liveness.test_count;
