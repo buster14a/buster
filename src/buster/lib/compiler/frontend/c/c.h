@@ -1509,6 +1509,11 @@ struct CIRLowerOptions
 {
     bool disable_direct_ssa;
     bool sysv_unnamed_bitfields_integer;
+    // No consumer will read debug information (-g0): lowered functions carry
+    // no IrDebugLocal records. Their only readers are the debug-value, debug
+    // location and debug-model builders, which run only with debug output;
+    // every other part of the program is unchanged.
+    bool omit_debug_locals;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;

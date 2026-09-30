@@ -40,7 +40,8 @@
     X(C_DIAGNOSTIC_EVALUATION_ROWS, c_diagnostic_evaluation_rows) \
     X(C_DIAGNOSTIC_LOWERING_ROWS, c_diagnostic_lowering_rows) \
     X(C_LEX_DIAGNOSTIC_ARENAS, c_lex_diagnostic_arenas) \
-    X(C_LEX_DIAGNOSTIC_ARENA_BYTES, c_lex_diagnostic_arena_bytes)
+    X(C_LEX_DIAGNOSTIC_ARENA_BYTES, c_lex_diagnostic_arena_bytes) \
+    X(DEBUG_LOCALS, debug_locals)
 
 typedef enum IrDiagnosticCensusCounter
 {

@@ -52071,9 +52071,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             continue;
         }
         function->state = IR_FUNCTION_LOWERED;
-        function->debug_local_count = builder.local_count;
-        function->debug_locals = arena_allocate(arena, IrDebugLocal, function->debug_local_count);
-        for (u32 local_index = 0; local_index < builder.local_count; local_index += 1)
+        function->debug_local_count = options.omit_debug_locals ? 0 : builder.local_count;
+        function->debug_locals = options.omit_debug_locals ? 0 : arena_allocate(arena, IrDebugLocal, function->debug_local_count);
+        IR_DIAGNOSTIC_CENSUS_RECORD(DEBUG_LOCALS, function->debug_local_count);
+        for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
         {
             CIntegerIrLocal* local = builder.locals + local_index;
             function->debug_locals[local_index] = (IrDebugLocal){
