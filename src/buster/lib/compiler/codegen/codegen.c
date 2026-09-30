@@ -15098,6 +15098,50 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        if (conversion == IR_CONVERSION_IDENTITY &&
+                            (target_type->kind == IR_TYPE_STRUCT || target_type->kind == IR_TYPE_UNION))
+                        {
+                            // Comma results keep a value-producing identity cast
+                            // to prevent recovering the right operand's place.
+                            // Its frame home contains the entire aggregate.
+                            if (source_type->kind != target_type->kind || !source_type->layout.resolved || !target_type->layout.resolved ||
+                                source_type->layout.size != target_type->layout.size || target_type->layout.size > INT32_MAX)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            s32 source_displacement = c_x64_frame_displacement(&emitter, value_offsets[instruction->operands[0].value]);
+                            for (u64 copied = 0; copied < target_type->layout.size;)
+                            {
+                                u32 chunk = codegen_canonical_copy_chunk(target_type->layout.size - copied, copied, copied);
+                                s64 source = (s64)source_displacement + (s64)copied;
+                                s64 destination = (s64)result_displacement + (s64)copied;
+                                if (source < INT32_MIN || source > INT32_MAX || destination < INT32_MIN || destination > INT32_MAX)
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                u16 width = (u16)(chunk * 8);
+                                BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, chunk <= 4 ? 32 : 64),
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, width, source),
+                                };
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, width, destination),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, chunk <= 2 ? S8("MOVZX") : S8("MOV"),
+                                                                           load_operands, BUSTER_ARRAY_LENGTH(load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands, BUSTER_ARRAY_LENGTH(store_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                copied += chunk;
+                            }
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                            continue;
+                        }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
                         bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
                         bool source_float_scalar = source_type->kind == IR_TYPE_FLOAT &&
@@ -21548,12 +21592,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
                         IrType* target_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         IrConversionOperation conversion = instruction->conversion_operation;
-                        c_a64_load(&emitter, 9, instruction->operands[0]);
                         if (!target_type || !source_type)
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        if (conversion == IR_CONVERSION_IDENTITY &&
+                            (target_type->kind == IR_TYPE_STRUCT || target_type->kind == IR_TYPE_UNION))
+                        {
+                            // A scalar load/store drops every byte after the
+                            // first eightbyte, including fields read later.
+                            if (source_type->kind != target_type->kind || !source_type->layout.resolved || !target_type->layout.resolved ||
+                                source_type->layout.size != target_type->layout.size || target_type->layout.size > UINT32_MAX)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            for (u64 copied = 0; copied < target_type->layout.size;)
+                            {
+                                u64 source = (u64)value_offsets[instruction->operands[0].value] + copied;
+                                u64 destination = (u64)result_offset + copied;
+                                u32 chunk = codegen_canonical_copy_chunk(target_type->layout.size - copied, source, destination);
+                                if (source > UINT32_MAX || destination > UINT32_MAX ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, (u32)source, chunk, false, false) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, (u32)destination, chunk, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                copied += chunk;
+                            }
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                            continue;
+                        }
+                        c_a64_load(&emitter, 9, instruction->operands[0]);
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
                         bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
                         if (target_type->kind == IR_TYPE_FLOAT && target_type->bit_width == 128 && conversion == IR_CONVERSION_FLOAT_EXTEND)
