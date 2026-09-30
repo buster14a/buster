@@ -123,19 +123,22 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
-      - name: Wait for the queued predecessor to land
-        if: ${{ github.event_name == 'merge_group' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Pinned closures are checked out into candidate/external before a merge
+      # group is admitted, so the reserved-root check must run here, on the
+      # pristine candidate checkout, for every event.
+      - name: Reject candidate-controlled checkout destinations
         run: |
-          python3 -B trusted/tools/merge_queue_admission.py wait-base \
-            --repo-root "$GITHUB_WORKSPACE/candidate" \
-            --trusted-root "$GITHUB_WORKSPACE/trusted" \
-            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA" --wait-seconds 18000
+          set -euo pipefail
+          for relative in external .native-retirement-trusted; do
+            path="$GITHUB_WORKSPACE/candidate/$relative"
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "error: candidate controls reserved materialization root '$relative'" >&2
+              exit 1
+            fi
+          done
       - name: Reject feature-owned generated state and classify trust transitions
         id: admission
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
@@ -151,21 +154,16 @@ jobs:
           fi
           current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
-          base="$TRUSTED_REF"
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            # Bind PR admission to the independently checked-out live policy.
-            base=$(git -C trusted rev-parse HEAD)
-            if [[ "$base" != "$current_main" ]]; then
-              echo '::error::Main advanced after trusted PR policy checkout.' >&2
-              exit 1
-            fi
+          # Bind PR admission to the independently checked-out live policy.
+          base=$(git -C trusted rev-parse HEAD)
+          if [[ "$base" != "$current_main" ]]; then
+            echo '::error::Main advanced after trusted PR policy checkout.' >&2
+            exit 1
           fi
-          status_args=()
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            rows="$RUNNER_TEMP/native-retirement-status-rows.json"
-            gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/statuses/$CANDIDATE_HEAD?per_page=100" > "$rows"
-            python3 - "$CANDIDATE_HEAD" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
+          rows="$RUNNER_TEMP/native-retirement-status-rows.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/statuses/$CANDIDATE_HEAD?per_page=100" > "$rows"
+          python3 - "$CANDIDATE_HEAD" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
           import json, pathlib, sys
           head, rows_path, output_path = sys.argv[1:]
           pages = json.loads(pathlib.Path(rows_path).read_text())
@@ -174,10 +172,6 @@ jobs:
           rows = [row for page in pages for row in page]
           pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
           PY_STATUS
-            status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
-          elif [[ "$EVENT_NAME" == merge_group ]]; then
-            status_args=(--repository "$GITHUB_REPOSITORY")
-          fi
           python3 "$gate" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
             --base "$base" \
@@ -185,15 +179,21 @@ jobs:
             --current-main "$current_main" \
             --event "$EVENT_NAME" \
             --allow-pending \
-            "${status_args[@]}" \
+            --status-json "$RUNNER_TEMP/native-retirement-status.json" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
           mode=$(python3 - "$RUNNER_TEMP/native-retirement-admission.json" <<'PY'
           import json, pathlib, sys
           print(json.loads(pathlib.Path(sys.argv[1]).read_text())["mode"])
           PY
           )
+          catch_up=$(python3 - "$RUNNER_TEMP/native-retirement-admission.json" <<'PY'
+          import json, pathlib, sys
+          print("true" if json.loads(pathlib.Path(sys.argv[1]).read_text()).get("catch_up") is True else "false")
+          PY
+          )
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [[ "$mode" != trusted-integration && "$mode" != trusted-integration-merge-group ]]; then
+          echo "catch_up=$catch_up" >> "$GITHUB_OUTPUT"
+          if [[ "$mode" != trusted-integration ]]; then
             python3 "$classifier" classify \
               --repo-root "$GITHUB_WORKSPACE/candidate" \
               --base "$base" \
@@ -256,44 +256,145 @@ jobs:
           path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare pinned SDK and external inputs with trusted code
         run: |
           python3 trusted/tools/native_retirement_sdks.py \
-            --source-root "$GITHUB_WORKSPACE/candidate"
+            --source-root "$GITHUB_WORKSPACE/candidate" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/candidate/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/candidate"
-      - name: Reconstruct feature state ephemerally or check published main
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
+      # Reconstruction is read-only, so it runs on the speculative group as
+      # soon as the group exists (#1893). Only the cheap identity/policy wait
+      # and the admission gate below run after the predecessor lands.
+      - name: Reconstruct the exact candidate or group state ephemerally
+        id: reconstruction
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
-          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch || '${{ steps.admission.outputs.mode }}' == trusted-integration || '${{ steps.admission.outputs.mode }}' == trusted-integration-merge-group ]]; then
-            python3 trusted/tools/native_retirement_rebind.py check \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
-            git -C candidate diff --exit-code -- \
-              docs/native-retirement-repository-sources-v1.json \
-              tools/native_retirement_dependency_binding.generated.h
+          out="$RUNNER_TEMP/native-retirement-rebind"
+          mkdir -p "$out"
+          committed=0
+          python3 trusted/tools/native_retirement_rebind.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            > "$out/committed-check.json" || committed=$?
+          if [[ "$committed" -ne 0 && "$committed" -ne 2 ]]; then
+            cat "$out/committed-check.json"
+            exit "$committed"
+          fi
+          if [[ "$committed" -eq 0 ]]; then
+            echo "committed_current=true" >> "$GITHUB_OUTPUT"
           else
-            python3 trusted/tools/native_retirement_rebind.py refresh \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              | tee "$RUNNER_TEMP/native-retirement-rebind/refresh.json"
-            python3 trusted/tools/native_retirement_rebind.py check \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
-            python3 candidate/tools/native_retirement_rebind.py check \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              | tee "$RUNNER_TEMP/native-retirement-rebind/candidate-check.json"
-            unexpected=$(git -C candidate diff --name-only -- . \
-              ':(exclude)docs/native-retirement-repository-sources-v1.json' \
-              ':(exclude)tools/native_retirement_dependency_binding.generated.h')
-            test -z "$unexpected"
+            echo "committed_current=false" >> "$GITHUB_OUTPUT"
+          fi
+          python3 trusted/tools/native_retirement_rebind.py refresh \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$out/refresh.json"
+          python3 trusted/tools/native_retirement_rebind.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$out/check.json"
+          python3 candidate/tools/native_retirement_rebind.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$out/candidate-check.json"
+          unexpected=$(git -C candidate diff --name-only -- . \
+            ':(exclude)docs/native-retirement-repository-sources-v1.json' \
+            ':(exclude)tools/native_retirement_dependency_binding.generated.h')
+          test -z "$unexpected"
+          if [[ "$committed" -eq 2 && ( '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch ) ]]; then
+            # Ordinary-bound merges land before their catch-up (#1893). The
+            # committed pair is behind but was reconstructed above.
+            echo '::warning::Committed native-retirement generated state is behind main; a trusted catch-up is pending.'
           fi
       - name: Run independent contract suite against the ephemeral binding
         working-directory: candidate
         run: |
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
+      - name: Wait for the queued predecessor to land
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B trusted/tools/merge_queue_admission.py wait-base \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            --trusted-root "$GITHUB_WORKSPACE/trusted" \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" --wait-seconds 18000
+      - name: Admit the landed merge group with trusted tools
+        id: group_admission
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          classifier="$GITHUB_WORKSPACE/trusted/tools/native_retirement_integration.py"
+          gate="$GITHUB_WORKSPACE/trusted/tools/native_retirement_merge_gate.py"
+          current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          # The queued base has landed (previous step); the gate checks it is live main.
+          base="$TRUSTED_REF"
+          python3 "$gate" check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            --base "$base" \
+            --head "$CANDIDATE_HEAD" \
+            --current-main "$current_main" \
+            --event "$EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            | tee "$RUNNER_TEMP/native-retirement-admission.json"
+          mode=$(python3 - "$RUNNER_TEMP/native-retirement-admission.json" <<'PY'
+          import json, pathlib, sys
+          print(json.loads(pathlib.Path(sys.argv[1]).read_text())["mode"])
+          PY
+          )
+          catch_up=$(python3 - "$RUNNER_TEMP/native-retirement-admission.json" <<'PY'
+          import json, pathlib, sys
+          print("true" if json.loads(pathlib.Path(sys.argv[1]).read_text()).get("catch_up") is True else "false")
+          PY
+          )
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "catch_up=$catch_up" >> "$GITHUB_OUTPUT"
+          if [[ "$mode" != trusted-integration-merge-group ]]; then
+            # candidate/external now holds the pinned closures, which the
+            # classifier's reserved-root check would reject. Classify a
+            # pristine worktree of the same head instead; the candidate's own
+            # reserved roots were rejected before materialization.
+            pristine="$RUNNER_TEMP/native-retirement-classify"
+            git -C candidate worktree add --detach "$pristine" "$CANDIDATE_HEAD"
+            python3 "$classifier" classify \
+              --repo-root "$pristine" \
+              --base "$base" \
+              --head "$CANDIDATE_HEAD" \
+              | tee "$RUNNER_TEMP/native-retirement-classification.json"
+            git -C candidate worktree remove --force "$pristine"
+          fi
+      - name: Require exact current generated state for attested non-catch-up heads
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        env:
+          MODE: ${{ steps.admission.outputs.mode || steps.group_admission.outputs.mode }}
+          CATCH_UP: ${{ steps.admission.outputs.catch_up || steps.group_admission.outputs.catch_up }}
+          COMMITTED_CURRENT: ${{ steps.reconstruction.outputs.committed_current }}
+        run: |
+          set -euo pipefail
+          if [[ ( "$MODE" == trusted-integration || "$MODE" == trusted-integration-merge-group ) && "$CATCH_UP" != true ]]; then
+            if [[ "$COMMITTED_CURRENT" != true ]]; then
+              echo '::error::An attested integration head must carry exactly current generated state.' >&2
+              exit 1
+            fi
+          fi
       - name: Retain read-only reconstruction diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -14,6 +14,10 @@ struct BatchTestResult
     u64 module_test_count;
     u64 external_test_count;
     u64 succeeded_external_test_count;
+    // Set only for a run narrowed by `ide test --module=`, so the summary
+    // can say how much of the registered suite it covered.
+    u64 selected_module_count;
+    u64 registered_module_count;
     ProcessResult process;
     u8 reserved[4];
 };
@@ -67,6 +71,9 @@ struct UnitTestArguments
     ShowCallback* show;
 #if BUSTER_INCLUDE_TESTS
     String8 coff_relocation_fixture_path;
+    // Comma-separated TestDescriptor names from `ide test --module=`; empty
+    // runs every registered module.
+    String8 module_selection;
     String8 memory_module;
     u64 memory_fixture_index;
     String8 memory_top_retained_fixture;
@@ -152,6 +159,10 @@ BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, Str
 BUSTER_F_DECL u64 buster_test_worker_count(u64 requested);
 
 BUSTER_F_DECL BatchTestResult library_tests(UnitTestArguments* arguments);
+// Checks a UnitTestArguments.module_selection list before a run. Prints each
+// name that matches no module registered for this target, then the
+// registered names, and returns false if there was one.
+BUSTER_F_DECL bool buster_test_module_selection_check(String8 selection);
 
 BUSTER_F_DECL void default_show(UnitTestArguments* arguments, String8 format, ...);
 BUSTER_F_DECL bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test);

@@ -7,6 +7,16 @@
 - All tests run inside the `ide` executable; there is no external unit-test
   framework. From the repository root, run `ide test --verbose=1 --ci=1` or
   build the `test_all` target.
+- `ide test --module=<name>[,<name>...]` runs only the named modules. A name
+  is a `TestDescriptor.name` from `test_descriptors` in
+  `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.
+  Unknown or empty names fail before any module runs and print the names
+  registered for the target. A named table audit runs even under
+  `BUSTER_TEST_TABLE_AUDITS=0`. Modules at or after the parallel aarch64 group
+  still get that group's table prewarm, but no state a skipped earlier module
+  would have left behind. The summary reads
+  `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
+  module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
   `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
@@ -84,7 +94,10 @@
   On `merge_group`, desktop and mobile enable matrix fail-fast; the native
   matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
   controller cancels exact-head merge-group runs after a failed Buster CI job
-  or required check from another workflow.
+  or required check from another workflow. It also stops a desktop Release
+  `Workflow tool regression tests` step that is still in progress past its
+  `ci.yml` budget plus grace. That budget table is mirrored in
+  `.github/scripts/recover-ci.py` and checked for drift.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
@@ -264,6 +277,17 @@ with only the external build and throughput programs stubbed, followed by the
 fixed no-argument recipe suite. These tests are fake-backend and
 stubbed-external evidence; privileged live-systemd and deployment
 qualification remain explicit operator gates and are not covered here.
+`./build.sh bench_service_broker self-test` also compiles the opt-in
+`systemd-broker-live-test` probe. Run that probe only in a provisioned,
+disposable real-systemd container while an exact outer unit holds the lease;
+it exercises the constrained socket instance and positive/negative private
+state requests. The broker self-test also runs the probe's unprivileged
+identity-policy controls. Opt-in `--isolation-only JOB ATTEMPT` checks actual
+account groups and non-destructive private-file/traversal denial without
+manager calls; it is not live broker evidence. `service-tests
+--cleanup-identity-only` needs disposable root-capable infrastructure and the
+three fixed accounts, and tests the real cleanup helper under the service UID.
+See `tools/bench_service/deploy/SYSTEMD_BROKER.md` for both gates.
 
 ## Configured external compiler fixtures
 
@@ -323,6 +347,16 @@ allocator/optimization discovery. See [differential-testing.md](../differential-
 for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
+
+## Oracle independence
+
+A differential test is evidence only when its two sides obtain the answer
+independently. [The oracle independence map](../oracle-independence.md)
+records, per route, the shared dependency and the independent oracle
+(Clang-derived layout corpus `record_layout_tests`, specification constants
+for debug information, host-compiled references). New golden data needs an
+independent producer and a regeneration command; never derive one Buster
+path's expectation from another's.
 
 ## Source-equivalence campaigns
 
@@ -412,7 +446,7 @@ process controls, not successful compiler or missing-evidence observations.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
-Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. A process that prints the marker and remains alive is killed at the deadline and fails as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` also locks down launch failure, nonzero exit, incomplete output, stderr output, a true hang, and summary-then-hang behavior.
+Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors
