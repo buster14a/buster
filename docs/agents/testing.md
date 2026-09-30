@@ -63,9 +63,11 @@
   The aggregate's independent desktop inventory checks exact-run job attempts
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
-  a 30-second total metadata budget. A later exact snapshot may recover a
-  transient omission; a persistent empty, stale or ambiguous record fails
-  closed. It never borrows step proof from an older attempt when a newer attempt
+  a 30-second total metadata budget. Transient 5xx/429/transport reads retry
+  in that budget, falling back to smaller jobs pages after a 5xx; a 4xx fails
+  immediately. A later exact snapshot may recover a transient omission; a
+  persistent empty, stale or ambiguous record fails closed, and its errors are
+  printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups

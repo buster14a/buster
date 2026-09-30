@@ -6,9 +6,11 @@ plans and all three selections, without running or claiming any matrix work.
 Synthetic completions below mock compiler re-probes only inside these tests;
 tools/coverage_manifest_test.py retains the real executable-binding controls.
 """
+import contextlib
 import copy
 from collections import Counter
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -21,6 +23,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -509,8 +512,11 @@ class CompletionGateTests(unittest.TestCase):
         with mock.patch.object(github_ci_time, "api_get", side_effect=responses) as fetch:
             result = github_ci_time.require_jobs(args)
             self.assertTrue(result["success"])
-            self.assertEqual(result["job_metadata"], {"snapshot_attempts": 1, "refreshes": 0,
-                                                       "refresh_budget_seconds": 30.0})
+            self.assertEqual({key: result["job_metadata"][key] for key in
+                              ("snapshot_attempts", "refreshes", "refresh_budget_seconds", "final_page_size")},
+                             {"snapshot_attempts": 1, "refreshes": 0, "refresh_budget_seconds": 30.0,
+                              "final_page_size": 100})
+            self.assertEqual([lookup["outcome"] for lookup in result["job_metadata"]["lookups"]], ["ok"] * 3)
             job = next(item for item in result["jobs"] if item["name"] == "Linux x86-64 release")
             self.assertEqual(job["run_id"], 123)
             self.assertEqual(job["head_sha"], "a" * 40)
@@ -611,7 +617,7 @@ class CompletionGateTests(unittest.TestCase):
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         batch = {"total_count": len(jobs), "jobs": pending}
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch]) as fetch, \
-                mock.patch.object(github_ci_time.time, "monotonic", side_effect=[100.0, 100.0, 129.5]), \
+                mock.patch.object(github_ci_time.time, "monotonic", side_effect=[100.0, 100.0, 100.0, 129.5]), \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
             result = github_ci_time.require_jobs(args)
         self.assertFalse(result["success"])
@@ -637,6 +643,137 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
         self.assertEqual(fetch.call_count, 3)
         sleep.assert_called_once_with(1.0)
+
+    def gate_inputs(self, run_attempt=1):
+        run = {"id": 123, "run_attempt": run_attempt, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=run_attempt)
+        return run, args
+
+    @staticmethod
+    def http_error(code):
+        return urllib.error.HTTPError("https://api.github.com/", code, "Bad Gateway" if code >= 500 else "Forbidden",
+                                      {}, None)
+
+    def test_jobs_page_5xx_recovers_on_a_later_smaller_page_snapshot(self):
+        jobs = self.sample()
+        run, args = self.gate_inputs()
+        batch = {"total_count": len(jobs), "jobs": jobs[:github_ci_time.JOB_PAGE_FALLBACK_SIZE]}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, self.http_error(502), batch]) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
+        self.assertEqual(result["job_metadata"]["final_page_size"], github_ci_time.JOB_PAGE_FALLBACK_SIZE)
+        self.assertIn("per_page=100&page=1", fetch.call_args_list[1].args[1])
+        self.assertIn(f"per_page={github_ci_time.JOB_PAGE_FALLBACK_SIZE}&page=1", fetch.call_args_list[2].args[1])
+        self.assertEqual([lookup["outcome"] for lookup in result["job_metadata"]["lookups"]],
+                         ["ok", "HTTP 502 Bad Gateway", "ok"])
+        sleep.assert_called_once_with(1.0)
+
+    def test_persistent_jobs_page_5xx_exhausts_the_snapshots_and_fails_closed(self):
+        run, args = self.gate_inputs()
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [self.http_error(503)] * 4) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
+        self.assertEqual(fetch.call_count, 5)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0, 4.0])
+        self.assertEqual(result["jobs"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("unavailable: HTTP 503", result["errors"][0])
+        self.assertIn("exact run/head proof unresolved after 4 snapshots", result["errors"][0])
+
+    def test_jobs_page_5xx_never_borrows_an_earlier_snapshot(self):
+        jobs = self.sample()
+        pending = copy.deepcopy(jobs)
+        pending[0].update(status="in_progress", conclusion=None)
+        run, args = self.gate_inputs()
+        responses = [run, {"total_count": len(jobs), "jobs": pending}] + [self.http_error(502)] * 3
+        with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["jobs"], [])
+        self.assertTrue(all("HTTP 502" in error for error in result["errors"]))
+
+    def test_client_errors_fail_immediately_without_retry(self):
+        jobs = self.sample()
+        run, args = self.gate_inputs()
+        for responses in ([run, self.http_error(403)], [self.http_error(404)]):
+            with mock.patch.object(github_ci_time, "api_get", side_effect=responses + [
+                    {"total_count": len(jobs), "jobs": jobs}]) as fetch, \
+                    mock.patch.object(github_ci_time.time, "sleep") as sleep:
+                with self.assertRaises(urllib.error.HTTPError):
+                    github_ci_time.require_jobs(args)
+            self.assertEqual(fetch.call_count, len(responses))
+            sleep.assert_not_called()
+
+    def test_transient_run_read_failure_recovers_within_the_budget(self):
+        jobs = self.sample()
+        run, args = self.gate_inputs()
+        responses = [urllib.error.URLError("connection reset"), TimeoutError("read timed out"), run,
+                     {"total_count": len(jobs), "jobs": jobs}]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[self.http_error(502)] * 4) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            with self.assertRaisesRegex(OSError, "run 123 metadata unavailable after 4 reads"):
+                github_ci_time.require_jobs(args)
+        self.assertEqual(fetch.call_count, 4)
+
+    def test_successful_job_with_empty_steps_is_a_distinct_unresolved_case(self):
+        jobs = self.sample()
+        target = next(job for job in jobs if job["name"] == "Linux x86-64 checks")
+        target["steps"] = []
+        run, args = self.gate_inputs()
+        batch = {"total_count": len(jobs), "jobs": jobs}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
+        self.assertTrue(any("Linux x86-64 checks: completed job returned no step records (steps=[])" in error
+                            for error in result["errors"]))
+
+    def run_gate_main(self, responses, output, summary):
+        stderr = io.StringIO()
+        argv = ["github_ci_time.py", "require-jobs", "--repository", "buster14a/buster", "--run-id", "123",
+                "--run-attempt", "1", "--output", str(output)]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
+                mock.patch.object(github_ci_time.time, "sleep"), \
+                mock.patch.object(sys, "argv", argv), \
+                mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+                contextlib.redirect_stderr(stderr):
+            status = github_ci_time.main()
+        return status, stderr.getvalue()
+
+    def test_unsuccessful_gate_with_output_prints_its_errors(self):
+        jobs = self.sample()
+        jobs[0]["conclusion"] = "failure"
+        run, _ = self.gate_inputs()
+        with tempfile.TemporaryDirectory() as temporary:
+            output, summary = Path(temporary) / "gate.json", Path(temporary) / "summary.md"
+            status, log = self.run_gate_main([run, {"total_count": len(jobs), "jobs": jobs}], output, summary)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            summary_text = summary.read_text(encoding="utf-8")
+            self.assertEqual(status, 1)
+            self.assertFalse(report["success"])
+            self.assertIn(f"run 123 attempt 1 head {'a' * 40}; 1 snapshots, 0 refreshes, 0 failed API reads", log)
+            self.assertNotIn("CI timing failed", log)
+            self.assertIn("## CI complete inventory gate unsuccessful", summary_text)
+            for error in report["errors"]:
+                self.assertIn(f"  - {error}", log)
+                self.assertIn(error, summary_text)
+            status, log = self.run_gate_main([run, self.http_error(403)], Path(temporary) / "raised.json", summary)
+            self.assertEqual(status, 1)
+            self.assertIn("CI timing failed: HTTP Error 403", log)
+            self.assertNotIn("inventory gate unsuccessful", log)
+            self.assertFalse((Path(temporary) / "raised.json").exists())
 
     def lost_runner_job(self, jobs):
         target = next(job for job in jobs if job["name"] == "macOS AArch64 checks")
