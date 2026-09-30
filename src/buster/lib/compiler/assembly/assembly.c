@@ -4734,12 +4734,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_immediate_fits(s64 value, u16 width, bool 
     return value >= signed_minimum && (signed_only ? value <= (s64)(unsigned_maximum >> 1) : value < 0 || (u64)value <= unsigned_maximum);
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_count_immediate_valid(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_EXPRESSION && !operand.expression.has_symbol &&
-           assembly_x86_immediate_fits(operand.expression.addend, 8, false);
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_bit_atomic(AssemblyOpcode opcode)
 {
     return opcode >= ASSEMBLY_OPCODE_X86_BSF && opcode <= ASSEMBLY_OPCODE_X86_TZCNT;
