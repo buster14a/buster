@@ -26,8 +26,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ebpf/ebpf.c",
-      "bytes": 144919,
-      "sha256": "412d8244cbc651719762d3c163e6a3c6b0ac04214e01a5cb85c89594d742b824"
+      "bytes": 136710,
+      "sha256": "bedb0d6b8c68d7c6442b0277ab0de8ab33f65db180371fa6ab110c9b9fea1366"
     },
     {
       "source": "src/buster/lib/compiler/ebpf/ebpf.h",
