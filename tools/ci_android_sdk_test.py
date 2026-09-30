@@ -94,7 +94,7 @@ class AndroidWorkflowContractTests(unittest.TestCase):
         lanes = mobile_coverage._workflow_mobile_lanes(ROOT / ".github/workflows/ci.yml")
         self.assertEqual(
             {(lane["os"], lane["arch"]) for lane in lanes},
-            {("android", "x86_64"), ("ios", "x86_64"), ("ios", "aarch64")},
+            {("android", "x86_64"), ("ios", "aarch64")},
         )
 
 
