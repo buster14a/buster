@@ -1,0 +1,41 @@
+name: Issue 1247 validation
+on:
+  push:
+    branches: [codex/1247-type-constant-validation]
+permissions:
+  contents: read
+concurrency:
+  group: issue-1247-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - name: Require enabled validation
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record revision and toolchains
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          clang --version
+          gcc --version
+      - name: Bootstrap and configure
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --no-sanitize --linker DEFAULT
+      - name: Focused frontend and driver baseline
+        run: |
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          build/Release/ide test --module=c_frontend_tests,c_type_layout_tests,record_layout_tests,compiler_driver_tests --verbose=1 --ci=1
+      - name: Self-host baseline fixed point
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
