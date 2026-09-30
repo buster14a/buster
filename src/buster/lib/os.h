@@ -71,6 +71,8 @@ typedef enum OsFileKind
     OS_FILE_KIND_DIRECTORY,
     // A POSIX symbolic link or Windows reparse point that was not followed.
     OS_FILE_KIND_LINK,
+    // A POSIX character device or FIFO: a stream with no inode to replace.
+    OS_FILE_KIND_STREAM,
     OS_FILE_KIND_OTHER,
 } OsFileKind;
 

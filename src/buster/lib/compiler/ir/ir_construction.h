@@ -25,6 +25,8 @@
     X(INSTRUCTION_ROWS_COPIED, instruction_rows_copied) \
     X(SOURCE_ROWS_COPIED, source_rows_copied) \
     X(SOURCE_ROWS_CLEARED, source_rows_cleared) \
+    X(DEBUG_FUNCTION_INDEX_ROWS, debug_function_index_rows) \
+    X(DEBUG_FUNCTION_SEED_SCAN_ROWS, debug_function_seed_scan_rows) \
     X(FUNCTION_STARTS, function_starts) \
     X(BODY_TOKENS, body_tokens) \
     X(PARAMETERS, parameters) \
@@ -82,6 +84,8 @@
     X(CFG_PARAMETER_VISITS, cfg_parameter_visits) \
     X(CFG_INCOMING_VISITS, cfg_incoming_visits) \
     X(CFG_COPY_SOURCES, cfg_copy_sources) \
+    X(DEBUG_VALUE_BLOCKS, debug_value_blocks) \
+    X(DEBUG_VALUE_LOCAL_VISITS, debug_value_local_visits) \
     X(VALIDATION_CALLS, validation_calls) \
     X(VALIDATION_OWNERSHIP_FUNCTION_SCANS, validation_ownership_function_scans) \
     X(VALIDATION_PUBLISHED_CFG_CHECKS, validation_published_cfg_checks) \
@@ -121,7 +125,9 @@
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
     X(PREPARATION_FAST_FUNCTIONS, preparation_fast_functions) \
-    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)
+    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions) \
+    X(VALIDATION_GLOBAL_RELOCATION_SORTS, validation_global_relocation_sorts) \
+    X(VALIDATION_GLOBAL_RELOCATION_SORT_ROWS, validation_global_relocation_sort_rows)
 
 typedef enum IrConstructionCounter
 {
