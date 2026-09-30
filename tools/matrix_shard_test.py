@@ -331,7 +331,7 @@ class WorkflowSetupTests(unittest.TestCase):
         self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
         self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
-                                ZIG_TARGET="fixture", FIXTURE_EXIT="0")
+                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux")
 
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
@@ -358,6 +358,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_native_observation_test.py", "tools/ci_sanitize_logs_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
             "tools/ci_workflow_tools_test.py",
+            "tools/bootstrap_wrapper_cases_test.py",
         }
         suites = re.findall(r'^            ([^ =]+\.py)=[^ =]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
@@ -410,24 +411,36 @@ class WorkflowSetupTests(unittest.TestCase):
     def test_wrapper_suite_executes_only_in_release_and_keeps_failure_status(self):
         tests = self.root / "tests"
         tests.mkdir()
-        (tests / "bootstrap_wrapper_test.py").write_text(
+        tools = self.root / "tools"
+        tools.mkdir()
+        fixture = (
             "import os, pathlib, sys\npathlib.Path('wrapper-called').touch()\n"
-            "print('BOOTSTRAP_TEST fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
-        for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
-            with self.subTest(shard=shard, exit_code=code):
-                marker = self.root / "wrapper-called"
-                if marker.exists():
-                    marker.unlink()
-                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
-                self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code))
-                result = self.run_step("Bootstrap wrapper regression tests")
-                self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
-                self.assertEqual(marker.exists(), shard == "release")
-                if shard == "checks":
-                    self.assertIn("owned-by-release-shard", result.stdout)
-                    self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
-                else:
-                    self.assertIn("BOOTSTRAP_TEST fixture", (self.root / "buster-ci/bootstrap-wrapper.log").read_text())
+            "print('BOOTSTRAP_TEST fixture', pathlib.Path(__file__).name, sys.argv[1:])\n"
+            "sys.exit(int(os.environ['FIXTURE_EXIT']))\n")
+        (tests / "bootstrap_wrapper_test.py").write_text(fixture)
+        (tools / "bootstrap_wrapper_cases.py").write_text(fixture)
+        selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
+                      ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
+        for platform, entry, argument in selections:
+            for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
+                with self.subTest(platform=platform, shard=shard, exit_code=code):
+                    marker = self.root / "wrapper-called"
+                    if marker.exists():
+                        marker.unlink()
+                    shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                    self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code),
+                                            RUNNER_OS=platform)
+                    result = self.run_step("Bootstrap wrapper regression tests")
+                    self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
+                    self.assertEqual(marker.exists(), shard == "release")
+                    if shard == "checks":
+                        self.assertIn("owned-by-release-shard", result.stdout)
+                        self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
+                    else:
+                        log = (self.root / "buster-ci/bootstrap-wrapper.log").read_text()
+                        self.assertIn(f"BOOTSTRAP_TEST fixture {entry}", log)
+                        self.assertIn(argument, log)
+                        self.assertIn("'2'" if platform == "Windows" else "'-v'", log)
 
 
 class CompletionGateTests(unittest.TestCase):
