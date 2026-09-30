@@ -42,12 +42,14 @@
  *
  * Map: BqRetirementWorkerBindingContext, bq_retirement_worker_json_node,
  * bq_retirement_worker_json_text, bq_retirement_worker_json_integer,
+ * bq_retirement_worker_binding_parse (the canonical-section check),
  * bq_retirement_worker_binding_import, bq_retirement_worker_binding_check,
  * bq_retirement_worker_admission_write, bq_retirement_worker_binding_write,
  * BqRetirementWorkerCompose, bq_retirement_worker_compose_request,
  * bq_retirement_worker_authority_publish, bq_retirement_worker_chain_carried,
- * bq_retirement_worker_bundle_write, bq_retirement_worker_result_write,
- * bq_retirement_worker_compose.
+ * bq_retirement_worker_bundle_write, bq_retirement_worker_manifest_format
+ * (which bq_worker_result_validate's retirement branch re-formats),
+ * bq_retirement_worker_result_write, bq_retirement_worker_compose.
  */
 #include "retirement_context_chain.h"
 #include <dirent.h>
