@@ -108,7 +108,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* 
                         {
                             break;
                         }
-                        BUSTER_TEST(arguments, codeview_test_u16(record + prefix - 6) == 0x8003);
+                        // LF_ULONG is 0x8004 (cvinfo.h; LLVM CodeViewTypes.def);
+                        // 0x8003 is the signed LF_LONG (#1440).
+                        BUSTER_TEST(arguments, codeview_test_u16(record + prefix - 6) == 0x8004);
                         BUSTER_TEST(arguments, codeview_test_u32(record + prefix - 4) == seen * (enumeration ? 1u : 4u));
                         if (!enumeration)
                         {
@@ -138,7 +140,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* 
             BUSTER_TEST(arguments, type_index == 4 || links >= 2);
         }
         // LF_UNION has no derived/vshape words: the numeric size starts at +12.
-        BUSTER_TEST(arguments, codeview_test_u16(built.types.pointer + offsets[4] + 12) == 0x8003);
+        BUSTER_TEST(arguments, codeview_test_u16(built.types.pointer + offsets[4] + 12) == 0x8004);
     }
 
     // Exact reserved-continuation boundary, then one byte over. A single member
@@ -295,9 +297,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_object_scope_placeholders(UnitT
     return result;
 }
 
+// Bit-field members and array sizes against CodeView's published encodings
+// (cvinfo.h; LLVM's CodeViewTypes.def), not against codeview.c's names
+// (#1440): a bit-field member's type is an LF_BITFIELD (0x1205) naming the
+// declared type, width and position inside the unit LF_MEMBER's offset names,
+// and LF_ARRAY's numeric field is the size in bytes, as an LF_ULONG (0x8004).
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_bit_fields_and_arrays(UnitTestArguments* arguments)
+{
+    enum { TYPE_BASE = 0x1000, LEAF_ARRAY = 0x1503, LEAF_BITFIELD = 0x1205, LEAF_FIELDLIST = 0x1203, LEAF_MEMBER = 0x150d, LEAF_ULONG = 0x8004 };
+    UnitTestResult result = {0};
+    String8 path = S8("geometry.c");
+    DebugTypeField fields[] = {
+        {.name = S8("a"), .type = 0, .offset = 0},
+        {.name = S8("b"), .type = 0, .offset = 4, .bit_offset = 3, .bit_width = 13, .is_bit_field = true},
+    };
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("unsigned int"), .size = 4},
+        {.kind = DEBUG_TYPE_ARRAY, .name = S8(""), .element_type = 0, .element_count = 7, .size = 28},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("geometry"), .size = 8, .fields = fields, .field_count = BUSTER_ARRAY_LENGTH(fields)},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+                                                                             .machine = CODEVIEW_MACHINE_X64});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        u32 bit_field_index = 0;
+        bool bit_field_valid = false;
+        bool array_valid = false;
+        u32 member_b_type = 0;
+        u32 record_index = 0;
+        for (u64 cursor = 4; cursor + 4 <= built.types.length; record_index += 1)
+        {
+            u8 const* record = built.types.pointer + cursor;
+            u64 size = (u64)codeview_test_u16(record) + 2;
+            u16 leaf = codeview_test_u16(record + 2);
+            if (leaf == LEAF_BITFIELD && size >= 10)
+            {
+                bit_field_index = TYPE_BASE + record_index;
+                bit_field_valid = codeview_test_u32(record + 4) == TYPE_BASE && record[8] == 13 && record[9] == 3;
+            }
+            else if (leaf == LEAF_ARRAY && size >= 18)
+            {
+                array_valid = codeview_test_u32(record + 4) == TYPE_BASE && codeview_test_u16(record + 12) == LEAF_ULONG &&
+                              codeview_test_u32(record + 14) == 28;
+            }
+            else if (leaf == LEAF_FIELDLIST && size >= 4 + 2 * 16)
+            {
+                // Two members, each LF_MEMBER, attributes, type, LF_ULONG
+                // offset, one-letter name and NUL, padded to four bytes.
+                u8 const* second = record + 4 + 16;
+                if (codeview_test_u16(second) == LEAF_MEMBER && second[14] == 'b')
+                {
+                    member_b_type = codeview_test_u32(second + 4);
+                    BUSTER_TEST(arguments, codeview_test_u16(second + 8) == LEAF_ULONG && codeview_test_u32(second + 10) == 4);
+                }
+            }
+            cursor += size;
+        }
+        BUSTER_TEST(arguments, bit_field_valid && array_valid);
+        BUSTER_TEST(arguments, bit_field_index && member_b_type == bit_field_index);
+    }
+    return result;
+}
+
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
+    UnitTestResult geometry = codeview_test_bit_fields_and_arrays(arguments);
+    result.test_count += geometry.test_count;
+    result.succeeded_test_count += geometry.succeeded_test_count;
     UnitTestResult growth = codeview_test_scope_growth(arguments);
     result.test_count += growth.test_count;
     result.succeeded_test_count += growth.succeeded_test_count;
