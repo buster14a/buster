@@ -129,7 +129,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_depfiles(Un
                 BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("driver.argument"));
             }
             FileMapRead object = file_map_read(arena, output, (FileReadOptions){0});
-            BUSTER_TEST(arguments, object.bytes.pointer && string_equal((String8){.pointer = object.bytes.pointer, .length = object.bytes.length}, sentinel));
+            BUSTER_TEST(arguments, object.bytes.pointer && string_equal((String8){.pointer = (char8*)object.bytes.pointer, .length = object.bytes.length}, sentinel));
             file_map_unmap(object);
             FileMapRead dependencies = file_map_read(arena, depfile, (FileReadOptions){0});
             BUSTER_TEST(arguments, !dependencies.bytes.pointer);
@@ -171,7 +171,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
     CompilerDriverResult static_image = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(static_command)));
     BUSTER_TEST(arguments, static_image.error == COMPILER_DRIVER_ERROR_LINK && compiler_driver_test_string_contains(static_image.diagnostic, S8("--export-dynamic")));
     ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
-    BUSTER_TEST(arguments, preserved.pointer && string_equal((String8){.pointer = preserved.pointer, .length = preserved.length}, sentinel));
+    BUSTER_TEST(arguments, preserved.pointer && string_equal((String8){.pointer = (char8*)preserved.pointer, .length = preserved.length}, sentinel));
     BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int missing(void); int answer(void) { return missing(); }\n"))));
     // SONAME operands remain literal even when they resemble linker flags.
     String8 sonames[] = {S8("defs"), S8("--no-undefined"), S8("--soname=literal")};
