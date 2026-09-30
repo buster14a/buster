@@ -498,8 +498,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 
     String8 descriptor_value = {0};
 #if BUSTER_WINDOWS
+    // Handle values are per process, and the child's own runtime (notably the
+    // sanitizer runtime) can hold an unrelated handle with the same value. Name
+    // the event so the child can prove object identity instead of assuming a
+    // valid handle value was inherited.
+    String8 descriptor_name = string_format(arena, S8("Local\\buster-os-spawn-probe-{u32}"), (u32)GetCurrentProcessId());
+    String16 descriptor_name16 = string16_from_string8(arena, descriptor_name, true);
     SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
-    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, 0);
+    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, (LPCWSTR)descriptor_name16.pointer);
     bool unrelated_created = unrelated != 0;
     if (unrelated_created)
     {
@@ -516,8 +522,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
     BUSTER_TEST(arguments, unrelated_created);
     if (unrelated_created)
     {
+#if BUSTER_WINDOWS
+        String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE"), S8("BUSTER_OS_SPAWN_PROBE_NAME")};
+        String8 descriptor_values[] = {S8("descriptor"), descriptor_value, descriptor_name};
+#else
         String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
         String8 descriptor_values[] = {S8("descriptor"), descriptor_value};
+#endif
         ProcessSpawnResult descriptor_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
                                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_keys),
                                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_values), (ProcessSpawnOptions){0});
