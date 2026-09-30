@@ -86,7 +86,12 @@ are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
-merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off
+merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
+The first attempt of a draft pull-request run defers the eight macOS-runner
+jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
+always run them, and `CI complete` rejects a deferral anywhere else (see
+[draft pull-request deferral](ci-runner-queue.md#draft-pull-request-deferral)).
+`fail-fast` is off
 in all three matrices. Native and mobile lanes have no desktop prerequisite;
 combination failure cannot hide their results or turn green. Within each Unix
 native lane, the differential step still runs after mode failure unless
@@ -305,6 +310,21 @@ the exact run/head, final job attempts, observed required-step status and
 conclusion, refresh count, and any unresolved proof errors. A green job-level
 conclusion alone cannot pass the gate.
 
+A hosted runner that stops reporting cannot run its own summary or upload
+steps, so the gate also records controller-visible interruption evidence. For
+each failed job that GitHub finalized with a step still `in_progress`, it reads
+that check run's annotations (job-scoped `checks: read`, 30-second budget) and
+adds an `interruption` record to `desktop-partitions.json`: the active and
+pending steps, runner name/labels, last reported step transition, finalization
+time, `silent_seconds` between them, and the annotations. It also prints a
+`CI_RUNNER_INTERRUPTION` line to the gate's log. The classification is
+`runner-communication-lost` only when GitHub's own annotation says
+`The hosted runner lost communication with the server.`; otherwise it is
+`unterminated-step`, or `annotation-unavailable` when the read fails. The
+record never changes the gate's verdict and does not identify a root cause.
+`silent_seconds` bounds the unobserved tail; it is not compiler work. Retry
+policy is unchanged: see [cancellation recovery](ci-cancellation-recovery.md).
+
 The Android summary also exposes the existing wrapper records from
 `RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
 `result.json`'s `android` field. Its two configuration rows show batch status,
@@ -426,6 +446,8 @@ runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state
 and multiple completed observations. No speedup is claimed before that evidence.
+Runner assignment latency and macOS capacity across all workflows are measured
+with `queue-collect`/`queue-summarize`; see [ci-runner-queue.md](ci-runner-queue.md).
 
 ## Independent Clang analyzer gate
 
@@ -463,3 +485,31 @@ pinned `.github/zig.json` digest; it adds only the validated namespace.
 ## Native runner phase observations
 
 Every native matrix lane retains calibrated, process-local phase evidence through its existing artifact. Provider preamble and Actions API clocks are joined only during audit; missing or contradictory identity is retained but cannot enter a performance comparison. See [Native runner observations](native-runner-observations.md).
+
+## Intel-macOS runner interruption observations (#1749)
+
+The Intel-macOS workflow-tool, Zig installation, desktop combination, native
+mode/differential, and iOS simulator steps start a step-owned resource sampler.
+It emits a `CI_RESOURCE_SAMPLE` JSON line immediately and every 30 seconds to
+the live step log and to `resources-<phase>.jsonl` in the existing job artifact.
+The step shell stops and waits for the sampler on exit; the sampler does not
+change the payload result or start another build/test worker.
+
+Each record identifies the phase, UTC time and elapsed time; it reports host
+load, a descendant-only process count, CPU percentage, RSS, and the three
+largest process names (no arguments or environment). It also reports macOS
+memory-pressure free percentage, swap used, cumulative pageouts, and free disk
+space under `RUNNER_TEMP`. A failed, unsupported, timed-out, or unparseable probe
+records an explicit status or `unknown`, never zero. The CPU percentage is a
+snapshot of processes still visible to `ps`; RSS is their current sum, not
+peak memory or the runner's total footprint. `sampling_ms` measures each
+observation's overhead. These fields are diagnostic only and cannot complete a
+missing required job or replace the exact phase evidence.
+
+Sampling starts after checkout, within the named step. It does not cover time
+before that step or between steps. A runner that stops communicating may lose
+both its artifact and the live log; the last available sample, if any, bounds
+what was observed and cannot prove the cause of a later outage. The separate
+`CI complete` interruption record in PR #1754 uses controller-visible job
+metadata and annotations even when the runner cannot finish cleanup. Keep
+failed-run elapsed time separate from successful-run performance in #709.

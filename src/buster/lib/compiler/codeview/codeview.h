@@ -24,6 +24,10 @@ struct CodeviewRelocation
     u32 function;
     CodeviewRelocationKind kind;
     String8 symbol_name;
+    // The program symbol a named relocation refers to; meaningful only with
+    // `symbol_name`, which remains the spelling-based fallback.
+    IrSymbolId symbol;
+    u32 reserved;
 };
 
 typedef struct CodeviewInput CodeviewInput;

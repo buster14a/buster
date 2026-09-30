@@ -5,6 +5,14 @@ The core path uses only git plumbing.  It never checks out, rebases, merges, or
 updates a pull-request branch.  GitHub orchestration runs this trusted script
 from the default branch, fetches immutable objects into private local refs, and
 publishes a commit status whose description binds the result to exact SHAs.
+
+PR-scoped routes also read merge-queue membership (``lookup_merge_queue``,
+``lookup_pull_merge_queue``, ``apply_merge_queue``).  GitHub skips a queued
+entry that starts conflicting with main without removing it, and refuses pushes
+to a queued branch, so a conflicted queued PR must be dequeued before its
+resolution can be pushed (#1865).  That read is advisory: it changes the
+report's instructions and the status's optional ``q=queued`` token, never the
+outcome or its blocking state.
 """
 
 from __future__ import annotations
@@ -38,8 +46,40 @@ STATUS_CONTEXT = "merge-conflict-preflight"
 HEX_OBJECT = re.compile(r"[0-9a-f]{40,64}\Z")
 STATUS_DESCRIPTION = re.compile(
     r"v1 m=(?P<main>[0-9a-f]{40}) h=(?P<head>[0-9a-f]{40}) "
-    r"o=(?P<outcome>[1-4]) c=(?P<state>clean|conflicted)\Z"
+    r"o=(?P<outcome>[1-4]) c=(?P<state>clean|conflicted)(?: q=(?P<queue>queued))?\Z"
 )
+
+# Merge-queue membership of one exact PR head, as the report records it.
+QUEUE_QUEUED = "queued"
+QUEUE_NOT_QUEUED = "not-queued"
+QUEUE_UNKNOWN = "unknown"
+QUEUE_NOT_CHECKED = "not-checked"
+QUEUE_LOCKED_ACTION = (
+    "This PR is still in the merge queue. GitHub skips a queued entry that conflicts with main "
+    "without removing it, and refuses every push to a queued branch (GH006). Dequeue the PR "
+    "first, then push the resolution and re-enqueue it after its checks pass."
+)
+QUEUE_UNKNOWN_ACTION = (
+    "Merge-queue membership could not be read. If this PR is queued, GitHub refuses every push "
+    "to its branch (GH006) until it is dequeued: dequeue it first, then push the resolution."
+)
+OPEN_QUEUE_MEMBERSHIP_QUERY = """
+query($owner: String!, $name: String!, $base: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, baseRefName: $base, first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number headRefOid isInMergeQueue }
+    }
+  }
+}
+"""
+PULL_QUEUE_MEMBERSHIP_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { number headRefOid isInMergeQueue }
+  }
+}
+"""
 
 # These are the generated and reviewed authorities installed by #862-#865.
 # Keep this list synchronized with tools/native_retirement_integration.py.  The
@@ -53,12 +93,16 @@ RETIREMENT_TRUST_PATHS = frozenset((
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
+    ".github/workflows/native-retirement-automation.yml",
+    ".github/workflows/native-retirement-catch-up.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".gitattributes",
     "tools/native_retirement_contract.py",
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_automation.py",
+    "tools/native_retirement_controller.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
@@ -66,6 +110,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 RETIREMENT_POLICY_SCHEMA_PATHS = frozenset((
+    ".github/native-retirement-automation.json",
     "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",
     "docs/native-retirement-dependencies-v1.json",
@@ -181,6 +226,33 @@ class PreviousResult:
     main: str
     head: str
     outcome: int | None = None
+
+
+@dataclass(frozen=True)
+class MergeQueueLookup:
+    """One read of PR number -> (head SHA, in merge queue); None if it failed."""
+    heads: dict[int, tuple[str, bool]] | None
+    error: str | None = None
+
+    def membership(self, number: int, head: str) -> str:
+        entry = self.heads.get(number) if self.heads is not None else None
+        # A PR absent from the read, or read at another head, is unknown.
+        if entry is None or entry[0] != head:
+            value = QUEUE_UNKNOWN
+        else:
+            value = QUEUE_QUEUED if entry[1] else QUEUE_NOT_QUEUED
+        return value
+
+
+def _queue_node(node) -> tuple[int, str, bool]:
+    number = node.get("number") if isinstance(node, dict) else None
+    head = node.get("headRefOid") if isinstance(node, dict) else None
+    queued = node.get("isInMergeQueue") if isinstance(node, dict) else None
+    if (not isinstance(number, int) or isinstance(number, bool) or number <= 0 or
+            not isinstance(head, str) or not HEX_OBJECT.fullmatch(head) or
+            not isinstance(queued, bool)):
+        raise PreflightError(f"GitHub merge-queue membership node is malformed: {node!r}")
+    return number, head, queued
 
 
 class GitHubApi:
@@ -311,6 +383,56 @@ class GitHubApi:
             raise PreflightError(f"GitHub pull request #{number} response is not an object")
         return value
 
+    def graphql(self, query: str, variables: dict) -> dict:
+        # Sent once like any POST; callers treat a failure as unknown membership.
+        value = self._request("POST", "/graphql", {"query": query, "variables": variables})
+        errors = value.get("errors") if isinstance(value, dict) else None
+        data = value.get("data") if isinstance(value, dict) else None
+        if errors or not isinstance(data, dict):
+            detail = json.dumps(errors, sort_keys=True)[:500] if errors else "no data object"
+            raise PreflightError(f"GitHub GraphQL query failed: {detail}")
+        return data
+
+    def queue_membership(self, base: str) -> dict[int, tuple[str, bool]]:
+        owner, name = self.repository.split("/", 1)
+        heads: dict[int, tuple[str, bool]] = {}
+        cursor = None
+        for _ in range(MAX_API_PAGES):
+            data = self.graphql(OPEN_QUEUE_MEMBERSHIP_QUERY, {
+                "owner": owner, "name": name, "base": base, "cursor": cursor,
+            })
+            repository = data.get("repository")
+            connection = repository.get("pullRequests") if isinstance(repository, dict) else None
+            nodes = connection.get("nodes") if isinstance(connection, dict) else None
+            page = connection.get("pageInfo") if isinstance(connection, dict) else None
+            if not isinstance(nodes, list) or not isinstance(page, dict):
+                raise PreflightError("GitHub merge-queue membership response omits nodes/pageInfo")
+            for node in nodes:
+                number, head, queued = _queue_node(node)
+                if number in heads:
+                    raise PreflightError(f"merge-queue membership repeats pull request #{number}")
+                heads[number] = (head, queued)
+            cursor = page.get("endCursor")
+            if page.get("hasNextPage") is not True:
+                break
+            if not isinstance(cursor, str) or not cursor:
+                raise PreflightError("GitHub merge-queue membership page has no end cursor")
+        else:
+            raise PreflightError(f"merge-queue membership pagination exceeded {MAX_API_PAGES} pages")
+        return heads
+
+    def pull_queue_membership(self, number: int) -> dict[int, tuple[str, bool]]:
+        owner, name = self.repository.split("/", 1)
+        data = self.graphql(PULL_QUEUE_MEMBERSHIP_QUERY, {
+            "owner": owner, "name": name, "number": number,
+        })
+        repository = data.get("repository")
+        found, head, queued = _queue_node(
+            repository.get("pullRequest") if isinstance(repository, dict) else None)
+        if found != number:
+            raise PreflightError(f"merge-queue membership returned #{found} while resolving #{number}")
+        return {number: (head, queued)}
+
     def retirement_status(self, head: str) -> dict:
         rows = []
         for page in range(1, MAX_API_PAGES + 1):
@@ -347,9 +469,10 @@ class GitHubApi:
         outcome = report["outcome"]["number"]
         clean = report["merge"]["clean"]
         blocking = report["outcome"]["blocking"]
+        queued = report["merge_queue"]["membership"] == QUEUE_QUEUED
         description = (
             f"{STATUS_SCHEMA} m={report['main']['sha']} h={report['head']['sha']} "
-            f"o={outcome} c={'clean' if clean else 'conflicted'}"
+            f"o={outcome} c={'clean' if clean else 'conflicted'}{' q=queued' if queued else ''}"
         )
         if len(description) > 140:
             raise PreflightError("commit-status description exceeds GitHub's 140-character limit")
@@ -634,6 +757,49 @@ def _previous_state(repo: Path, previous: PreviousResult | None, main: str, head
     return result
 
 
+def _merge_queue_record(membership: str, conflicted: bool,
+                        lookup_error: str | None = None) -> dict:
+    queued = membership == QUEUE_QUEUED
+    action = None
+    if conflicted and queued:
+        action = QUEUE_LOCKED_ACTION
+    elif conflicted and membership == QUEUE_UNKNOWN:
+        action = QUEUE_UNKNOWN_ACTION
+    return {
+        "membership": membership,
+        "lookup_error": lookup_error,
+        "branch_locked_by_queue": (
+            queued if membership in (QUEUE_QUEUED, QUEUE_NOT_QUEUED) else None),
+        "dequeue_required_before_push": conflicted and queued,
+        "action": action,
+    }
+
+
+def lookup_merge_queue(api: GitHubApi, base: str) -> MergeQueueLookup:
+    """Read every open PR targeting ``base``; a failure becomes unknown membership."""
+    try:
+        lookup = MergeQueueLookup(api.queue_membership(base))
+    except PreflightError as error:
+        lookup = MergeQueueLookup(None, str(error))
+    return lookup
+
+
+def lookup_pull_merge_queue(api: GitHubApi, number: int) -> MergeQueueLookup:
+    """Read one PR; a failure becomes unknown membership."""
+    try:
+        lookup = MergeQueueLookup(api.pull_queue_membership(number))
+    except PreflightError as error:
+        lookup = MergeQueueLookup(None, str(error))
+    return lookup
+
+
+def apply_merge_queue(report: dict, lookup: MergeQueueLookup, number: int) -> dict:
+    membership = lookup.membership(number, report["head"]["sha"])
+    report["merge_queue"] = _merge_queue_record(
+        membership, not report["merge"]["clean"], lookup.error)
+    return report
+
+
 def analyze(repo: Path, main_revision: str, head_revision: str,
             previous: PreviousResult | None = None, retirement_status: dict | None = None,
             retirement_event: str = "pull_request", retirement_api=None) -> dict:
@@ -759,6 +925,8 @@ def analyze(repo: Path, main_revision: str, head_revision: str,
             "genuine_source_paths": source_conflicts,
         },
         "previous_authoritative_result": previous_state,
+        # Exact git identities cannot show queue state; PR routes fill it in.
+        "merge_queue": _merge_queue_record(QUEUE_NOT_CHECKED, not merge.clean),
         "outcome": {
             "number": outcome_number,
             "kind": outcome_kind,
@@ -799,6 +967,12 @@ def report_markdown(report: dict, title: str | None = None) -> str:
         )
     else:
         lines.append("- No prior authoritative result was available for this exact head.")
+    queue = report["merge_queue"]
+    if queue["membership"] != QUEUE_NOT_CHECKED:
+        lines.append(
+            f"- Merge queue: **{queue['membership']}**" +
+            (f" (lookup failed: {queue['lookup_error']})" if queue["lookup_error"] else "") + "."
+        )
     paths = report["merge"]["path_details"]
     if paths:
         lines.extend(("", "| Conflicting path | Git classification | Retirement ownership |", "|---|---|---|"))
@@ -819,6 +993,8 @@ def report_markdown(report: dict, title: str | None = None) -> str:
     generated = report["candidate_changes"]["generated_or_integration_owned_retirement_paths"]
     if generated and not report["trusted_retirement_integration"]["verified"]:
         lines.extend(("", "Candidate-owned generated paths: " + ", ".join(f"`{path}`" for path in generated) + "."))
+    if queue["action"]:
+        lines.extend(("", "**Merge queue:** " + queue["action"]))
     lines.extend((
         "",
         "**Required response:** " + report["outcome"]["action"],
@@ -907,6 +1083,7 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             break
     if report is None:
         raise PreflightError(f"pull request #{number} or its base moved during {MAX_STABLE_ATTEMPTS} preflight attempts")
+    apply_merge_queue(report, lookup_pull_merge_queue(api, number), number)
     return report, head
 
 
