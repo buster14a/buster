@@ -3253,6 +3253,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
     u32* alignments = arena_allocate(arena, u32, type_count + 1);
     bool* resolved = arena_allocate(arena, bool, type_count + 1);
     bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    // Only this whole-table seeding counts as population work; a settled
+    // c_parse_type_layout_agenda solve touches its request's closure alone.
     WORK_LEDGER_RECORD(POPULATION_LAYOUT_SOLVES, 1);
     WORK_LEDGER_RECORD(POPULATION_LAYOUT_ROWS_SEEDED, pending_count);
     // The copies below (or the clear on the uncached path) plus the
