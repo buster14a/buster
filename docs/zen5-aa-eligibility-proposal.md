@@ -5,6 +5,32 @@ proposed identifier is `buster-zen5-aa-eligibility-v1`. No physical pilot,
 empirical limit, approval receipt, or A/B launch authority is supplied by this
 document. A reviewer must approve an exact version and digest before an admitted
 service can use it. Until then the eligibility result is `unavailable`.
+Three protocol inputs are decided (see
+[Decided protocol inputs](#decided-protocol-inputs)); every other parameter
+below remains a proposal pending exploratory pilot evidence and approval.
+
+## Decided protocol inputs
+
+davidgmbb decided these inputs on 2026-09-30
+([#36 decision](https://github.com/buster14a/buster/issues/36#issuecomment-5919407135)).
+They fix the shape of the protocol; they do not approve the policy.
+
+| Input | Decision | Consequence |
+| --- | --- | --- |
+| Across-attempt quantile | `q = 0.90` | Under the proposed 42-member family and `0.05/42` allocation, a finite upper bound needs `n >= ln(0.05/42) / ln(q)`, i.e. `n >= 63.91`, so **at least 64 confirmatory attempts**. At `n = 64` the only finite bound is the sample maximum `T_(64)`. Each complete three-control attempt has 720 timed children, so 64 attempts are 46,080 timed children. |
+| #881 current-job pair count | `P = 60` with runtime rows included (`U = R`) | The contract minimum of 60 pairs per round, with every #511 metric collected, including generated runtime. |
+| Policy binding | Recipe-profile pin `aa-policy-sha256=` | The approved policy bytes are bound through the recipe profile digest. The #568 receipt schema is unchanged. |
+
+**Still unapproved, pending exploratory pilots:** the empirical practical
+limits for all 42 members, the stationarity and independence checks, the
+current-job A/A equivalence band, the exact policy bytes and their
+`aa-policy-sha256` digest, and applicability/requalification. The member
+definitions, the `0.05/42` Bonferroni allocation and the order-statistic method
+below are also still proposals; the decided `q` and minimum `n` are stated
+relative to them. Exploratory pilots may only inform these choices. The exact
+policy is then frozen, approved and pinned, and only **new** confirmatory
+attempts, run afterwards, are judged against it; exploratory attempts never
+count toward the 64.
 
 This policy would decide whether the dedicated Ryzen 7 9700X environment and
 the current *baseline A/A* are precise and stable enough to inspect a candidate
@@ -68,7 +94,10 @@ value for each member from the existing descriptive analyzer:
 | Serial effect | Absolute `pair_center.lag_one_correlation` | Same |
 | Linear drift | Absolute `pair_center.relative_linear_drift_per_pair` | Same |
 
-An undefined serial/drift summary remains unavailable, never zero. Review
+"Pair resolution" is a p95 absolute label/build effect, a variability
+statistic; it is not the timer or peak-RSS measurement quantum, which are
+recorded separately as described below. An undefined serial/drift summary
+remains unavailable, never zero. Review
 both rounds and every block, not only a pooled center. The fixed schedule
 rotates AB/BA inside blocks but does not by itself prove independence or
 remove time/assignment confounding. A reviewer must reject or narrow scope
@@ -91,14 +120,19 @@ separately approved practical limit; a valid bound crossing a limit is
 inconclusive. The proposed family allocation is therefore `0.05/42` per
 one-sided bound, with no unused member removed after seeing pilot results.
 No bootstrap of individual children or after-the-fact choice of a smaller
-family is allowed. The reviewer must fix `q`, the exact member definitions,
-pilot count, stationarity/independence checks, and any finite-sample fallback
-**before** the physical pilot. The 5% allocation and order-statistic method
-here are proposals, not an approved policy and not #619's A/B family.
+family is allowed. `q = 0.90` is decided, which fixes the minimum at 64
+confirmatory attempts under this family (see
+[Decided protocol inputs](#decided-protocol-inputs)). The reviewer must still
+fix the exact member definitions, the confirmatory attempt count (at least 64),
+stationarity/independence checks, and any finite-sample fallback **before** the
+confirmatory attempts. The 5% allocation and order-statistic method here are
+proposals, not an approved policy and not #619's A/B family.
 
 The reviewer must also set **empirical practical limits** for each member from
-full retained qualified pilots, with justification against the #511 limits and
-the requested-work population. No value is supplied here. Wall time uses the
+full retained exploratory pilots, with justification against the #511 limits
+and the requested-work population. No value is supplied here. The pilots that
+design a limit are not evidence that the limit holds; only confirmatory
+attempts captured after the policy is pinned are evaluated against it. Wall time uses the
 recorded positive integer nanoseconds and reports the observed clock step and
 ties. Peak RSS uses actual child high-water bytes and reports measurement
 granularity, ties and nonzero steps; equal or page-rounded readings do not
@@ -117,9 +151,11 @@ must be inspected together. A new workload, binary layout, build arrangement,
 profile or host is outside the policy until its applicability is reviewed.
 
 The later current-job A/A must cover every required #511 row and variable
-metric under its own frozen seed, two rounds, warmups and even pair count in
-the approved 60–254 range. A control capture of one compiler workload cannot
-replace it. For that current A/A, the proposed equivalence check reuses
+metric under its own frozen seed, two rounds, warmups and even pair count. The
+contract's sampling rule allows an even 60–256 pairs per round; its
+full-population record ceiling limits a full job to 254. #881 uses the decided
+`P = 60` with runtime rows included (`U = R`). A control capture of one
+compiler workload cannot replace it. For that current A/A, the proposed equivalence check reuses
 #619's two-pair block statistics and simultaneous lower/upper intervals for
 every required member in **each round and pooled**, comparing both bounds
 with a separately approved A/A equivalence band around ratio 1. The band is
@@ -145,9 +181,10 @@ the first timed child**:
    environment, root, log and binary hash, and section/function placement.
 2. The exact #1053 `spec.json` and canonical `plan.json` bytes and SHA-256,
    fixed schedule, interblock gap, immutable same-binary copy, and serialized
-   same-root and cross-root build identities. Freeze the pilot count and
-   statistical family separately once a reviewer approves them. No request
-   field may choose a pair count, threshold or stopping rule.
+   same-root and cross-root build identities. For confirmatory attempts, the
+   approved policy (attempt count, statistical family and limits) is fixed by
+   the recipe profile's `aa-policy-sha256=` pin and bound through the profile
+   digest. No request field may choose a pair count, threshold or stopping rule.
 3. A service-owned pre-sample `buster-zen5-calibration-phase-v1` receipt,
    durably persisted before timing. Its digest and persistence ordering fact
    come through #1021's authenticated private channel, outside the bundle.
@@ -192,14 +229,19 @@ python3 -B tools/zen5_calibration_handoff.py replay plan.json \
 service, not copied from the result archive. Repeat the replay from a second
 clean extraction and compare all input, report and analysis SHA-256 digests.
 The offline fixture is explicitly synthetic:
-`python3 -B tools/zen5_calibration_handoff_test.py`.
+`python3 -B tools/zen5_calibration_handoff_test.py`. The benchmark service
+workflow policy check runs it with the other Zen 5 reader self-tests.
 
 ## Review and ownership handoff
 
-The #426 reviewer must approve or revise the method, member list, pilot count,
-empirical limits, applicability, exact policy bytes/digest and requalification
-triggers before the service can use the decision. A qualified physical pilot,
-not the synthetic fixture, must support every chosen limit. Changes in
+`q = 0.90` (at least 64 confirmatory attempts), `P = 60` with `U = R`, and
+binding by the recipe-profile pin `aa-policy-sha256=` are decided. The #426
+reviewer must still approve or revise the method, member list, confirmatory
+attempt count, empirical limits, stationarity/independence checks, the A/A
+equivalence band, applicability, exact policy bytes/digest and requalification
+triggers before the service can use the decision. Qualified exploratory
+pilots, not the synthetic fixture, must support every chosen limit, and new
+confirmatory attempts must then satisfy it. Changes in
 microcode, kernel/perf, firmware, memory, topology/SMT, power profile,
 environment/toolchain, workload/oracle, source/binary, build root/layout,
 service/lease or policy method require a new applicability review and fresh
