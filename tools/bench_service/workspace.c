@@ -3,6 +3,9 @@
  * Entry points: bq_materialize reserves the existing FIFO authority before it
  * validates/copies an installed source snapshot; bq_workspace_reconcile removes
  * only a seal-matched attempt before allowing that authority to finish.
+ * bq_retirement_poison_write, bq_retirement_poison_read and
+ * bq_retirement_poisoned keep the #881 recovery L2 poison record; the
+ * reconciliation never finishes a poisoned job succeeded.
  *
  * Layout: installed recipe/source validation, bounded manifest copying,
  * sealed workspace identity, mode-read-only evidence, and fail-closed cleanup. This
@@ -1142,6 +1145,68 @@ BqError bq_failure_evidence(BqQueue* queue, BqJob const* job)
     return result;
 }
 
+/* #881 recovery L2 poison record (queue.h). Its body is the magic, the job,
+ * the token, the handoff class and what the classification observed. */
+#define BQ_RETIREMENT_POISON_MAGIC "BQ-RETIREMENT-POISON-V1"
+#define BQ_RETIREMENT_POISON_CAP 384u
+
+#ifdef BUSTER_BENCH_SERVICE_TEST
+/* Test-only seam: the next poison write fails as a full disk would. */
+BUSTER_GLOBAL_LOCAL bool bq_test_poison_write_failure;
+#endif
+
+BqError bq_retirement_poison_read(BqQueue* queue, BqJob const* job, bool* inconsistent)
+{
+    char name[48], prefix[128];
+    u8 bytes[BQ_RETIREMENT_POISON_CAP];
+    u32 size = 0;
+    int length = job ? snprintf(prefix, sizeof(prefix), BQ_RETIREMENT_POISON_MAGIC "\njob=%" PRIu64 "\ntoken=%" PRIu64
+                                "\nhandoff=", (uint64_t)job->id, (uint64_t)job->token) : -1;
+    BqError error = queue && length > 0 && (size_t)length < sizeof(prefix) &&
+                    bq_record_name(name, BQ_RETIREMENT_POISON_RECORD, job->id) ?
+                    bq_record_read(queue, name, bytes, sizeof(bytes), &size) : BQ_IO;
+    bool prefixed = error == BQ_OK && size > (u32)length && !memcmp(bytes, prefix, (size_t)length);
+    u32 left = prefixed ? size - (u32)length : 0;
+    bool incomplete = left >= 11 && !memcmp(bytes + length, "incomplete\n", 11);
+    bool contradicted = left >= 13 && !memcmp(bytes + length, "inconsistent\n", 13);
+    if (error == BQ_OK && !incomplete && !contradicted)
+    {
+        error = BQ_CORRUPT;
+    }
+    if (inconsistent)
+    {
+        *inconsistent = error != BQ_NOT_FOUND && (error != BQ_OK || contradicted);
+    }
+    return error;
+}
+
+bool bq_retirement_poisoned(BqQueue* queue, BqJob const* job)
+{
+    bool poisoned = bq_retirement_poison_read(queue, job, NULL) != BQ_NOT_FOUND;
+    return poisoned;
+}
+
+BqError bq_retirement_poison_write(BqQueue* queue, BqJob const* job, bool inconsistent, bool measured,
+                                   char const* state)
+{
+    char name[48], body[BQ_RETIREMENT_POISON_CAP];
+    int length = job && state ? snprintf(body, sizeof(body), BQ_RETIREMENT_POISON_MAGIC "\njob=%" PRIu64 "\ntoken=%"
+                                         PRIu64 "\nhandoff=%s\nmeasured-record=%s\nauthority-state=%s\n",
+                                         (uint64_t)job->id, (uint64_t)job->token,
+                                         inconsistent ? "inconsistent" : "incomplete", measured ? "present" : "absent",
+                                         state) : -1;
+    bool named = length > 0 && (u32)length < sizeof(body) && bq_record_name(name, BQ_RETIREMENT_POISON_RECORD, job->id);
+#ifdef BUSTER_BENCH_SERVICE_TEST
+    if (bq_test_poison_write_failure)
+    {
+        named = false;
+        bq_test_poison_write_failure = false;
+    }
+#endif
+    BqError error = named && queue ? bq_record_write(queue, name, (u8 const*)body, (u32)length, false) : BQ_IO;
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_real_advance(BqQueue* queue, BqJob const* job, BqPhase phase, BqOutcome outcome)
 {
     u8 body[24];
@@ -1422,6 +1487,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
     {
         error = failure;
     }
+    /* #881 recovery L2: a poisoned job never finishes succeeded. A durable
+     * success is failed (FINALIZING) or interrupted (CLEANING) with a
+     * worker-mismatch failure record; earlier phases reconcile interrupted. */
+    bool poisoned = error == BQ_OK && bq_retirement_poisoned(queue, job);
     BqError attempt = error == BQ_OK ? bq_attempt_presence(queue, job) : BQ_NOT_FOUND;
     bool has_attempt = attempt == BQ_OK;
     if (error == BQ_OK && attempt != BQ_OK && attempt != BQ_NOT_FOUND)
@@ -1494,6 +1563,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
         error = bq_cleanup_record(queue, job, &workspaces_info, &workspace_info, true);
         cleanup = error == BQ_OK ? BQ_OK : cleanup;
     }
+    /* A failed job without its failure record stays corrupt (above); only a
+     * durable success gains the poison's failure record. */
+    if (error == BQ_OK && poisoned && !job->cancel_requested && failure == BQ_NOT_FOUND &&
+        job->outcome == BQ_SUCCEEDED && (job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING))
+    {
+        error = bq_failure_write(queue, job, BQ_WORKER_MISMATCH);
+        failure = error == BQ_OK ? BQ_WORKER_MISMATCH : failure;
+    }
+    if (error == BQ_OK && poisoned && job->phase == BQ_FINALIZING)
+    {
+        error = bq_real_advance(queue, job, BQ_CLEANING, job->cancel_requested ? BQ_CANCELLED : BQ_FAILED);
+        job = bq_job(&queue->state, id);
+        if (!job) error = BQ_CORRUPT;
+    }
     if (error == BQ_OK && job->phase == BQ_RESERVED && failure != BQ_NOT_FOUND)
     {
         BqOutcome outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
@@ -1523,6 +1606,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
     {
         BqOutcome final_outcome = job->cancel_requested ? BQ_CANCELLED :
                                   terminal_outcome != BQ_NO_OUTCOME ? terminal_outcome : job->outcome;
+        if (poisoned && final_outcome == BQ_SUCCEEDED)
+        {
+            final_outcome = BQ_INTERRUPTED;
+        }
         error = job->outcome == BQ_FAILED && failure == BQ_NOT_FOUND ? BQ_CORRUPT :
                 bq_real_advance(queue, job, BQ_FINISHED, final_outcome);
     }

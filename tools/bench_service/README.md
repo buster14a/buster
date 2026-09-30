@@ -454,7 +454,13 @@ are separate translation units linked into the service. The service order is:
    restart as complete, incomplete (a crash prefix, including a `.pending`
    temporary beside a final name), damaged (both records present but no longer
    reopening) or absent; incomplete and damaged attempts are poisoned with
-   their evidence kept.
+   their evidence kept. The coordinator does this on restart recovery and
+   before any failed outcome (`bq_worker_retirement_handoff_hold`): it also
+   requires the MEASURED `worker-phase-4` record to agree with a complete
+   state, and otherwise writes a `retirement-poison-<id>` record and holds the
+   queue. A poisoned job never finalizes, reconciles succeeded or exports; no
+   operator path releases a held retirement job while the recipe is blocked
+   (RETIREMENT_PREPARATION.md, "Recovery classification (L2)").
 
 The composer consumes, per timed row, its census id, batch group, runtime
 eligibility and the six frozen dimension values (target, cpu, allocator,

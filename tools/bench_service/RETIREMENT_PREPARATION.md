@@ -1791,18 +1791,116 @@ SHA-256 of the profile, contract and support declaration.
 `bq_worker_result_binding_validate` accepts a retirement result only through
 its complete-profile seam, and its public entry still refuses one.
 
-**Still open.** These are inputs for the `bq_worker_recover` classification:
+**Recovery classification (L2).** A handoff can stop after
+`tp_retirement_store_authority_handoff` has copied or journalled the
+authority but before `worker-phase-4` exists (the record is written only
+after the handoff completes, then the acknowledgement).
+`bq_worker_retirement_handoff_hold` classifies such a handoff with
+`bq_retirement_coordinator_handoff_class` from the queue's `worker-phase-4`
+record and `tp_retirement_store_authority_state`. Two callers run it:
 
-- A handoff that times out after `tp_retirement_store_authority_handoff`
-  has already copied and journalled the authority leaves the copy and the
-  journal in the queue-private root, with no `worker-phase-4` and no
-  acknowledgement. Recovery must classify such attempts with
-  `tp_retirement_store_authority_state` (`COMPLETE` without a MEASURED
-  record, or `INCOMPLETE`) and poison them.
-- Before this change, MEASURED's `worker-phase-4` record was written before
-  the handoff. It is now written only after the handoff completes, so a
-  record without a `COMPLETE` handoff can only come from tampering or an
-  older build. Recovery should still check the two together.
+- `bq_worker_recover`, before it lets `bq_worker_finish` finish a recovered
+  retirement job (a durable success included);
+- `bq_worker_finish` itself, before it records any failed, cancelled or
+  interrupted outcome. That covers the live run, including a MEASURED
+  handoff that fails inside `bq_worker_phase_accept`;
+- the live run's failure retention (`bq_worker_failure_retain`), before it
+  publishes any evidence, including when a failed stop or a cleanup failure
+  skipped `bq_worker_finish`.
+
+| `worker-phase-4` | Queue-private copy, journal or `.pending` | Store state | Class |
+|---|---|---|---|
+| present | the copy it names | `COMPLETE` | complete |
+| absent | none | `ABSENT` | absent |
+| absent | any | not `COMPLETE` | incomplete |
+| present (well formed or not) | any or none | not `COMPLETE` | inconsistent |
+| absent | copy and journal | `COMPLETE` | inconsistent |
+
+With the record, the state is taken over the copy its digest names; without
+it, over the copy the handoff left (its own digest), so a sealed but
+unacknowledged handoff is still classified. A queue-private root that cannot
+be opened for any reason but its absence, or that fails to close, counts as
+something left. A `COMPLETE` state without the record is either the crash
+window between the handoff and the record or forged records; the classifier
+cannot tell them apart.
+
+Complete and absent handoffs proceed as before. Incomplete and inconsistent
+ones, and any job that already carries a poison record, are poisoned and
+held:
+
+- an immutable queue record `retirement-poison-<id>`
+  (`BQ-RETIREMENT-POISON-V1`: job, token, class, whether `worker-phase-4`
+  existed, the observed state) is written once (`bq_retirement_poison_write`
+  in `workspace.c`). Any record under that name poisons the job; a malformed
+  or unreadable one counts as inconsistent (`bq_retirement_poison_read`,
+  `bq_retirement_poisoned`). A failed write still holds and reports the
+  error;
+- a job without a durable outcome that was not cancelled gets its failure
+  record: the caller's reason for an incomplete handoff, `worker-mismatch`
+  for an inconsistent one. After a crash between the two writes, the existing
+  poison record's class decides;
+- nothing is advanced, published, bound or removed: the attempt workspace,
+  the result root and the queue-private copy and journal stay as evidence,
+  and the live run's failure retention adds nothing for a held job;
+- the caller returns `BQ_RECONCILIATION_REQUIRED` (or the write error) with
+  the queue still needing reconciliation, so `bq_reserve` admits no further
+  job. Every later recovery finds the poison record and holds again.
+
+A poisoned job never surfaces as succeeded or exported:
+
+- `bq_worker_retirement_finalize` refuses it, so no finish can succeed;
+- `bq_workspace_reconcile` never finishes it succeeded. A durable success at
+  FINALIZING gets a `worker-mismatch` failure record and is failed; one at
+  CLEANING is finished interrupted; earlier phases reconcile interrupted, and
+  a cancelled job cancelled. A failed job missing its failure record stays
+  corrupt: the poison never supplies that record;
+- `bq_export_authorize` refuses it (`BQ_EXPORT_INVALID`).
+
+**The operator path is closed for now.** `bq_workspace_reconcile` refuses
+every recipe that `bq_recipe_real` rejects (`BQ_UNSUPPORTED`). The retirement
+recipe is still blocked, so no operator command releases a held retirement
+job: the queue stays wedged until a build that admits the recipe reconciles
+it, and that reconciliation then follows the poison rules above. This is
+deliberate; a held experiment is never cleaned up by a build that cannot
+judge it.
+
+Tests:
+
+- `bq_prep_worker_unit_recovery` uses job 82's composed attempt and the real
+  `bq_worker_recover`. Each of these holds twice, never succeeds or is
+  rewritten, keeps its evidence and refuses the next reservation:
+  - a handoff that timed out after the copy (no journal, no `worker-phase-4`);
+  - a `COMPLETE` handoff without `worker-phase-4`;
+  - a `worker-phase-4` over an `INCOMPLETE` handoff;
+  - a cancelled job's timed-out handoff;
+  - a durable success in the queue without `worker-phase-4`, whose
+    reconciliation is refused.
+
+  The poison outlives the restored records. The intact handoff (complete) and
+  an emptied one (absent) are not held.
+- `bq_prep_worker_unit_live_handoff` sends job 82's MEASURED packet through
+  `bq_worker_phase_accept` again with `worker-phase-4` missing. The handoff
+  refuses, and `bq_worker_finish` then holds the failed job before any
+  transition. `bq_worker_failure_retain` then publishes, binds, advances and
+  records nothing more for it. With the finish skipped (a failed stop), the
+  retention classifies and holds the job itself before publishing anything.
+- `bq_test_retirement_poison_hold` (`tests.c`) covers leftovers and records
+  without the producer:
+  - a `.pending` temporary alone is incomplete;
+  - a queue-private root that is not a directory counts as something left;
+  - a malformed `worker-phase-4` is inconsistent;
+  - a failed poison write holds with `BQ_IO`;
+  - a corrupt or unreadable poison record poisons;
+  - the record's class decides the reason;
+  - a cancelled job is held without a failure record;
+  - a smoke job is never held;
+  - `bq_worker_finish` holds a failing job.
+- `bq_test_retirement_poison_reconcile` drives a smoke-recipe durable success
+  at FINALIZING and at CLEANING with a poison record. Each reconciles failed
+  and interrupted respectively, never succeeded, and export refuses it. A
+  poisoned failed job at CLEANING without its failure record reconciles
+  `BQ_CORRUPT` and is left unchanged.
+  `bq_test_export` checks the export refusal on a bound, finished result.
 
 ## Production context generators (#881)
 
