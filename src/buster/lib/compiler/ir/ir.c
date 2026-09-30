@@ -5051,7 +5051,12 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
         IrType* aggregate = ir_type_from_id(&program->types, function->values[field_instruction->operands[0].value].canonical_type);
         u64 field_index = field_instruction->immediates[0];
         IrField* field = aggregate && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
-        result = field && field->is_bit_field && field->access_size && access_type->layout.size == field->access_size;
+        IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
+        // Boolean bit-fields use a raw unsigned integer unit even when the
+        // layout did not narrow it. Truth conversion belongs to the field value.
+        bool boolean_storage = field_type && field_type->kind == IR_TYPE_BOOLEAN && !access_type->is_signed;
+        result = field && field->is_bit_field && (field->access_size || boolean_storage) &&
+                 access_type->layout.size == ir_field_access_size(&program->types, field);
     }
 
     return result;

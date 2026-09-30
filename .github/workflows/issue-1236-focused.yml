@@ -90,5 +90,7 @@ jobs:
               echo "CANDIDATE form=$form allocator=$mode status=pass"
             done
           done
+      - name: Verify volatile operation counts
+        run: build/Release/ide test --module=c_tests
       - name: Check source growth
-        run: '"$RUNNER_TEMP/buster-build" source_size --rev fd633e9d10512617f11e2f3f08b7c21adfb2ea0c --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617'
+        run: '"$RUNNER_TEMP/buster-build" source_size --rev 155a62a14bd6daa9744c0be6bbbc69da449ce3d0 --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617'
