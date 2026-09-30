@@ -9833,6 +9833,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
         "};\n"
         "#define BYTE_ADDRESS(object, count) ((unsigned char *)&(object) + (count))\n"
         "const unsigned char *macro_address = BYTE_ADDRESS(o, offsetof(struct O, tail));\n"
+        "int *raw_size = (int *)sizeof x;\n"
+        "int *raw_group = (int *)(16 + 1);\n"
+        "int *raw_unary = (int *)+16;\n"
+        "#ifndef __STRICT_ANSI__\n"
+        "void *gnu_void = (void *)&x + 1;\n"
+        "#endif\n"
         "int main(void)\n"
         "{\n"
         "    static char *L1 = (char *)&x + 1;\n"
@@ -9873,6 +9879,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
         "    failed += aggregate.base != &o;\n"
         "    failed += runtime != &((char *)&x)[1];\n"
         "    failed += macro_address != (const unsigned char *)&o.tail;\n"
+        "    failed += (size_t)raw_size != sizeof(int);\n"
+        "    failed += (size_t)raw_group != 17;\n"
+        "    failed += (size_t)raw_unary != 16;\n"
+        "#ifndef __STRICT_ANSI__\n"
+        "    failed += gnu_void != (void *)&((char *)&x)[1];\n"
+        "#endif\n"
         "    return failed;\n"
         "}\n");
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -9883,25 +9895,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
         {S8("negative_int"), S8("arr"), 8}, {S8("negative_long"), S8("arr"), 8},
         {S8("negative_row"), S8("m"), 16},
     };
-    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    String8 dialects[] = {S8("-std=c11"), S8("-std=gnu17")};
+    for (u32 configuration = 0; configuration < BUSTER_ARRAY_LENGTH(forms) * BUSTER_ARRAY_LENGTH(dialects); configuration += 1)
     {
+        u32 form = configuration % BUSTER_ARRAY_LENGTH(forms);
+        String8 dialect = dialects[configuration / BUSTER_ARRAY_LENGTH(forms)];
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
-            String8 name = string_format(arena, S8("buster-static-pointer-{u32}-{u32}"), form, mode);
+            String8 name = string_format(arena, S8("buster-static-pointer-{u32}-{u32}"), configuration, mode);
             String8 input = buster_test_temporary_path(arena, name, S8(".c"));
             String8 output = buster_test_temporary_path(arena, name, S8(".o"));
             if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
             {
-                String8 command[] = {S8("-c"), S8("-g0"), S8("-std=c11"), S8("-target"), S8("x86_64-linux"),
+                String8 command[] = {S8("-c"), S8("-g0"), dialect, S8("-target"), S8("x86_64-linux"),
                     forms[form], modes[mode], S8("-fverify-codegen"), S8("-fno-codegen-fallback"), S8("-o"), output, input};
                 CompilerDriverResult built = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
                 if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
                 {
-                    FileMapRead map = file_map_read(output);
+                    FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
                     if (BUSTER_REQUIRE(arguments, map.bytes.length != 0))
                     {
                         ObjectFile serialized = object_read(arena, map.bytes, built.object.target);
@@ -9937,7 +9952,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
                                                                S8(".out")
 #endif
                                                                );
-                String8 run_command[] = {S8("-std=c11"), forms[form], modes[mode], S8("-fverify-codegen"),
+                String8 run_command[] = {dialect, forms[form], modes[mode], S8("-fverify-codegen"),
                     S8("-fno-codegen-fallback"), S8("-o"), executable, input};
                 CompilerDriverResult linked = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));

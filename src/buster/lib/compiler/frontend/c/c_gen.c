@@ -28176,7 +28176,13 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
             return start;
         }
         CToken primary = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&primary, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (primary.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, primary, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            index = c_ir_unevaluated_operand_end(builder, index + 1, end);
+            need_primary = false;
+        }
+        else if (c_token_is_punctuator(&primary, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close >= end)
