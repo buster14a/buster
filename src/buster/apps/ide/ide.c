@@ -36,6 +36,7 @@
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
@@ -910,6 +911,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
     IrSemanticCounters semantics = ir_semantic_counters();
+    WorkLedgerCounters work = work_ledger_counters();
     IrDiagnosticCensus diagnostic_census = ir_diagnostic_census();
 #endif
     String8 text = {0};
@@ -941,6 +943,23 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     for (u32 index = 0; index < IR_SEMANTIC_COUNT; index += 1)
     {
         source_metrics_append_field(arena, &text, S8("ir_semantics"), ir_semantic_counter_name((IrSemanticCounter)index), semantics.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("work"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("work"), S8("overflowed"), work.overflowed);
+    for (u32 index = 0; index < WORK_LEDGER_COUNT; index += 1)
+    {
+        source_metrics_append_line(&text, string_format(arena, S8("work.{S8}.{S8}={u64}\n"), work_ledger_counter_mechanism((WorkLedgerCounter)index),
+                                                        work_ledger_counter_name((WorkLedgerCounter)index), work.values[index]));
+    }
+    for (u32 index = 0; index < WORK_LEDGER_PHASE_COUNT; index += 1)
+    {
+        String8 phase = work_ledger_phase_name((WorkLedgerPhase)index);
+        WorkLedgerPhaseTotals totals = work.phases[index];
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.marks={u64}\n"), phase, totals.marks));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.minor_faults={u64}\n"), phase, totals.minor_faults));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_calls={u64}\n"), phase, totals.arena_calls));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_bytes={u64}\n"), phase, totals.arena_bytes));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_zero_written={u64}\n"), phase, totals.arena_zero_written));
     }
     source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("version"), 1);
     source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("overflowed"), diagnostic_census.overflowed);

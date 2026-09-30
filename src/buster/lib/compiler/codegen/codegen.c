@@ -3254,6 +3254,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result
     }
     if (appended)
     {
+        WORK_LEDGER_RECORD(MACHINE_DEBUG_LOCATION_ROWS, 1);
         result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
             .function_symbol = symbol,
             .local = local,
@@ -12577,6 +12578,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
             }
             machine_simd_operation_count = selected.simd_operation_count;
+            if (selected.supported)
+            {
+                WORK_LEDGER_RECORD(MACHINE_FUNCTIONS_SELECTED, 1);
+                WORK_LEDGER_RECORD(MACHINE_ROWS, selected.function.instruction_count);
+                WORK_LEDGER_RECORD(MACHINE_VIRTUAL_REGISTERS, selected.function.virtual_register_count);
+                WORK_LEDGER_RECORD(MACHINE_BLOCKS, selected.function.block_count);
+            }
             if (!selected.supported)
             {
                 fallback_opcode = selected.failed_opcode < IR_OPCODE_COUNT ? selected.failed_opcode : IR_OPCODE_COUNT;
@@ -12690,6 +12698,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
                     MachineEncodeResult encoded;
+                    WORK_LEDGER_RECORD(MACHINE_PLACEMENT_EDITS, placement.edit_count);
 
                     // The encoder writes where the function will live when
                     // its worst-case budget fits what the code buffer has
@@ -12707,6 +12716,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         break; default: BUSTER_TODO();
                     }
 
+                    WORK_LEDGER_RECORD(MACHINE_ENCODED_BYTES, encoded.valid ? encoded.byte_count : 0);
                     // Keep exact-form telemetry even when the encoder fails;
                     // the function may still fall back to the canonical path.
                     result.statistics.exact_attempts += encoded.exact_attempts;
@@ -24129,7 +24139,9 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
         return result;
     }
+    WORK_LEDGER_PHASE(TARGET_PREWARM);
     codegen_prewarm_for_target(target);
+    WORK_LEDGER_PHASE(CODEGEN);
     // Reserve the active ABI contexts before retries. Classification stays lazy,
     // but filling a reserved page retains no allocation from an attempt that
     // code-buffer growth might rewind. Explicit function conventions reserve
