@@ -331,7 +331,9 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   Its `recipe` input chooses from a reviewed allowlist
   (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
   the installed service still serves only its compiled registry, which today
-  admits only the one-pair `validate-buster-v1` smoke recipe. That recipe is
+  admits only the one-pair `validate-buster-v1` smoke recipe;
+  `zen5-calibration-v1` (#426) is registered but held until the broker carries
+  its stages (see `tools/bench_service/README.md`). The smoke recipe is
   not the former stage-1 diagnostic, an A/A qualification, or a performance
   verdict. The result wait comes from the selected recipe's reviewed budget
   and is capped by the job timeout; see
