@@ -21,15 +21,29 @@ WorkerUnitResultJoinTests read the worker-unit producer's composed job-82
 result (#881 PR 3), which the preparation runner of `bench_service self-test`
 exports to build/bench-service-tools/retirement-worker-unit-result (skipped
 when absent; `--worker-unit DIRECTORY`, which build.c runs right after that
-runner, runs only them and fails when it is absent): its binding sits at COMPOSER_BINDING_PATH with the sealed-result
-phase pending, which the validator's evidence check refuses until lane F's
-final binding names the composed sealed result; over that final binding the
-join accepts the producer authority's receipt digest for job 82 and refuses
-another job or attempt, another trust root and a tampered receipt. Nothing here is a full service bundle, a performance
-result or #512 evidence.
+runner, runs only them and fails when it is absent): its binding sits at
+COMPOSER_BINDING_PATH with the sealed-result phase pending, which the
+validator's evidence check refuses until lane F's final binding names the
+composed sealed result; over that final binding the join accepts the producer
+authority's receipt digest for job 82 and refuses another job or attempt,
+another trust root and a tampered receipt. Lane F's production writer
+(retirement_lane_f.py) derives a deterministic independent-replay archive
+from that result; its adapter replay refuses the fixture's placeholder harness
+commit and, with only that source pin relaxed, the preparation runner's
+stand-in statistics. Over the writer's directory the real validator, pinned
+by the profile, and the export CLI without any validator double both refuse
+the job-82 binding explicitly. The result holds the context evidence the
+binding names (support files and the other prior-closure artifacts) as flat
+entries (#1998, closing gap N8): lane F's replay lays them out and the
+validator refuses the fixture's unapproved #508 support declaration; the
+export CLI does not lay them out and refuses the support declaration's
+binding path as missing. Nothing here is a full service bundle, a
+performance result or #512 evidence.
 """
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -40,6 +54,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -48,6 +63,7 @@ import retirement_export_replay as replay  # noqa: E402
 import native_retirement_performance_binding as binding  # noqa: E402
 import native_retirement_performance_binding_test as binding_tests  # noqa: E402
 import native_retirement_result_input as result_input  # noqa: E402
+import retirement_lane_f as lane_f  # noqa: E402
 
 ROOT = None
 REPOSITORY = HERE.parents[1]
@@ -521,8 +537,8 @@ class RealThroughputOutputTests(unittest.TestCase):
         reported."""
         second = self.run_chain((self.root / RECEIPT).read_bytes())
         self.assertEqual(second.returncode, 1)
-        self.assertRegex(second.stderr, r"retirement export replay failed: Command .*"
-                                        r"native_retirement_performance_binding\.py.* returned non-zero exit status")
+        self.assertRegex(second.stderr, r"retirement export replay failed: production binding validator "
+                                        r"refused the final binding: ValueError: ")
         self.assertNotIn("verified-without-admission", second.stdout)
 
     def write_validator_double(self):
@@ -557,6 +573,11 @@ WORKER_UNIT_RESULT = REPOSITORY / "build" / "bench-service-tools" / "retirement-
 # With --worker-unit (build.c runs it right after the preparation runner),
 # a missing result is a failure, not a skip.
 WORKER_UNIT_REQUIRED = False
+# Lane F's publication identity for the worker unit's independent-replay archive.
+PUBLICATION_ID = "worker-unit-lane-f"
+# The context evidence files the producer publishes flat (#1998: all 39 of
+# the #511 record, BQ_PREP_WORKER_UNIT_EVIDENCE).
+WORKER_UNIT_EVIDENCE = 39
 
 
 class WorkerUnitResultJoinTests(unittest.TestCase):
@@ -622,22 +643,16 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
     def run_cli(self, lane_f, attempt=None):
         """The worker unit's result through the CLI's publication, separate
         retrieval, unpack (UNPACKER), lane F import, final-binding check,
-        validator (a double: the fixture's binding is structurally complete
-        but its provenance is the test record's) and join."""
+        the real production validator and the join."""
         attempt = self.attempt if attempt is None else attempt
         names = sorted(path.name for path in self.result.iterdir())
         archive = self.work / "worker-unit.bqexport"
         if not archive.exists():
             self.export_sha = _write_archive(archive, self.result, names, self.job, self.attempt, "a" * 64)
         unpacker = self.work / "unpacker"
-        validator = self.work / "validator-double.py"
         if not unpacker.exists():
             unpacker.write_text(f"#!{sys.executable}\n{UNPACKER}")
             unpacker.chmod(stat.S_IRWXU)
-            proof = {"proof": "independent-evidence-and-receipts-checked", "rows_recomputed": True,
-                     "support_checked": True, "execution_checked": True, "bundle_checked": True,
-                     "git_checked": True, "required_rows": 0}
-            validator.write_text(f"import json\nprint(json.dumps({proof!r}))\n")
         consumer = Path(tempfile.mkdtemp(prefix="consumer-", dir=self.work))
         publication, retrieval = consumer / "publication", consumer / "retrieval"
         publication.mkdir(mode=0o700)
@@ -646,10 +661,7 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
                       "--binding", replay.COMPOSER_BINDING_PATH, "--job", str(self.job), "--attempt", str(attempt),
                       "--full-result-sha256", "a" * 64, "--export-receipt-sha256", self.export_sha,
                       "--trusted-execution-receipt-sha256", self.trusted]
-        launcher = ("import sys; sys.path.insert(0, sys.argv[1]); import retirement_export_replay as r; "
-                    "sys.argv = sys.argv[2:]; r.binding.__file__ = sys.argv.pop(1) or r.binding.__file__; "
-                    "sys.exit(r.main())")
-        command = [sys.executable, "-c", launcher, str(HERE), str(Path(replay.__file__).resolve()), str(validator)]
+        command = [sys.executable, str(Path(replay.__file__).resolve())]
         subprocess.run(command + [str(archive), "--publish-only", "--test-publication", str(publication)] +
                        identities, capture_output=True, text=True, check=True)
         published = publication / f"retirement-{self.job}-{self.attempt}.bqexport"
@@ -658,10 +670,127 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
                               cwd=consumer, env={"PATH": os.environ.get("PATH", ""), "LANG": "C"},
                               capture_output=True, text=True, check=False)
 
+    # -- lane F's production writer over the worker unit's result ----------------
+
+    def writer_bundle(self, name):
+        archive = self.work / f"{name}.tar"
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(lane_f.main(["bundle", str(self.result), str(archive),
+                                          "--publication-id", PUBLICATION_ID]), 0)
+        self.assertEqual(json.loads(output.getvalue())["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+        return archive
+
+    def writer_lane_f(self, name):
+        """Lane F's directory from the production writer. Its adapter replay
+        is replaced here because the job-82 fixture's sealed adapter result
+        is the preparation runner's stand-in (bq_prep_worker_unit_adapter)
+        and its harness commit a placeholder: the real replay refuses both
+        (test_writer_refuses_the_fixture_adapter_evidence)."""
+        archive = self.writer_bundle(name)
+        with mock.patch.object(lane_f, "adapter_replay", return_value=("6" * 64, "7" * 64, "clang -O2")):
+            lane_f.bind(self.result, self.work / name, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        PUBLICATION_ID, "retirement-v1", f"run-{self.job}", REPOSITORY, *self.harness())
+        return self.work / name
+
+    def harness(self):
+        """The record's harness identity, trusted here as the operator's."""
+        measurement = json.loads((self.result / replay.COMPOSER_BINDING_PATH).read_bytes())["measurement"]
+        return measurement["harness_source_commit"], measurement["harness_source_tree"]
+
+    def test_writer_bundle_is_deterministic_and_extracts(self):
+        first, second = self.writer_bundle("first"), self.writer_bundle("second")
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        state = lane_f.composed_state(self.result)
+        descriptor = {"path": first.name, "bytes": first.stat().st_size,
+                      "sha256": hashlib.sha256(first.read_bytes()).hexdigest()}
+        extracted = binding._extract_downloaded_bundle(self.work, descriptor, PUBLICATION_ID, state["closure"],
+                                                       self.work / "extracted")
+        # The producer publishes the context evidence flat (#1998): the
+        # archive holds each at its binding path, from its flat entry.
+        flat = 0
+        for item in state["closure"]:
+            source = self.result / item["path"]
+            if not source.exists():
+                source = self.result / lane_f.evidence_name(item["path"])
+                flat += 1
+            self.assertEqual((extracted / item["path"]).read_bytes(), source.read_bytes())
+        self.assertEqual(flat, WORKER_UNIT_EVIDENCE)
+
+    def test_writer_refuses_the_fixture_adapter_evidence(self):
+        """The production adapter replay rebuilds the reviewed adapter at the
+        record's harness commit: the fixture's placeholder commit is refused.
+        With only that source pin relaxed, the real adapter's output differs
+        from the fixture's stand-in statistics, which is refused too. Neither
+        promotes a lane F directory."""
+        archive = self.writer_bundle("bundle")
+        published = hashlib.sha256(archive.read_bytes()).hexdigest()
+        checkout = self.work / "checkout"
+        checkout.mkdir()
+        for arguments in (["init", "--quiet"], ["add", "."], ["-c", "user.name=lane-f", "-c", "user.email=f@invalid",
+                                                          "commit", "--quiet", "-m", "clean checkout"]):
+            (checkout / "file").write_text("clean\n")
+            subprocess.run(["git", "-C", str(checkout)] + arguments, check=True, capture_output=True)
+        with self.assertRaisesRegex(ValueError, "differ from the trusted harness identity"):
+            lane_f.bind(self.result, self.work / "untrusted", archive, published, PUBLICATION_ID, "retirement-v1",
+                        "run-f", checkout, "0" * 40, self.harness()[1])
+        with self.assertRaisesRegex(ValueError, "does not match the bound source identity"):
+            lane_f.bind(self.result, self.work / "pinned", archive, published, PUBLICATION_ID, "retirement-v1",
+                        "run-f", checkout, *self.harness())
+        self.assertFalse((self.work / "pinned").exists())
+        compile_adapter = binding._compile_trusted_retirement_adapter
+
+        def working_tree_adapter(temp_root, repository_root=None, _commit=None, _tree=None):
+            return compile_adapter(temp_root, repository_root)
+
+        with mock.patch.object(binding, "_compile_trusted_retirement_adapter", working_tree_adapter), \
+                self.assertRaisesRegex(ValueError, "adapter replay differs from the sealed adapter result"):
+            lane_f.bind(self.result, self.work / "relaxed", archive, published, PUBLICATION_ID, "retirement-v1",
+                        "run-f", REPOSITORY, *self.harness())
+        self.assertFalse((self.work / "relaxed").exists())
+
+    def test_real_validator_refuses_the_writer_output_for_missing_context_evidence(self):
+        """(Gap N8, closed by #1998) The writer's final binding round-trips
+        through lane F's import and check, and the context evidence the
+        binding names (support, subjects, producer and provenance files) is
+        in the worker unit's result as flat entries, which lane F lays out
+        at their binding paths (all WORKER_UNIT_EVIDENCE of them). The real
+        validator, pinned by the profile, then refuses the fixture's own
+        support declaration, which is not the approved #508 input. The
+        refusal is recorded in the verdict, deterministically."""
+        directory = self.writer_lane_f("lane-f")
+        validator, validator_sha256 = lane_f.profile_validator_pin(REPOSITORY)
+        self.assertEqual(validator.resolve(), Path(binding.__file__).resolve())
+        closure_sha256 = lane_f.validator_closure(REPOSITORY, validator, validator_sha256)[2]
+        verdicts = []
+        for name in ("clean-1", "clean-2"):
+            verdict = lane_f.replay_lane_f(self.result, directory, self.work / name, REPOSITORY, self.trusted,
+                                           validator, validator_sha256, closure_sha256,
+                                           self.work / f"{name}.verdict.json")
+            verdicts.append((self.work / f"{name}.verdict.json").read_bytes())
+            self.assertEqual(verdict["verdict"], "refused")
+            self.assertEqual((verdict["validator"]["path"], verdict["validator"]["sha256"],
+                              verdict["validator"]["closure_sha256"]),
+                             ("tools/native_retirement_performance_binding.py", validator_sha256, closure_sha256))
+            self.assertEqual(verdict["evidence_layout"]["entries"], WORKER_UNIT_EVIDENCE)
+            self.assertEqual(verdict["refusal"],
+                             "ValueError: #508 support declaration digest is not the approved immutable input")
+        self.assertEqual(verdicts[0], verdicts[1])
+        with self.assertRaisesRegex(ValueError, "pinned SHA-256"):
+            lane_f.replay_lane_f(self.result, directory, self.work / "clean-3", REPOSITORY, self.trusted,
+                                 validator, "f" * 64, closure_sha256, self.work / "clean-3.verdict.json")
+
     def test_cli_replays_the_worker_unit_result_through_lane_f(self):
-        joined = self.run_cli(self.final_binding().parent)
-        self.assertEqual(joined.returncode, 0, joined.stderr)
-        self.assertEqual(json.loads(joined.stdout.splitlines()[-1])["replay"], "verified-without-admission")
+        """The export CLI with the writer's directory and the real validator:
+        the CLI validates the unpacked result without lane F's flat-evidence
+        layout (retirement_lane_f.evidence_layout), so the replay stops at
+        the first binding path the result holds only as a flat entry (the
+        support declaration), and a final binding that changes anything else
+        is refused before it."""
+        refused = self.run_cli(self.writer_lane_f("lane-f"))
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("support.files[0] is missing or is a symbolic link: " + binding.SUPPORT_DECLARATION_PATH,
+                      refused.stderr)
+        self.assertNotIn("verified-without-admission", refused.stdout)
         changed = self.final_binding("changed", lambda record: record["rules"]["sampling"].__setitem__("seed", 8))
         refused = self.run_cli(changed.parent)
         self.assertEqual(refused.returncode, 1)

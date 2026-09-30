@@ -72,6 +72,7 @@ No fixture here is service admission or performance evidence.
 """
 
 import collections
+import contextlib
 from contextlib import closing, contextmanager
 import copy
 import hashlib
@@ -1477,6 +1478,63 @@ class WorkerUnitWaiverTests(unittest.TestCase):
                         {"value": dict(runtime["value"], executable_sha256="1" * 64)},
                         {"value": dict(runtime["value"], kind="compiler")}):
             self.assertFalse(_gap_runtime_executable(dict(runtime, **changed), context), changed)
+
+
+class LaneFWriterEndToEndTests(unittest.TestCase):
+    """Lane F's production writer (retirement_lane_f.py) in place of the
+    test's own independent-replay phase: over the composer's sealed result
+    it publishes the archive (`bundle`), binds from the downloaded copy
+    (`bind`, with the real adapter replay) and imports its directory
+    (`lane_f_import`, `final_binding_check`); the unchanged validator then
+    accepts the final binding with bundle_checked on both series shard sizes,
+    and every tamper case of test_composed_sealed_result_validates still
+    fails. It runs through _compose_and_validate with that fixture's own
+    doubles: _check_support_output and _population are replaced (the fixture
+    census is not the approved #508 declaration) and no repository_root is
+    given, so the proof is evidence-and-receipts-checked-without-independent-git,
+    not a complete independent replay."""
+
+    @staticmethod
+    def _writer(record, evidence, composed, calls):
+        import retirement_export_replay as replay
+        import retirement_lane_f as lane_f
+        pending = dict(replay.PENDING_DESCRIPTOR)
+        composed_record = json.loads(json.dumps(record))
+        composed_record["workflow"]["phases"]["sealed_result"] = dict(pending, path=composed["sealed"]["path"])
+        composed_record["workflow"]["phases"]["independent_replay"] = dict(
+            pending, path="retirement-independent-replay.json")
+        (evidence / replay.COMPOSER_BINDING_PATH).write_bytes(lane_f.canonical(composed_record))
+        work = evidence.parent
+        published = work / "published.tar"
+        with contextlib.redirect_stdout(io.StringIO()):
+            if lane_f.main(["bundle", str(evidence), str(published), "--publication-id", "pub-lane-f"]) != 0:
+                raise AssertionError("lane F could not write the independent-replay archive")
+        downloaded = work / "downloaded.tar"
+        shutil.copyfile(published, downloaded)
+        # The trusted harness identity is the checkout's, never the record's.
+        harness = [subprocess.run(["git", "rev-parse", revision], cwd=ROOT, check=True, capture_output=True,
+                                  text=True).stdout.strip() for revision in ("HEAD", "HEAD^{tree}")]
+        repository = Path(binding.__file__).resolve().parents[1]
+        written = lane_f.bind(evidence, work / "lane-f", downloaded, hashlib.sha256(published.read_bytes()).hexdigest(),
+                              "pub-lane-f", "retirement-v1", "run-lane-f", repository, *harness)
+        final_path = replay.lane_f_import(work / "lane-f", evidence)
+        final = replay.final_binding_check(evidence, final_path)
+        record.clear()
+        record.update(final)
+        calls.append(written)
+
+    def test_lane_f_writer_output_validates(self):
+        tests = ComposeEndToEndTests("test_composed_sealed_result_validates")
+        calls = []
+
+        def writer(record, evidence, composed, _family):
+            self._writer(record, evidence, composed, calls)
+
+        with mock.patch.object(sys.modules[__name__], "_independent_replay", writer):
+            for shard_bytes in (None, 4096):
+                with self.subTest(shard_bytes=shard_bytes):
+                    tests._compose_and_validate(shard_bytes)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
