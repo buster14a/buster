@@ -605,7 +605,10 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
                 .length = wait.streams[STANDARD_STREAM_ERROR].length,
             };
             BUSTER_TEST(arguments, !wait.timed_out);
-            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+            // AddressSanitizer exits with a failure status on Linux but aborts
+            // by default on Darwin (abort_on_error=1); either ending is a
+            // stopped read, and the report below says why it stopped.
+            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED || wait.result == PROCESS_RESULT_CRASH);
             BUSTER_TEST(arguments, string_first_sequence(error, S8("use-after-poison")) != BUSTER_STRING_NO_MATCH);
         }
     }
