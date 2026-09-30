@@ -245,6 +245,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
   forms and all four allocators, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
+  `c_test_bit_field_assignment_accesses` also pins the volatile load/store
+  counts on six desktop layouts in both forms. Boolean raw-unit accesses
+  remain valid even when their layout needs no narrowed storage unit.
   Automatic nested initializers select known fields by index, preserving the
   initializer expression's source range without inventing a token for an
   anonymous member. Positional cursors and brace-elided descent skip unnamed
