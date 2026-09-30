@@ -907,7 +907,8 @@ class WorkerUnitResultTests(unittest.TestCase):
     its pre-campaign documents and admission receipt bound, its two late
     phases pending), the execution context over the result bundle's raw
     digest, the producer authority and its context chain, the result manifest
-    and BQ-BUNDLE-V1 index. Mutated bindings are refused by the validator.
+    and BQ-BUNDLE-V1 index, and the validator's executable rule over every
+    A/B invocation. Mutated bindings are refused by the validator.
     Absent that output (CI runs this file without the preparation runner),
     the class is skipped.
     """
@@ -1074,6 +1075,36 @@ class WorkerUnitResultTests(unittest.TestCase):
             self.assertEqual(sum(1 for _ in records), receipt["invocations"])
         finally:
             records.close()
+
+    def test_invocations_name_the_file_they_executed(self):
+        """The validator's executable rule (_check_execution_transcript) over
+        job 82's A/B transcript: a compiler invocation names its variant's
+        subject binary and a runtime invocation its row's frozen artifact,
+        the program the runtime launch executed, never the compiler binary
+        (the recorder's tp_retirement_executed_sha256). Every runtime row of
+        the plan runs, so the check covers real runtime launches."""
+        record = self.record()
+        plan = json.loads((self.result / "retirement-execution-plan.json").read_bytes())
+        contracts = {row["row"]: row for row in plan["rows"]}
+        receipt = json.loads((self.result / "retirement-execution-receipt.json").read_bytes())
+        binaries = {variant: record["subjects"][variant]["binary"]["sha256"] for variant in ("baseline", "candidate")}
+        counts = {"compiler": 0, "runtime": 0}
+        records = binding._execution_trace_records(self.result, receipt["shards"], receipt["invocations"])
+        try:
+            for value in records:
+                variant = value["variant"]
+                if value["kind"] == "compiler":
+                    expected = binaries[variant]
+                else:
+                    expected = contracts[value["row"]][variant]["artifact_sha256"]
+                    self.assertNotIn(value["executable_sha256"], binaries.values())
+                self.assertEqual(value["executable_sha256"], expected,
+                                 f"invocation {value['sequence']} ({value['kind']}) names another executable")
+                counts[value["kind"]] += 1
+        finally:
+            records.close()
+        self.assertGreater(counts["compiler"], 0)
+        self.assertGreater(counts["runtime"], 0)
 
 
 if __name__ == "__main__":

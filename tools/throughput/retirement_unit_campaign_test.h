@@ -13,7 +13,9 @@
  * documents into a scratch evidence root, and the READY result is mapped
  * onto lane E's composer request. Every launch runs in lane B's canonical
  * child layout and sandbox over stand-in roots (test_unit_campaign_layout
- * checks what a layout child sees and is denied). The admission, ready
+ * checks what a layout child sees and is denied; test_unit_campaign_runtime_rule
+ * the runtime shape; test_unit_campaign_runtime_identity that a runtime
+ * record names its program, not the binary). The admission, ready
  * digest and pins are
  * test data: no #426 verdict, acceptance measurement or real ready record.
  * Include after retirement_campaign_test.h, which compiles the fixture
@@ -1939,6 +1941,136 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
     test_unit_campaign_step_remove(fixture, linking, "runtime-rule-l");
 }
 
+/* Whether the transcript line of invocation `sequence` names `digest` as the
+ * file it executed. */
+static int test_unit_campaign_record_names(char const* transcript, uint64_t sequence, char const* digest)
+{
+    char key[48], field[96];
+    snprintf(key, sizeof(key), "\"sequence\":%" PRIu64 ",", sequence);
+    snprintf(field, sizeof(field), "\"executable_sha256\":\"%s\"", digest);
+    char const* found = strstr(transcript, key);
+    char const* start = found;
+    while (start && start > transcript && start[-1] != '\n') --start;
+    char const* end = found ? strchr(found, '\n') : NULL;
+    char const* named = start ? strstr(start, field) : NULL;
+    return end && named && named < end;
+}
+
+/* One real layout launch of `command` in step directory `step` through the
+ * timed recorder (tp_retirement_measurement_run), on a fresh log; `program`
+ * is the runtime launch's program (NULL for a compile). */
+static int test_unit_campaign_identity_launch(TestUnitCampaign* fixture, TpSampleTest* test,
+    TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable, int step,
+    TpProcessProgram const* program)
+{
+    int binary = executable->descriptor;
+    int log = openat(fixture->cwd, "runtime-identity.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int ruleset = log >= 3 ? bq_retirement_sandbox(&binary, 1, fixture->sources, step, NULL) : -1;
+    TpProcessInputs inputs = {binary, step, log, command->environment, 0, 0, {fixture->sources[0], fixture->sources[1]},
+        ruleset, (uint64_t)command->memory_mib << 20, program};
+    TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID};
+    int ok = ruleset >= 3 && tp_retirement_measurement_run(&test->samples, command, executable, &inputs, step, &result);
+    if (!ok)
+        fprintf(stderr, "unit campaign runtime identity: kind %u status %d exit %d error %d\n", command->kind,
+                (int)result.status, result.process.exit_code, result.process.launch_error);
+    if (ruleset >= 0 && close(ruleset) != 0) ok = 0;
+    if (log >= 0 && (close(log) != 0 || unlinkat(fixture->cwd, "runtime-identity.log", 0) != 0)) ok = 0;
+    return ok;
+}
+
+/* The invocation record names the file the launch executed
+ * (tp_retirement_executed_sha256), which the validator checks against the
+ * frozen plan: through the timed recorder, a real layout compile of the link
+ * group records the compiler binary, and the runtime launch of the program
+ * that compile wrote records the program's digest (the row's frozen
+ * artifact, as the service took it from its copy), not the binary's. The
+ * binary here is the fixture child with trailing bytes, so the two digests
+ * differ; the fixture's own program has the held binary's bytes, which would
+ * hide a runtime record naming the binary. Other invocations are synthetic. */
+static void test_unit_campaign_runtime_identity(TestUnitCampaign* fixture)
+{
+    char path[TP_PATH_CAP], binary_sha[65], program_sha[65] = {0};
+    uint64_t bytes = 0;
+    int ok = tp_path(path, fixture->directory, "identity-child") && tp_copy_file(fixture->binary_path, path) &&
+        chmod(path, 0700) == 0;
+    int append = ok ? open(path, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = append >= 3 && write(append, "identity\n", 9) == 9;
+    if (append >= 0 && close(append) != 0) ok = 0;
+    ok = ok && chmod(path, 0500) == 0;
+    int binary = ok ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    TpRetirementExecutable executable = {.descriptor = -1};
+    ok = binary >= 3 && tp_retirement_file_hash(binary, binary_sha, &bytes) &&
+        tp_retirement_executable_init(&executable, binary, binary_sha) && strcmp(binary_sha, fixture->binary_sha) != 0;
+    int step = test_unit_campaign_step(fixture, "runtime-identity", NULL);
+    TpSampleTest* test = (TpSampleTest*)calloc(1, sizeof(*test));
+    ok = ok && step >= 3 && test && test_sample_open_layout(test, 1, 6);
+    if (test) test->transcript.cpu = fixture->cpu;
+    uint64_t compiled = UINT64_MAX, ran = UINT64_MAX;
+    unsigned variant = 2;
+    TpRetirementInvocation invocation;
+    while (ok && ran == UINT64_MAX &&
+           tp_retirement_execution_peek(&test->execution, &invocation) == TP_RETIREMENT_NEXT_READY)
+    {
+        int compile = !invocation.kind && compiled == UINT64_MAX;
+        int run = invocation.kind && compiled != UINT64_MAX && invocation.variant == variant;
+        if (compile || run)
+        {
+            /* The stage-0 link compile (slot 1) writes artifact-<side>.bin,
+             * which the runtime command (slot 2) runs as `./<leaf>`. */
+            TpRetirementMeasuredCommand command = fixture->commands[0][(run ? 4 : 2) + invocation.variant];
+            command.unit = run ? invocation.row : invocation.group;
+            TpProcessProgram program = {0};
+            ok = !run || test_unit_campaign_program_hashed(step, command.arguments[3], &program);
+            /* Synthetic intervals (1 ms each) may run ahead of the clock;
+             * a real launch must start after the last recorded end. */
+            while (ok && tp_process_monotonic_ns() <= test->transcript.last_end) test_delay(1);
+            ok = ok && test_unit_campaign_identity_launch(fixture, test, &command, &executable, step,
+                                                          run ? &program : NULL);
+            if (run)
+            {
+                memcpy(program_sha, program.sha256, sizeof(program_sha));
+                ran = invocation.sequence;
+            }
+            else
+            {
+                variant = invocation.variant;
+                compiled = invocation.sequence;
+            }
+        }
+        else ok = test_sample_observe(test, 0, TEST_SAMPLE_VALID);
+    }
+    CHECK(ok && compiled != UINT64_MAX && ran != UINT64_MAX && !strcmp(program_sha, fixture->binary_sha));
+    long size = 0;
+    int read_ok = ok && fflush(test->stream) == 0 && fseek(test->stream, 0, SEEK_END) == 0 &&
+        (size = ftell(test->stream)) > 0 && fseek(test->stream, 0, SEEK_SET) == 0;
+    char* transcript = read_ok ? (char*)malloc((size_t)size + 1) : NULL;
+    read_ok = transcript && fread(transcript, 1, (size_t)size, test->stream) == (size_t)size;
+    if (read_ok) transcript[size] = 0;
+    int compiler_named = read_ok && test_unit_campaign_record_names(transcript, compiled, binary_sha);
+    int program_named = read_ok && test_unit_campaign_record_names(transcript, ran, program_sha);
+    int binary_named = read_ok && test_unit_campaign_record_names(transcript, ran, binary_sha);
+    if (read_ok && (!compiler_named || !program_named || binary_named))
+        fprintf(stderr, "unit campaign runtime identity: compiler record %s the binary, runtime record %s its "
+                "program and %s the binary\n", compiler_named ? "names" : "does not name",
+                program_named ? "names" : "does not name", binary_named ? "names" : "does not name");
+    CHECK(read_ok && compiler_named && program_named && !binary_named);
+    free(transcript);
+    if (test)
+    {
+        test_sample_close(test);
+        free(test);
+    }
+    if (step >= 0)
+    {
+        unlinkat(step, "artifact-left.bin", 0);
+        unlinkat(step, "artifact-right.bin", 0);
+        close(step);
+        CHECK(unlinkat(fixture->cwd, "runtime-identity", AT_REMOVEDIR) == 0);
+    }
+    if (binary >= 0) CHECK(close(binary) == 0);
+    CHECK(unlink(path) == 0);
+}
+
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)
 {
     TestUnitCampaign* fixture = (TestUnitCampaign*)calloc(1, sizeof(*fixture));
@@ -1949,6 +2081,7 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
         test_unit_campaign_plan(fixture);
         test_unit_campaign_layout(fixture);
         test_unit_campaign_runtime_rule(fixture);
+        test_unit_campaign_runtime_identity(fixture);
         /* A driver that has not begun runs no step and touches nothing. */
         BqRetirementUnitCampaign idle = {0};
         BqRetirementUnitCampaignStreams none = {0};
