@@ -2105,6 +2105,7 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
                                                              u32* alignment_out, u32* requested_out, String8* rejection_out);
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
+BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment);
 
 typedef struct CIrPreparedCall CIrPreparedCall;
 // The block-memory builtins, in the order of the two tables below.
@@ -2873,6 +2874,11 @@ struct CIntegerIrBuilder
     // CIrSignature::returns_zero_at_end.
     bool returns_zero_at_end;
     bool preparing_calls;
+    // How many GNU `_Alignof(object)` evaluations of an object's alignment
+    // records enclose this one, and whether one of them hit
+    // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_ir_alignof_object_alignment.
+    u8 alignof_object_depth;
+    bool alignof_object_refused;
     bool va_list_builtin_operand;
     // Label metadata is tracked only when the body can produce label values
     // (an address-of-label expression, or a referenced global carrying
@@ -29151,6 +29157,16 @@ c_ir_expression_core_loop:
                 }
                 value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
             }
+            u32 object_alignment = (u32)value;
+            if (!is_sizeof && !(operand && operand->layout.resolved) &&
+                !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &object_alignment))
+            {
+                builder->failure_message = S8("the alignment of the _Alignof operand's object is not an integer constant expression");
+                builder->failure_token_index = operand_start;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            value = is_sizeof ? value : object_alignment;
             values[value_count++] = c_ir_emit_integer_value_typed(builder, value, false, token, builder->size_type);
             expect_operand = false;
             index = consumed_index;
@@ -47856,6 +47872,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
+                if (type_id.value == IR_ID_UNDERLYING_INVALID && !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
+                {
+                    return false;
+                }
                 values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) ? alignment : size);
                 expect_operand = false;
                 index = consumed_index;
@@ -49575,6 +49595,63 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
     }
     *alignment_out = alignment;
     return status;
+}
+
+// GNU `_Alignof`/`__alignof__` over an object answers the object's alignment,
+// not only its type's: GCC and Clang both fold `_Alignas(32) int g;
+// _Alignof(g)` to 32. When the operand, under redundant parentheses, is one
+// name bound to an object, raises `*alignment` -- the type's answer -- by the
+// runs c_alignof_object_next_run names, each evaluated as the object's
+// storage evaluates it. c_parse_alignof_object_alignment answers the same
+// question for the parse-time folds, and the two must agree. False when a run
+// does not resolve, or when evaluating runs nests past
+// C_ALIGNOF_OBJECT_DEPTH_LIMIT anywhere below this operand: a run may itself
+// spell `_Alignof(object)` and reach this function again through a nested
+// constant query.
+BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment)
+{
+    bool valid = true;
+    while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    CEntityId entity = end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
+                           ? c_ir_identifier_entity_or_lookup(builder, start) : C_ENTITY_ID_INVALID;
+    CEntity const* object = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
+    if (object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
+    {
+        u32 natural = *alignment;
+        u32 cursor = 0;
+        u32 run_start = 0;
+        u32 run_count = 0;
+        while (valid && c_alignof_object_next_run(&builder->parse, entity, start, &cursor, &run_start, &run_count))
+        {
+            if (!run_count)
+            {
+                continue;
+            }
+            valid = builder->alignof_object_depth < C_ALIGNOF_OBJECT_DEPTH_LIMIT;
+            builder->alignof_object_refused |= !valid;
+            if (valid)
+            {
+                builder->alignof_object_depth += 1;
+                u32 raised = natural;
+                String8 rejection = {0};
+                valid = c_ir_alignment_evaluate(builder, run_start, run_count, natural, &raised, 0, &rejection) == C_IR_ALIGNMENT_RESOLVED &&
+                        !builder->alignof_object_refused;
+                *alignment = valid ? BUSTER_MAX(*alignment, raised) : *alignment;
+                builder->alignof_object_depth -= 1;
+            }
+        }
+        // A nested refusal can be answered past: an alignment record's
+        // evaluator falls back to another fold when its constant query fails.
+        // The flag carries it out to the outermost operand instead, which
+        // clears it once refused.
+        builder->alignof_object_refused &= builder->alignof_object_depth != 0;
+    }
+    return valid;
 }
 
 // Marks every array type that some struct uses as its flexible array member.

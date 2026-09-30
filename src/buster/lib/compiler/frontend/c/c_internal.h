@@ -159,6 +159,17 @@ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
+// GNU `_Alignof(object)` answers the object's alignment, which its alignment
+// records raise; a record may itself spell `_Alignof(object)`, so each layout
+// engine counts the nested evaluations and refuses past this many rather than
+// chain -- or cycle, for `extern int g; _Alignas(_Alignof(g)) int g;` --
+// through its constant evaluator.
+#define C_ALIGNOF_OBJECT_DEPTH_LIMIT 4
+// Steps through the alignment runs that raise `_Alignof(entity)` at
+// `token_index`: the entity's own, then those of each object declaration of
+// the entity that ends before the operand. `*cursor` starts at zero.
+BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
+                                               u32* count_out);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -1034,6 +1045,11 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool enum_constant_members_active;
+    // How many GNU `_Alignof(object)` evaluations of an object's alignment
+    // records enclose this one, and whether one of them hit
+    // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
+    u8 alignof_object_depth;
+    bool alignof_object_refused;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

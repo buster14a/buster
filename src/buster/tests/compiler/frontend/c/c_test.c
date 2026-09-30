@@ -13741,6 +13741,105 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArg
     return result;
 }
 
+// GNU `_Alignof`/`__alignof__` over an object answers the object's
+// alignment, `_Alignas` and `aligned` included, and it is an integer constant
+// expression wherever GCC and Clang fold it (#1704). Both layout engines must
+// agree: the parse-time folds (file and block static assertions, enum
+// initializers) and the IR ones (deferred assertions, a static initializer,
+// the value a function body lowers). A chain of `_Alignas(_Alignof(object))`
+// deeper than C_ALIGNOF_OBJECT_DEPTH_LIMIT is refused, never answered with the
+// type's alignment.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("_Alignas(32) int g;\n"
+                                               "int attribute_aligned __attribute__((aligned(64)));\n"
+                                               "extern int redeclared;\n"
+                                               "_Alignas(16) int redeclared;\n"
+                                               "int plain;\n"
+                                               "_Static_assert(_Alignof(g) == 32, \"alignof object\");\n"
+                                               "_Static_assert(__alignof__(g) == 32, \"gnu alignof object\");\n"
+                                               "_Static_assert(__alignof((g)) == 32, \"parenthesized object\");\n"
+                                               "_Static_assert(_Alignof(g) == 32 && _Alignof(g) != 4, \"deferred object\");\n"
+                                               "_Static_assert(_Alignof(attribute_aligned) == 64, \"aligned attribute\");\n"
+                                               "_Static_assert(_Alignof(redeclared) == 16, \"redeclaration\");\n"
+                                               "_Static_assert(_Alignof(plain) == _Alignof(int), \"type alignment\");\n"
+                                               "_Alignas(_Alignof(g)) int chained;\n"
+                                               "_Static_assert(_Alignof(chained) == 32, \"chained\");\n"
+                                               "enum { ENUM_ALIGNMENT = _Alignof(g) };\n"
+                                               "_Static_assert(ENUM_ALIGNMENT == 32, \"enum initializer\");\n"
+                                               "unsigned long folded_alignment = _Alignof(g);\n"
+                                               "unsigned long local_alignment(void)\n"
+                                               "{ _Alignas(128) int l = 0; _Static_assert(_Alignof(l) == 128, \"local\");\n"
+                                               "  _Static_assert(_Alignof(g) == 32, \"file object in a block\"); return _Alignof(l) + (unsigned long)l; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("alignof-object.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        bool folded_global = false;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+            if (symbol && string_equal(symbol->link_name, S8("folded_alignment")))
+            {
+                folded_global = global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 32;
+            }
+        }
+        BUSTER_TEST(arguments, folded_global);
+        bool lowered_local = false;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = &function->instructions[instruction_index];
+                lowered_local |= instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count && instruction->immediates[0] == 128;
+            }
+        }
+        BUSTER_TEST(arguments, lowered_local);
+    }
+    scratch_end(temporary);
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } const refused[] = {
+        {S8("_Alignas(32) int g; _Static_assert(_Alignof(g) == 4, \"type alignment\");\n"), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { _Alignas(32) int l = 0; _Static_assert(_Alignof(l) == 4, \"type alignment\"); return l; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Alignas(64) int a; _Alignas(_Alignof(a)) int b; _Alignas(_Alignof(b)) int c; _Alignas(_Alignof(c)) int d;"
+            " _Alignas(_Alignof(d)) int e; _Alignas(_Alignof(e)) int h; _Static_assert(_Alignof(h) == 64, \"too deep\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena refused_temporary = scratch_begin(0, 0);
+        CPreprocessResult refused_tokens = c_preprocess(refused_temporary.arena, refused[index].source, (CPreprocessOptions){0});
+        CParseResult refused_parse = c_parse(refused_temporary.arena, refused_tokens);
+        CIRLowerResult refused_ir = c_lower_to_ir(refused_temporary.arena, S8("alignof-object-refused.c"), refused_tokens, refused_parse, target_native);
+        u32 diagnostic_count = refused_parse.diagnostic_count + refused_ir.diagnostic_count;
+        CDiagnosticKind kind = refused_parse.diagnostic_count ? refused_parse.diagnostics[0].kind
+                               : refused_ir.diagnostic_count  ? refused_ir.diagnostics[0].kind
+                                                              : C_DIAGNOSTIC_KIND_COUNT;
+        BUSTER_TEST_RAW(arguments, refused_tokens.diagnostic_count == 0, refused[index].source);
+        // A block-scope assertion is reported by both the deferred pass and
+        // its function's lowering (#1783), so only the first kind is compared.
+        BUSTER_TEST_RAW(arguments, diagnostic_count >= 1, refused[index].source);
+        BUSTER_TEST_RAW(arguments, kind == refused[index].kind, refused[index].source);
+        scratch_end(refused_temporary);
+    }
+    return result;
+}
+
 // `void` is one byte in both layout engines, and an object of it is still
 // refused. GNU gives `void` a size so that a `void *` steps by bytes, and both
 // reference compilers fold `sizeof(void)`, `sizeof(const void)` and
@@ -27765,6 +27864,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
+    BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
