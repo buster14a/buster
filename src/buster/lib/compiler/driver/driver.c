@@ -43,6 +43,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
 #include <buster/lib/compiler/driver/archive.c>
@@ -3368,12 +3369,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 
 // A failed native link names its reason and symbol. A relocation refused in
 // a position-independent image is almost always an object compiled for a
-// fixed address, so the diagnostic says what the image needs instead.
+// fixed address, so the diagnostic says what the image needs instead. A
+// failed artifact write names the operating-system error that refused it.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
 {
     String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
                        ? S8(" (a position-independent image needs objects compiled with -fPIC)")
-                       : S8("");
+                   : link.error == LINK_ERROR_FILE_WRITE && link.write_error.v ? string_format(arena, S8(" ({EOs})"), link.write_error)
+                                                                               : S8("");
     return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
 }
 
@@ -3422,6 +3425,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                      : string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
+        WORK_LEDGER_RECORD(OUTPUT_OBJECT_BYTES, artifact.bytes.length);
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
         u32 slice_count = 0;
         ByteSlice* slices = object_artifact_slices(arena, artifact, &slice_count);
@@ -3501,6 +3505,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
     if (result->native_link.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
@@ -3529,17 +3534,21 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
 // rather than written without its relocation.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
 {
+    bool valid = true;
     switch (kind)
     {
-    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; return true;
-    default: break;
+    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
+    case ASSEMBLY_RELOCATION_X86_PC64: *object_kind = OBJECT_RELOCATION_X86_64_PC64; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL32: *object_kind = OBJECT_RELOCATION_AARCH64_PREL32; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL64: *object_kind = OBJECT_RELOCATION_AARCH64_PREL64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; break;
+    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
+    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
+    default: valid = false; break;
     }
-    return false;
+    return valid;
 }
 
 // One assembly input, from source text to the same three outputs a C input
@@ -3819,6 +3828,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
+    WORK_LEDGER_PHASE(PREPROCESS);
     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
@@ -3885,6 +3895,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
     }
+    WORK_LEDGER_PHASE(PARSE);
     CParserResult syntax = c_parse_ast(arena, preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
@@ -3894,6 +3905,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                   syntax.diagnostic_count, invocation.input_paths[0], (String8){0});
         goto end;
     }
+    WORK_LEDGER_PHASE(SEMANTIC);
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
@@ -3935,6 +3947,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
@@ -3960,6 +3973,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                           boundary, (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
         goto end;
     }
+    WORK_LEDGER_PHASE(CODEGEN);
     if (invocation.emit_llvm_bitcode)
     {
         LlvmBitcodeArtifact artifact =
@@ -4151,6 +4165,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
+    WORK_LEDGER_PHASE(OBJECT);
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
@@ -4163,6 +4178,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     result.object = object;
     result.has_object = true;
+    WORK_LEDGER_PHASE(OUTPUT);
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
 end:
     file_map_unmap(source_file);
@@ -5133,6 +5149,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result.native_link.executable.length);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;

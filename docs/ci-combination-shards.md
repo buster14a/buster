@@ -93,6 +93,13 @@ moving foreign-platform binaries to an aggregate runner for a fictitious
 re-probe. Missing matrix entries cannot turn a smaller surviving group green.
 The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
 
+For a main push with [admitted exact queue evidence](ci-main-reuse.md), the
+native, mobile and UEFI groups are skipped on main and the aggregate verifies
+their eight actual queue job executions, artifacts and retained current-run
+inventory. The full 21-job inventory remains mandatory on all other
+events and on main whenever admission falls back. The desktop partition
+proof and main-only effects still execute on main.
+
 The inventory reader paginates **all attempts of the same immutable run** and
 selects each job's highest attempt, never its most recent *successful* attempt.
 This supports re-running failed jobs while retaining earlier successful jobs

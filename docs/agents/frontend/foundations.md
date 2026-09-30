@@ -254,12 +254,42 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
-- Legacy integer constant ranges and static assertions share the private
+- Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
   range into a synthesized token view while retaining either derived index
   gives the wrong classification. Spelling, source recovery, and pack changes
   still belong to the original preprocess result (GitHub #629).
+- A `_Static_assert` whose expression types as an integer takes its value
+  from the typed evaluator (`c_parse_typed_constant`), with C's types,
+  promotions and conversions: `0u - 1 == 4294967295u` holds and
+  `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
+  still decides which assertions wait for the deferred typed check (casts,
+  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
+  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  only shapes the typed evaluator does not model. A typed fault (division by
+  zero, a shift count outside the promoted width) is final. An assertion
+  decided at the declaration reports `static assertion failed: "<message>"`
+  (GitHub #1238).
+- Compile-time integer arithmetic has one implementation, `ir_integer_*`
+  (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
+  the canonical operations, each result carrying its exact-value faults
+  (signed overflow, unsigned wrap, division by zero, shift count, negative
+  shifted operand). `c_integer_operation` maps a C operator and the
+  signedness of its operation type to the canonical operation for runtime
+  lowering (`c_ir_operation`, `c_ir_apply_operation`) and for the three
+  constant evaluators; `c_integer_constant_binary/unary` apply C's constant
+  policy. Preprocessing (`c_conditional_apply`) keeps its `intmax_t` rule and
+  deferred faults; integer constant expressions (`c_parse_constant_binary`,
+  `c_ir_constant_apply_binary`) are not constant on a division by zero or a
+  shift count outside `[0, width)` of the separately promoted left operand,
+  and keep the wrapped value on signed overflow (the value GCC and Clang
+  fold to; the C17 6.6p4 diagnostic needs a warning channel the frontend
+  does not have). Lowering's value queries (`c_ir_value_integer_constant_evaluate`)
+  read conversions by their canonical operation, so a signed widening
+  sign-extends (GitHub #1347). `ir_integer_test.c` checks every operation
+  exhaustively at widths 1..8 and against the host's 128-bit type at wider
+  widths.
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
@@ -280,6 +310,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- Static pointer folding retains casts that precede trailing arithmetic:
+  `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
+  and local statics. Only a cast covering the entire operand range may be
+  removed by the bare-address shortcut. Constant subscripts retain their
+  signedness before checked scaling into the relocation's signed addend.
+  `compiler_driver_test_static_pointer_addresses` checks the address family
+  under both frontend forms and all four allocators, reads serialized ELF
+  addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
+  non-null integer-to-pointer static casts remains unsupported; it is refused
+  rather than folded as if the trailing operator belonged inside the cast.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -303,6 +343,11 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
+  The one exception is a phase arena (`CPreprocessOptions.phase_arena`): a
+  phase allocates what only it reads there and releases it before returning,
+  so no result may reference it. `c_preprocess_seal` copies the preprocessing
+  result out of it; semantic layout queries keep their tables there and
+  release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
@@ -810,6 +855,9 @@ context, just as changing layout does; neither selection mutates `IrType`.
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument
 classification except on Windows AArch64, whose convention distinguishes them.
+Both public query entries validate before the shared resident-page lookup.
+Allocation and classification live in a separate cold helper; a hit copies its
+answer directly without allocating, reclassifying, or repeating public checks.
 Unresolved layouts are not cached. Adding a type under a fresh id is supported;
 changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
 every independent context), because dependent aggregate classifications change

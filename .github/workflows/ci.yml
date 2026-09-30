@@ -132,6 +132,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  reuse:
+    name: Main CI reuse decision
+    if: ${{ github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      reuse: ${{ steps.admit.outputs.reuse }}
+      receipt_digest: ${{ steps.admit.outputs.receipt_digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify exact queue execution before scheduling main jobs
+        id: admit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tools/main_ci_reuse.py decide --output "$RUNNER_TEMP/main-ci-reuse.json"
+
   test:
     # Queue desktop shards wait for cheap workflow lint. Ordinary runs still
     # execute for diagnostics even when lint fails.
@@ -275,52 +297,41 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
-        # Thirteen suites include native fixture builds and process launches.
+        # Native fixture builds and process launches; see docs/ci-bootstrap-wrapper.md.
         # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
         # exhausted 120s in run 35934837738 despite passing suite summaries.
         timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          workflow_tools_started=$SECONDS
-          run_suite() {
-            local suite=$1 log=$2 started=$SECONDS status
-            printf 'SUITE_START path=%s at=%s\n' "$suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/$log"; then
-              printf 'SUITE_END path=%s result=success elapsed_seconds=%s at=%s\n' \
-                "$suite" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            else
-              status=$?
-              printf 'SUITE_END path=%s result=failure status=%s elapsed_seconds=%s at=%s\n' \
-                "$suite" "$status" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              return "$status"
-            fi
-          }
-          run_suite tests/ci_tools_test.py workflow-tools.log
-          run_suite tools/ci_admission_test.py ci-admission.log
-          run_suite tools/ci_zig_test.py zig-installer-test.log
-          run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log
-          run_suite tools/ci_android_sdk_test.py android-sdk-installer-test.log
-          run_suite tools/analyzer_selection_test.py analyzer-selection.log
-          run_suite tools/coverage_manifest_test.py coverage-manifest.log
-          run_suite tools/matrix_shard_test.py matrix-shard.log
-          run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
-          run_suite tools/native_producer_profile_test.py native-producer-profile.log
-          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
-          run_suite tools/ci_llvm_test.py llvm-installer-test.log
-          run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
-          run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
-          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
-          run_suite tools/ci_native_observation_test.py native-observation-test.log
-          run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
-          run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
-          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
+          # Independent suites share three lanes, slowest first (#2021).
+          suites=(
+            tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
+            tools/coverage_manifest_test.py=coverage-manifest.log
+            tools/matrix_shard_test.py=matrix-shard.log
+            tests/ci_tools_test.py=workflow-tools.log
+            tools/ci_matrix_phases_test.py=matrix-phases-test.log
+            tools/ci_native_observation_test.py=native-observation-test.log
+            tools/native_target_compatibility_test.py=native-target-compatibility.log
+            tools/ci_admission_test.py=ci-admission.log
+            tools/main_ci_reuse_test.py=main-ci-reuse.log
+            tools/ci_zig_test.py=zig-installer-test.log
+            tools/ci_zig_cache_test.py=zig-cache-policy-test.log
+            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
+            tools/analyzer_selection_test.py=analyzer-selection.log
+            tools/differential_ci_policy_test.py=differential-ci-policy.log
+            tools/native_producer_profile_test.py=native-producer-profile.log
+            tools/ci_llvm_test.py=llvm-installer-test.log
+            tools/ci_configure_evidence_test.py=configure-evidence-test.log
+            tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
+            tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
+            tools/github_ci_time_test.py=ci-queue-timing-test.log
+            tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
+          )
           if [[ '${{ matrix.os }}' == macos ]]; then
-            run_suite tools/ci_runner_resources_test.py runner-resources-test.log
+            suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
           fi
-          printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
-            "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          "$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
@@ -571,9 +582,10 @@ jobs:
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
+    needs: reuse
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
@@ -894,7 +906,8 @@ jobs:
           retention-days: 7
 
   mobile:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: reuse
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
@@ -1068,8 +1081,9 @@ jobs:
           retention-days: 7
 
   uefi:
+    needs: reuse
     name: UEFI firmware boot
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
@@ -1164,9 +1178,12 @@ jobs:
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
           rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
           rm -rf "$reference_root"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-            -MMD -MF "$candidate_depfile" build.c -o build/analyzer-driver
-          python3 tools/analyzer_reference.py manifest \
+          bootstrap_arguments=(bootstrap)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            bootstrap_arguments+=(--bind-context)
+          fi
+          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
@@ -1175,7 +1192,8 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$candidate_manifest")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1184,12 +1202,8 @@ jobs:
               echo '::error::Historical analyzer reference contains a symlink.'
               exit 1
             fi
-            (
-              cd "$reference_root"
-              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-                -MMD -MF "$reference_depfile" build.c -o "$GITHUB_WORKSPACE/build/analyzer-baseline"
-            )
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+              --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$reference_manifest"
@@ -1256,26 +1270,33 @@ jobs:
               exit 1
             fi
           done
+          candidate_arguments=(manifest)
+          reference_arguments=(manifest)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
+            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
+          fi
+          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$expected_directory/candidate.json"
           expected_materialized="$(python3 tools/analyzer_reference.py materialization \
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$expected_directory/candidate.json")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
           fi
-          python3 tools/analyzer_reference.py manifest \
-            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
-            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
-            --output "$expected_directory/candidate.json"
           if [[ "$expected_materialized" == true ]]; then
             if [[ ! -d "$reference_root" || -L "$reference_root" || \
                   ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
               echo '::error::Historical analyzer reference evidence is missing or unsafe.'
               exit 1
             fi
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$expected_directory/reference.json"
@@ -1353,7 +1374,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, test, native, mobile, uefi, analyzer]
+    needs: [lint, test, native, mobile, uefi, analyzer, reuse]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1362,16 +1383,28 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify every desktop partition exists
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: 'python3 tools/github_ci_time.py require-jobs --output "$RUNNER_TEMP/desktop-partitions.json"'
+      - name: Reverify queue source and current main jobs
+        id: reverified
+        if: ${{ needs.reuse.outputs.reuse == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: python3 -B tools/main_ci_reuse.py finish --expected-digest "$SOURCE_RECEIPT_DIGEST" --output "$RUNNER_TEMP/main-ci-reuse-finish.json"
       - name: Retain desktop partition inventory
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/desktop-partitions.json
+          # A reused main run retains its queue-to-main receipt here instead.
+          path: |
+            ${{ runner.temp }}/desktop-partitions.json
+            ${{ runner.temp }}/main-ci-reuse-finish.json
           if-no-files-found: ignore
           retention-days: 7
       - name: Require every shard
@@ -1384,6 +1417,8 @@ jobs:
           MOBILE_RESULT: ${{ needs.mobile.result }}
           UEFI_RESULT: ${{ needs.uefi.result }}
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
+          REUSE_REQUESTED: ${{ needs.reuse.outputs.reuse }}
+          REUSE_REVERIFIED: ${{ steps.reverified.outcome }}
         run: |
           {
             printf '| Shards | Result |\n| --- | --- |\n| All ten desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
@@ -1392,7 +1427,16 @@ jobs:
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
-            echo '::error::All desktop, native, mobile, UEFI and analyzer shards must succeed; failure, cancellation and skips do not pass.'
+          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
+            echo '::error::Main-specific lint, desktop and analyzer jobs must succeed.'
+            exit 1
+          fi
+          if [[ "$REUSE_REQUESTED" == true ]]; then
+            if [[ "$REUSE_REVERIFIED" != success || "$NATIVE_RESULT" != skipped || "$MOBILE_RESULT" != skipped || "$UEFI_RESULT" != skipped ]]; then
+              echo '::error::Skipped main jobs require fresh, exact queue proof and completed main-only work.'
+              exit 1
+            fi
+          elif [[ "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success ]]; then
+            echo '::error::All native, mobile and UEFI jobs must succeed without queue proof; failure, cancellation and skips do not pass.'
             exit 1
           fi

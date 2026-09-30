@@ -212,13 +212,26 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. A process-state query that loses the PID after
-  an initial `kill -0` is reconciled with one more liveness probe: confirmed
-  disappearance is stopped while persistent ambiguity remains fail-closed.
-  Once teardown observes a terminal state it is monotonic for that ownership
-  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
-  bounded stop verification; sending SIGKILL alone is not a failure, but an
-  owned process that remains live after it is.
+  this path deterministically. The numeric PID marker stays compatible with
+  existing callers; its `.identity` sidecar records the launch identity before
+  the PID marker is published. The Linux Android lane compares boot ID and
+  kernel start ticks from `/proc/<pid>/stat`, reading state and identity in one
+  snapshot. The portable/macOS fake-tool path uses `LC_ALL=C ps` start time
+  (one-second resolution) and state. These are checked at start reuse, wait,
+  shutdown and immediately before signals; an identity mismatch is a retired
+  owned process, not a new cleanup target. This is a shell snapshot check, not
+  an atomic pidfd signal operation; the portable timestamp also cannot resolve
+  reuse within the same second. Missing/malformed ownership or an unverifiable
+  live PID fails cleanup without targeting that PID, and retains the record
+  for retry. Once cleanup proves the owned process stopped it removes both
+  records, preventing another invocation from resurrecting the ownership.
+  SIGTERM and SIGKILL retain bounded stop verification; sending SIGKILL alone
+  is not a failure, but a surviving owned process is. `android/run_tests_test.sh`
+  also runs `android/emulator_identity_test.py` for independent identity,
+  malformed-record, unavailable-probe and surviving-process controls. Its real
+  workflow-body fixture simulates PID reuse after the payload observes the
+  original emulator terminal, and requires successful structured cleanup with
+  no adb shutdown or signal to the unrelated replacement.
 
 The private OS resource-failure, flood and process-tree child modes dispatch at
 the start of `library_tests`, before compiler prewarming and other test modules.
@@ -300,6 +313,14 @@ uses it. It copies the symbol/relocation view before remapping indices, preservi
 the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
+
+`compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
+with the PATH `clang` at baseline, Haswell and Zen 5. Each row runs only when
+the host CPU can execute it. Buster compiles its half of the Zen 5 row for
+`znver5`, and Clang compiles its half for `x86-64-v4`, which has the same
+64-byte vector ABI. Clang accepts `znver5` only from version 19 (Ubuntu 24.04
+ships 18), but it accepts `x86-64-v4` from version 12, so the row needs no
+host-compiler gate; see the [layout guide](frontend/layout.md).
 
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
@@ -509,6 +530,8 @@ stderr message. This harness regression changes neither assertion totals nor
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
+
+The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. After the oracle returns, it queues `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` on stdout. From Node's `exit` event, which fires only once the event loop has drained, it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors

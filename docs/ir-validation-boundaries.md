@@ -12,6 +12,17 @@ This contract complements the [frontend guide](agents/frontend/foundations.md),
 for machine metadata work (#45). Dense canonical finalization is described in
 [canonical CFG publication](canonical-cfg-publication.md).
 
+## Integer constant rows
+
+A `CONSTANT_INTEGER` row spells a signed number as `immediates[0]` plus
+`immediate_is_negative`; its value is that number reduced modulo 2^width
+(`ir_integer_constant_decode`). The validator requires the spelled number to
+lie in `[-2^(width-1), 2^width)` (`ir_integer_constant_canonical`), so a
+reader that materializes the magnitude unreduced -- the native emitters do --
+sees the same bits as one that reduces it. The C producer's single row
+emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
+a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
+
 ## A certificate describes one input
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's

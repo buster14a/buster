@@ -13,12 +13,14 @@
 // propagation for computed goto (ir_label_provenance_*), the per-target
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
-// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value),
+// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value,
+// ir_abi_context_value_validated/cold),
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
-// preparation (ir_prepare_canonical_module in ir_fast.c), immutable CFG
-// publication (ir_function_publish_cfg in
+// preparation (ir_prepare_canonical_module in ir_fast.c), the fixed-width
+// integer semantics every compile-time evaluator shares (ir_integer_* in
+// ir_integer.c), immutable CFG publication (ir_function_publish_cfg in
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
@@ -30,6 +32,7 @@
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/ir/ir_append.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
@@ -39,6 +42,9 @@
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* function);
 
 #if BUSTER_BENCH_ALLOCATIONS
+// getrusage for the work ledger's per-phase minor-fault sample.
+#include <buster/lib/system_headers.h>
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
 
 void ir_construction_record(IrConstructionCounter counter, u64 amount)
@@ -66,6 +72,124 @@ void ir_construction_record(IrConstructionCounter counter, u64 amount)
 IrConstructionCounters ir_construction_counters(void)
 {
     return ir_construction_totals;
+}
+
+// The work ledger's storage and phase accountant; see work_ledger.h. A phase
+// accumulates the difference between two samples of the same monotonic
+// sources -- the process's minor page faults, which count first touches of
+// pages, and the calling thread's arena request totals -- so a phase's rows
+// sum exactly to the invocation's.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerCounters work_ledger_totals;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhase work_ledger_current_phase;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhaseTotals work_ledger_phase_start;
+
+BUSTER_GLOBAL_LOCAL void work_ledger_add(u64* value, u64 amount, bool* overflowed)
+{
+    if (amount > UINT64_MAX - *value)
+    {
+        *value = UINT64_MAX;
+        *overflowed = true;
+    }
+    else
+    {
+        *value += amount;
+    }
+}
+
+void work_ledger_record(WorkLedgerCounter counter, u64 amount)
+{
+    if ((u32)counter < WORK_LEDGER_COUNT)
+    {
+        work_ledger_add(work_ledger_totals.values + counter, amount, &work_ledger_totals.overflowed);
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+// Minor faults are process-wide on the platforms that report them; a compile
+// runs its phases on one thread, so the difference is that thread's touches.
+// Windows reports no minor-fault split and records zero.
+BUSTER_GLOBAL_LOCAL WorkLedgerPhaseTotals work_ledger_phase_sample(void)
+{
+    WorkLedgerPhaseTotals sample = {0};
+#if defined(__linux__) || defined(__APPLE__)
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+    {
+        sample.minor_faults = (u64)usage.ru_minflt;
+    }
+#endif
+    ArenaBenchmarkCounters arena = arena_benchmark_counters();
+    sample.arena_calls = arena.calls;
+    sample.arena_bytes = arena.requested_bytes;
+    sample.arena_zero_written = arena.zero_written;
+    return sample;
+}
+
+BUSTER_GLOBAL_LOCAL void work_ledger_phase_close(void)
+{
+    WorkLedgerPhaseTotals sample = work_ledger_phase_sample();
+    WorkLedgerPhaseTotals* phase = work_ledger_totals.phases + work_ledger_current_phase;
+    bool* overflowed = &work_ledger_totals.overflowed;
+    work_ledger_add(&phase->minor_faults, sample.minor_faults - BUSTER_MIN(sample.minor_faults, work_ledger_phase_start.minor_faults), overflowed);
+    work_ledger_add(&phase->arena_calls, sample.arena_calls - BUSTER_MIN(sample.arena_calls, work_ledger_phase_start.arena_calls), overflowed);
+    work_ledger_add(&phase->arena_bytes, sample.arena_bytes - BUSTER_MIN(sample.arena_bytes, work_ledger_phase_start.arena_bytes), overflowed);
+    work_ledger_add(&phase->arena_zero_written,
+                    sample.arena_zero_written - BUSTER_MIN(sample.arena_zero_written, work_ledger_phase_start.arena_zero_written), overflowed);
+    work_ledger_phase_start = sample;
+}
+
+void work_ledger_phase(WorkLedgerPhase phase)
+{
+    if ((u32)phase < WORK_LEDGER_PHASE_COUNT)
+    {
+        work_ledger_phase_close();
+        work_ledger_current_phase = phase;
+        work_ledger_totals.phases[phase].marks += 1;
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+WorkLedgerCounters work_ledger_counters(void)
+{
+    work_ledger_phase_close();
+    return work_ledger_totals;
+}
+
+String8 work_ledger_counter_mechanism(WorkLedgerCounter counter)
+{
+    String8 const mechanisms[] = {
+#define WORK_LEDGER_MECHANISM(id, mechanism, name) S8(#mechanism),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_MECHANISM)
+#undef WORK_LEDGER_MECHANISM
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? mechanisms[counter] : S8("invalid");
+}
+
+String8 work_ledger_counter_name(WorkLedgerCounter counter)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_NAME(id, mechanism, name) S8(#name),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_NAME)
+#undef WORK_LEDGER_NAME
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? names[counter] : S8("invalid");
+}
+
+String8 work_ledger_phase_name(WorkLedgerPhase phase)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_PHASE_NAME(id, name) S8(#name),
+        WORK_LEDGER_PHASES(WORK_LEDGER_PHASE_NAME)
+#undef WORK_LEDGER_PHASE_NAME
+    };
+    return (u32)phase < WORK_LEDGER_PHASE_COUNT ? names[phase] : S8("invalid");
 }
 
 String8 ir_construction_counter_name(IrConstructionCounter counter)
@@ -3993,28 +4117,57 @@ void ir_abi_context_reserve(IrAbiContext* context, u32 type_count)
     }
 }
 
-IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+BUSTER_GLOBAL_LOCAL IrAbiValue ir_abi_context_value_cold(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
 {
     IrAbiValue result = {0};
+    IrAbiCachePage* page = ir_abi_context_page(context, type_id.value / IR_ABI_CACHE_PAGE_TYPES, use);
+    u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
+    u64 mask = (u64)1 << slot;
+    if (program->types.types[type_id.value].layout.resolved)
+    {
+        page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
+                                                  use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
+        page->resolved |= mask;
+        context->classified_values += 1;
+        result = page->values[slot];
+    }
+    return result;
+}
+
+// Call only after the public entry's program/type/use and context checks.
+// Keep allocation and classification out of the resident-page lookup so the
+// by-value answer can flow directly into an optimized caller on a cache hit.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE IrAbiValue ir_abi_context_value_validated(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+{
+    use = ir_abi_context_use(context, use);
+    IrAbiCachePage** pages = context->pages[use];
+    IrAbiCachePage* page = pages ? pages[type_id.value / IR_ABI_CACHE_PAGE_TYPES] : 0;
+    u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
+    u64 mask = (u64)1 << slot;
+    IrAbiValue result;
+    if (page && (page->resolved & mask))
+    {
+        result = page->values[slot];
+    }
+    else
+    {
+        result = ir_abi_context_value_cold(program, context, type_id, use);
+    }
+    return result;
+}
+
+IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+{
+    IrAbiValue result;
     if (program && context && context->arena && context->type_storage == program->types.types &&
         context->convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count &&
         type_id.value / IR_ABI_CACHE_PAGE_TYPES < context->page_capacity)
     {
-        use = ir_abi_context_use(context, use);
-        IrAbiCachePage* page = ir_abi_context_page(context, type_id.value / IR_ABI_CACHE_PAGE_TYPES, use);
-        u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
-        u64 mask = (u64)1 << slot;
-        if (!(page->resolved & mask) && program->types.types[type_id.value].layout.resolved)
-        {
-            page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
-                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
-            page->resolved |= mask;
-            context->classified_values += 1;
-        }
-        if (page->resolved & mask)
-        {
-            result = page->values[slot];
-        }
+        result = ir_abi_context_value_validated(program, context, type_id, use);
+    }
+    else
+    {
+        result = (IrAbiValue){0};
     }
     return result;
 }
@@ -4091,10 +4244,23 @@ void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention)
 
 IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
 {
-    IrAbiValue result = {0};
+    IrAbiValue result;
     if (program && program->arena && convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count)
     {
-        result = ir_abi_context_value(program, ir_program_abi_context(program, convention), type_id, use);
+        IrAbiContext* context = ir_program_abi_context(program, convention);
+        if (context->arena && context->type_storage == program->types.types && context->convention < IR_ABI_CONVENTION_COUNT &&
+            type_id.value / IR_ABI_CACHE_PAGE_TYPES < context->page_capacity)
+        {
+            result = ir_abi_context_value_validated(program, context, type_id, use);
+        }
+        else
+        {
+            result = (IrAbiValue){0};
+        }
+    }
+    else
+    {
+        result = (IrAbiValue){0};
     }
     return result;
 }
@@ -5353,9 +5519,14 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
     {
+        // The signed value the sign and magnitude spell must lie in
+        // [-2^(width-1), 2^width): a reader that materializes the magnitude
+        // unreduced (the native emitters do) then sees the same number as one
+        // that reduces it (ir_integer_constant_decode).
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
         if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
-            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+            (ir_integer_type_width(type) && !ir_integer_constant_canonical(instruction, ir_integer_type_width(type))))
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6126,3 +6297,4 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>
 #include <buster/lib/compiler/ir/ir_fast.c>
+#include <buster/lib/compiler/ir/ir_integer.c>

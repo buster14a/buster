@@ -42,6 +42,17 @@ job/attempt, plan bytes and approved host/lease/profile identity. Merely writing
 `plan.json` beside later results does not prove predeclaration. Any source,
 binary, root, host/profile or output-oracle change requires a new plan and job.
 
+## Service producer
+
+The held `zen5-calibration-v1` recipe (`tools/bench_service/zen5_recipe.c`,
+described in `tools/bench_service/README.md`) is the intended producer. It
+builds the five trusted subjects serially, writes this plan in the canonical
+`freeze` form before any timed child, publishes a durable plan manifest, and
+emits `immutable.json`, `same-root-rebuild.json` and `cross-root.json` under
+`zen5/captures/`. Its final manifest lists the plan and capture digests, but
+those are bundle contents: the trusted digests for `replay` must still come
+from the authenticated service channel. The recipe never authorizes A/B.
+
 ## Exclusive collection and independent replay
 
 The operator explicitly authorizes the host interval and verifies the approved

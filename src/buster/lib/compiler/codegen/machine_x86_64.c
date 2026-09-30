@@ -11889,6 +11889,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
                         ? MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
                         : 0u);
     machine_x64_gpr_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLES_BUILT, 1);
     return (u8)machine_x64_gpr_encoding_table_count;
 }
 
@@ -12013,6 +12014,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
     table->gpr_operand_slot = variant->operand_slots[gpr_operand_index];
     table->memory_operand_slot = variant->operand_slots[memory_operand_index];
     machine_x64_variable_memory_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLES_BUILT, 1);
     return (u8)machine_x64_variable_memory_encoding_table_count;
 }
 
@@ -14152,6 +14154,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
 
+// Recomputes a frame-address value into `reg`: `lea reg, [rbp - offset]` for
+// the slot and member displacement of the value's defining LEA_FRAME row,
+// the same address that row produced.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_address(MachineX64Encoder* encoder, MachineFunction const* function,
+                                                             MachineStackPlacement const* placement, u32 virtual_register, u32 reg)
+{
+    MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
+    MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
+    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_X64_LEA_FRAME);
+    u32 offset = placement->stack_slot_offsets[machine_ref_payload(definition->operands[1])] - definition->payload;
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(reg, 64),
+        machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, 64, true),
+    };
+    bool result = entry && entry->descriptor && entry->plan_valid &&
+                  machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, 2, true, false, 0, false, 0);
+    encoder->overflow |= !result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                            MachineX64ExactEmitCounters* counters)
 {
@@ -14349,6 +14372,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
         else
         {
             MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + table_index;
+            WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
             MachineX64GprEncoding const* encoding = table->encodings + reg;
             if (table->operand_count != 1 || table->operand_slots[0] != 0 ||
                 table->flags != MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE ||
@@ -14437,6 +14461,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     u32 displacement_class = force_disp32 ? 2 : displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
     MachineX64VariableMemoryEncodingTable const* table =
         machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, 1);
     MachineX64GprEncoding const* encoding =
         table->encodings[displacement_class] + reg + (base << 4);
     u32 byte_count = encoding->byte_count;
@@ -14605,6 +14630,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
+        WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
         u8 low_register = table->operand_count ? operand_registers[table->operand_slots[0]] : 0;
         u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
@@ -15236,6 +15262,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         {
             if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, function->immediates[edit->subject]);
             else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, function->immediates[edit->subject], 0);
+        }
+        else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+        {
+            (void)machine_x64_emit_exact_frame_address(encoder, function, placement, edit->subject, edit->location);
         }
         else
         {
