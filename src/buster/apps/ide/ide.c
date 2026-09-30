@@ -39,6 +39,7 @@
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
@@ -924,6 +925,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
+    IrDiagnosticCensus diagnostic_census = ir_diagnostic_census();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -948,6 +950,13 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     {
         source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
                                     construction.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("overflowed"), diagnostic_census.overflowed);
+    for (u32 index = 0; index < IR_DIAGNOSTIC_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("diagnostic_census"), ir_diagnostic_census_counter_name((IrDiagnosticCensusCounter)index),
+                                    diagnostic_census.values[index]);
     }
 #endif
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
@@ -999,6 +1008,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // Only the source reports below read the spelled-byte sum.
+    invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
@@ -1120,12 +1131,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             ObjectWriteStatistics written = compile.object_write_statistics;
             string_print(S8("OBJECT_WRITE format={S8} section_visits={u64} symbol_visits={u64} relocation_visits={u64} image_reserved={u64} "
-                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} scratch={u64} retained={u64} "
-                            "output={u64}\n"),
+                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} payload_borrowed={u64} scratch={u64} "
+                            "retained={u64} output={u64}\n"),
                          object_format_name(object_format_for_target(invocation.target)), written.section_visits, written.symbol_visits,
                          written.relocation_visits, written.image_bytes_reserved, written.image_bytes_stored, written.image_bytes_zeroed,
-                         written.image_bytes_patched, written.payload_bytes_copied, written.scratch_bytes, written.retained_bytes,
-                         written.output_bytes);
+                         written.image_bytes_patched, written.payload_bytes_copied, written.payload_bytes_borrowed, written.scratch_bytes,
+                         written.retained_bytes, written.output_bytes);
         }
         for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
         {

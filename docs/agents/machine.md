@@ -259,12 +259,16 @@
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
-  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
-  independent parts; an orphan SSEUP becomes SSE. Canonical classification
-  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
-  with explicit XMM definition/use operands for whole-register argument
-  transfers and the existing XMM0 result bridges. Variadic prologues save
-  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  sixteen-byte VECTOR ABI part. Android IEEE binary128 scalar values and
+  one-member wrappers use the same XMM contract. Union merging can split that
+  pair into two independent parts; an orphan SSEUP becomes SSE. Canonical
+  classification publishes no FLOAT_UP parts. MIR keeps these values in frame
+  slots, with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. `machine_x64_type_is_f128`
+  admits only Android's exact sixteen-byte scalar layout; constants write both
+  limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
+  copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
+  each VECTOR read consumes one FP cursor slot.
   The shared direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
@@ -500,7 +504,8 @@
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
-  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
+  Binary128 arithmetic and rounding conversions are frontend runtime calls;
+  see the wide-float frontend guide.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
@@ -747,7 +752,8 @@
   links here. An instruction shape the relaxation does not recognize fails the
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
+  sequence too (`link_elf_relax_local_dynamic`).
 
 ## Wide integer conversion rounding
 

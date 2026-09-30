@@ -1,0 +1,57 @@
+diff --git a/src/buster/lib/compiler/codegen/machine_x86_64.c b/src/buster/lib/compiler/codegen/machine_x86_64.c
+index 258124a2..1a06d579 100644
+--- a/src/buster/lib/compiler/codegen/machine_x86_64.c
++++ b/src/buster/lib/compiler/codegen/machine_x86_64.c
+@@ -4714,6 +4714,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
+-                bool promoted_valid = direct_local & !indirect_local & operand_register_valid;
+-                bool local_slot_valid = direct_local & !indirect_local & !operand_register_valid & (slot != UINT32_MAX);
+-                bool place_is_addressed = indirect_local | (place_kind == MACHINE_X64_PLACE_ADDRESSED);
+-                bool pointer_valid = place_is_addressed & operand_register_valid;
+-                bool source_valid = promoted_valid | local_slot_valid | pointer_valid;
+-                bool select_and_define = source_valid & !(promoted_valid & (result_register == operand_register));
++                bool promoted_valid = false;
++                bool local_slot_valid = false;
++                bool pointer_valid = false;
++                if (direct_local && !indirect_local)
++                {
++                    if (operand_register_valid)
++                    {
++                        promoted_valid = true;
++                    }
++                    else if (slot != UINT32_MAX)
++                    {
++                        local_slot_valid = true;
++                    }
++                }
++                else if ((indirect_local || place_kind == MACHINE_X64_PLACE_ADDRESSED) && operand_register_valid)
++                {
++                    pointer_valid = true;
++                }
++                bool source_valid = promoted_valid || local_slot_valid || pointer_valid;
++                bool select_and_define = source_valid && !(promoted_valid && result_register == operand_register);
+@@ -4735,2 +4749,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
+-                    u16 opcode = local_slot_valid ? local_opcode : pointer_opcode;
+-                    opcode = promoted_valid ? promoted_opcode : opcode;
++                    u16 opcode;
++                    if (promoted_valid)
++                    {
++                        opcode = promoted_opcode;
++                    }
++                    else if (local_slot_valid)
++                    {
++                        opcode = local_opcode;
++                    }
++                    else
++                    {
++                        opcode = pointer_opcode;
++                    }
+@@ -4739,2 +4764,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
+-                    u32 source_payload = local_slot_valid ? slot : operand_register;
+-                    MachineRefKind source_kind = local_slot_valid ? MACHINE_REF_STACK_SLOT : MACHINE_REF_VIRTUAL_REGISTER;
++                    u32 source_payload = operand_register;
++                    MachineRefKind source_kind = MACHINE_REF_VIRTUAL_REGISTER;
++                    if (local_slot_valid)
++                    {
++                        source_payload = slot;
++                        source_kind = MACHINE_REF_STACK_SLOT;
++                    }
