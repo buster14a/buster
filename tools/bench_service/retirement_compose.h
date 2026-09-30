@@ -46,6 +46,9 @@
 /* A #619 adapter member identity is read with `%127s`. */
 #define TP_RETIREMENT_COMPOSE_MEMBER_BYTES 128u
 #define TP_RETIREMENT_COMPOSE_NAME_BYTES 128u
+/* The external closure (TpRetirementComposeRequest.closure) is at most one
+ * store's worth of entries. */
+#define TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES TP_RETIREMENT_STORE_FILES
 /* Composer-owned store leaves (the manifests use the plan's paths and the
  * sealed record uses the request's path). */
 #define TP_RETIREMENT_COMPOSE_CODE_PATH "retirement-code-records.jsonl"
@@ -226,6 +229,20 @@ typedef struct TpRetirementComposeRequest
     unsigned code_count;
     TpRetirementComposeClosure const* prior;
     unsigned prior_count;
+    /* The rest of the binding's pre-replay closure (the validator's
+     * _sealed_closure_files): files below the store root that are neither
+     * store files nor declared prior entries but external entries of the
+     * store plan, such as the evidence the binding names and its A/A
+     * admission receipt. Each is rehashed and sealed under its name like a
+     * prior entry; none may name a workflow phase or repeat a store path or
+     * a prior or earlier closure name or path. At most
+     * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES; may be empty. */
+    TpRetirementComposeClosure const* closure;
+    /* Where each closure file is stored below the root when that differs
+     * from the path it is sealed under (lane F's replay layout moves it
+     * back); NULL, or a NULL entry, means the path itself. */
+    char const* const* closure_stored;
+    unsigned closure_count;
     char const* sealed_path;
 } TpRetirementComposeRequest;
 

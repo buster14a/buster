@@ -32,10 +32,13 @@ from that result; its adapter replay refuses the fixture's placeholder harness
 commit and, with only that source pin relaxed, the preparation runner's
 stand-in statistics. Over the writer's directory the real validator, pinned
 by the profile, and the export CLI without any validator double both refuse
-the job-82 binding explicitly: it names context evidence (census support
-files and the other prior-closure artifacts) the worker unit's result does
-not contain (gap N8). Nothing here is a full service bundle, a performance
-result or #512 evidence.
+the job-82 binding explicitly. The result holds the context evidence the
+binding names (support files and the other prior-closure artifacts) as flat
+entries (#1998, closing gap N8): lane F's replay lays them out and the
+validator refuses the fixture's unapproved #508 support declaration; the
+export CLI does not lay them out and refuses the support declaration's
+binding path as missing. Nothing here is a full service bundle, a
+performance result or #512 evidence.
 """
 import contextlib
 import copy
@@ -572,6 +575,9 @@ WORKER_UNIT_RESULT = REPOSITORY / "build" / "bench-service-tools" / "retirement-
 WORKER_UNIT_REQUIRED = False
 # Lane F's publication identity for the worker unit's independent-replay archive.
 PUBLICATION_ID = "worker-unit-lane-f"
+# The context evidence files the producer publishes flat (#1998: all 39 of
+# the #511 record, BQ_PREP_WORKER_UNIT_EVIDENCE).
+WORKER_UNIT_EVIDENCE = 39
 
 
 class WorkerUnitResultJoinTests(unittest.TestCase):
@@ -699,8 +705,16 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
                       "sha256": hashlib.sha256(first.read_bytes()).hexdigest()}
         extracted = binding._extract_downloaded_bundle(self.work, descriptor, PUBLICATION_ID, state["closure"],
                                                        self.work / "extracted")
+        # The producer publishes the context evidence flat (#1998): the
+        # archive holds each at its binding path, from its flat entry.
+        flat = 0
         for item in state["closure"]:
-            self.assertEqual((extracted / item["path"]).read_bytes(), (self.result / item["path"]).read_bytes())
+            source = self.result / item["path"]
+            if not source.exists():
+                source = self.result / lane_f.evidence_name(item["path"])
+                flat += 1
+            self.assertEqual((extracted / item["path"]).read_bytes(), source.read_bytes())
+        self.assertEqual(flat, WORKER_UNIT_EVIDENCE)
 
     def test_writer_refuses_the_fixture_adapter_evidence(self):
         """The production adapter replay rebuilds the reviewed adapter at the
@@ -735,11 +749,14 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
         self.assertFalse((self.work / "relaxed").exists())
 
     def test_real_validator_refuses_the_writer_output_for_missing_context_evidence(self):
-        """(Gap N8) The writer's final binding round-trips through lane F's
-        import and check, but the real validator, pinned by the profile,
-        refuses it: the binding names context evidence (support, subjects,
-        producer and provenance files) the worker unit's result does not
-        contain. The refusal is recorded in the verdict, deterministically."""
+        """(Gap N8, closed by #1998) The writer's final binding round-trips
+        through lane F's import and check, and the context evidence the
+        binding names (support, subjects, producer and provenance files) is
+        in the worker unit's result as flat entries, which lane F lays out
+        at their binding paths (all WORKER_UNIT_EVIDENCE of them). The real
+        validator, pinned by the profile, then refuses the fixture's own
+        support declaration, which is not the approved #508 input. The
+        refusal is recorded in the verdict, deterministically."""
         directory = self.writer_lane_f("lane-f")
         validator, validator_sha256 = lane_f.profile_validator_pin(REPOSITORY)
         self.assertEqual(validator.resolve(), Path(binding.__file__).resolve())
@@ -754,9 +771,9 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
             self.assertEqual((verdict["validator"]["path"], verdict["validator"]["sha256"],
                               verdict["validator"]["closure_sha256"]),
                              ("tools/native_retirement_performance_binding.py", validator_sha256, closure_sha256))
-            self.assertEqual(verdict["evidence_layout"]["entries"], 0)
+            self.assertEqual(verdict["evidence_layout"]["entries"], WORKER_UNIT_EVIDENCE)
             self.assertEqual(verdict["refusal"],
-                             "ValueError: support.files[0] is missing or is a symbolic link: census/support.tsv")
+                             "ValueError: #508 support declaration digest is not the approved immutable input")
         self.assertEqual(verdicts[0], verdicts[1])
         with self.assertRaisesRegex(ValueError, "pinned SHA-256"):
             lane_f.replay_lane_f(self.result, directory, self.work / "clean-3", REPOSITORY, self.trusted,
@@ -764,11 +781,15 @@ class WorkerUnitResultJoinTests(unittest.TestCase):
 
     def test_cli_replays_the_worker_unit_result_through_lane_f(self):
         """The export CLI with the writer's directory and the real validator:
-        the replay stops at the same missing context evidence (N8), and a
-        final binding that changes anything else is refused before it."""
+        the CLI validates the unpacked result without lane F's flat-evidence
+        layout (retirement_lane_f.evidence_layout), so the replay stops at
+        the first binding path the result holds only as a flat entry (the
+        support declaration), and a final binding that changes anything else
+        is refused before it."""
         refused = self.run_cli(self.writer_lane_f("lane-f"))
         self.assertEqual(refused.returncode, 1)
-        self.assertIn("support.files[0] is missing or is a symbolic link: census/support.tsv", refused.stderr)
+        self.assertIn("support.files[0] is missing or is a symbolic link: " + binding.SUPPORT_DECLARATION_PATH,
+                      refused.stderr)
         self.assertNotIn("verified-without-admission", refused.stdout)
         changed = self.final_binding("changed", lambda record: record["rules"]["sampling"].__setitem__("seed", 8))
         refused = self.run_cli(changed.parent)

@@ -152,7 +152,17 @@ forged receipt with recomputed in-bundle descriptors is rejected. The binding
 record's location inside the result is owned by E's result composer: the
 worker-unit producer writes it at the result root as `retirement-binding.json`
 (#881 PR 3), `COMPOSER_BINDING_PATH` in the script fixes that path, and any
-other `--binding` is refused. That record carries its sealed-result and
+other `--binding` is refused. Every evidence file that record names, besides
+the composer's and lane F's workflow phases, is a result-root entry too: the
+producer publishes the binding context's evidence (support files, closures,
+subjects' snapshots, binaries and build receipts, producer toolchain, harness
+and statistics implementation, service, host-profile, qualification and lease
+receipts, provenance receipts, contract source and admission record) beside
+`retirement-aa-admission.json`, each at the size and digest the record binds
+and under the name the replay's layout maps its binding path to
+(`retirement-evidence-` and the path's segments joined by `--`), and the composer
+seals them under their binding paths; they are ordinary regular files of
+the bundle index and the export. That record carries its sealed-result and
 independent-replay phases as pending descriptors (the sealed result binds the
 record's digest), so it never passes a replay itself. Lane F's final binding
 is produced after the export, so it lives outside the service result: the
@@ -219,11 +229,17 @@ python3 tools/bench_service/retirement_lane_f.py replay /private/new-result /pri
 - **Flat evidence.** The producer publishes the evidence the binding context
   names as flat result-root entries (#1998). Lane F reads a binding-named
   path `P` that is not in the result from `retirement-evidence-` followed by
-  `P` with each `/` written `--` (`evidence_name`), and `replay` moves it
-  back to `P` in its clean copy for the validator (`evidence_layout`). The
+  `P`'s segments joined by `--` (`evidence_name`), and `replay` moves it
+  back to `P` in its clean copy for the validator (`evidence_layout`). A
+  single-segment `P` is only read where it is, and a `P` with an empty, `.`
+  or `..` segment, a segment containing `--` or beginning or ending with
+  `-`, a byte outside `[A-Za-z0-9._-]`, or a name over 128 bytes has no flat
+  name, so the mapping is injective; the producer's
+  `bq_retirement_worker_evidence_map` is the same rule, held to it by a
+  shared table test. The
   mapping is derived from the record's `{path, bytes, sha256}` descriptors
-  only. A path present both at `P` and flat, two paths with one flat name
-  (including a descriptor naming the flat file itself beside `P`), or a
+  only. A path present both at `P` and flat, a flat name claimed twice
+  (by `P` and by a descriptor naming the flat file itself), or a
   `retirement-evidence-*` entry that no descriptor names is refused. A
   descriptor with neither is left for the validator to refuse.
 - `bundle` checks every file the sealed result's seal enumerates against its

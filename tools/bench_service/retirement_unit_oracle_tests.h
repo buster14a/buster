@@ -491,11 +491,14 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
          bq_prep_test_oracle_source(fixture->installed, candidate, "/* census-fixture candidate */\n", NULL, true,
                                     &subjects[1]) &&
          bq_prep_test_oracle_toolchain(fixture);
-    char inventory[1024], inventory_sha256[SHA256_HEX_CAPACITY] = {0};
+    /* The contract pin is the repository contract's digest, so the worker
+     * unit's binding context can publish those bytes as contract.source. */
+    char inventory[1024], inventory_sha256[SHA256_HEX_CAPACITY] = {0}, contract[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && bq_prep_test_file_sha("docs/native-retirement-performance-contract.md", contract);
     length = ok ? snprintf(inventory, sizeof(inventory),
         "BQ-RETIREMENT-INPUTS-V1\nrepository=buster14a/buster\nsupport-sha256=%.64s\ncontract-sha256=%.64s\n"
         "base=%s %s %s %u %" PRIu64 " %u %u %u\ncandidate=%s %s %s %u %" PRIu64 " %u %u %u\n",
-        fixture->support_sha256, "2222222222222222222222222222222222222222222222222222222222222222",
+        fixture->support_sha256, contract,
         subjects[0].commit, subjects[0].tree, subjects[0].manifest_sha256, subjects[0].entries,
         (uint64_t)subjects[0].bytes, subjects[0].directories, subjects[0].max_path, subjects[0].max_depth,
         subjects[1].commit, subjects[1].tree, subjects[1].manifest_sha256, subjects[1].entries,
@@ -512,7 +515,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
     length = ok ? snprintf(fixture->base_profile, sizeof(fixture->base_profile),
         "schema=1\nrecipe=native-retirement-performance-v1\ncontract-sha256=%.64s\ninventory-sha256=%s\n"
         "toolchain-manifest-sha256=%s\nbuild-driver-sha256=%s\n",
-        "2222222222222222222222222222222222222222222222222222222222222222", inventory_sha256,
+        contract, inventory_sha256,
         fixture->toolchain_sha256, driver_sha256) : -1;
     ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_profile);
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(keys); index += 1)

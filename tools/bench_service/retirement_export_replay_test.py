@@ -778,16 +778,22 @@ class LaneFWriterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retirement-evidence-extra is not named"):
             lane_f.evidence_layout(self.result, self.composed)
         (self.result / "retirement-evidence-extra").unlink()
-        # Two binding paths with one flat name.
+        # No two binding paths share a flat name: a single segment is read
+        # where it is, and a segment that could blur a separator (containing
+        # "--", or beginning or ending with "-") has no flat name, so the
+        # flat file two such paths would share is named by neither.
         self.assertIsNone(lane_f.evidence_name("already-flat.md"))
-        colliding = json.loads(json.dumps(self.composed))
         source = self.composed["contract"]["source"]
-        colliding["support"] = {"first": dict(source, path="docs/x--y.md"), "second": dict(source, path="docs--x/y.md")}
-        self.assertEqual(lane_f.evidence_name("docs/x--y.md"), lane_f.evidence_name("docs--x/y.md"))
-        (self.result / "retirement-evidence-docs--x--y.md").write_bytes(b"contract\n")
-        with self.assertRaisesRegex(ValueError, "named by both"):
-            lane_f.evidence_layout(self.result, colliding)
-        (self.result / "retirement-evidence-docs--x--y.md").unlink()
+        for first, second in (("docs/x--y.md", "docs--x/y.md"), ("a-/b", "a/-b")):
+            self.assertIsNone(lane_f.evidence_name(first))
+            self.assertIsNone(lane_f.evidence_name(second))
+            colliding = json.loads(json.dumps(self.composed))
+            colliding["support"] = {"first": dict(source, path=first), "second": dict(source, path=second)}
+            shared = self.result / (lane_f.EVIDENCE_PREFIX + first.replace("/", lane_f.EVIDENCE_SEPARATOR))
+            shared.write_bytes(b"contract\n")
+            with self.subTest(first=first), self.assertRaisesRegex(ValueError, "is not named by the binding"):
+                lane_f.evidence_layout(self.result, colliding)
+            shared.unlink()
         # One flat file named both flat and by its path, in either sort order.
         for path in ("docs/contract.md", "z/contract.md"):
             flat = lane_f.evidence_name(path)

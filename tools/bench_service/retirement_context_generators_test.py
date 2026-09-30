@@ -6,7 +6,8 @@ Usage: retirement_context_generators_test.py
 BindingContextTests drives retirement_binding_context.py over the #511 test
 record as its inputs (retirement_binding_context_fixture.py
 --production-inputs, with a census directory made from the same record): its
-bytes equal the fixture generator's for the same facts, are deterministic,
+bytes equal the fixture's record context (--record-context) for the same
+facts, are deterministic,
 and pass ``check_context`` (the C importer's layout); a context with two
 sections swapped, a section missing, the admission sentinel moved or a
 non-canonical section is refused, and so are a wrong binary digest, odd or
@@ -110,7 +111,7 @@ class BindingContextTests(unittest.TestCase):
         output = self.root / "fixture.context"
         contract = sha256(self.contents["docs/native-retirement-performance-contract.md"])
         subprocess.run([sys.executable, "-W", "error", str(HERE / "retirement_binding_context_fixture.py"),
-                        str(self.census), str(output), self.binaries["baseline"], self.binaries["candidate"],
+                        "--record-context", str(self.census), str(output), self.binaries["baseline"], self.binaries["candidate"],
                         contract, "7", "60", "100000"], check=True)
         self.assertEqual(self.generate(), output.read_bytes())
 

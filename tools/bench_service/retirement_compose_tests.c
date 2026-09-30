@@ -47,6 +47,11 @@ BUSTER_GLOBAL_LOCAL unsigned assertions, failures;
 #define DRIVER_GROUPS 64u
 #define DRIVER_FILES 64u
 #define DRIVER_PRIOR 128u
+/* The external closure's capacity: one entry over the composer's cap
+ * (CLOSURE_OVER_CAP). */
+#define DRIVER_CLOSURE (TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES + 1u)
+/* One CLOSURE_OVER_CAP name or path, with its terminator. */
+#define DRIVER_CLOSURE_TEXT 32u
 #define DRIVER_PATH 512u
 #define DRIVER_LINE 4096u
 #define DRIVER_WORDS 16u
@@ -119,6 +124,12 @@ typedef struct Driver
     DriverPrior prior_storage[DRIVER_PRIOR];
     TpRetirementComposeClosure prior[DRIVER_PRIOR];
     unsigned prior_count;
+    /* The external closure (the worker unit's evidence); closure_null
+     * passes a NULL array with the count. */
+    TpRetirementComposeClosure closure[DRIVER_CLOSURE];
+    char const* closure_stored[DRIVER_CLOSURE];
+    unsigned closure_count;
+    int closure_null;
     TpRetirementComposeDeclaration declaration;
     TpRetirementPlan statistics;
     TpRetirementComposeLayout layout;
@@ -572,7 +583,9 @@ BUSTER_GLOBAL_LOCAL void driver_request(Driver* driver)
         .aa_transcript_paths = driver->aa_transcript.paths, .aa_transcript_count = driver->aa_transcript.count,
         .aa_metrics_tag = driver->aa_tag[0] ? driver->aa_tag : NULL,
         .code = driver->code, .code_count = driver->code_count, .prior = driver->prior,
-        .prior_count = driver->prior_count, .sealed_path = driver->sealed};
+        .prior_count = driver->prior_count, .closure = driver->closure_null ? NULL : driver->closure,
+        .closure_stored = driver->closure_stored, .closure_count = driver->closure_count,
+        .sealed_path = driver->sealed};
 }
 
 BUSTER_GLOBAL_LOCAL int driver_compose(Driver* driver)
@@ -1580,6 +1593,123 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusals(void)
     for (unsigned refusal = 0; refusal < REFUSE_COUNT; ++refusal) test_compose_refusal((Refusal)refusal);
 }
 
+/* The external closure (#881 P4): one evidence file beside the store is
+ * rehashed and sealed under its name, also when it is stored under another
+ * name than the path it is sealed under (lane F's layout); refused at the
+ * prior stage, with no sealed result, are a digest mismatch, a missing file,
+ * a symbolic link, a path leaving the root (stored or sealed), a store
+ * file's path, a prior entry's path or name (stored or sealed), a workflow
+ * phase's name, a repeated entry, a NULL array and more than
+ * TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES entries (each distinct and valid
+ * alone, closure_over_cap, so only the count refuses). */
+typedef enum ClosureCase
+{
+    CLOSURE_ACCEPTED, CLOSURE_DIGEST, CLOSURE_MISSING, CLOSURE_SYMLINK, CLOSURE_ESCAPE, CLOSURE_STORE_PATH,
+    CLOSURE_PRIOR_PATH, CLOSURE_PRIOR_NAME, CLOSURE_PHASE, CLOSURE_REPEATED, CLOSURE_NULL, CLOSURE_OVER_CAP,
+    CLOSURE_MAPPED, CLOSURE_STORED_PRIOR, CLOSURE_MAPPED_ESCAPE, CLOSURE_CASES
+} ClosureCase;
+
+/* CLOSURE_OVER_CAP's closure: DRIVER_CLOSURE entries with distinct names,
+ * paths and evidence files beside the store, every one of which the
+ * per-entry checks accept. */
+BUSTER_GLOBAL_LOCAL int closure_over_cap(Fixture* fixture, char const* body, char const* digest)
+{
+    Driver* driver = fixture->driver;
+    char* text = (char*)tp_retirement_compose_allocate(driver->arena, (uint64_t)DRIVER_CLOSURE * 2u *
+                                                                       DRIVER_CLOSURE_TEXT);
+    int valid = text != NULL;
+    for (unsigned i = 0; valid && i < DRIVER_CLOSURE; ++i)
+    {
+        char* name = text + (size_t)i * 2u * DRIVER_CLOSURE_TEXT;
+        char* path = name + DRIVER_CLOSURE_TEXT;
+        snprintf(name, DRIVER_CLOSURE_TEXT, "measurement.evidence_%04u", i);
+        snprintf(path, DRIVER_CLOSURE_TEXT, "retirement-evidence-%04u", i);
+        valid = fixture_write(fixture->store, path, body, strlen(body));
+        driver->closure[i] = (TpRetirementComposeClosure){name, path, strlen(body), digest};
+        driver->closure_stored[i] = NULL;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void test_compose_closure_case(ClosureCase which)
+{
+    static char const body[] = "evidence\n";
+    static char const contract[] = "contract\n";
+    Fixture fixture;
+    int ready = fixture_ready(&fixture);
+    CHECK(ready);
+    Driver* driver = fixture.driver;
+    char digest[65], contract_digest[65], samples_digest[65], path[512];
+    fixture_digest(body, strlen(body), digest);
+    fixture_digest(contract, strlen(contract), contract_digest);
+    snprintf(path, sizeof(path), "%s/retirement-samples-0000.jsonl", fixture.store);
+    unsigned char* samples = NULL;
+    size_t samples_length = 0;
+    ready = ready && fixture_write(fixture.store, "retirement-evidence-harness", body, strlen(body)) &&
+            fixture_write(fixture.root, "x", body, strlen(body)) &&
+            driver_read_file(driver->arena, path, &samples, &samples_length) &&
+            symlinkat("retirement-evidence-harness", driver->store_fd, "retirement-evidence-link") == 0;
+    CHECK(ready);
+    if (ready)
+    {
+        fixture_digest(samples, samples_length, samples_digest);
+        TpRetirementComposeClosure entry = {"measurement.harness_binary", "retirement-evidence-harness",
+                                            strlen(body), digest};
+        char changed[65];
+        memcpy(changed, digest, sizeof(changed));
+        changed[0] = changed[0] == 'f' ? 'e' : 'f';
+        if (which == CLOSURE_DIGEST) entry.sha256 = changed;
+        if (which == CLOSURE_MISSING) entry.path = "retirement-evidence-missing";
+        if (which == CLOSURE_SYMLINK) entry.path = "retirement-evidence-link";
+        if (which == CLOSURE_ESCAPE) entry.path = "../x";
+        if (which == CLOSURE_STORE_PATH)
+            entry = (TpRetirementComposeClosure){"measurement.harness_binary", "retirement-samples-0000.jsonl",
+                                                 samples_length, samples_digest};
+        if (which == CLOSURE_PRIOR_PATH)
+            entry = (TpRetirementComposeClosure){"measurement.harness_binary", "contract.md", strlen(contract),
+                                                 contract_digest};
+        if (which == CLOSURE_PRIOR_NAME) entry.name = "contract.source";
+        if (which == CLOSURE_PHASE) entry.name = "workflow.phases.independent_replay";
+        char const* stored = NULL;
+        if (which == CLOSURE_MAPPED || which == CLOSURE_STORED_PRIOR || which == CLOSURE_MAPPED_ESCAPE)
+        {
+            stored = which == CLOSURE_STORED_PRIOR ? "contract.md" : "retirement-evidence-harness";
+            entry.path = which == CLOSURE_MAPPED_ESCAPE ? "measurement/../harness" : "measurement/harness";
+            if (which == CLOSURE_STORED_PRIOR)
+            {
+                entry.bytes = strlen(contract);
+                entry.sha256 = contract_digest;
+            }
+        }
+        driver->closure[0] = driver->closure[1] = entry;
+        driver->closure_stored[0] = driver->closure_stored[1] = stored;
+        driver->closure_count = which == CLOSURE_REPEATED ? 2u : which == CLOSURE_OVER_CAP ? DRIVER_CLOSURE : 1u;
+        if (which == CLOSURE_OVER_CAP) CHECK(closure_over_cap(&fixture, body, digest));
+        driver->closure_null = which == CLOSURE_NULL;
+        int composed = driver_compose(driver);
+        struct stat info;
+        int sealed = fstatat(driver->store_fd, "retirement-sealed-result.json", &info, AT_SYMLINK_NOFOLLOW) == 0;
+        if (which == CLOSURE_ACCEPTED || which == CLOSURE_MAPPED)
+            CHECK(composed && sealed &&
+                  file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
+                                which == CLOSURE_MAPPED ?
+                                "\"name\":\"measurement.harness_binary\",\"path\":\"measurement/harness\"" :
+                                "\"name\":\"measurement.harness_binary\",\"path\":\"retirement-evidence-harness\""));
+        else
+        {
+            CHECK(!composed && !sealed && driver->result.refused && !strcmp(driver->result.refused, "prior"));
+            if (driver->result.refused && strcmp(driver->result.refused, "prior"))
+                fprintf(stderr, "COMPOSE_TEST closure=%u stage=%s\n", (unsigned)which, driver->result.refused);
+        }
+    }
+    fixture_stop(&fixture);
+}
+
+BUSTER_GLOBAL_LOCAL void test_compose_closure(void)
+{
+    for (unsigned which = 0; which < CLOSURE_CASES; ++which) test_compose_closure_case((ClosureCase)which);
+}
+
 BUSTER_GLOBAL_LOCAL int reopen_store(Driver* driver)
 {
     tp_retirement_store_close(&driver->store);
@@ -1927,6 +2057,7 @@ int main(int argc, char** argv)
         test_compose_success();
         test_compose_series_shards();
         test_compose_refusals();
+        test_compose_closure();
         test_production_capacity();
         test_budget_and_settle();
         test_handoff();

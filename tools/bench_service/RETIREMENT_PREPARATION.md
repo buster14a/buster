@@ -1357,7 +1357,11 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
    three control files, the five `BQPHASE2` `worker-phase-N` receipts,
    `worker-phase-5` included, and PR 3's binding and A/A admission receipt,
-   `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`), so store files plus those entries
+   `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`, each at the per-file cap; and the
+   evidence files the pinned binding context names, at their exact count and
+   bytes, `bq_retirement_worker_evidence_measure`, at most
+   `BQ_RETIREMENT_WORKER_EVIDENCE_CAP`: the record's 33 fixed artifacts and
+   up to 15 requested-work items), so store files plus those entries
    stay within `BQ_WORKER_BUNDLE_ENTRY_CAP`. Every other result-root file is
    a store file (the untimed streams, D's documents, the post-sample record,
    both stages' streams and the composer's outputs), so the plan covers the
@@ -1426,6 +1430,55 @@ stand-in.
    validator structurally. A production context comes from
    `retirement_binding_context.py` (see
    [Production context generators](#production-context-generators-881)).
+2b. **The evidence the binding names.** Every `{path, bytes, sha256}`
+   descriptor the context's sections carry, except the admission receipt
+   and the workflow phases, names a file the producer publishes into the
+   result root (`bq_retirement_worker_evidence_publish`): the nine support
+   files, the validator source, the requested-work closures, both subjects'
+   source snapshot, binary and build receipt, the producer toolchain and
+   build files, the harness binary and statistics implementation, the
+   service, host-profile, qualification and lease receipts, the five
+   provenance receipts, the contract source and the admission record (39 in
+   the #511 record, `bq_retirement_worker_evidence_sites`). The context
+   names the record's own paths (`docs/native-retirement-support-v1.tsv`,
+   `tools/throughput/retirement_stats.h`, ...), and each file is published
+   under the result-root name lane F's replay maps that path to
+   (`bq_retirement_worker_evidence_map`, lane F's `evidence_name` rule:
+   `retirement-evidence-` and the path's segments joined by `--`); the
+   replay moves it back to its path before validating. A single-segment path
+   (lane F reads one where it is), a path with an empty, `.` or `..`
+   segment, a segment containing `--` or beginning or ending with `-` (so
+   the mapping is injective), a byte outside `[A-Za-z0-9._-]` and `/`, or a
+   mapped name over 128 bytes refuses, as does a repeated path or mapped
+   name. `bq_prep_worker_unit_evidence_names` evaluates one table of paths
+   with both the C rule and lane F's `evidence_name` and requires them to
+   agree. The composer seals each under its
+   binding path (`TpRetirementComposeRequest.closure_stored` names where it
+   is stored). The subjects' binaries are copied
+   from the producer's held descriptors (the gate's pair, whose digests the
+   context check already requires); every other file comes from the
+   installed evidence directory `native-retirement-performance-v1.evidence`
+   under `recipes/` (service-owned, not writable; its files single-link and
+   read-only), whose files the pinned context covers by digest. Every
+   source is read and hashed before any file is written, and each again as
+   it is written; each must be exactly the descriptor's size (at most the
+   bundle's 64 MiB per-file cap, else the context refuses at listing) and
+   SHA-256: a changed installed file refuses with `BQ_RECIPE_MISMATCH`, a
+   changed held binary with `BQ_SOURCE_MISMATCH`, and a refusal leaves no
+   evidence file (a second-pass refusal unlinks what it wrote). The
+   composer's external closure is at most `TP_RETIREMENT_COMPOSE_CLOSURE_ENTRIES`
+   and refuses a digest mismatch, a missing or linked file, a path leaving
+   the root, a store path, a repeated prior or closure name or path and a
+   `workflow.phases.*` name. Composition requires the same
+   count and bytes the store plan reserved, and passes the evidence and the
+   A/A admission receipt to the composer as the rest of the validator's
+   pre-replay closure (`TpRetirementComposeRequest.closure`), which it
+   rehashes and seals beside D's documents under the validator's
+   `_all_artifacts` names. The fixture's context and evidence directory come
+   from `retirement_binding_context_fixture.py`, whose service, host and
+   provenance receipts carry the fixture A/A receipt's identities and whose
+   contract source is the repository's contract (the fixture profile's
+   `contract-sha256=` pins its digest).
 3. **Composition and the authority.** `tp_retirement_compose` (a refusal
    prints its stage), then `tp_retirement_store_receipt_authority` into
    `<attempt>/retirement-authority/` with the result root as the store root:
@@ -1547,10 +1600,38 @@ MEASURING, A/A, the fixture admission, the post-A/A document, the freeze,
 A/B, READY, composition and MEASURED, then the finalization; all five
 documents are written at exactly the sizes the campaign retained before
 timing (`documents-sized.txt`), and the post-sample record, every stream
-kind of both stages, every composer output, the binding, the manifest and
-the bundle are published. The composed result is exported beside the runner
+kind of both stages, every composer output, the binding, the 39 evidence
+files its context names, the manifest and the bundle are published. The
+composed result is exported beside the runner
 (`build/bench-service-tools/retirement-worker-unit-result/`) for
 `retirement_compose_test.py` and `retirement_export_replay_real_test.py`.
+`bq_prep_worker_unit_evidence_refusals` publishes the evidence again into
+fresh directories and requires the refusals of swapped held binaries, an
+installed file with one byte changed, a missing one, and a context path
+outside the prefix or with a slash. `WorkerUnitEvidenceTests` runs the
+unchanged `native_retirement_performance_binding.py` over a copy of the
+exported result with lane F's two phases stubbed and the authority's receipt
+digest as the trust root (only `_check_support_output` and `_population` are
+replaced: the fixture census is not the approved #508 declaration): the
+execution, subject and provenance receipts pass the validator's own checks,
+each evidence file removed or changed is refused, and `validate()` accepts
+once exactly the fixture's known non-evidence refusals are waived
+(`WORKER_UNIT_KNOWN_GAPS`). Each waiver matches one call site's exact
+message and a predicate over that call's own values, and must fire exactly
+its count: the stand-in compilers copy one `tests/batch.metrics` into every
+batch, so metrics content repeats (3,903 timed and 576 untimed, waived only
+for that record's digest) and its header names `allocator=none` and
+`target=x86_64-linux` whatever the batch (2,928 timed batches of the other
+three allocators and 576 untimed batches of the untimed contract's
+cross-target `aarch64-unknown-linux-gnu` groups, waived only when every other
+header field matches); lane D records a runtime launch's executable as the
+compiler binary (488, waived only for runtime invocations whose output and
+command match); and the fixture's stand-in composer adapter (1). The copy is
+laid out as lane F's replay lays out the result (`_lane_f_layout`), so the
+validator finds `docs/native-retirement-support-v1.tsv` and
+`tools/throughput/retirement_stats.h` at their pinned paths. Unwaived, it
+stops at the first gap; a changed frozen compile command is refused even
+with the waivers.
 Job 85 retains a failing untimed launch, job 86 a SIGTERM during A/A, job 87
 the deadline expiring during A/A, and job 88 a detached (`setsid`) sleeper
 left by its first second-label compile, found and killed right after that
@@ -1971,7 +2052,8 @@ The host facts and the qualification and host-profile receipts need #422
 of the admitted pair on the service host. Until those exist, only the test
 record (`retirement_binding_context_fixture.py --production-inputs`) can
 drive the tool. With the record's own binaries its output is byte-identical
-to the fixture generator's.
+to the fixture's record context (`--record-context`; the fixture's default
+mode now writes the coherent worker-unit context and its evidence).
 
 One admitted context pins exactly one baseline/candidate pair (gap audit
 N9). The subjects' binary digests are in the context, and

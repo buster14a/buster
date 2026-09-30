@@ -31,7 +31,8 @@
  *              authority digest, then the result manifest and bundle
  * The retirement-worker entries of the result root are reserved before
  * timing (BQ_RETIREMENT_WORKER_RESULT_ENTRIES: the control files, the phase
- * receipts, the binding and its admission receipt). Production A/A
+ * receipts, the binding and its admission receipt; and the evidence files
+ * the pinned binding context names, bq_retirement_worker_evidence_measure). Production A/A
  * admission has no authority (#426, #1021) and stays compiled out; the
  * preparation fixture compiles the driver's fixture admission and supplies
  * the receipt stand-in (bq_retirement_worker_campaign_fixture_receipt).
@@ -64,7 +65,7 @@
  * written concurrently cannot all be pending store files);
  * bq_retirement_worker_store_plan (lane E's plan with the retained
  * declaration, D's documents as prior entries and the result root's control
- * files and phase receipts reserved); BqRetirementWorkerCampaign.
+ * files, phase receipts and evidence files reserved); BqRetirementWorkerCampaign.
  */
 #include "worker_linux.h"
 
@@ -116,13 +117,30 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_directories[BQ_RETIRE
  * receipt, retirement_worker_compose.c) are inventoried beside the store's
  * files, so the store plan reserves them as external entries, each at the
  * bundle's per-file cap: the store then keeps its files plus those entries
- * within the bundle's entry cap. D's five documents are the plan's prior
- * entries and the authority and its context chain live in the attempt
- * workspace, outside the result root. */
+ * within the bundle's entry cap. The evidence files the pinned binding
+ * context names (bq_retirement_worker_evidence_measure) are external entries
+ * too, at their exact sizes. D's five documents are the plan's prior entries
+ * and the authority and its context chain live in the attempt workspace,
+ * outside the result root. */
 #define BQ_RETIREMENT_WORKER_BINDING_ENTRIES 2u
 #define BQ_RETIREMENT_WORKER_RESULT_ENTRIES \
     (BQ_WORKER_BUNDLE_CONTROL_ENTRIES + BQ_WORKER_RETIREMENT_PHASE_RECEIPTS + BQ_RETIREMENT_WORKER_BINDING_ENTRIES)
 #define BQ_RETIREMENT_WORKER_CONTROL_BYTES ((u64)BQ_RETIREMENT_WORKER_RESULT_ENTRIES * BQ_WORKER_BUNDLE_FILE_CAP)
+/* The evidence files a binding context may name. The #511 record fixes 33:
+ * nine support files (SUPPORT_FILE_ROLES), the validator source, both
+ * subjects' snapshot, binary and build receipt, four producer, two
+ * measurement, four execution (the A/A admission receipt is the producer's
+ * own) and five provenance artifacts, the contract source and the admission
+ * record. Requested-work items vary: the validator requires one per
+ * REQUIRED_WORK_CLOSURE_KINDS (six) and bounds none, so the reviewed context
+ * may name at most BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP, nine beyond
+ * the required closure; a larger reviewed closure needs a reviewed raise.
+ * Every evidence file is one bundle entry beside the store's. */
+#define BQ_RETIREMENT_WORKER_EVIDENCE_FIXED 33u
+#define BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP 15u
+#define BQ_RETIREMENT_WORKER_EVIDENCE_CAP (BQ_RETIREMENT_WORKER_EVIDENCE_FIXED + BQ_RETIREMENT_WORKER_EVIDENCE_REQUESTED_CAP)
+BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_WORKER_EVIDENCE_CAP +
+                BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_FILES <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
 /* One receipt per BQPHASE2 phase, RETIREMENT_READY the last-numbered. */
@@ -738,9 +756,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_streams_publish(TpRetirementStore*
  * D's two constant entries, bq_retirement_unit_handoff_declared), D's five
  * documents as prior entries at their measured sizes, and the result root's
  * worker-written entries (BQ_RETIREMENT_WORKER_RESULT_ENTRIES: the control
- * files and the phase receipts) as external entries, so every store file
- * plus every such entry stays within BQ_WORKER_BUNDLE_ENTRY_CAP; any excess
- * refuses. */
+ * files and the phase receipts, each at the per-file cap, and the binding
+ * context's `evidence_entries` evidence files, `evidence_bytes` in all) as
+ * external entries, so every store file plus every such entry stays within
+ * BQ_WORKER_BUNDLE_ENTRY_CAP; any excess refuses. */
 #define BQ_RETIREMENT_WORKER_RETAINED (4u + BQ_RETIREMENT_UNIT_HANDOFF_RETAINED)
 typedef struct BqRetirementWorkerDeclaration
 {
@@ -785,16 +804,16 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_declaration(TpRetirementCampaignCa
  * rows) and the store plan over them. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_store_plan(TpRetirementStore* store,
     TpRetirementCampaignCapacity const* capacity, TpRetirementComposeLayout const* layout, unsigned pairs,
-    unsigned code_rows, BqRetirementWorkerDeclaration const* declared, TpRetirementCampaignStorePlan* plan,
-    TpRetirementFamilyCounts* family)
+    unsigned code_rows, BqRetirementWorkerDeclaration const* declared, u32 evidence_entries, u64 evidence_bytes,
+    TpRetirementCampaignStorePlan* plan, TpRetirementFamilyCounts* family)
 {
     TpRetirementComposeShape shape = {layout, pairs, code_rows, BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS};
     TpRetirementComposeBounds bounds = {0};
-    bool ok = tp_retirement_compose_bounds(&shape, &bounds) &&
-              tp_retirement_compose_plan(store, capacity, &shape, &declared->declaration,
-                  BQ_RETIREMENT_WORKER_RESULT_ENTRIES, BQ_RETIREMENT_WORKER_CONTROL_BYTES, plan) &&
-              plan->external_entries >= BQ_RETIREMENT_WORKER_RESULT_ENTRIES &&
-              plan->entries <= BQ_WORKER_BUNDLE_ENTRY_CAP;
+    u32 externals = BQ_RETIREMENT_WORKER_RESULT_ENTRIES + evidence_entries;
+    bool ok = evidence_entries <= BQ_RETIREMENT_WORKER_EVIDENCE_CAP && tp_retirement_compose_bounds(&shape, &bounds) &&
+              tp_retirement_compose_plan(store, capacity, &shape, &declared->declaration, externals,
+                  BQ_RETIREMENT_WORKER_CONTROL_BYTES + evidence_bytes, plan) &&
+              plan->external_entries >= externals && plan->entries <= BQ_WORKER_BUNDLE_ENTRY_CAP;
     *family = ok ? (TpRetirementFamilyCounts){bounds.bootstrap_members, bounds.cell_members} :
                    (TpRetirementFamilyCounts){0};
     return ok;
@@ -850,6 +869,10 @@ typedef struct BqRetirementWorkerCampaign
     TpRetirementCampaignStorePlan store_plan;
     TpRetirementFamilyCounts family;
     uint64_t document_bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
+    /* The binding context's evidence files, reserved in the store plan and
+     * published at composition (bq_retirement_worker_evidence_publish). */
+    u64 evidence_bytes;
+    u32 evidence_entries;
     /* The A/A admission receipt the admission step verified (fixture only:
      * production admission is compiled out), which the binding names. */
     char aa_receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX];
@@ -859,6 +882,11 @@ typedef struct BqRetirementWorkerCampaign
      * closed rather than aborted. */
     bool begun, composed;
 } BqRetirementWorkerCampaign;
+
+/* The count and total bytes of the evidence files the pinned binding context
+ * names (retirement_worker_compose.c), which the store plan reserves. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_measure(Arena* arena, int installed, String8 profile,
+    u32* entries, u64* bytes);
 
 /* Composition, the authority and MEASURED (retirement_worker_compose.c). */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_compose(BqRetirementWorkerCampaign* campaign,
@@ -1194,6 +1222,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_bind(BqRetirementWorke
         result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && !bq_retirement_worker_sized_write(campaign->directory, campaign->document_bytes))
         result = BQ_IO;
+    /* The binding context's evidence files are external entries of the plan. */
+    if (result == BQ_OK)
+        result = bq_retirement_worker_evidence_measure(campaign->arena, unit->installed, unit->profile,
+                                                       &campaign->evidence_entries, &campaign->evidence_bytes);
     if (result == BQ_OK)
     {
         campaign->store_files = bq_retirement_worker_allocate(campaign->arena, TP_RETIREMENT_STORE_FILES,
@@ -1206,8 +1238,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_bind(BqRetirementWorke
         !(bq_retirement_worker_declaration(&campaign->campaign.capacity, campaign->document_bytes,
                                            &campaign->declaration) &&
           bq_retirement_worker_store_plan(&campaign->store, &campaign->campaign.capacity, &campaign->compose_layout,
-              campaign->pins.pairs, campaign->code_capacity, &campaign->declaration, &campaign->store_plan,
-              &campaign->family)))
+              campaign->pins.pairs, campaign->code_capacity, &campaign->declaration, campaign->evidence_entries,
+              campaign->evidence_bytes, &campaign->store_plan, &campaign->family)))
         result = BQ_RESOURCE_MISMATCH;
     /* The finished untimed streams are the first store files. */
     if (result == BQ_OK &&
