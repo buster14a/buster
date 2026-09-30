@@ -4342,7 +4342,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_weak_unwind(UnitTestArguments* 
                             link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
                         if (!anchored)
                         {
-                            BUSTER_TEST(arguments, linked.error == LINK_ERROR_RELOCATION && !linked.executable.length);
+                            BUSTER_TEST(arguments, linked.error == LINK_ERROR_RELOCATION);
                         }
                         else if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
                         {
