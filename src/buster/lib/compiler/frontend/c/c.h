@@ -379,10 +379,14 @@ struct CPreprocessedMetrics
     u64 definitions;
 };
 
-// A phase arena reserves what a translation-unit arena reserves: it holds,
-// for the length of one phase, state that used to live in the TU arena for
-// the length of the whole compile.
-#define C_PHASE_ARENA_RESERVED_SIZE BUSTER_GB(32)
+// A phase arena reserves about what a translation-unit arena reserves: it
+// holds, for the length of one phase, state that used to live in the TU arena
+// for the length of the whole compile. It is deliberately one GiB short of the
+// driver's COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE: the per-thread
+// arena pool matches parked mappings by reservation size alone, and a distinct
+// size keeps a retired phase arena (16 MiB committed) from being handed out as
+// a unit arena, or counted as one, on the thread that parked it.
+#define C_PHASE_ARENA_RESERVED_SIZE BUSTER_GB(31)
 // Committed bytes a retired phase arena keeps for the next unit on the same
 // thread; the rest returns to the OS so a phase's peak does not outlive it.
 #define C_PHASE_ARENA_RETAINED_SIZE BUSTER_MB(16)
