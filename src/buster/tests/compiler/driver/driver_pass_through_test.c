@@ -63,6 +63,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     CompilerDriverInvocation unsplit = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(opaque));
     BUSTER_TEST(arguments, unsplit.error == COMPILER_DRIVER_ERROR_ARGUMENT && unsplit.linker_argument_count == 1);
     BUSTER_TEST(arguments, compiler_driver_test_string_contains(unsplit.diagnostic, opaque[2]));
+    String8 missing_value[] = {S8("-Xlinker")};
+    CompilerDriverInvocation missing = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_value));
+    BUSTER_TEST(arguments, missing.error == COMPILER_DRIVER_ERROR_ARGUMENT && compiler_driver_test_string_contains(missing.diagnostic, S8("-Xlinker")));
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         String8 command[] = {S8("--target"), targets[target], S8("-Wl,--export-dynamic"), S8("tests/basic_c_multi_main.c")};

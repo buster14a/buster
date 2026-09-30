@@ -12436,7 +12436,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation uefi_linker_argument =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(uefi_linker_argument_command_line));
     BUSTER_TEST(arguments, uefi_linker_argument.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets"));
+    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets: --gc-sections"));
     String8 unsupported_uefi_command_line[] = {
         S8("--target=wasm64-unknown-uefi"), S8("source.c"),
     };
