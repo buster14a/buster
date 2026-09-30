@@ -515,6 +515,111 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_lowering_source = S8_INITIALIZER(
     "}\n"
 );
 
+// Lowering places every function's rows at the cursors of the module's row
+// streams and trims the streams to the rows the function kept
+// (c_ir_row_streams_trim). Every lowered function therefore leaves lowering
+// with exact capacities, cache-line-aligned instruction rows, rows owned by
+// the result arena, and rows that no later function overlaps; the canonical
+// passes that grow a trimmed function afterwards -- promotion appends
+// block-parameter values -- move that array out of the stream and still see
+// valid IR.
+BUSTER_GLOBAL_LOCAL String8 const c_test_ir_row_streams_source = S8_INITIALIZER(
+    "static int counter;\n"
+    "int accumulate(int limit)\n"
+    "{\n"
+    "    for (int index = 0; index < limit; index += 1)\n"
+    "    {\n"
+    "        if (index & 1) counter += index; else counter -= 1;\n"
+    "    }\n"
+    "    return counter;\n"
+    "}\n"
+    "int classify(int value)\n"
+    "{\n"
+    "    switch (value) { case 0: return 10; case 1: return 20; case 7: return 30; default: break; }\n"
+    "    return value > 100 ? 1 : value < -100 ? -1 : 0;\n"
+    "}\n"
+    "int wide(void)\n"
+    "{\n"
+    "    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;\n"
+    "    /* many body tokens, few rows */\n"
+    "    return ((((((a + b) * (c - d)) ^ (e | f)) & (g << 1)) >> 1) + h) + (a + b + c + d + e + f + g + h);\n"
+    "}\n"
+    "void empty(void) {}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_row_streams(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 target_index = 0; target_index < 3; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index == 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index == 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_ir_row_streams_source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("ir-row-streams.c"), tokens, parse, target,
+                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    u8 const* owned_start = (u8 const*)temporary.arena + arena_minimum_position;
+                    u8 const* owned_end = (u8 const*)temporary.arena + temporary.arena->position;
+                    u32 lowered_count = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                    {
+                        IrFunction* function = module->functions + function_index;
+                        if (function->state == IR_FUNCTION_LOWERED)
+                        {
+                            lowered_count += 1;
+                            BUSTER_TEST(arguments, function->instruction_count && function->block_count);
+                            BUSTER_TEST(arguments, function->instruction_capacity == function->instruction_count);
+                            BUSTER_TEST(arguments, function->value_capacity == function->value_count);
+                            BUSTER_TEST(arguments, function->block_capacity == function->block_count);
+                            BUSTER_TEST(arguments, ((u64)function->instructions & 63) == 0);
+                            BUSTER_TEST(arguments, (u8 const*)function->instructions >= owned_start &&
+                                                       (u8 const*)(function->instructions + function->instruction_count) <= owned_end);
+                            BUSTER_TEST(arguments, (u8 const*)function->values >= owned_start &&
+                                                       (u8 const*)(function->values + function->value_count) <= owned_end);
+                            BUSTER_TEST(arguments, (u8 const*)function->blocks >= owned_start &&
+                                                       (u8 const*)(function->blocks + function->block_count) <= owned_end);
+                            BUSTER_TEST(arguments, function->instruction_canonical_sources &&
+                                                       (u8 const*)function->instruction_canonical_sources >= owned_start &&
+                                                       (u8 const*)(function->instruction_canonical_sources + function->instruction_count) <= owned_end);
+                        }
+                    }
+                    BUSTER_TEST(arguments, lowered_count == 4);
+                    for (u32 first = 0; first < module->function_count; first += 1)
+                    {
+                        IrFunction* a = module->functions + first;
+                        for (u32 second = first + 1; a->state == IR_FUNCTION_LOWERED && second < module->function_count; second += 1)
+                        {
+                            IrFunction* b = module->functions + second;
+                            if (b->state == IR_FUNCTION_LOWERED)
+                            {
+                                BUSTER_TEST(arguments, a->instructions + a->instruction_count <= b->instructions ||
+                                                           b->instructions + b->instruction_count <= a->instructions);
+                                BUSTER_TEST(arguments, a->values + a->value_count <= b->values || b->values + b->value_count <= a->values);
+                                BUSTER_TEST(arguments, a->blocks + a->block_count <= b->blocks || b->blocks + b->block_count <= a->blocks);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1257,6 +1362,138 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "}\n"
     )};
     return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+}
+
+// A bit-field width is evaluated once, where the member is declared
+// (CMember.bit_width), and the sizeof folding in c_parse.c, bit-field promotion
+// and the IR layout in c_gen.c all read that one number. The folding used to
+// read a width only when it was a single decimal token: `(5)`, an enumerator,
+// a cast or a character constant folded as a zero-width field and moved every
+// later member, a hex or suffixed literal refused to fold at all, and
+// `_Generic(+promoted.b, ...)` saw an unpromoted `unsigned`, while the IR
+// layout evaluated the same tokens itself and was right. An octal width and a
+// block-scope enumerator shadowing a file-scope one pin the evaluation point:
+// the width is read where the member is declared. The expected numbers
+// are clang 18's for x86-64 Linux, not either engine's: two engines agreeing
+// with each other is not the oracle.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("enum { W = 5 };\n"
+                        "struct Paren { char c; int b : (5); char x; };\n"
+                        "struct Enumerator { char c; int b : W; char x; };\n"
+                        "struct Cast { char c; unsigned b : (unsigned char)261; char x; };\n"
+                        "struct Sized { char c; unsigned b : sizeof(int) * 8 - 7; char x; };\n"
+                        "struct Hex { char c; unsigned b : 0x5; char x; };\n"
+                        "struct Suffix { char c; unsigned b : 5u; char x; };\n"
+                        "struct Character { char c; unsigned b : '\\5'; char x; };\n"
+                        "struct Octal { char c; unsigned b : 010; char x; };\n"
+                        "struct Promoted { unsigned b : (3); };\n"
+                        "static struct Promoted promoted;\n"
+                        "enum {\n"
+                        " size_Paren = sizeof(struct Paren), x_Paren = __builtin_offsetof(struct Paren, x),\n"
+                        " size_Enumerator = sizeof(struct Enumerator), x_Enumerator = __builtin_offsetof(struct Enumerator, x),\n"
+                        " size_Cast = sizeof(struct Cast), x_Cast = __builtin_offsetof(struct Cast, x),\n"
+                        " size_Sized = sizeof(struct Sized), x_Sized = __builtin_offsetof(struct Sized, x),\n"
+                        " size_Hex = sizeof(struct Hex), x_Hex = __builtin_offsetof(struct Hex, x),\n"
+                        " size_Suffix = sizeof(struct Suffix), x_Suffix = __builtin_offsetof(struct Suffix, x),\n"
+                        " size_Character = sizeof(struct Character), x_Character = __builtin_offsetof(struct Character, x),\n"
+                        " size_Octal = sizeof(struct Octal), x_Octal = __builtin_offsetof(struct Octal, x),\n"
+                        " promoted_selection = _Generic(+promoted.b, int: 1, unsigned: 2, default: 3)\n"
+                        "};\n"
+                        "_Static_assert(sizeof(struct Sized) == 12, \"sized\");\n"
+                        "enum { Scope = 3 };\n"
+                        "int scoped_width(void) { enum { Scope = 20 }; struct Scoped { char c; unsigned b : Scope; char x; };\n"
+                        " enum { size_Scoped = sizeof(struct Scoped), x_Scoped = __builtin_offsetof(struct Scoped, x) };\n"
+                        " return size_Scoped + x_Scoped; }\n"
+                        "int bit_field_width_authority(void) { return size_Paren + x_Paren + promoted_selection + promoted.b; }\n");
+    typedef struct CBitFieldWidthCase CBitFieldWidthCase;
+    struct CBitFieldWidthCase
+    {
+        String8 tag;
+        String8 size_name;
+        String8 offset_name;
+        u64 size;
+        u64 offset;
+    };
+    CBitFieldWidthCase cases[] = {
+        {S8("Paren"), S8("size_Paren"), S8("x_Paren"), 4, 2},
+        {S8("Enumerator"), S8("size_Enumerator"), S8("x_Enumerator"), 4, 2},
+        {S8("Cast"), S8("size_Cast"), S8("x_Cast"), 4, 2},
+        {S8("Sized"), S8("size_Sized"), S8("x_Sized"), 12, 8},
+        {S8("Hex"), S8("size_Hex"), S8("x_Hex"), 4, 2},
+        {S8("Suffix"), S8("size_Suffix"), S8("x_Suffix"), 4, 2},
+        {S8("Character"), S8("size_Character"), S8("x_Character"), 4, 2},
+        // `010` is octal: the width is eight bits, not ten.
+        {S8("Octal"), S8("size_Octal"), S8("x_Octal"), 4, 2},
+        // The block-scope enumerator shadows the file-scope one.
+        {S8("Scoped"), S8("size_Scoped"), S8("x_Scoped"), 8, 4},
+    };
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            u64 selection = 0;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity const* entity = parse.entities + entity_index;
+                if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, S8("promoted_selection")))
+                {
+                    selection = entity->constant_value;
+                }
+            }
+            BUSTER_TEST(arguments, selection == 1);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bit-field-width-authority.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrProgram* program = lowered.program;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    CBitFieldWidthCase expected = cases[case_index];
+                    u64 folded_size = UINT64_MAX;
+                    u64 folded_offset = UINT64_MAX;
+                    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+                    {
+                        CEntity const* entity = parse.entities + entity_index;
+                        if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, expected.size_name))
+                        {
+                            folded_size = entity->constant_value;
+                        }
+                        if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, expected.offset_name))
+                        {
+                            folded_offset = entity->constant_value;
+                        }
+                    }
+                    BUSTER_TEST(arguments, folded_size == expected.size && folded_offset == expected.offset);
+                    IrType* record = 0;
+                    for (u32 index = 0; index < program->types.count && !record; index += 1)
+                    {
+                        IrType* type = program->types.types + index;
+                        if (!type->is_volatile && type->kind == IR_TYPE_STRUCT && string_equal(type->name, expected.tag))
+                        {
+                            record = type;
+                        }
+                    }
+                    if (BUSTER_REQUIRE(arguments, record && record->layout.resolved && record->field_count == 3))
+                    {
+                        BUSTER_TEST(arguments, record->layout.size == expected.size && record->fields[2].offset == expected.offset);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arguments)
@@ -27038,6 +27275,383 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
     return result;
 }
 
+
+// C 6.5.17 sequences the complete left operand before the right operand;
+// conditions test the final value. The comma is not short-circuiting, and
+// a comma in the middle operand of ?: is not a root comma. Keep argument
+// separators and unevaluated sizeof as controls, not ordering assertions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8("static volatile unsigned trace; static int slot;\n"),
+        S8("static int mark(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"),
+        S8("static int (*indirect)(int, int) = mark;\n"),
+        S8("static int pair(int a, int b) { return a + b; }\n"),
+        S8("int probe_0(int flag) { int value = 0; if (mark(1, 0), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_1(int flag) { int value = 0; while (mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_2(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_3(int flag) { int value = 0; for (; mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_4(int flag) { return (mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_5(int flag) { return !!(mark(1, 0), mark(2, 1)); }\n"),
+        S8("int probe_6(int flag) { int value = 0; if ((void)mark(1, 1), mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_7(int flag) { int value = 0; while ((void)mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_8(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while ((void)mark(1, 1), mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_9(int flag) { int value = 0; for (; (void)mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_10(int flag) { return ((void)mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_11(int flag) { return !!((void)mark(1, 1), mark(2, 0)); }\n"),
+        S8("int probe_12(int flag) { int value = 0; if (mark(1, 1), mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_13(int flag) { int value = 0; while (mark(1, 1), mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_14(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_15(int flag) { int value = 0; for (; mark(1, 1), mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_16(int flag) { return (mark(1, 1), mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_17(int flag) { return !!(mark(1, 1), mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_18(int flag) { int value = 0; if (((mark(1, 1), mark(2, 0)))) value = 1; return value; }\n"),
+        S8("int probe_19(int flag) { int value = 0; while (((mark(1, 1), mark(2, 0)))) { value = 1; break; } return value; }\n"),
+        S8("int probe_20(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (((mark(1, 1), mark(2, 0)))); return value - 1; }\n"),
+        S8("int probe_21(int flag) { int value = 0; for (; ((mark(1, 1), mark(2, 0)));) { value = 1; break; } return value; }\n"),
+        S8("int probe_22(int flag) { return (((mark(1, 1), mark(2, 0)))) ? 1 : 0; }\n"),
+        S8("int probe_23(int flag) { return !!(((mark(1, 1), mark(2, 0)))); }\n"),
+        S8("int probe_24(int flag) { int value = 0; if (0 && mark(1, 1), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_25(int flag) { int value = 0; while (0 && mark(1, 1), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_26(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 && mark(1, 1), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_27(int flag) { int value = 0; for (; 0 && mark(1, 1), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_28(int flag) { return (0 && mark(1, 1), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_29(int flag) { return !!(0 && mark(1, 1), mark(2, 1)); }\n"),
+        S8("int probe_30(int flag) { int value = 0; if (1 || mark(1, 1), mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_31(int flag) { int value = 0; while (1 || mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_32(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (1 || mark(1, 1), mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_33(int flag) { int value = 0; for (; 1 || mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_34(int flag) { return (1 || mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_35(int flag) { return !!(1 || mark(1, 1), mark(2, 0)); }\n"),
+        S8("int probe_36(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_37(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_38(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_39(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_40(int flag) { return (mark(1, 0) && mark(2, 1), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_41(int flag) { return !!(mark(1, 0) && mark(2, 1), mark(3, 1)); }\n"),
+        S8("int probe_42(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0), mark(3, 0)) value = 1; return value; }\n"),
+        S8("int probe_43(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0), mark(3, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_44(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0), mark(3, 0)); return value - 1; }\n"),
+        S8("int probe_45(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0), mark(3, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_46(int flag) { return (mark(1, 1) || mark(2, 0), mark(3, 0)) ? 1 : 0; }\n"),
+        S8("int probe_47(int flag) { return !!(mark(1, 1) || mark(2, 0), mark(3, 0)); }\n"),
+        S8("int probe_48(int flag) { int value = 0; if (mark(1, 0), mark(2, 0) || mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_49(int flag) { int value = 0; while (mark(1, 0), mark(2, 0) || mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_50(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 0) || mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_51(int flag) { int value = 0; for (; mark(1, 0), mark(2, 0) || mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_52(int flag) { return (mark(1, 0), mark(2, 0) || mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_53(int flag) { return !!(mark(1, 0), mark(2, 0) || mark(3, 1)); }\n"),
+        S8("int probe_54(int flag) { int value = 0; if (mark(1, 1), mark(2, 1) && mark(3, 0)) value = 1; return value; }\n"),
+        S8("int probe_55(int flag) { int value = 0; while (mark(1, 1), mark(2, 1) && mark(3, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_56(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 1) && mark(3, 0)); return value - 1; }\n"),
+        S8("int probe_57(int flag) { int value = 0; for (; mark(1, 1), mark(2, 1) && mark(3, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_58(int flag) { return (mark(1, 1), mark(2, 1) && mark(3, 0)) ? 1 : 0; }\n"),
+        S8("int probe_59(int flag) { return !!(mark(1, 1), mark(2, 1) && mark(3, 0)); }\n"),
+        S8("int probe_60(int flag) { int value = 0; if (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_61(int flag) { int value = 0; while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_62(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_63(int flag) { int value = 0; for (; flag ? mark(1, 1), mark(2, 0) : mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_64(int flag) { return (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_65(int flag) { return !!(flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); }\n"),
+        S8("int probe_66(int flag) { int value = 0; if (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_67(int flag) { int value = 0; while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_68(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_69(int flag) { int value = 0; for (; flag ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_70(int flag) { return (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_71(int flag) { return !!(flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_72(int flag) { int value = 0; if (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_73(int flag) { int value = 0; while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_74(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_75(int flag) { int value = 0; for (; 0 ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_76(int flag) { return (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_77(int flag) { return !!(0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_78(int flag) { int value = 0; if (indirect(1, 1), indirect(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_79(int flag) { int value = 0; while (indirect(1, 1), indirect(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_80(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (indirect(1, 1), indirect(2, 0)); return value - 1; }\n"),
+        S8("int probe_81(int flag) { int value = 0; for (; indirect(1, 1), indirect(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_82(int flag) { return (indirect(1, 1), indirect(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_83(int flag) { return !!(indirect(1, 1), indirect(2, 0)); }\n"),
+        S8("int probe_84(int flag) { int value = 0; if (sizeof(mark(1, 1)), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_85(int flag) { int value = 0; while (sizeof(mark(1, 1)), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_86(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (sizeof(mark(1, 1)), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_87(int flag) { int value = 0; for (; sizeof(mark(1, 1)), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_88(int flag) { return (sizeof(mark(1, 1)), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_89(int flag) { return !!(sizeof(mark(1, 1)), mark(2, 1)); }\n"),
+        S8("int probe_90(int flag) { int value = 0; if (slot = mark(1, 0), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_91(int flag) { int value = 0; while (slot = mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_92(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (slot = mark(1, 0), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_93(int flag) { int value = 0; for (; slot = mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_94(int flag) { return (slot = mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_95(int flag) { return !!(slot = mark(1, 0), mark(2, 1)); }\n"),
+        S8("int probe_96(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_97(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_98(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_99(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_100(int flag) { return (mark(1, 0) && mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_101(int flag) { return !!(mark(1, 0) && mark(2, 1)); }\n"),
+        S8("int probe_102(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_103(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_104(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_105(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_106(int flag) { return (mark(1, 1) || mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_107(int flag) { return !!(mark(1, 1) || mark(2, 0)); }\n"),
+        S8("int probe_108(int flag) { int value = 0; if (pair(1, 2)) value = 1; return value; }\n"),
+        S8("int probe_109(int flag) { int value = 0; while (pair(1, 2)) { value = 1; break; } return value; }\n"),
+        S8("int probe_110(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (pair(1, 2)); return value - 1; }\n"),
+        S8("int probe_111(int flag) { int value = 0; for (; pair(1, 2);) { value = 1; break; } return value; }\n"),
+        S8("int probe_112(int flag) { return (pair(1, 2)) ? 1 : 0; }\n"),
+        S8("int probe_113(int flag) { return !!(pair(1, 2)); }\n"),
+        S8("int probe_114(int flag) { int value = 0; if (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) value = 1; return value; }\n"),
+        S8("int probe_115(int flag) { int value = 0; while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) { value = 1; break; } return value; }\n"),
+        S8("int probe_116(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); return value - 1; }\n"),
+        S8("int probe_117(int flag) { int value = 0; for (; mark(1, 1), (flag ? mark(2, 0) : mark(3, 1));) { value = 1; break; } return value; }\n"),
+        S8("int probe_118(int flag) { return (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) ? 1 : 0; }\n"),
+        S8("int probe_119(int flag) { return !!(mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); }\n"),
+        S8("int main(void) { unsigned failed = 0; int value;\n"),
+        S8("trace = 0; slot = 9; value = probe_0(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_1(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_2(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_3(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_4(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_5(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_6(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_7(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_8(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_9(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_10(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_11(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_12(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_13(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_14(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_15(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_16(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_17(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_18(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_19(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_20(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_21(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_22(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_23(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_24(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_25(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_26(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_27(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_28(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_29(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_30(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_31(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_32(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_33(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_34(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_35(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_36(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_37(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_38(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_39(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_40(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_41(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_42(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_43(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_44(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_45(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_46(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_47(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_48(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_49(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_50(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_51(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_52(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_53(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_54(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_55(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_56(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_57(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_58(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_59(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_60(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_61(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_62(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_63(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_64(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_65(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_66(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_67(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_68(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_69(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_70(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_71(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_72(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_73(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_74(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_75(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_76(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_77(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_78(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_79(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_80(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_81(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_82(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_83(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_84(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_85(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_86(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_87(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_88(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_89(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_90(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_91(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_92(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_93(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_94(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_95(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_96(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_97(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_98(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_99(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_100(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_101(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_102(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_103(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_104(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_105(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_106(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_107(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_108(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_109(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_110(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_111(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_112(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_113(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_114(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_115(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_116(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_117(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_118(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_119(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("return failed != 0; }\n"),
+    };
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-condition.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 probe = 0; probe < 6; probe += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, string_format(temporary.arena, S8("probe_{u32}"), probe));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, function, S8("mark")) == 2);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("comma-condition-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    Arena* conflicts[] = {arguments->arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("comma-condition-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("comma-condition {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                    modes[mode], frontends[form], optimizations[optimization], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+// A comma is never an lvalue, even when its final operand was a place.
+// Keep these in the registered suite alongside the VLA-row negative cases.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 invalid_sources[] = {
+        S8("int test(void) { int a = 0, b = 0; (a, b) = 1; return b; }"),
+        S8("int test(void) { int a = 0, b = 0; return ((a, b) = 1); }"),
+        S8("int test(void) { int a = 0, b = 0; (a, b) += 1; return b; }"),
+        S8("int *test(int *p) { return &(0, *p); }"),
+        S8("int test(int *p) { return (0, *p)++; }"),
+        S8("int test(int *p) { return ++(0, *p); }"),
+        S8("void *test(int n, char rows[][n]) { return &(0, rows[1]); }"),
+        S8("int test(void) { int a[3]; return sizeof &(0, a); }"),
+        S8("struct S { int x; }; struct S *test(struct S *p) { return &(0, *p); }"),
+        S8("static void side(void) {} int test(void) { if (1, side()) return 1; return 0; }"),
+        S8("struct S { int x; }; int test(void) { while (1, (struct S){0}) {} return 0; }"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index],
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-constraint.c"), tokens, parsed, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27080,6 +27694,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
@@ -27088,6 +27703,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
@@ -27128,6 +27744,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    BUSTER_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
+    BUSTER_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);

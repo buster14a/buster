@@ -464,8 +464,12 @@ and Mach-O dylibs have no writer yet.
 
 ## Object output (`-c`)
 
-`-c` writes the object through `object_write`. The ELF64 writer plans the
-whole file with checked arithmetic, then stores each byte once; it refuses an
+`-c` writes the object through `object_write_borrowing`. The ELF64 writer
+plans the whole file with checked arithmetic, then stores each byte once,
+except that each section payload of at least 4 KiB is named in place and the
+file is published from the image's ranges and those payloads in order
+(`object_artifact_slices`, `file_publish_slices`), byte-identical to
+`object_write`'s image. It refuses an
 object whose section count reaches `SHN_LORESERVE`, whose string tables need
 offsets past 32 bits, or whose size overflows or exceeds the arena, with the
 diagnostic `native elf64 object exceeds the object writer's limits (...)`,
