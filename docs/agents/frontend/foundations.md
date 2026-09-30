@@ -274,7 +274,8 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   cannot use read-only storage as a constant certificate. Arithmetic and
   comparison folding also materialize scalar places before reading payloads.
   `c_ir_type_name_prefix` preserves volatile pointees, including qualifiers
-  interspersed with primitive type words, before constructing cast pointers.
+  interspersed with primitive type words, before constructing cast pointers;
+  each pointer level retains its own volatile/atomic access qualification.
   `c_test_constant_scalar_truth` checks constant initializers, unevaluated
   predicate bits/effects, diagnostics and native execution (#1225).
 - A folded conditional expression converts its selected value to the common

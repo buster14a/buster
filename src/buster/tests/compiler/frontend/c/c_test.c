@@ -27455,6 +27455,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("!qualified"), 0}, {S8("qualified"), 0}, {S8("atomic_object"), 0},
         {S8("*(const volatile int *)&zero"), 0}, {S8("*(int const volatile *)&zero"), 0},
         {S8("*(const volatile _Atomic int *)&zero"), 0}, {S8("(_Bool)input"), 0},
+        {S8("*(const int *volatile *)&null_object"), 0}, {S8("*(const int *_Atomic *)&null_object"), 0},
         {S8("!effect()"), 0}, {S8("effect() ? 7 : 9"), 0},
         {S8("0 ? effect() : 7"), 1}, {S8("!zero"), 1}, {S8("!array"), 1},
     };
@@ -27641,6 +27642,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static const volatile int u = 0; static int bad = !u;"),
         S8("static const int u = 0; static int bad = !*(const volatile int *)&u;"),
         S8("static const int u = 0; static int bad = *(const volatile int *)&u ? 3 : 4;"),
+        S8("static int *const u = 0; static int bad = !*(int *volatile *)&u;"),
         S8("struct S { int x; }; static struct S u; static int bad = !u;"),
         S8("struct S { int x; }; static struct S u; static int bad = u ? 3 : 4;"),
     };

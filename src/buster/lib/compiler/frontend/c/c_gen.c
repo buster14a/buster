@@ -24692,10 +24692,19 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         {
             type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
             index = c_parse_skip_attributes(builder->preprocess, index + 1, end);
+            CType pointer_qualifiers = {
+                .element_type = C_TYPE_ID_INVALID,
+                .return_type = C_TYPE_ID_INVALID,
+                .array_bound = C_ARRAY_BOUND_INVALID,
+            };
             while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-                   c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
+                   c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &pointer_qualifiers))
             {
                 index = c_parse_skip_attributes(builder->preprocess, index + 1, end);
+            }
+            if (pointer_qualifiers.is_atomic || pointer_qualifiers.is_volatile)
+            {
+                type = c_ir_add_qualified_type(builder->program, type, pointer_qualifiers.is_atomic, pointer_qualifiers.is_volatile);
             }
         }
         *index_out = index;
