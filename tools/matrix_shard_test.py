@@ -26,6 +26,51 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import ci_summary
 import github_ci_time
+import mobile_coverage
+
+
+class AppleCIPolicyTests(unittest.TestCase):
+    """#1986 retires Intel Apple scheduling, not compiler target support."""
+
+    def test_active_workflows_have_no_intel_apple_runner_or_target_lane(self):
+        paths = list((ROOT / ".github/workflows").glob("*.yml"))
+        paths += list((ROOT / ".forgejo/workflows").glob("*.yml"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(workflow=path.name):
+                text = path.read_text(encoding="utf-8")
+                # Reject old Intel labels, Rosetta launches and dedicated Apple
+                # target entries, including in default manual/auxiliary jobs.
+                self.assertNotRegex(text, r"\bmacos-(?:\d+-intel|1[0-3](?:-large)?|(?:14|15)-large|latest-large)\b")
+                self.assertNotRegex(text, r"\barch\s+-(?:x86_64|i386)\b")
+                self.assertNotRegex(text, r"(?mi)^\s*(?:os|platform): (?:macos|ios)\n\s*arch: x86_64$")
+                self.assertNotRegex(text, r"(?mi)^\s*(?:target|slug|lane): (?:macos|ios)-x86_64$")
+                self.assertNotRegex(text, r"(?mi)^\s*(?:target|zig_target): x86_64-(?:apple-|macos)")
+        evidence = (ROOT / ".github/workflows/native-retirement-evidence.yml").read_text()
+        entries = re.findall(r"^          - name: (.+ native)$", evidence, re.M)
+        self.assertEqual(Counter(entries), Counter(github_ci_time.NATIVE))
+
+    def test_mobile_inventory_rejects_missing_duplicate_foreign_and_intel_lanes(self):
+        original = mobile_coverage.WORKFLOW_PATH.read_text()
+        ios = ("          - name: iOS AArch64\n            runner: macos-26\n"
+               "            os: ios\n            arch: aarch64\n")
+        self.assertEqual(original.count(ios), 1)
+        mutations = {
+            "missing-retained-ios": original.replace(ios, ""),
+            "duplicate-ios": original.replace(ios, ios + ios),
+            "intel-runner": original.replace(ios, ios.replace("macos-26", "macos-26-intel")),
+            "intel-target": original.replace(ios, ios.replace("iOS AArch64", "iOS x86-64").replace("aarch64", "x86_64")),
+            "wrong-android-runner": original.replace("runner: ubuntu-26.04\n            os: android", "runner: windows-2025\n            os: android"),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ci.yml"
+            path.write_text(original)
+            self.assertEqual(len(mobile_coverage._workflow_mobile_lanes(path)), 2)
+            for name, text in mutations.items():
+                with self.subTest(mutation=name):
+                    path.write_text(text)
+                    with self.assertRaises(mobile_coverage.MobileCoverageError):
+                        mobile_coverage._workflow_mobile_lanes(path)
 
 C_FIXTURE = r'''
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_fixture_export(Arena* arena)
@@ -397,9 +442,9 @@ class CompletionGateTests(unittest.TestCase):
     def check(self, jobs, attempt=1):
         return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40)
 
-    def test_all_twenty_five_jobs_and_exact_twelve_desktop_shards(self):
-        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 25)
-        self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 12)
+    def test_all_twenty_one_jobs_and_exact_ten_desktop_shards(self):
+        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 21)
+        self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 10)
         self.assertEqual(self.check(self.sample()), [])
 
     def test_missing_duplicate_failed_cancelled_and_skipped_jobs_fail(self):
@@ -500,7 +545,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_stale_in_progress_step_record_is_refreshed_for_exact_run_and_head(self):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
-        target = next(job for job in pending if job["name"] == "macOS x86-64 checks")
+        target = next(job for job in pending if job["name"] == "macOS AArch64 checks")
         step = next(step for step in target["steps"] if step["name"] == "Desktop result and reproduction")
         step.update(status="in_progress", conclusion=None)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
@@ -531,7 +576,7 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_partial_rerun_shadow_never_borrows_an_older_green_steps_record(self):
         first_attempt = self.sample()
-        target_name = "macOS x86-64 checks"
+        target_name = "macOS AArch64 checks"
         shadow = copy.deepcopy(next(job for job in first_attempt if job["name"] == target_name))
         shadow.update(id=101, run_attempt=2, steps=[])
         current_gate = copy.deepcopy(next(job for job in first_attempt if job["name"] == "CI complete"))
@@ -594,9 +639,9 @@ class CompletionGateTests(unittest.TestCase):
         sleep.assert_called_once_with(1.0)
 
     def lost_runner_job(self, jobs):
-        target = next(job for job in jobs if job["name"] == "macOS x86-64 checks")
+        target = next(job for job in jobs if job["name"] == "macOS AArch64 checks")
         target.update(conclusion="failure", started_at="2026-09-28T15:17:35Z", completed_at="2026-09-28T16:04:37Z",
-                      runner_name="GitHub Actions 1000119276", labels=["macos-26-intel"])
+                      runner_name="GitHub Actions 1000119276", labels=["macos-26"])
         target["steps"] = [
             {"name": "Install verified Zig", "status": "completed", "conclusion": "success",
              "started_at": "2026-09-28T15:17:51Z", "completed_at": "2026-09-28T15:18:13Z"},
@@ -651,7 +696,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 3)
             self.assertIn(f"check-runs/{target['id']}/annotations", fetch.call_args_list[2].args[1])
             self.assertTrue(any("required job did not complete successfully" in error for error in result["errors"]))
-            record = next(job for job in result["jobs"] if job["name"] == "macOS x86-64 checks")["interruption"]
+            record = next(job for job in result["jobs"] if job["name"] == "macOS AArch64 checks")["interruption"]
             self.assertEqual(record["classification"], classification)
             self.assertIn("CI_RUNNER_INTERRUPTION", "".join(call.args[0] for call in stderr.write.call_args_list))
             self.assertTrue(all("interruption" not in job for job in result["jobs"] if job["name"] != target["name"]))
@@ -662,7 +707,7 @@ class CompletionGateTests(unittest.TestCase):
         lanes = re.search(r"^        lane: \[([^]]+)\]$", desktop, re.M).group(1).split(", ")
         shards = re.search(r"^        shard: \[([^]]+)\]$", desktop, re.M).group(1).split(", ")
         includes = re.findall(r"^          - name: (.+)\n            lane: (.+)\n", desktop, re.M)
-        self.assertEqual(Counter(lanes), Counter(f"{platform}-{arch}" for platform, arch in ci_summary._COVERAGE_POLICY_ANCHORS))
+        self.assertEqual(Counter(lanes), Counter(f"{platform}-{arch}" for platform, arch in ci_summary._COVERAGE_POLICY_ANCHORS if (platform, arch) != ("macos", "x86_64")))
         self.assertEqual(Counter(shards), Counter(github_ci_time.COMBINATION_SHARDS))
         self.assertEqual(Counter(lane for _, lane in includes), Counter(lanes))
         expanded = [f"{name} {shard}" for name, _ in includes for shard in shards]
@@ -706,7 +751,7 @@ class CompletionGateTests(unittest.TestCase):
                "status": "completed", "conclusion": "success", "created_at": "2026-09-16T12:00:00Z", "jobs": jobs}
         measurement, reason = github_ci_time.measure(run)
         self.assertIsNone(reason)
-        self.assertEqual(measurement["runner_seconds"], 25 * 60)
+        self.assertEqual(measurement["runner_seconds"], 21 * 60)
         self.assertEqual(measurement["elapsed_seconds"], 70)
         self.assertEqual(set(measurement["job_queue_seconds"].values()), {5})
         for index in range(len(jobs)):
@@ -743,7 +788,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
             "mobile": workflow.split("\n  mobile:\n", 1)[1].split("\n  uefi:\n", 1)[0],
         }
 
-    def test_exactly_the_eight_macos_runner_jobs_are_deferrable(self):
+    def test_exactly_the_four_macos_runner_jobs_are_deferrable(self):
         jobs = self.workflow_jobs()
         expected = []
         desktop = re.findall(r"^          - name: (.+)\n            lane: .+\n            runner: (.+)$", jobs["test"], re.M)
@@ -752,7 +797,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         for job in ("native", "mobile"):
             entries = re.findall(r"^          - name: (.+)\n            runner: (.+)$", jobs[job], re.M)
             expected += [name for name, runner in entries if runner.startswith("macos-")]
-        self.assertEqual(len(expected), 8)
+        self.assertEqual(len(expected), 4)
         self.assertEqual(Counter(expected), Counter(github_ci_time.MACOS_RUNNER_JOBS))
 
     def test_first_attempt_draft_accepts_deferred_macos_lanes_only(self):
@@ -760,7 +805,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         self.assertEqual(self.check(self.sample(deferred=False), draft=True), [])
         self.assertEqual(self.check(self.sample(deferred=False), draft=False), [])
         errors = self.check(self.sample(), draft=False)
-        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 8)
+        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 4)
         # A cancelled no-op rerun by rerun-failed-jobs runs the real lane
         # instead; a deferral record from a later attempt is never accepted.
         jobs = self.sample()
@@ -796,7 +841,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertFalse(any(github_ci_time.deferred_base_name(job["name"]) for job in latest))
         self.assertEqual(self.check(latest, draft=True, attempt=2), [])
-        failed = next(job for job in second if job["name"] == "macOS x86-64 checks")
+        failed = next(job for job in second if job["name"] == "macOS AArch64 checks")
         failed["conclusion"] = "failure"
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertTrue(self.check(latest, draft=True, attempt=2))
