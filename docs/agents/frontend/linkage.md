@@ -20,6 +20,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Program-symbol identity crosses the object boundary.**
+  `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
+  through `entry_by_symbol`. Entries map to their own index; globals and
+  aliases are seeded with the definition their link name resolves to (the
+  first definition carrying it), which the name-index build records as it
+  places each definition, so their references hash no name. Externs keep the
+  name path, whose first lookup also claims the insertion slot it ended on.
+  DWARF `DW_OP_addr` and CodeView `S_GDATA32` relocations carry the
+  variable's `IrSymbolId` and resolve through the same map when it names a
+  definition; the name path remains for everything else. Non-optimized
+  builds cross-check every such answer against the name lookup, and
+  `compiler_driver_test_debug_global_relocations` pins the first-definition
+  contract with block-scope statics, an asm label, a completed tentative
+  definition and a block-scope extern on ELF x86-64, ELF AArch64 and COFF.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
@@ -112,6 +126,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and nearly every module has none. And the two targets with no initializer
   array at all -- core Wasm, which starts one function of its own, and eBPF,
   which has no startup -- **diagnose** the attribute rather than dropping it.
+- **`__attribute__((section("name")))` places a definition in a section of
+  its own name on ELF and is refused elsewhere** (issue #1276). The frontend
+  records it in `IrSymbol.section_name`: from the definition, else from any
+  other declaration of the entity (`c_entity_section_name`), and for
+  block-scope statics too. COFF and Mach-O targets, and thread-local
+  variables, are diagnosed at the declaration
+  (`c_section_attribute_unsupported_output`). Codegen lays each named group
+  out after its image's ordinary contents (`codegen_section_group`); a module
+  that names none keeps its layout byte for byte.
+  `object_from_canonical_codegen_module` splits those tails into sections
+  past `OBJECT_SECTION_COUNT` (`object_named_section_plan`). A name that is
+  `.init_array`, `.fini_array` or `.preinit_array`, optionally with a
+  `.NNNNN` suffix, becomes an initializer-array section, and the ELF writer
+  types it `SHT_INIT_ARRAY`, `SHT_FINI_ARRAY` or `SHT_PREINIT_ARRAY`.
+  Functions moved out of `.text` leave the one-range DWARF unit.
+  `object_read_elf64` keeps every C-identifier-named input section as its
+  own section. `link_objects` places each such set contiguously after the
+  ordinary sections of its kind, and defines the `__start_NAME`/`__stop_NAME`
+  references GNU `ld` would (`link_section_sets_define`). The LLVM bitcode
+  writer records the names. Wasm does not yet (#1717).
 - **`.init_array` and `.fini_array` are section kinds**,
   `OBJECT_SECTION_INIT_ARRAY` and `OBJECT_SECTION_FINI_ARRAY`, holding one
   pointer-wide slot per initializer with an `ABSOLUTE64` relocation against

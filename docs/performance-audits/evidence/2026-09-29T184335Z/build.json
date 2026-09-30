@@ -1,0 +1,21 @@
+{
+  "baseline_revision": "61a84e2bc916f8d6efae3125d68e8116dc2f9189",
+  "source_file_sha256": "efad21961de81ef506534502d06a7dd822b6cdfa51fa2c5efca85edc61fef0c7",
+  "baseline_binary_sha256": "038e8a9d20ec1021cdb75cadebc9013aa73dff0aa0d8bb628d6f4d5124a1b207",
+  "candidate_binary_sha256": "8df79ca6da448af962c7434b35e15bc544eff58f785c9484c2513d76a0d45d22",
+  "compile_commands_sha256": "506b0086974396b4f475421ab6c83826705bb4d38967931c7016c63cf0070e42",
+  "release_ide_compile_commands": [
+    {
+      "directory": "/workspace/scratch/0374addfc77a/buster/build",
+      "command": "/usr/lib/llvm-18/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/usr/lib/llvm-18/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/usr/lib/llvm-18/lib/clang/18/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/0374addfc77a/buster/build/generated -I/workspace/scratch/0374addfc77a/buster/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wno-unused-function -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -c /workspace/scratch/0374addfc77a/buster/src/buster/apps/ide/ide.c",
+      "file": "/workspace/scratch/0374addfc77a/buster/src/buster/apps/ide/ide.c",
+      "output": "CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o"
+    }
+  ],
+  "bootstrap": "Clang 18.1.3 build.c, hosted-CI procedure; not trusted local TCC bootstrap",
+  "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "build_root": "/workspace/scratch/0374addfc77a/buster",
+  "machine": "hosted AMD EPYC 9V74 VM, 9 exposed logical CPUs",
+  "measurement_rule": "5 fixed pairs, alternating AB/BA, serial after both builds, no overlapping build; retain all observations; module classification correctness required; full suite one diagnostic pair; no confidence interval or dedicated-host admission",
+  "initial_suite_attempt": "interrupted after accidentally overlapping candidate build; excluded from timing comparison"
+}
