@@ -14,7 +14,7 @@ Read source: `link.c` 428-513 (initializer collection and stable filtering), 190
 
 Current AGENTS, frontend/linkage, build, testing, benchmarking, workflow and recent audit `docs/performance-audits/2026-09-25T215313Z.md` on `claude/laughing-noether-meufke` were read. Related issues/PRs include #1319, #1309, #1310, #987, #990, #623/#981, #204/#208 and #488/#798. The already-published canonical CFG join and the merged empty-promotion sweep are not rediscovered here.
 
-Ownership: one writer on `research/codeview-provenance-20260926`; only new research paths and its branch-only correctness workflow. Existing production owners/branches are untouched. Connected GitHub is the publication/read path. No actual subagent launcher was available; **no independent agent review is claimed**. The editing container did not execute the experiment or any compiler test. Hosted worktrees are used by the workflow.
+Ownership: one writer on `research/codeview-provenance-20260926`; only new research paths and its manual-dispatch correctness workflow. Existing production owners/branches are untouched. Connected GitHub is the publication/read path. No actual subagent launcher was available; **no independent agent review is claimed**. The editing container did not execute the experiment or any compiler test. Hosted worktrees are used by the workflow.
 
 ## Three candidates and provisional ranking
 
@@ -87,6 +87,26 @@ Let f be the share of complete artifact time spent on removable matching, and le
 
 ## Hosted execution and remaining gates
 
-The branch-only workflow uses a standard GitHub-hosted Ubuntu executor and an isolated worktree at the exact submitted head. It verifies the pinned parent/source blob; records compiler versions and hashes; extracts the reference body; builds and runs Clang -O2, GCC -O2, and Clang ASan/UBSan; compares full CSV/results; and retains artifacts. No benchmark, desktop test, SSH, dedicated runner, secret, deployment or write-enabled job is requested.
+The workflow uses a standard GitHub-hosted Ubuntu executor and an isolated worktree at the exact submitted head. It verifies the pinned parent/source blob; records compiler versions and hashes; extracts the reference body; builds and runs Clang -O2, GCC -O2, and Clang ASan/UBSan; compares full CSV/results; and retains artifacts. No benchmark, desktop test, SSH, dedicated runner, secret, deployment or write-enabled job is requested.
 
 Counts/correctness results must be attached to the exact completed run, not inferred from a queued workflow. This prototype still needs independent review, a real multi-TU PE/PDB population census, real-producer certificate/invalidation integration tests, full compiler/self-host/platform correctness, and approved exclusively leased 9700X matched trusted Clang A/A and uninstrumented A/B measurements with complete artifact and memory/setup accounting before any production decision.
+
+## Recorded result and rerunning
+
+The recorded result is [PR #1343's evidence comment](https://github.com/buster14a/buster/pull/1343#issuecomment-5841656176): run 36205982972 on research head `e1258d7b2bc016f624a2fc2876da5375bafb0bd0`, 301 cases passing under Clang -O2, GCC -O2 and Clang ASan/UBSan, complete CSV SHA-256 `04eb0eba69024fdcc6efd219f80ec214e1b7a0a4b58a43747eb32efc1a4673d1`. That result concerns the pinned `link.c` blob above, **not** the current `link_pe_resolved_codeview`, which has changed on main since; no claim is made for current main.
+
+`.github/workflows/research-codeview-provenance.yml` is a manual `workflow_dispatch` dispatcher only; it never runs on pushes, pull requests or merge groups. Dispatch it on any ref that contains this directory. It fetches full history and extracts the reference resolver from the pinned blob `ceef10d857cfdf3fe20a09d10407077563baa84e` (verified against `ade6ac4b6ecb21f30b61b656439bac476c145e2f`), so the rerun measures the same resolver regardless of the dispatched ref.
+
+To rerun locally from the repository root without the workflow:
+
+```sh
+evidence=build/codeview-provenance && mkdir -p "$evidence"
+git cat-file blob ceef10d857cfdf3fe20a09d10407077563baa84e |
+  awk '/^ByteSlice link_pe_resolved_codeview\(/ { c = 1 } /^BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol\(/ { c = 0 } c { print }
+       c && /ObjectRelocation\* relocation = object->relocations \+ relocation_index;/ { print "            resolver_visits += 1;" }' > "$evidence/reference.inc"
+cc -std=c17 -O2 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char -I"$evidence" \
+  tools/research/codeview-provenance/probe.c -o "$evidence/probe"
+"$evidence/probe" > "$evidence/result.csv" && tail -n 1 "$evidence/result.csv"
+```
+
+The last line should read `RESULT cases=301 comparisons=602 status=pass digest=7cd4b562ab7b16d3`. The workflow additionally runs GCC and sanitized builds, compares all CSVs, and checks that the unsafe-certificate mutant fails with the required semantic mismatch.
