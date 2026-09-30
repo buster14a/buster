@@ -6598,7 +6598,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
                     (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS));
                 if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), S8(".exe"));
+                    // Each combination runs its own images: Windows may refuse to
+                    // replace an image that just ran (#2089).
+                    u32 iteration = (target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                    String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), executable_suffix);
                     String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                         S8("-o"), executable, source};
                     CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
@@ -6611,7 +6615,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
                     if (host_compiled)
                     {
-                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-mixed"), S8(".exe"));
+                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-mixed"), executable_suffix);
                         String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                             S8("-o"), mixed, S8("tests/differential/many_native_arguments.c"), host_object};
                         CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
@@ -6673,7 +6677,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                         // regression gates all three MIR allocators against Clang.
                         if (native_target && mode != 0 && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                         {
-                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), S8(".exe"));
+                            // Each combination runs its own image: Windows may refuse to
+                            // replace an image that just ran (#2089).
+                            u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * BUSTER_ARRAY_LENGTH(pics) + pic;
+                            String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), executable_suffix);
                             String8 link[10];
                             u32 count = 0;
                             link[count++] = S8(BUSTER_HOST_C_COMPILER);
