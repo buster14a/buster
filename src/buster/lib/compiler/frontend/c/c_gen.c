@@ -47002,8 +47002,34 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     }
     if (left.kind == C_IR_CONSTANT_UNKNOWN || right.kind == C_IR_CONSTANT_UNKNOWN)
     {
-        *result = (CIrConstantValue){.type = left.kind == C_IR_CONSTANT_UNKNOWN ? left.type : right.type, .kind = C_IR_CONSTANT_UNKNOWN};
-        return true;
+        // Unknown values still have the operation's result type. A ?: arm
+        // must not inherit an unsigned/pointer operand type from a comparison.
+        bool comparison = operation == C_CONDITIONAL_EQUAL || operation == C_CONDITIONAL_NOT_EQUAL || operation == C_CONDITIONAL_LESS ||
+                          operation == C_CONDITIONAL_LESS_EQUAL || operation == C_CONDITIONAL_GREATER || operation == C_CONDITIONAL_GREATER_EQUAL;
+        IrTypeId result_type = builder->s32_type;
+        if (!comparison)
+        {
+            IrTypeId left_decay = c_ir_sizeof_operand_decay(builder, left.type);
+            IrTypeId right_decay = c_ir_sizeof_operand_decay(builder, right.type);
+            bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
+            result_type = c_ir_constant_common_type(builder, left_decay, shift ? left_decay : right_decay);
+            if (result_type.value == IR_ID_UNDERLYING_INVALID && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT))
+            {
+                IrType* left_value = ir_type_from_id(&builder->program->types, left_decay);
+                IrType* right_value = ir_type_from_id(&builder->program->types, right_decay);
+                if (left_value && right_value)
+                {
+                    if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && operation == C_CONDITIONAL_SUBTRACT)
+                        result_type = builder->ptrdiff_type;
+                    else if (left_value->kind == IR_TYPE_POINTER && c_ir_constant_type_is_integer(right_value))
+                        result_type = left_decay;
+                    else if (operation == C_CONDITIONAL_ADD && c_ir_constant_type_is_integer(left_value) && right_value->kind == IR_TYPE_POINTER)
+                        result_type = right_decay;
+                }
+            }
+        }
+        *result = (CIrConstantValue){.type = result_type, .kind = C_IR_CONSTANT_UNKNOWN};
+        return result_type.value != IR_ID_UNDERLYING_INVALID;
     }
     left_type = ir_type_from_id(&builder->program->types, left.type);
     right_type = ir_type_from_id(&builder->program->types, right.type);

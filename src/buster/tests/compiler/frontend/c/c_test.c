@@ -27441,6 +27441,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("zero + 1"), 1}, {S8("nonzero != 0"), 1},
         {S8("null_object == 0"), 1}, {S8("address_object == &object"), 1},
         {S8("array && 1"), 1}, {S8("array || 0"), 1},
+        {S8("(1 ? -1 : wide_input > 0) > 0"), 0},
+        {S8("1 ? 7 : mutable_pointer == 0"), 7},
+        {S8("(1 ? -1 : input + 1ULL) > 0"), 1},
+        {S8("(1 ? -1 : byte_input << wide_input) > 0"), 0},
+        {S8("(1 ? -1 : mutable_pointer - &object) > 0"), 0},
+        {S8("!!(1 ? &object : array + input)"), 1},
     };
     struct
     {
@@ -27473,6 +27479,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         "static const int *const null_object = 0;\n"
         "static const int *const address_object = &object;\n"
         "static volatile int input, hits;\n"
+        "static volatile unsigned long long wide_input;\nstatic volatile unsigned char byte_input;\n"
+        "static int *mutable_pointer;\n"
         "static const volatile int qualified = 0;\n"
         "static const _Atomic int atomic_object = 0;\n"
         "static int callee(void) { return 1; }\n"
@@ -27578,6 +27586,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
         CPreprocessResult tokens = c_preprocess(temporary.arena,
             S8("static const int zero = 0; static int folded = zero ? 3 : 4;"
+               "static volatile unsigned long long wide; static int typed = (1 ? -1 : wide > 0) > 0;"
                "static volatile int value; int probe(void) { return __builtin_constant_p(!value); }"),
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
@@ -27589,6 +27598,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             IrGlobal* folded = c_test_find_ir_global(module, lowered.program, S8("folded"));
             BUSTER_TEST_RAW(arguments, folded && folded->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && folded->initializer_bits == 4,
                 S8("constant truth minimum: static const zero selects 4"));
+            IrGlobal* typed = c_test_find_ir_global(module, lowered.program, S8("typed"));
+            BUSTER_TEST_RAW(arguments, typed && (typed->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || typed->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER) &&
+                                     typed->initializer_bits == 0, S8("constant truth result type: unknown comparison is int"));
             IrFunction* probe = c_test_find_ir_function(module, S8("probe"));
             if (BUSTER_REQUIRE(arguments, probe != 0))
             {

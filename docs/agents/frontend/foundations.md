@@ -273,6 +273,8 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   checked result; they never interpret UNKNOWN as zero. Volatile/atomic reads
   cannot use read-only storage as a constant certificate. Arithmetic and
   comparison folding also materialize scalar places before reading payloads.
+  Unknown binary results retain comparison, promotion and pointer-operation
+  result types so an unselected conditional arm still supplies its C type.
   `c_ir_type_name_prefix` preserves volatile pointees, including qualifiers
   interspersed with primitive type words, before constructing cast pointers;
   each pointer level retains its own volatile/atomic access qualification.
