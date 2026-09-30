@@ -193,8 +193,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     return result;
 }
 
-// Static assertions containing local-object sizeof operands must agree in the
-// semantic-only and object actions, including both frontend SSA forms.
+// Static assertions containing local-object sizeof or _Generic operands must
+// agree in the semantic-only and object actions, including both frontend SSA
+// forms.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -242,6 +243,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
+            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+        // #1697: _Generic selects on a block-scope object's type.
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, long: 1, default: 0), \"generic local\");\n"
+            "}\n"), true, {0}},
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"generic local\");\n"
             "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -307,11 +317,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
     return result;
 }
 
+// #1601: a function whose declarator returns a function pointer, declared and
+// then defined, gave its RETURN rows and its direct calls a return type the
+// function's own signature does not name. -fverify-codegen rejected the unit,
+// and the default producer-certified path silently declined FAST for all of it
+// (#1602). Plain, static, qualified-return and two-level shapes, in both
+// frontend forms: the strict validator accepts the unit, FAST reaches every
+// function codegen receives, and every allocator's executable agrees.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_pointer_return_redeclarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-function-pointer-return"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static int twice(int x) { return 2 * x; }\n"
+        "static int thrice(int x) { return 3 * x; }\n"
+        "static int (*pick(int))(int);\n"
+        "int early(int v) { return pick(0)(v); }\n"
+        "static int (*pick(int which))(int) { return which ? twice : thrice; }\n"
+        "int (*pick_extern(int))(int);\n"
+        "int (*pick_extern(int which))(int) { return which ? thrice : twice; }\n"
+        "static int (*const pick_const(int))(int);\n"
+        "static int (*const pick_const(int which))(int) { return which ? twice : 0; }\n"
+        "static int (*volatile pick_volatile(int))(int);\n"
+        "static int (*volatile pick_volatile(int which))(int) { return which ? thrice : 0; }\n"
+        "static int (*level1(int which))(int) { return which ? twice : thrice; }\n"
+        "static int (*(*level2(int))(int))(int);\n"
+        "static int (*(*level2(int which))(int))(int) { return which ? level1 : 0; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int (*(*outer)(int))(int) = level2(1);\n"
+        "    return early(5) != 15 || pick(1)(5) != 10 || pick_extern(1)(4) != 12 || pick_const(1)(6) != 12 ||\n"
+        "           pick_volatile(1)(2) != 6 || outer(0)(7) != 21;\n"
+        "}\n"))));
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        // The default path trusts the producer and is where the decline was
+        // silent; -fverify-codegen validates the input before anything runs.
+        for (u32 verify = 0; verify < 2; verify += 1)
+        {
+            String8 object = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-function-pointer-return-{u32}-{u32}"), form, verify), S8(".o"));
+            String8 command[7];
+            u32 count = 0;
+            command[count++] = S8("-nostdinc");
+            command[count++] = forms[form];
+            if (verify) command[count++] = S8("-fverify-codegen");
+            command[count++] = S8("-c");
+            command[count++] = S8("-o");
+            command[count++] = object;
+            command[count++] = input;
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == IR_FAST_ALL);
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("function-pointer return form={u32} verify={u32}: {S8}\n"), form, verify, compiled.diagnostic);
+            }
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
+            BUSTER_TEST(arguments, compiled.fast.validation_skips == 0 && compiled.fast.functions != 0 &&
+                                   compiled.fast.functions == compiled.codegen_statistics.function_count);
+        }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+        // Mobile tests run in an application process that cannot launch the
+        // generated executables; the object checks above still run there.
+        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 executable = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-function-pointer-return-{u32}-{S8}"), form, modes[mode]), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), forms[form], string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                                 S8("-o"), executable, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, invocation);
+            if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("function-pointer return form={u32} mode={S8}: {S8}\n"), form, modes[mode], linked.diagnostic);
+            }
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE && !linked.codegen_statistics.fallback_function_count);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {executable};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+#endif
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_pointer_return_redeclarations);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command));

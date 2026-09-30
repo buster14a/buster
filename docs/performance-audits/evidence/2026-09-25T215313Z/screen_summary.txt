@@ -1,0 +1,160 @@
+compound_lits n=1000:348M n=2000:495M n=4000:861M n=8000:1881M
+   growthshare= 56.8% exp=1.98 c_ir_type_name_prefix 196.2M->776.3M  <<<
+enums n=1000:262M n=2000:299M n=4000:373M n=8000:521M
+   growthshare=  3.7% exp=1.00 c_parse_expression_type_query 5.6M->11.1M
+   growthshare=  3.3% exp=1.00 c_type_parse_sizeof_step 5.0M->9.9M
+   growthshare=  3.1% exp=1.00 c_lex_scan_one 4.5M->9.1M
+   growthshare=  2.7% exp=0.88 __memcpy_avx_unaligned_erms 4.7M->8.7M
+   growthshare=  2.6% exp=1.00 target_data_layout 3.8M->7.6M
+   growthshare=  2.3% exp=0.93 __memset_avx2_unaligned_erms 3.7M->7.1M
+   growthshare=  2.1% exp=1.00 c_parse_validate_const_assignments 3.2M->6.3M
+extern_calls n=1000:314M n=2000:402M n=4000:580M n=8000:936M
+   growthshare=  3.1% exp=0.95 __memcpy_avx_unaligned_erms 11.9M->23.1M
+   growthshare=  2.5% exp=1.00 c_type_parse_sizeof_step 9.1M->18.1M
+   growthshare=  2.4% exp=0.97 __memset_avx2_unaligned_erms 9.0M->17.6M
+   growthshare=  2.2% exp=1.00 machine_fast_placement_build_prepassed 7.8M->15.7M
+   growthshare=  2.2% exp=1.00 c_lower_to_ir_with_options 7.8M->15.5M
+   growthshare=  2.2% exp=0.99 string_equal 7.7M->15.4M
+   growthshare=  2.1% exp=1.00 c_parse_expression_type_query 7.4M->14.9M
+functions n=1000:348M n=2000:470M n=4000:714M n=8000:1204M
+   growthshare=  4.0% exp=1.00 machine_fast_placement_build_prepassed 19.7M->39.4M
+   growthshare=  2.7% exp=1.00 c_lower_to_ir_with_options 13.0M->26.0M
+   growthshare=  2.6% exp=1.00 machine_fast_prepass_build 12.5M->25.1M
+   growthshare=  2.5% exp=1.00 machine_select_canonical_function_x86_64 12.2M->24.5M
+   growthshare=  2.1% exp=0.98 __memset_avx2_unaligned_erms 10.4M->20.4M
+   growthshare=  2.0% exp=0.95 __memcpy_avx_unaligned_erms 10.7M->20.7M
+globals_fixedrefs n=1000:245M n=2000:261M n=4000:294M n=8000:361M
+   growthshare=  5.9% exp=0.99 c_lower_to_ir_with_options 4.0M->7.9M
+   growthshare=  4.6% exp=1.00 c_parse_ast 3.1M->6.2M
+   growthshare=  4.4% exp=1.00 c_ir_declaration_initializer_range 2.9M->5.9M
+   growthshare=  4.3% exp=1.00 c_parse_skip_attributes 2.9M->5.7M
+   growthshare=  4.2% exp=0.82 __memcpy_avx_unaligned_erms 3.6M->6.4M
+   growthshare=  4.0% exp=0.89 __memset_avx2_unaligned_erms 3.1M->5.8M
+   growthshare=  3.2% exp=1.00 c_parse_declaration_type_derive 2.1M->4.2M
+   growthshare=  2.6% exp=1.00 c_analyze_semantics_core 1.8M->3.5M
+globals_refs n=1000:281M n=2000:336M n=4000:446M n=8000:668M
+   growthshare=  3.0% exp=0.92 __memcpy_avx_unaligned_erms 7.4M->14.0M
+   growthshare=  2.7% exp=0.96 __memset_avx2_unaligned_erms 6.3M->12.3M
+   growthshare=  2.5% exp=1.00 c_lower_to_ir_with_options 5.6M->11.1M
+   growthshare=  2.3% exp=1.00 machine_fast_placement_build_prepassed 5.2M->10.4M
+gotos n=1000:405M n=2000:646M n=4000:1642M n=8000:5684M
+   growthshare= 37.8% exp=2.20 string_equal 423.5M->1952.5M  <<<
+   growthshare= 34.0% exp=2.34 __memcmp_avx2_movbe 338.4M->1714.8M  <<<
+   growthshare= 17.8% exp=2.00 c_ir_label_find 240.3M->960.6M  <<<
+ifchain n=1000:763M n=2000:2196M n=4000:7746M n=8000:29590M
+   growthshare= 39.1% exp=2.00 c_ir_statement_span 2848.3M->11392.6M  <<<
+   growthshare= 25.8% exp=2.00 c_ir_statement_end 1879.8M->7519.5M  <<<
+   growthshare= 16.3% exp=2.00 c_ir_statement_labels_end 1184.6M->4737.2M  <<<
+   growthshare=  9.0% exp=2.00 c_ir_matching_delimiter 655.8M->2623.7M  <<<
+   growthshare=  5.1% exp=2.00 c_ir_statement_do_tail_end 368.0M->1472.0M  <<<
+   growthshare=  3.1% exp=2.00 c_parse_c23_attribute_at 224.3M->896.7M  <<<
+includes n=1000:307M n=2000:410M n=4000:825M n=8000:2484M
+   growthshare= 41.1% exp=2.33 __memcmp_avx2_movbe 169.3M->851.6M  <<<
+   growthshare= 31.0% exp=2.17 string_equal 146.4M->661.2M  <<<
+   growthshare= 15.9% exp=2.00 c_preprocess_file_index 88.2M->352.4M  <<<
+initializer n=1000:235M n=2000:244M n=4000:262M n=8000:298M
+   growthshare=  6.7% exp=1.00 c_parse_expression_type_query 2.4M->4.8M
+   growthshare=  6.4% exp=1.00 c_conditional_number 2.3M->4.6M
+   growthshare=  5.1% exp=0.75 __memcpy_avx_unaligned_erms 2.7M->4.5M
+   growthshare=  3.9% exp=0.99 c_lex_scan_one 1.4M->2.8M
+   growthshare=  3.7% exp=1.00 c_parse_infer_initializer_array_count_core 1.3M->2.7M
+   growthshare=  3.7% exp=1.00 c_type_parse_sizeof_step 1.3M->2.7M
+   growthshare=  3.6% exp=1.00 c_semantic_integer_literal_kind 1.3M->2.6M
+   growthshare=  3.3% exp=1.00 c_preprocess 1.2M->2.4M
+locals n=1000:313M n=2000:401M n=4000:577M n=8000:932M
+   growthshare=  3.1% exp=1.00 c_type_parse_sizeof_step 11.1M->22.2M
+   growthshare=  2.4% exp=0.86 __memcpy_avx_unaligned_erms 10.5M->19.1M
+   growthshare=  2.3% exp=1.00 c_parse_expression_type_query 8.2M->16.3M
+   growthshare=  2.3% exp=1.00 c_ir_lower_body_advance 8.2M->16.3M
+longexpr n=1000:335M n=2000:633M n=4000:1792M n=8000:6366M
+   growthshare= 79.8% exp=2.00 c_type_parse_sizeof_step 1218.0M->4868.1M  <<<
+   growthshare= 13.6% exp=2.00 c_parse_expression_operator_precedence 208.0M->832.0M  <<<
+   growthshare=  5.2% exp=2.00 c_parse_expression_token_ends_operand 80.0M->320.0M  <<<
+loops n=1000:391M n=2000:556M n=4000:888M n=8000:1553M
+   growthshare=  4.0% exp=1.00 machine_fast_placement_build_prepassed 26.7M->53.4M
+   growthshare=  2.6% exp=0.99 __memset_avx2_unaligned_erms 17.7M->35.1M
+   growthshare=  2.6% exp=1.00 machine_select_canonical_function_x86_64 17.2M->34.3M
+   growthshare=  2.2% exp=1.00 c_ir_ssa_finish 14.4M->28.8M
+   growthshare=  2.1% exp=1.00 c_ir_lower_body_advance 14.2M->28.5M
+   growthshare=  2.0% exp=1.00 machine_fast_prepass_build 13.6M->27.1M
+macros n=1000:278M n=2000:330M n=4000:436M n=8000:648M
+   growthshare=  5.0% exp=1.00 c_type_parse_sizeof_step 10.6M->21.2M
+   growthshare=  2.8% exp=1.00 c_lex_scan_one 5.9M->11.9M
+   growthshare=  2.3% exp=1.00 c_parse_validate_const_assignments 4.9M->9.8M
+   growthshare=  2.1% exp=1.00 c_parse_expression_type_query 4.4M->8.8M
+   growthshare=  2.1% exp=1.00 target_data_layout 4.4M->8.7M
+macros_unused n=1000:235M n=2000:242M n=4000:254M n=8000:281M
+   growthshare= 14.3% exp=0.99 c_lex_scan_one 3.9M->7.7M
+   growthshare=  6.9% exp=1.00 c_token_spelling_equal 1.8M->3.7M
+   growthshare=  6.7% exp=1.00 c_preprocess_define_directive 1.8M->3.6M
+   growthshare=  6.6% exp=0.15 simd512_equal_byte_fallback 16.0M->17.7M
+   growthshare=  6.4% exp=0.99 c_token_push 1.8M->3.5M
+   growthshare=  5.5% exp=0.98 c_preprocess 1.5M->3.0M
+   growthshare=  4.9% exp=1.20 c_symbol_intern 1.0M->2.3M
+   growthshare=  4.7% exp=0.98 c_macro_define 1.3M->2.6M
+members n=1000:481M n=2000:967M n=4000:3173M n=8000:12529M
+   growthshare= 27.7% exp=2.00 c_parse_member_type 864.8M->3457.5M  <<<
+   growthshare= 27.2% exp=2.21 string_equal 701.0M->3244.5M  <<<
+   growthshare= 24.5% exp=2.34 __memcmp_avx2_movbe 563.1M->2857.4M  <<<
+   growthshare= 14.9% exp=2.00 c_ir_emit_field_place_from_value 465.7M->1859.4M  <<<
+   growthshare=  2.9% exp=1.98 ir_type_from_id 91.0M->357.9M  <<<
+nested n=1000:236M n=2000:247M n=4000:267M n=8000:308M
+   growthshare=  5.6% exp=1.00 c_preprocess 2.3M->4.6M
+   growthshare=  5.4% exp=1.00 machine_fast_placement_build_prepassed 2.2M->4.5M
+   growthshare=  4.1% exp=0.99 c_lex_scan_one 1.7M->3.4M
+   growthshare=  3.9% exp=1.00 machine_fast_prepass_build 1.6M->3.2M
+   growthshare=  3.7% exp=0.98 c_translate_source 1.5M->3.0M
+   growthshare=  2.9% exp=1.00 machine_select_canonical_function_x86_64 1.2M->2.4M
+   growthshare=  2.6% exp=1.00 c_ir_lower_body_advance 1.1M->2.2M
+   growthshare=  2.6% exp=0.56 __memset_avx2_unaligned_erms 2.3M->3.3M
+prototypes n=1000:312M n=2000:391M n=4000:551M n=8000:870M
+   growthshare=  4.2% exp=1.00 c_parse_skip_attributes 13.3M->26.7M
+   growthshare=  3.6% exp=1.00 c_parse_ast 11.6M->23.2M
+   growthshare=  3.3% exp=0.99 c_lower_to_ir_with_options 10.6M->21.0M
+   growthshare=  3.2% exp=0.98 string_equal 10.5M->20.7M
+   growthshare=  2.9% exp=1.00 c_lex_scan_one 9.3M->18.5M
+   growthshare=  2.8% exp=1.00 c_parse_primitive_type 8.9M->17.9M
+   growthshare=  2.6% exp=1.00 c_parse_type_word_for_dialect_token 8.3M->16.6M
+   growthshare=  2.6% exp=0.93 __memcpy_avx_unaligned_erms 9.1M->17.3M
+ptr_init n=1000:265M n=2000:322M n=4000:485M n=8000:1018M
+   growthshare= 76.7% exp=2.00 ir_validate_global 136.5M->544.9M  <<<
+statics n=1000:338M n=2000:451M n=4000:678M n=8000:1132M
+   growthshare=  3.5% exp=1.00 machine_fast_placement_build_prepassed 15.9M->31.8M
+   growthshare=  2.7% exp=1.00 c_lower_to_ir_with_options 12.4M->24.8M
+   growthshare=  2.6% exp=1.00 machine_select_canonical_function_x86_64 11.9M->23.8M
+   growthshare=  2.4% exp=1.00 machine_fast_prepass_build 10.9M->21.8M
+   growthshare=  2.4% exp=1.00 c_parse_skip_attributes 10.9M->21.7M
+   growthshare=  2.3% exp=0.99 __memset_avx2_unaligned_erms 10.5M->20.7M
+   growthshare=  2.2% exp=0.95 __memcpy_avx_unaligned_erms 11.0M->21.2M
+straight n=1000:287M n=2000:348M n=4000:470M n=8000:716M
+   growthshare=  4.8% exp=1.00 c_type_parse_sizeof_step 11.9M->23.8M
+   growthshare=  3.2% exp=1.00 machine_fast_placement_build_prepassed 7.9M->15.9M
+   growthshare=  2.1% exp=1.00 c_parse_validate_const_assignments 5.2M->10.4M
+   growthshare=  2.1% exp=1.00 c_ir_lower_expression_core_step 5.2M->10.3M
+   growthshare=  2.0% exp=1.00 machine_fast_prepass_build 4.9M->9.9M
+strings n=1000:292M n=2000:358M n=4000:491M n=8000:758M
+   growthshare=  4.8% exp=1.00 machine_fast_placement_build_prepassed 12.9M->25.8M
+   growthshare=  3.7% exp=1.00 machine_fast_prepass_build 9.8M->19.6M
+   growthshare=  2.4% exp=0.91 __memcpy_avx_unaligned_erms 7.3M->13.7M
+   growthshare=  2.4% exp=1.00 machine_select_canonical_function_x86_64 6.3M->12.6M
+   growthshare=  2.0% exp=1.00 machine_encode_x86_64 5.4M->10.8M
+   growthshare=  2.0% exp=0.35 simd512_equal_byte_fallback 19.5M->24.9M
+struct_init n=1000:276M n=2000:343M n=4000:529M n=8000:1106M
+   growthshare= 70.8% exp=2.00 ir_validate_global 136.5M->544.9M  <<<
+structs n=1000:445M n=2000:764M n=4000:1702M n=8000:4773M
+   growthshare= 34.7% exp=2.00 machine_fast_close_live_ranges 355.8M->1421.3M  <<<
+   growthshare= 25.9% exp=1.99 c_type_parse_core_step 266.7M->1061.4M  <<<
+   growthshare= 15.6% exp=2.00 trailing_zeroes_u64 160.0M->640.0M  <<<
+   growthshare=  2.1% exp=1.57 __memset_avx2_unaligned_erms 32.8M->97.0M  <<<
+switch n=1000:342M n=2000:593M n=4000:1498M n=8000:4914M
+   growthshare= 36.5% exp=2.00 c_ir_integer_signed_value 416.0M->1664.0M  <<<
+   growthshare= 18.3% exp=2.00 c_ir_integer_type_mask 208.1M->832.1M  <<<
+   growthshare= 18.3% exp=2.00 c_ir_switch_integer_less_equal 207.9M->831.9M  <<<
+   growthshare= 15.7% exp=1.97 c_ir_lower_body_advance 182.8M->717.5M  <<<
+   growthshare=  5.7% exp=1.98 c_parse_validate_one_switch 65.9M->259.9M  <<<
+typedefs n=1000:307M n=2000:388M n=4000:552M n=8000:879M
+   growthshare=  2.9% exp=0.87 __memcpy_avx_unaligned_erms 11.5M->21.1M
+   growthshare=  2.6% exp=1.00 c_ir_lower_body_advance 8.6M->17.3M
+   growthshare=  2.5% exp=1.00 c_parse_expression_type_query 8.2M->16.3M
+   growthshare=  2.3% exp=0.97 __memset_avx2_unaligned_erms 8.0M->15.6M
+   growthshare=  2.3% exp=1.00 c_lex_scan_one 7.4M->14.8M
