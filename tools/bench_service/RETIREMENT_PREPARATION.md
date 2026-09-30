@@ -2000,7 +2000,6 @@ writable `recipes/`. After the review it also fails when:
 
 - the chain's bytes are not compared;
 - the queue-private root is created before the chain check;
-- the finalization check ignores the queue copy's digest;
 - the durable-record parser accepts a record of another job, attempt or
   phase.
 
