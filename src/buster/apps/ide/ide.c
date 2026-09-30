@@ -1112,6 +1112,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("CODEGEN_ENCODER exact_attempts={u64} exact_successes={u64} exact_failures={u64}\n"),
                      compile.codegen_statistics.exact_attempts, compile.codegen_statistics.exact_successes, compile.codegen_statistics.exact_failures);
         string_print(S8("CODEGEN_MIR mutable_virtual_registers={u64}\n"), compile.codegen_statistics.mutable_virtual_register_count);
+        string_print(S8("CODEGEN_EMIT machine_code_in_place={u64} machine_code_copied={u64}\n"),
+                     compile.codegen_statistics.machine_code_bytes_in_place, compile.codegen_statistics.machine_code_bytes_copied);
+        if (compile.object_write_statistics.output_bytes)
+        {
+            ObjectWriteStatistics written = compile.object_write_statistics;
+            string_print(S8("OBJECT_WRITE format={S8} section_visits={u64} symbol_visits={u64} relocation_visits={u64} image_reserved={u64} "
+                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} scratch={u64} retained={u64} "
+                            "output={u64}\n"),
+                         object_format_name(object_format_for_target(invocation.target)), written.section_visits, written.symbol_visits,
+                         written.relocation_visits, written.image_bytes_reserved, written.image_bytes_stored, written.image_bytes_zeroed,
+                         written.image_bytes_patched, written.payload_bytes_copied, written.scratch_bytes, written.retained_bytes,
+                         written.output_bytes);
+        }
         for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
         {
             if (compile.codegen_statistics.fallback_reason_counts[reason])
