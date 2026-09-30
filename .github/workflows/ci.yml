@@ -1190,9 +1190,12 @@ jobs:
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
           rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
           rm -rf "$reference_root"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-            -MMD -MF "$candidate_depfile" build.c -o build/analyzer-driver
-          python3 tools/analyzer_reference.py manifest \
+          bootstrap_arguments=(bootstrap)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            bootstrap_arguments+=(--bind-context)
+          fi
+          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
@@ -1201,7 +1204,8 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$candidate_manifest")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1210,12 +1214,8 @@ jobs:
               echo '::error::Historical analyzer reference contains a symlink.'
               exit 1
             fi
-            (
-              cd "$reference_root"
-              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-                -MMD -MF "$reference_depfile" build.c -o "$GITHUB_WORKSPACE/build/analyzer-baseline"
-            )
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+              --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$reference_manifest"
@@ -1282,26 +1282,33 @@ jobs:
               exit 1
             fi
           done
+          candidate_arguments=(manifest)
+          reference_arguments=(manifest)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
+            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
+          fi
+          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$expected_directory/candidate.json"
           expected_materialized="$(python3 tools/analyzer_reference.py materialization \
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$expected_directory/candidate.json")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
           fi
-          python3 tools/analyzer_reference.py manifest \
-            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
-            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
-            --output "$expected_directory/candidate.json"
           if [[ "$expected_materialized" == true ]]; then
             if [[ ! -d "$reference_root" || -L "$reference_root" || \
                   ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
               echo '::error::Historical analyzer reference evidence is missing or unsafe.'
               exit 1
             fi
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$expected_directory/reference.json"
