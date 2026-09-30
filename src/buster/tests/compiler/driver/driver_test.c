@@ -4459,12 +4459,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             String8 description = string_format(temporary.arena, S8("frame vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
                                 sources[fixture], targets[target], modes[mode], frontends[frontend], cpus[cpu], pic, compiled.diagnostic);
                             TargetDataLayout layout = target_data_layout(invocation.target);
-                            // No x86-64 allocator implements binary128 loads.
-                            // Require the structured refusal so selecting the
-                            // Android ABI can never silently reuse x87.
-                            bool x86_quad_control = fixture == 6 &&
+                            // Android x86-64 binary128 is strict in every MIR
+                            // allocator. The archived `none` emitter may still
+                            // report its structured pointer-load gap, exactly
+                            // like AArch64 during the MIR-only transition.
+                            bool x86_quad_target = fixture == 6 &&
                                 invocation.target.cpu_arch == CPU_ARCH_X86_64 &&
                                 layout.long_double_type.bit_width == 128;
+                            bool x86_quad_transition = x86_quad_target && mode == 0;
                             // During the MIR-only transition, the archived
                             // `none` path may still report its structured load
                             // gap while the MIR alias succeeds. Validate either
@@ -4484,12 +4486,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             bool supported_quad = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
                                 compiled.codegen_statistics.function_count == function_counts[fixture] &&
                                 compiled.codegen_statistics.fallback_function_count == 0;
-                            BUSTER_TEST_RAW(arguments, x86_quad_control
-                                ? explicit_quad_unsupported
+                            BUSTER_TEST_RAW(arguments, x86_quad_target
+                                ? x86_quad_transition ? explicit_quad_unsupported || supported_quad : supported_quad
                                 : aarch64_quad_transition
                                 ? explicit_quad_unsupported || supported_quad
                                 : compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
-                            if (x86_quad_control)
+                            if (x86_quad_target)
                             {
                                 command[BUSTER_ARRAY_LENGTH(command) - 1] = S8("-UBUSTER_SIGNBIT_BINARY128_REJECTION");
                                 CompilerDriverInvocation positive = compiler_driver_parse_arguments(temporary.arena,
@@ -4791,6 +4793,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArg
                     if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
                     {
                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-va-list-run"), S8(""));
+                        String8 link_command[10];
+                        u32 link_count = 0;
+                        link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+#if BUSTER_LINUX
+                        link_command[link_count++] = S8("-no-pie");
+#endif
+                        link_command[link_count++] = object;
+                        link_command[link_count++] = host_object;
+                        link_command[link_count++] = S8("-o");
+                        link_command[link_count++] = executable;
+                        ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST(arguments, link_ok);
+                        if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// System V x87 `long double` parameters named before `...` (#1732). The named
+// values take 16-byte-aligned stack slots, so `va_start` must step the overflow
+// cursor past them before the first unnamed stack argument. The precision
+// sentinel 2^63 + 1 is not representable in `double`, so lowering through
+// `double` fails the check. The same source is compiled by Buster and, with
+// SYSV_NAMED_F80_HOST, by the host compiler, and each side calls the other.
+// The native-retirement support contract freezes the tracked test inventory,
+// so this case is written from here instead of a file under tests/.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_named_f80_varargs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "#ifdef SYSV_NAMED_F80_HOST\n"
+        "#define NAMED_F80(name) host_##name\n"
+        "#else\n"
+        "#define NAMED_F80(name) name\n"
+        "#endif\n"
+        "typedef int NamedF80One(int, long double, ...);\n"
+        "typedef int NamedF80Two(long long, long long, long long, long long, long long, long long, long long,\n"
+        "                        long double, long double, ...);\n"
+        "int NAMED_F80(named_f80_one)(int marker, long double first, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, first);\n"
+        "    int bad = marker != 17 || first != 9223372036854775809.0L;\n"
+        "    bad |= va_arg(ap, long long) != 11ll;\n"
+        "    bad |= va_arg(ap, double) != 2.5;\n"
+        "    bad |= va_arg(ap, long double) != 0.5L;\n"
+        "    bad |= va_arg(ap, long long) != 22ll;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int NAMED_F80(named_f80_two)(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
+        "                             long double first, long double second, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, second);\n"
+        "    int bad = a != 1ll || b != 2ll || c != 3ll || d != 4ll || e != 5ll || f != 6ll || g != 7ll;\n"
+        "    bad |= first != 9223372036854775809.0L || second != -1.5L;\n"
+        "    bad |= va_arg(ap, long long) != 33ll;\n"
+        "    bad |= va_arg(ap, double) != 4.5;\n"
+        "    bad |= va_arg(ap, long double) != 0.5L;\n"
+        "    bad |= va_arg(ap, long long) != 44ll;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int NAMED_F80(named_f80_calls)(NamedF80One* one, NamedF80Two* two)\n"
+        "{\n"
+        "    int bad = one(17, 9223372036854775809.0L, 11ll, 2.5, 0.5L, 22ll);\n"
+        "    bad |= two(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll, 9223372036854775809.0L, -1.5L, 33ll, 4.5, 0.5L, 44ll) << 1;\n"
+        "    return bad;\n"
+        "}\n"
+        "#ifdef SYSV_NAMED_F80_HOST\n"
+        "int named_f80_one(int, long double, ...);\n"
+        "int named_f80_two(long long, long long, long long, long long, long long, long long, long long,\n"
+        "                  long double, long double, ...);\n"
+        "int named_f80_calls(NamedF80One*, NamedF80Two*);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = host_named_f80_calls(named_f80_one, named_f80_two);\n"
+        "    bad |= named_f80_calls(host_named_f80_one, host_named_f80_two) << 2;\n"
+        "    bad |= named_f80_calls(named_f80_one, named_f80_two) << 4;\n"
+        "    return bad;\n"
+        "}\n"
+        "#endif\n");
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-named-f80"), S8(".c"));
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    // Android x86-64 long double is binary128, so only the x87 targets apply.
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-ios")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-sysv-named-f80-host"), S8(".o"));
+    String8 host_command[12];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O0");
+    host_command[host_count++] = S8("-fno-inline");
+    host_command[host_count++] = S8("-DSYSV_NAMED_F80_HOST=1");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = source_path;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    bool host_compiled = source_written && host_spawn.handle &&
+                         os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; source_written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-named-f80"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode],
+                        frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), source_path, S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 3 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-named-f80-run"), S8(""));
                         String8 link_command[10];
                         u32 link_count = 0;
                         link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -5626,6 +5768,232 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
                                 if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
                             }
                         }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(source_path));
+    return result;
+}
+
+// Supported IEEE binary128 ABIs lower arithmetic, comparisons, conversions,
+// static folding, variadics, aggregates and complex values to compiler-runtime
+// calls around their direct-register transport. Every cell is strict and must
+// import the soft-float entry points; native Linux AArch64 also links each
+// object with the host runtime and executes its Clang-derived byte oracles.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_binary128_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-f128-runtime-source"), S8(".c"));
+    // Two literals keep each chunk under the portable string-length limit.
+    String8 source_parts[] = {
+        S8(
+        "// IEEE binary128 runtime lowering: arithmetic, comparisons, negation,\n"
+        "// truth, rounding and integer conversions, static folding and variadics;\n"
+        "// aggregates and complex values. Every expected image was produced by Clang\n"
+        "// for the same expression; each check compares all sixteen bytes.\n"
+        "#if __LDBL_MANT_DIG__ == 113\n"
+        "#include <stdarg.h>\n"
+        "\n"
+        "typedef unsigned long long F128Word;\n"
+        "typedef union F128Image F128Image;\n"
+        "union F128Image\n"
+        "{\n"
+        "    long double value;\n"
+        "    F128Word words[2];\n"
+        "};\n"
+        "typedef struct F128Pair F128Pair;\n"
+        "struct F128Pair\n"
+        "{\n"
+        "    long double first;\n"
+        "    long double second;\n"
+        "};\n"
+        "\n"
+        "static long double const f128_static_third = 1.0L / 3;\n"
+        "static long double const f128_static_table[] = {2, -0.0L, 1e4000L, 0.1L + 0.2L};\n"
+        "\n"
+        "long double f128_add(long double a, long double b) { return a + b; }\n"
+        "long double f128_divide(long double a, long double b) { return a / b; }\n"
+        "long double f128_negate(long double a) { return -a; }\n"
+        "int f128_less(long double a, long double b) { return a < b; }\n"
+        "int f128_greater_equal(long double a, long double b) { return a >= b; }\n"
+        "int f128_not_equal(long double a, long double b) { return a != b; }\n"
+        "int f128_truth(long double a) { return a ? 1 : 0; }\n"
+        "double f128_to_double(long double a) { return (double)a; }\n"
+        "float f128_to_float(long double a) { return (float)a; }\n"
+        "long long f128_to_s64(long double a) { return (long long)a; }\n"
+        "unsigned f128_to_u32(long double a) { return (unsigned)a; }\n"
+        "long double f128_from_s32(int a) { return a; }\n"
+        "long double f128_from_u64(unsigned long long a) { return a; }\n"
+        "long double f128_from_double(double a) { return a; }\n"
+        "long double f128_mixed(long double a, double b, int c) { return a * b - c; }\n"
+        "long double f128_created_nan(void) { return 0.0f / 0.0L; }\n"
+        "\n"
+        "long double f128_variadic(int count, ...)\n"
+        "{\n"
+        "    va_list list;\n"
+        "    va_start(list, count);\n"
+        "    long double sum = 0;\n"
+        "    for (int index = 0; index < count; index += 1)\n"
+        "    {\n"
+        "        sum = sum * 2 + (index & 1 ? va_arg(list, double) : va_arg(list, long double));\n"
+        "    }\n"
+        "    va_end(list);\n"
+        "    return sum;\n"
+        "}\n"
+        "\n"
+        "long double f128_variadic_aggregates(int count, ...)\n"
+        "{\n"
+        "    va_list list;\n"
+        "    va_start(list, count);\n"
+        "    long double sum = 0;\n"
+        "    for (int index = 0; index < count; index += 1)\n"
+        "    {\n"
+        "        F128Pair pair = va_arg(list, F128Pair);\n"
+        "        long double _Complex value = va_arg(list, long double _Complex);\n"
+        "        sum = sum * 3 + pair.first - pair.second + __real__ value * __imag__ value;\n"
+        "    }\n"
+        "    va_end(list);\n"
+        "    return sum;\n"
+        "}\n"
+        "\n"
+        ),
+        S8(
+        "F128Pair f128_pair(F128Pair pair)\n"
+        "{\n"
+        "    F128Pair result = {pair.second - pair.first, pair.first * pair.second};\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "long double _Complex f128_complex_multiply(long double _Complex a, long double _Complex b) { return a * b; }\n"
+        "long double _Complex f128_complex_divide(long double _Complex a, long double _Complex b) { return a / b; }\n"
+        "\n"
+        "#define F128_CHECK(expression, expected_low, expected_high, code) \\\n"
+        "    do \\\n"
+        "    { \\\n"
+        "        F128Image observed; \\\n"
+        "        observed.value = (expression); \\\n"
+        "        if (!result && (observed.words[0] != (expected_low) || observed.words[1] != (expected_high))) result = (code); \\\n"
+        "    } while (0)\n"
+        "#define F128_CHECK_INT(expression, expected, code) \\\n"
+        "    do \\\n"
+        "    { \\\n"
+        "        if (!result && (expression) != (expected)) result = (code); \\\n"
+        "    } while (0)\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    long double third = f128_divide(1, 3);\n"
+        "    long double quiet_nan = f128_created_nan();\n"
+        "    F128Image negative_zero = {.words = {0, 0x8000000000000000ULL}};\n"
+        "    F128_CHECK(third, 0x5555555555555555ULL, 0x3ffd555555555555ULL, 1);\n"
+        "    F128_CHECK(f128_add(third, 0.25L), 0xaaaaaaaaaaaaaaaaULL, 0x3ffe2aaaaaaaaaaaULL, 2);\n"
+        "    F128_CHECK(f128_negate(third), 0x5555555555555555ULL, 0xbffd555555555555ULL, 3);\n"
+        "    F128_CHECK(f128_negate(negative_zero.value), 0, 0, 4);\n"
+        "    F128_CHECK(quiet_nan, 0, 0x7fff800000000000ULL, 5);\n"
+        "    F128_CHECK(f128_negate(quiet_nan), 0, 0xffff800000000000ULL, 6);\n"
+        "    F128_CHECK_INT(f128_less(third, 0.5L) + 2 * f128_less(quiet_nan, 1) + 4 * f128_less(-1, -2), 1, 7);\n"
+        "    F128_CHECK_INT(f128_greater_equal(third, third) + 2 * f128_greater_equal(quiet_nan, quiet_nan), 1, 8);\n"
+        "    F128_CHECK_INT(f128_not_equal(quiet_nan, quiet_nan) + 2 * f128_not_equal(negative_zero.value, 0), 1, 9);\n"
+        "    F128_CHECK_INT(f128_truth(negative_zero.value) + 2 * f128_truth(quiet_nan) + 4 * f128_truth(third), 6, 10);\n"
+        "    F128_CHECK_INT(f128_to_double(third) == 1.0 / 3, 1, 11);\n"
+        "    F128_CHECK_INT(f128_to_float(third) == 1.0f / 3, 1, 12);\n"
+        "    F128_CHECK_INT(f128_to_s64(-12345678901.75L), -12345678901LL, 13);\n"
+        "    F128_CHECK_INT(f128_to_u32(4294967295.5L), 4294967295u, 14);\n"
+        "    F128_CHECK(f128_from_s32(-7), 0x0000000000000000ULL, 0xc001c00000000000ULL, 15);\n"
+        "    F128_CHECK(f128_from_u64(18446744073709551615ULL), 0xfffe000000000000ULL, 0x403effffffffffffULL, 16);\n"
+        "    F128_CHECK(f128_from_double(0.1), 0xa000000000000000ULL, 0x3ffb999999999999ULL, 17);\n"
+        "    F128_CHECK(f128_mixed(third, 0.1, 3), 0xbbaaaaaaaaaaaaabULL, 0xc0007bbbbbbbbbbbULL, 18);\n"
+        "    F128_CHECK(f128_static_third, 0x5555555555555555ULL, 0x3ffd555555555555ULL, 19);\n"
+        "    F128_CHECK(f128_static_table[0], 0, 0x4000000000000000ULL, 20);\n"
+        "    F128_CHECK(f128_static_table[1], 0, 0x8000000000000000ULL, 21);\n"
+        "    F128_CHECK(f128_static_table[2], 0x18c21ab905450cc3ULL, 0x73e6a3750647fcabULL, 22);\n"
+        "    F128_CHECK(f128_static_table[3], 0x3333333333333334ULL, 0x3ffd333333333333ULL, 23);\n"
+        "    F128_CHECK(f128_variadic(10, third, 0.5, 1.0L, 1.5, third, 2.5, 3.0L, 3.5, third, 4.5), 0xffffffffffffffffULL, 0x4008343fffffffffULL, 24);\n"
+        "    F128Pair pair = f128_pair((F128Pair){third, 3});\n"
+        "    F128_CHECK(pair.first, 0x5555555555555555ULL, 0x4000555555555555ULL, 25);\n"
+        "    F128_CHECK(pair.second, 0x0000000000000000ULL, 0x3fff000000000000ULL, 26);\n"
+        "    F128_CHECK(f128_variadic_aggregates(3, pair, third + 2.0Li, (F128Pair){1, third}, 3 - 1.0Li, pair, third * 1.0Li), 0x5555555555555554ULL, 0x4002f55555555555ULL, 31);\n"
+        "    long double _Complex product = f128_complex_multiply(third + 2.0Li, 3 - third * 1.0Li);\n"
+        "    F128_CHECK(__real__ product, 0xaaaaaaaaaaaaaaaaULL, 0x3fffaaaaaaaaaaaaULL, 27);\n"
+        "    F128_CHECK(__imag__ product, 0x38e38e38e38e38e4ULL, 0x400178e38e38e38eULL, 28);\n"
+        "    long double _Complex quotient = f128_complex_divide(product, 1 + 1.0Li);\n"
+        "    F128_CHECK(__real__ quotient, 0xe38e38e38e38e38eULL, 0x4000e38e38e38e38ULL, 29);\n"
+        "    F128_CHECK(__imag__ quotient, 0x8e38e38e38e38e3aULL, 0x40000e38e38e38e3ULL, 30);\n"
+        "    return result;\n"
+        "}\n"
+        "#else\n"
+        "int main(void) { return 0; }\n"
+        "#endif\n"
+        ),
+    };
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    if (!BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        return result;
+    }
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android"), S8("aarch64-unknown-uefi"),
+                         S8("x86_64-linux-android")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 positions[] = {S8("-fno-pic"), S8("-fPIC")};
+    String8 imports[] = {S8("__addtf3"), S8("__subtf3"), S8("__multf3"), S8("__divtf3"), S8("__lttf2"), S8("__getf2"), S8("__netf2"),
+                         S8("__trunctfdf2"), S8("__trunctfsf2"), S8("__fixtfdi"), S8("__fixunstfsi"), S8("__floatsitf"), S8("__floatunditf")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-f128-runtime"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
+                        S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("f128 runtime {S8} {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], positions[position], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 22 &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+                    for (u32 import = 0; compiled.has_object && import < BUSTER_ARRAY_LENGTH(imports); import += 1)
+                    {
+                        ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&compiled.object, imports[import]);
+                        BUSTER_TEST_RAW(arguments, symbol && symbol->section == OBJECT_SECTION_UNDEFINED,
+                            string_format(temporary.arena, S8("{S8} imports {S8}"), description, imports[import]));
+                    }
+                    if (compiled.has_object && target == BUSTER_ARRAY_LENGTH(targets) - 1)
+                    {
+                        String8 import = S8("__extenddftf2");
+                        ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&compiled.object, import);
+                        BUSTER_TEST_RAW(arguments, symbol && symbol->section == OBJECT_SECTION_UNDEFINED,
+                            string_format(temporary.arena, S8("{S8} imports {S8}"), description, import));
+                    }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX && !BUSTER_ANDROID
+                    if (target == 0 && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-f128-runtime-run"), S8(".elf"));
+                        String8 link[8];
+                        u32 count = 0;
+                        link[count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                        link[count++] = position ? S8("-pie") : S8("-no-pie");
+                        link[count++] = output;
+                        link[count++] = S8("-o");
+                        link[count++] = executable;
+                        ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = link, .length = count},
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        bool linked = spawned.handle && os_process_wait_sync(temporary.arena, spawned).result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST_RAW(arguments, linked, description);
+                        if (linked) { BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description); }
                     }
 #endif
                     scratch_end(temporary);
@@ -11826,6 +12194,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_binary128_runtime);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
@@ -11851,6 +12220,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);

@@ -674,6 +674,42 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
     return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
 }
 
+// The C frontend only exposes the canonical x87 spelling on a target whose
+// selected ABI actually carries it.  The target layout is the frontend's
+// source of truth for the spelling; the shared ABI classifier is the source of
+// truth for how a value with that spelling crosses a function boundary.
+// x86_64 Android shares the ELF System V convention, but target_data_layout
+// gives it sixteen-byte IEEE binary128 long double, so the exact
+// representation checks below keep it off this x87 path.  Lowering and the
+// parser's lowering-constraint mirror ask this same predicate.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
+// The supported C long-double ABIs carry IEEE binary128 directly in one
+// sixteen-byte vector-file part: AAPCS64 in a Q register and Android System V
+// x86-64 in an XMM register. Keep this gate as narrow as the exact target data
+// layout so ordinary System V x87 long double remains on its separate path.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    bool direct_register_abi =
+        (target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_AAPCS64) ||
+        (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    return direct_register_abi && layout.endianness == TARGET_ENDIAN_LITTLE &&
+           layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];
 

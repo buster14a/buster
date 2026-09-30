@@ -4944,7 +4944,7 @@ BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CType
     else if ((source_pointer && target_float) || (source_float && target_pointer))
         message = S8("cannot convert between a pointer and a floating-point type");
     else if (runtime && to == C_TYPE_FLOAT16 && (from == C_TYPE_LONG_DOUBLE || from == C_TYPE_LONG_DOUBLE_COMPLEX) &&
-             target_data_layout(target).long_double_type.bit_width > 64 &&
+             target_data_layout(target).long_double_type.bit_width > 64 && !c_ir_target_supports_f128_transport(target) &&
              !(target.cpu_arch == CPU_ARCH_X86_64 && target_data_layout(target).long_double_type.bit_width == 80))
         message = S8("C IR lowering does not support this runtime conversion to binary16");
     return message;
@@ -23768,7 +23768,10 @@ BUSTER_C_INTERNAL void c_parse_validate_signature(CTypeParseMachine* machine, CP
         valid = type.value < result->type_count;
         if (!valid) continue;
         CType value = result->types[type.value];
-        if (index && function.is_variadic && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
+        bool binary128 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target);
+        bool x87 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic &&
+                   c_ir_target_supports_f80(preprocess.target);
+        if (index && function.is_variadic && !binary128 && !x87 && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
         if (value.kind == C_TYPE_VECTOR)
         {
             u64 size = 0;
@@ -24904,6 +24907,9 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                         target_data_layout(preprocess.target).long_double_type.bit_width == 80 && !value.is_atomic &&
                         value.kind != C_TYPE_LONG_DOUBLE_COMPLEX &&
                         c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment) && size <= 16;
+                    supported |= !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target) &&
+                                 (value.kind == C_TYPE_LONG_DOUBLE || value.kind == C_TYPE_LONG_DOUBLE_COMPLEX || value.kind == C_TYPE_STRUCT ||
+                                  value.kind == C_TYPE_UNION || value.kind == C_TYPE_ARRAY);
                     if (!supported) message = S8("C IR lowering does not yet support wide floating-point va_arg");
                 }
             }
