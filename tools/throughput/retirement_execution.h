@@ -351,7 +351,9 @@ static int tp_retirement_metrics_artifact_valid(TpRetirementMetricsArtifact cons
  * invocation. A compiler invocation binds the batch output digest over its
  * per-input object digests and, for an object batch, its metrics artifact;
  * exit_status is the frozen expected exit status (nonzero only when a frozen
- * control fails). */
+ * control fails). executable_sha256 is the file the process executed: the
+ * variant's compiler binary for a compiler invocation, the row's program (its
+ * frozen artifact) for a runtime invocation. */
 typedef struct TpRetirementOutput
 {
     char const* executable_sha256;

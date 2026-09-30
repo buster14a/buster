@@ -11,8 +11,11 @@
  * is the shared boundary of timed (measurement_run) and untimed
  * (retirement_untimed.h) batches. Code sections are parsed once,
  * outside timing (tp_retirement_code_observe), never per invocation.
- * The service owns immutable source/cwd trees, private output descriptors,
- * independent correctness/oracles, sandboxing, lease and durable publication.
+ * An invocation record names the file the launch executed
+ * (tp_retirement_executed_sha256): a layout runtime launch's program, else
+ * the executable. The service owns immutable source/cwd trees, private
+ * output descriptors, independent correctness/oracles, sandboxing, lease and
+ * durable publication.
  * There is no request parser, recipe admission or performance verdict here.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_MEASUREMENT_H
@@ -573,6 +576,23 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
     return ok;
 }
 
+/* The SHA-256 of the file a completed launch executed, which its invocation
+ * record names as `executable_sha256`: a layout runtime launch runs its
+ * program (TpProcessInputs.program), whose digest the service took from the
+ * copy it wrote and tp_retirement_launch_program re-hashed and compared
+ * before the child ran; every other launch (a compiler batch, or a plain
+ * runtime launch, which fexecve's the executable itself) runs the executable
+ * descriptor, hashed by tp_retirement_executable_init. The validator requires
+ * a runtime record to name its row's frozen artifact and a compiler record
+ * its variant's binary. Only called after tp_retirement_launch succeeded,
+ * so the program descriptor is present exactly for a layout runtime launch. */
+static char const* tp_retirement_executed_sha256(TpRetirementMeasuredCommand const* command,
+    TpRetirementExecutable const* executable, TpProcessInputs const* inputs)
+{
+    char const* digest = command->kind == 1 && inputs->program ? inputs->program->sha256 : executable->sha256;
+    return digest;
+}
+
 /* output_directory is a service-opened private directory. Compiler outputs
  * must not exist before launch; no stale output can satisfy the oracle. Runtime
  * output is the fresh log descriptor, which must be empty and positioned at 0.
@@ -607,8 +627,8 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_COLLECTION_FAILED;
-        TpRetirementOutput measured = {executable->sha256, command_digest, outcome.output_sha256,
-            member_count ? &outcome.metrics : NULL, command->exit_status};
+        TpRetirementOutput measured = {tp_retirement_executed_sha256(command, executable, inputs), command_digest,
+            outcome.output_sha256, member_count ? &outcome.metrics : NULL, command->exit_status};
         ok = tp_retirement_samples_append(samples, &outcome.observed, &outcome.process, &measured,
             member_count ? members : NULL, member_count);
     }

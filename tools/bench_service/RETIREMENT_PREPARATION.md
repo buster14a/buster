@@ -1478,7 +1478,10 @@ identity after it entered the sandbox (`tp_process_program_same`, `ESTALE`
 otherwise) and executes `./<leaf>` from its cwd, slot 7 (`execveat` with
 `AT_FDCWD` and `AT_SYMLINK_NOFOLLOW`, so `AT_EXECFN` and the start-up stack
 are lane B's `execve("./<leaf>")`). Anything else is refused before any
-child.
+child. A runtime invocation's transcript record names that program as its
+`executable_sha256`: the SHA-256 the launch verified, which is the row's
+frozen artifact the validator requires. A compiler or batch record names
+the side's binary (`tp_retirement_executed_sha256`).
 
 **Where the program comes from.** The #619 schedule runs each stage's
 runtime campaign after its compiler campaign, and those compiler launches
