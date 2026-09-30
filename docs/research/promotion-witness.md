@@ -156,6 +156,19 @@ The exact temporary [model workflow](https://github.com/buster14a/buster/blob/65
 
 [evidence.txt](../../tools/research/promotion-witness/evidence.txt) preserves model commands, versions, raw results, source/generated-file hashes and [artifact 10893469576](https://github.com/buster14a/buster/actions/runs/36206085627/artifacts/10893469576). [census.txt](../../tools/research/promotion-witness/census.txt) preserves every selected counter row, compilation recipe, source/object/stdout identities and [artifact 10894340547](https://github.com/buster14a/buster/actions/runs/36206222943/artifacts/10894340547). Artifacts expire October 10, 2026; these tracked text records retain the essential evidence. Run the recorded recipes only on authorized hosted executors, not a desktop benchmark environment.
 
+To rerun the model from the repository root without a workflow, extract the pinned source and compile the probe with the recorded flags. `prepare.py` refuses any other `ir_promote.c`, so later main revisions must use the pinned blob:
+
+```sh
+out="$(mktemp -d)"
+mkdir -p "$out/pin/src/buster/lib/compiler/ir"
+git show ade6ac4b6ecb21f30b61b656439bac476c145e2f:src/buster/lib/compiler/ir/ir_promote.c > "$out/pin/src/buster/lib/compiler/ir/ir_promote.c"
+python3 tools/research/promotion-witness/prepare.py "$out/pin" "$out/gen"
+cc -O2 -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -fwrapv -fno-strict-aliasing -funsigned-char -I"$out/gen" tools/research/promotion-witness/probe.c -o "$out/probe"
+"$out/probe" | sha256sum
+```
+
+A matching stdout hash is the `Stdout SHA256` in [evidence.txt](../../tools/research/promotion-witness/evidence.txt). Local rerun on 2026-09-30 while bringing this record up to main `d68265991e874f1151186b7765a82483c51ca14f`: Clang 18.1.3 `-O2`, GCC 13.3.0 `-O2` and GCC 13.3.0 ASan/UBSan (`-O1 -g -fno-sanitize-recover=all`) each reproduced that hash with `PASS total=25892`. This reran only the reduced model against the pinned source; the census and all other results above still describe the pinned revision, not current main.
+
 The model's remap substitute checks root flattening and list-tail maintenance, not actual dense value numbering, types, dominance, use-def consistency or machine code. Full canonical validation, registered compiler tests, production allocator/sanitizer integration, cross-target portability, self-hosting and real-workload candidate equivalence remain untested. The census is a developer Release work-count observation, not a frozen matched-production build. No timing result was interpreted as performance evidence; no 9700X lease or run occurred.
 
 ## Decision and handoff
