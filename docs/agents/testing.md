@@ -328,6 +328,16 @@ for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
 
+## Oracle independence
+
+A differential test is evidence only when its two sides obtain the answer
+independently. [The oracle independence map](../oracle-independence.md)
+records, per route, the shared dependency and the independent oracle
+(Clang-derived layout corpus `record_layout_tests`, specification constants
+for debug information, host-compiled references). New golden data needs an
+independent producer and a regeneration command; never derive one Buster
+path's expectation from another's.
+
 ## Source-equivalence campaigns
 
 `ide test` also runs a bounded source-equivalence smoke campaign under all native
@@ -416,7 +426,7 @@ process controls, not successful compiler or missing-evidence observations.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
-Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. A process that prints the marker and remains alive is killed at the deadline and fails as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` also locks down launch failure, nonzero exit, incomplete output, stderr output, a true hang, and summary-then-hang behavior.
+Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors
