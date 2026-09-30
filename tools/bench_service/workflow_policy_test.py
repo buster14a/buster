@@ -463,6 +463,14 @@ def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) 
             if budget != int(runtime[0]) // 1000000:
                 errors.append(f"{name} budget must equal the broker RuntimeMaxSec")
 
+    refusal = (
+            '            echo \'BENCH_DISPATCH_RECIPE_NOT_INSTALLED the installed service does not serve this recipe\' >&2',
+            "            exit 1",
+            "          fi",
+    )
+    if not contains_block(dispatch.splitlines(), refusal):
+        errors.append("a recipe the installed service does not serve must stop the dispatch")
+
     timeout = f"    timeout-minutes: {JOB_TIMEOUT_MINUTES}"
     if [line for line in submit if line.startswith("    timeout-minutes:")] != [timeout]:
         errors.append(f"submit job must keep {timeout.strip()}")

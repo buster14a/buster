@@ -234,6 +234,8 @@ jobs:
           printf 'job=%s\n' "$job" >> "$GITHUB_OUTPUT"
           {
             printf '## 9700X admission receipt\n\n'
+            # Backticks delimit literal Markdown code in the summary.
+            # shellcheck disable=SC2016
             printf 'recipe `%s`, runtime budget %s s, result wait %s s\n\n' \
               "$BQ_RECIPE" "$BQ_RUNTIME_BUDGET" "$BQ_WAIT_SECONDS"
             printf '```text\n'

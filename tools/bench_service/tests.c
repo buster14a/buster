@@ -114,7 +114,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
 
     /* submit-recipe names a registry service recipe and encodes exactly the
      * fixed submit's bytes for it; every other recipe name is refused. */
-    char* selected[] = {"submit-recipe", "validate-buster-v1", gateway[1], gateway[2], gateway[3]};
+    char* selected[] = {"submit-recipe", "validate-buster-v1", gateway[1], gateway[2], gateway[3], 0};
     BqPacket chosen;
     BQ_CHECK(bq_client_arguments(4, gateway, true, &fixed, &operation) && operation == BQ_OP_SUBMIT);
     BQ_CHECK(bq_client_arguments(5, selected, true, &chosen, &operation) && operation == BQ_OP_SUBMIT &&
