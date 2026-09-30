@@ -52,7 +52,18 @@ subject to either problem.
 **Issues are the task queue.** Work that is real but not being done right now
 becomes an issue, not a paragraph in an audit that nobody will find — a chip
 filed against a memory is invisible to the next agent, while an issue is
-something a fresh session can pick up cold. Write the body as a **prompt**: what
+something a fresh session can pick up cold. An agent that encounters a separate
+actionable problem reports it during the task, before session end or handoff:
+search open and closed issues/PRs for the root cause; comment with fresh evidence
+on the matching record, or file a new issue if none exists. A finding fixed in
+the active PR belongs in that PR's description and regression evidence; link an
+existing issue if one tracks it. Group symptoms with the same root cause in one
+record and separate independent problems. Report a blocker on its owning issue
+or PR as soon as it changes the next action. Do not open a new issue for every
+flaky retry or known duplicate. When access prevents publication, preserve a
+ready-to-post body and explicitly identify the unposted report in the handoff.
+
+Write the body as a **prompt**: what
 is wrong and how it was diagnosed, the file and symbol names to start from,
 the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a
@@ -174,12 +185,20 @@ Ordinary feature branches do not own
 an admitted source changed. The read-only rebinding workflow reconstructs the
 exact candidate state in a disposable checkout. The repository ruleset's
 required `Native retirement merge admission` check is the merge-admission
-authority. `API migration policy` remains a separate compatibility check. For
-retirement-sensitive changes it accepts only a current-main, two-parent
-integration head with a successful exact-head
-`Native retirement trusted integration` status from `github-actions[bot]`.
-When `main` advances that status is invalidated; rerun the protected writer
-instead of hand-editing generated state or requiring a manual rebase.
+authority. `API migration policy` remains a separate compatibility check.
+
+An ordinary PR that changes admitted sources needs no writer step. It queues
+like any other PR, and queue admission requires the ephemeral reconstruction
+of its exact group tree. Afterwards an automatic catch-up PR
+(`native-retirement/catch-up`) publishes the regenerated pair for `main`.
+Leave that PR to the automation: do not edit it, push to it or merge it by hand.
+
+`bootstrap` and `policy` transitions still need the writer first. For them,
+admission accepts only a current-main, two-parent integration head with a
+successful exact-head `Native retirement trusted integration` status from
+`github-actions[bot]`. When `main` advances that status is invalidated; rerun
+the protected writer instead of hand-editing generated state or requiring a
+manual rebase.
 
 Changes to rebinder/materializer/validator/workflow implementation are a
 `bootstrap` transition. Changes to reviewed policy, generated schema, or
@@ -194,8 +213,9 @@ generated-file edits are rejected for every class. See
 
 The `merge-conflict-preflight` status is a cheap read-only answer for one exact
 triple: current `main`, candidate head and merge base. Its description embeds
-the full main and head SHAs; the retained JSON also records their trees, every
-merge-base SHA/tree and the exact combined tree when clean. A result for
+the full main and head SHAs, plus a trailing `q=queued` when the trusted job
+read that exact head as queued; the retained JSON also records their trees,
+every merge-base SHA/tree and the exact combined tree when clean. A result for
 `m=<old-main> h=<head>` is not authoritative after `main` moves, even when the
 same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
@@ -221,8 +241,8 @@ Respond to its numbered classification exactly as follows:
    `docs/native-retirement-repository-sources-v1.json` and/or
    `tools/native_retirement_dependency_binding.generated.h` from the PR. Do not
    hand-resolve hashes or refresh generated state on the feature branch; rerun
-   ephemeral validation and let the serialized trusted writer publish the
-   integrated result.
+   ephemeral validation and let the automatic catch-up (or, for a trust
+   transition, the trusted writer) publish the integrated result.
 2. **Genuine source overlap.** Stop the expensive matrix and inspect the exact
    named paths. Choose an intentional order, rebase or explicit stack; preserve
    both changes where required, run the affected focused tests, then let the
@@ -240,6 +260,18 @@ Respond to its numbered classification exactly as follows:
    the applicable exact-head authorization before running expensive acceptance
    again: independent review by default, or the explicitly configured admin
    dispatch in the documented solo-maintainer policy.
+
+**Dequeue a conflicted queued PR before pushing its fix.** GitHub keeps a
+queued PR that starts conflicting with `main` in the queue, and it refuses
+every push to that PR's branch with `GH006` ("Branches that are queued for
+merging cannot be updated"). Any of these signals means the PR is in that
+state: a conflicted status that ends in `q=queued`, a preflight summary that
+names the PR as queued, or that push error. Dequeue the PR first, with
+**Remove from queue** or the GraphQL `dequeuePullRequest` mutation. Then push
+the resolution and re-enqueue the PR after its checks pass. Do not retry the
+push or use a queue bypass. If you cannot dequeue the PR, say so on the PR.
+Nothing dequeues it automatically; see
+[queued PRs that start conflicting](../merge-queue-admission.md#queued-prs-that-start-conflicting).
 
 For a local diagnosis with already-fetched immutable commits, run:
 
@@ -280,9 +312,10 @@ replacement head after its checks pass. No manual generated-file repair is neede
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
 All eight documented checks are required from GitHub Actions. The repository
-contract permits up to 20 speculative combined-head builds while allowing only
-one validated candidate to merge at a time. `ALLGREEN` requires every queued
-group's checks, and `MERGE` retains merge commits. The initial activation had
+contract permits up to 4 speculative combined-head builds (lowered from 20 by
+#1805) while allowing only one validated candidate to merge at a time.
+`ALLGREEN` requires every queued group's checks, and `MERGE` retains merge
+commits. The initial activation had
 one build slot and no bypass; the administrator must read back the current live
 settings before relying on them. On 2026-09-24 the administrator added two
 standing `always` bypass actors to the live main ruleset: Repository admin

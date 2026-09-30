@@ -2051,6 +2051,16 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
+// The same encoders, writing into the caller's buffer when the function's
+// worst-case byte budget fits `caller_capacity`, and into a budget-sized
+// buffer from `arena` otherwise; `bytes` in the result says which. Either way
+// the encoder is bounded by that same budget, so its bytes and its success or
+// failure do not depend on where it writes. On failure `caller_bytes` may
+// hold partial bytes past anything the caller has committed.
+BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                             u8* caller_bytes, u64 caller_capacity);
+BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                              u8* caller_bytes, u64 caller_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
