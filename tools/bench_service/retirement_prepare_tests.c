@@ -3,6 +3,11 @@
  * the #923 integrator. It uses the real descriptor-backed materializer.
  */
 #define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
+/* The worker-unit campaign fixture (retirement_worker_unit_tests.h) admits
+ * A/A through lane D's fixture stand-in; the installed service refuses both
+ * flags at compile time. */
+#define TP_RETIREMENT_CAMPAIGN_FIXTURE_AA 1
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA 1
 #define main bq_service_cli_main
 #include "main.c"
 #undef main

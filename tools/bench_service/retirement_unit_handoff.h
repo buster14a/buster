@@ -24,7 +24,10 @@
  * (and with it the A/B launch-log chain) under the producer authority.
  *
  * Map: BqRetirementUnitHandoff, bq_retirement_unit_handoff_names,
- * bq_retirement_unit_handoff_timed, bq_retirement_unit_handoff.
+ * bq_retirement_unit_handoff_declared (D's retained entries, constant before
+ * timing), bq_retirement_unit_handoff_timed, bq_retirement_unit_handoff,
+ * bq_retirement_unit_handoff_retained_matches (the handoff's entries against
+ * the store plan's declaration).
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_HANDOFF_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_HANDOFF_H
@@ -39,8 +42,16 @@ static char const* const bq_retirement_unit_handoff_names[BQ_RETIREMENT_UNIT_CAM
     "workflow.phases.pre_sample_plan", "workflow.phases.post_aa_binding"};
 
 /* D's retained-file kinds for lane E's declaration: the post-sample record
- * (one exact file) and the failed launch's kept log (at most one). */
+ * (one exact file) and the failed launch's kept log (at most one). They are
+ * constants, so the service declares them in lane E's store plan before any
+ * timing (tp_retirement_compose_plan binds the declaration's digest), and
+ * the handoff copies the same entries and checks them against the declared
+ * ones (bq_retirement_unit_handoff_retained_matches). */
 #define BQ_RETIREMENT_UNIT_HANDOFF_RETAINED 2u
+static TpRetirementComposeRetained const bq_retirement_unit_handoff_declared[BQ_RETIREMENT_UNIT_HANDOFF_RETAINED] = {
+    {"unitrecord", BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, NULL, 1, 0, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX},
+    {"unitlogs", BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_SUFFIX,
+     BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_MAX, 0, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX}};
 
 /* The request's D-owned storage: the driver result it points into, the
  * layout, the partitions in E's form, D's prior-closure entries and D's
@@ -140,14 +151,8 @@ static inline int bq_retirement_unit_handoff(BqRetirementUnitCampaign const* dri
             }
         }
     }
-    if (ok)
-    {
-        handoff->retained[0] = (TpRetirementComposeRetained){"unitrecord", BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD, NULL, 1,
-            0, BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX};
-        handoff->retained[1] = (TpRetirementComposeRetained){"unitlogs", BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX,
-            BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_SUFFIX, BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_MAX, 0,
-            BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX};
-    }
+    for (unsigned index = 0; ok && index < BQ_RETIREMENT_UNIT_HANDOFF_RETAINED; ++index)
+        handoff->retained[index] = bq_retirement_unit_handoff_declared[index];
     for (unsigned index = 0; ok && index < BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS; ++index)
         handoff->prior[index] = (TpRetirementComposeClosure){bq_retirement_unit_handoff_names[index],
             bq_retirement_unit_campaign_document_paths[index], handoff->result.documents[index].bytes,
@@ -179,6 +184,35 @@ static inline int bq_retirement_unit_handoff(BqRetirementUnitCampaign const* dri
         /* The A/A stage's metrics writer tag (NULL when it wrote none). */
         request->aa_metrics_tag = campaign->samples[0] && campaign->samples[0]->metrics ?
             campaign->samples[0]->metrics->tag : NULL;
+    }
+    return ok;
+}
+
+static inline int bq_retirement_unit_handoff_text_equal(char const* left, char const* right)
+{
+    int equal = left && right ? !strcmp(left, right) : left == right;
+    return equal;
+}
+
+/* At handoff: D's retained entries the handoff produced are, field for
+ * field, the ones the store plan declared before timing (declared holds
+ * `count` entries of the caller's declaration; D's must appear in it in
+ * bq_retirement_unit_handoff_declared order, contiguously from `first`). A
+ * difference means the sealed retained manifest would not bind what the plan
+ * reserved, so the composition must not proceed. */
+static inline int bq_retirement_unit_handoff_retained_matches(BqRetirementUnitHandoff const* handoff,
+    TpRetirementComposeRetained const* declared, unsigned count, unsigned first)
+{
+    int ok = handoff && declared && first <= count && count - first >= BQ_RETIREMENT_UNIT_HANDOFF_RETAINED;
+    for (unsigned index = 0; ok && index < BQ_RETIREMENT_UNIT_HANDOFF_RETAINED; ++index)
+    {
+        TpRetirementComposeRetained const* have = &handoff->retained[index];
+        TpRetirementComposeRetained const* want = &declared[first + index];
+        ok = bq_retirement_unit_handoff_text_equal(have->kind, want->kind) &&
+            bq_retirement_unit_handoff_text_equal(have->prefix, want->prefix) &&
+            bq_retirement_unit_handoff_text_equal(have->suffix, want->suffix) &&
+            have->files_max == want->files_max && have->reserved == want->reserved &&
+            have->bytes_max == want->bytes_max;
     }
     return ok;
 }

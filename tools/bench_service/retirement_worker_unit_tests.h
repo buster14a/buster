@@ -38,6 +38,28 @@
 #define BQ_PREP_WORKER_UNIT_UNCLEAN 200
 #define BQ_PREP_WORKER_UNIT_MILLISECONDS 300000u
 
+/* The #437 A/A admission receipt stand-in the fixture build's producer
+ * presents (retirement_worker_campaign.c declares it under
+ * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA keys in
+ * sorted order with test identities, over the driver's family and the
+ * campaign's CPU. It is test data, not a #426 decision. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
+    TpRetirementCampaign const* campaign, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
+    u32* length, char digest[SHA256_HEX_CAPACITY])
+{
+    int written = driver && campaign ? snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
+        "{\"admitted\":true,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
+        "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
+        "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
+        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\",\"version\":1}",
+        1, 2, driver->family_sha256, campaign->cpu) : -1;
+    bool ok = written > 0 && written < (int)BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX;
+    if (ok) bq_digest(receipt, (u32)written, (char8*)digest);
+    *length = ok ? (u32)written : 0;
+    return ok;
+}
+
 typedef enum BqPrepWorkerUnitMode
 {
     BQ_PREP_WORKER_UNIT_RUN,
@@ -373,10 +395,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         observed.attempt_token = attempt->job.token;
         BqPrepWorkerUnitRun run = bq_prep_worker_unit_drive(fixture, attempt, &seams, BQ_PREP_WORKER_UNIT_RUN);
         char digest[SHA256_HEX_CAPACITY] = {0};
-        if (run.status != BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED)
+        if (run.status != BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED)
             fprintf(stderr, "RETIREMENT_PREP worker-unit success exited %d after %u messages\n", run.status,
                     run.messages);
-        BQ_PREP_CHECK(run.status == BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED && run.messages == 1 && run.preparing == 1 &&
+        BQ_PREP_CHECK(run.status == BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED && run.messages == 1 && run.preparing == 1 &&
                       run.eof && bq_prep_worker_unit_keeper_gone(fixture, &attempt->job));
         BQ_PREP_CHECK(bq_prep_worker_unit_ready(attempt->attempt, digest) &&
                       bq_retirement_unit_replay_pinned(attempt->store, fixture->workspaces_fd, fixture->installed_fd,

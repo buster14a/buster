@@ -19,6 +19,13 @@
  *                                        pre-sample documents
  *   bq_retirement_unit_campaign_post_aa_document  the driver's step after the
  *                                        A/A admission: the post-A/A binding
+ *   bq_retirement_unit_campaign_documents_measure  the same five documents
+ *                                        sized and hashed without writing,
+ *                                        before lane E's store plan binds
+ *                                        their bytes (the post-A/A binding
+ *                                        through bq_retirement_unit_campaign_
+ *                                        post_aa_bytes, whose unknown
+ *                                        digests are fixed-width)
  *   bq_retirement_documents_partition    the validator's timed and untimed
  *                                        batch-group partitions (_batch_groups,
  *                                        _untimed_groups)
@@ -35,7 +42,8 @@
  * BqRetirementDocumentPartition, BqRetirementDocumentFamily,
  * BqRetirementDocumentInputs, BqRetirementDocumentDescriptor,
  * BqRetirementDocumentPhase, bq_retirement_document_identity,
- * BqRetirementUnitCampaignDocumentSources.
+ * BqRetirementUnitCampaignDocumentSources, BqRetirementUnitCampaignDocumentSet,
+ * bq_retirement_unit_campaign_documents_derive.
  *
  * Nothing here reads the census: this header needs only the driver
  * (retirement_unit_campaign.h), so the throughput functional fixture runs the
@@ -1294,82 +1302,156 @@ static inline int bq_retirement_unit_campaign_document_timed_rows(BqRetirementDo
     return ok;
 }
 
-/* Before A/A: the oracle records, the execution plan, the result-input plan
- * and the pre-sample plan, written in that order into the evidence root and
- * recorded with the partitions, the family and source pin digests and the
- * timed-row layout digest (which the lane E handoff reproduces). The
- * partitions and family are derived here from the pinned rows (whose every
- * identity must be the gate's sealed one) and must be the bound campaign's:
- * its groups, the gate's frozen batch groups and the plan's two family
- * counts. The untimed groups, batches, rows and code facts are the ones the
- * untimed step ran and observed, and the budget the reviewed one the
- * campaign binds. A failure poisons the attempt; a document already written
- * stays as evidence, and none is ever replaced. */
-static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign* driver,
-    BqRetirementUnitCampaignDocumentSources const* sources)
+/* The four pre-A/A documents' descriptors and what they bind: the
+ * result-input partitions, the family and the source pin and timed-row
+ * layout digests. */
+typedef struct BqRetirementUnitCampaignDocumentSet
 {
-    TpRetirementCampaign const* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
+    BqRetirementDocumentDescriptor descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA];
+    BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
+    unsigned counts[2];
+    BqRetirementDocumentFamily family;
+    char support[65], manifest[65], rows[65], timed_rows[65];
+} BqRetirementUnitCampaignDocumentSet;
+
+/* The oracle records, the execution plan, the result-input plan and the
+ * pre-sample plan over the untimed step's batches, rows and code facts, the
+ * bound campaign's groups, CPU and budget and `plan`: written in that order
+ * into the evidence root when `write`, otherwise only encoded and hashed (the
+ * writer takes NULL streams), so their exact sizes are known before the
+ * result store is planned. The partitions and family are derived from the
+ * pinned rows (whose every identity must be the gate's sealed one) and must
+ * be the bound campaign's: its groups, the gate's frozen batch groups and the
+ * plan's two family counts. */
+static inline int bq_retirement_unit_campaign_documents_derive(BqRetirementUnitCampaign const* driver,
+    TpRetirementCampaign const* campaign, TpRetirementPlan const* plan,
+    BqRetirementUnitCampaignDocumentSources const* sources, int write, BqRetirementUnitCampaignDocumentSet* set)
+{
     BqRetirementCorrectness const* gate = driver ? driver->gate : NULL;
     BqRetirementDocumentPopulation const* population = sources ? sources->population : NULL;
     BqRetirementDocumentPartition timed = {0}, untimed = {0};
-    BqRetirementDocumentFamily family = {0};
-    char support[65] = {0}, manifest[65] = {0}, rows[65] = {0}, performance[65] = {0}, budget[65] = {0};
-    char timed_rows[65] = {0};
-    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND && !driver->documented && campaign && gate &&
-        population && population->count && sources->directory >= 0 && driver->budget && driver->untimed_batches &&
-        bq_retirement_unit_campaign_document_pins(sources->profile, support, manifest, rows, performance) &&
+    char performance[65] = {0}, budget[65] = {0};
+    if (set) memset(set, 0, sizeof(*set));
+    int ok = driver && set && campaign && plan && gate && population && population->count &&
+        sources->directory >= 0 && driver->budget && driver->untimed_batches &&
+        bq_retirement_unit_campaign_document_pins(sources->profile, set->support, set->manifest, set->rows,
+            performance) &&
         !strcmp(performance, population->performance_rows_sha256) &&
         tp_retirement_budget_digest(driver->budget, budget) && !strcmp(budget, campaign->budget_sha256) &&
         bq_retirement_documents_partition(population, 0, &timed) &&
         bq_retirement_documents_partition(population, 1, &untimed) &&
-        bq_retirement_documents_family(population, &timed, &family) &&
-        family.bootstrap_members == driver->plan.bootstrap_members_per_scope &&
-        family.cell_members == driver->plan.cell_members_per_scope &&
+        bq_retirement_documents_family(population, &timed, &set->family) &&
+        set->family.bootstrap_members == plan->bootstrap_members_per_scope &&
+        set->family.cell_members == plan->cell_members_per_scope &&
         bq_retirement_unit_campaign_document_layout(gate, campaign, population, &timed) &&
-        bq_retirement_unit_campaign_document_timed_rows(population, &timed, timed_rows) &&
+        bq_retirement_unit_campaign_document_timed_rows(population, &timed, set->timed_rows) &&
         driver->untimed_batch_count == 4u * untimed.count &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
-    BqRetirementDocumentInputs inputs = {gate, population, &timed, &untimed, driver ? driver->budget : NULL,
-        driver ? &driver->plan : NULL, driver ? driver->untimed_batches : NULL,
-        driver ? driver->untimed_batch_count : 0, driver ? driver->untimed_rows : NULL, driver ? driver->codes : NULL,
-        driver ? driver->code_count : 0, campaign ? campaign->cpu : -1, support, manifest, rows};
-    BqRetirementDocumentDescriptor descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA];
-    BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
-    unsigned counts[2] = {0, 0};
-    memset(descriptors, 0, sizeof(descriptors));
-    memset(partitions, 0, sizeof(partitions));
+    BqRetirementDocumentInputs inputs = {gate, population, &timed, &untimed, driver ? driver->budget : NULL, plan,
+        driver ? driver->untimed_batches : NULL, driver ? driver->untimed_batch_count : 0,
+        driver ? driver->untimed_rows : NULL, driver ? driver->codes : NULL, driver ? driver->code_count : 0,
+        campaign ? campaign->cpu : -1, set ? set->support : NULL, set ? set->manifest : NULL, set ? set->rows : NULL};
     for (unsigned index = 0; ok && index < BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA; ++index)
     {
-        FILE* stream = bq_retirement_unit_campaign_document_open(sources->directory, index);
-        BqRetirementDocumentPhase phase = {&family, descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256,
+        FILE* stream = write ? bq_retirement_unit_campaign_document_open(sources->directory, index) : NULL;
+        BqRetirementDocumentDescriptor* descriptors = set->descriptors;
+        BqRetirementDocumentPhase phase = {&set->family,
+            descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256,
             bq_retirement_unit_campaign_document_paths[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN],
             &descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN], NULL, NULL};
-        int written = stream != NULL;
+        int written = !write || stream != NULL;
         if (written && index == BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE)
             written = bq_retirement_documents_oracle(stream, &inputs, &descriptors[index]);
         else if (written && index == BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN)
             written = bq_retirement_documents_execution_plan(stream, &inputs, &descriptors[index]);
         else if (written && index == BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN)
-            written = bq_retirement_documents_result_input_plan(stream, &inputs, partitions, counts, &descriptors[index]);
+            written = bq_retirement_documents_result_input_plan(stream, &inputs, set->partitions, set->counts,
+                &descriptors[index]);
         else if (written)
             written = bq_retirement_documents_phase(stream, &inputs, &phase, 0, &descriptors[index]);
-        ok = bq_retirement_unit_campaign_document_close(stream, written);
+        ok = write ? bq_retirement_unit_campaign_document_close(stream, written) : written;
     }
+    bq_retirement_documents_partition_release(&timed);
+    bq_retirement_documents_partition_release(&untimed);
+    return ok;
+}
+
+/* Before A/A: the four pre-A/A documents written into the evidence root
+ * (bq_retirement_unit_campaign_documents_derive) and recorded with the
+ * partitions, the family and source pin digests and the timed-row layout
+ * digest (which the lane E handoff reproduces). The untimed groups,
+ * batches, rows and code facts are the ones the untimed step ran and
+ * observed, and the budget the reviewed one the campaign binds. A failure
+ * poisons the attempt; a document already written stays as evidence, and
+ * none is ever replaced. */
+static inline int bq_retirement_unit_campaign_documents(BqRetirementUnitCampaign* driver,
+    BqRetirementUnitCampaignDocumentSources const* sources)
+{
+    TpRetirementCampaign const* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
+    BqRetirementUnitCampaignDocumentSet set;
+    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND && !driver->documented && campaign &&
+        bq_retirement_unit_campaign_documents_derive(driver, campaign, &driver->plan, sources, 1, &set);
     if (ok)
     {
-        memcpy(driver->documents, descriptors, sizeof(descriptors));
-        memcpy(driver->partitions, partitions, sizeof(partitions));
-        memcpy(driver->partition_counts, counts, sizeof(counts));
-        memcpy(driver->family_sha256, family.sha256, 65);
-        memcpy(driver->source_rows_sha256, rows, 65);
-        memcpy(driver->support_sha256, support, 65);
-        memcpy(driver->manifest_sha256, manifest, 65);
-        memcpy(driver->timed_rows_sha256, timed_rows, 65);
+        memcpy(driver->documents, set.descriptors, sizeof(set.descriptors));
+        memcpy(driver->partitions, set.partitions, sizeof(set.partitions));
+        memcpy(driver->partition_counts, set.counts, sizeof(set.counts));
+        memcpy(driver->family_sha256, set.family.sha256, 65);
+        memcpy(driver->source_rows_sha256, set.rows, 65);
+        memcpy(driver->support_sha256, set.support, 65);
+        memcpy(driver->manifest_sha256, set.manifest, 65);
+        memcpy(driver->timed_rows_sha256, set.timed_rows, 65);
         driver->documented = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA;
     }
     else bq_retirement_unit_campaign_fail(driver);
-    bq_retirement_documents_partition_release(&timed);
-    bq_retirement_documents_partition_release(&untimed);
+    return ok;
+}
+
+/* The post-A/A binding's exact size before any timing: every field but the
+ * admission receipt and pre-sample plan digests is known once the pre-A/A
+ * documents are sized, and those two are fixed-width digests, so encoding it
+ * with a placeholder admission digest gives the byte count the written
+ * document will have (bq_retirement_unit_campaign_post_aa_document). */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_ADMISSION_PLACEHOLDER \
+    "0000000000000000000000000000000000000000000000000000000000000000"
+static inline int bq_retirement_unit_campaign_post_aa_bytes(TpRetirementPlan const* plan,
+    BqRetirementUnitCampaignDocumentSet const* set, uint64_t* bytes)
+{
+    BqRetirementDocumentInputs inputs = {0};
+    inputs.plan = plan;
+    inputs.support_sha256 = set ? set->support : NULL;
+    inputs.manifest_sha256 = set ? set->manifest : NULL;
+    inputs.rows_sha256 = set ? set->rows : NULL;
+    BqRetirementDocumentPhase phase = {set ? &set->family : NULL,
+        set ? set->descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN].sha256 : NULL,
+        bq_retirement_unit_campaign_document_paths[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN],
+        set ? &set->descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN] : NULL,
+        set ? set->descriptors[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256 : NULL,
+        BQ_RETIREMENT_UNIT_CAMPAIGN_ADMISSION_PLACEHOLDER};
+    BqRetirementDocumentDescriptor descriptor = {0};
+    int ok = plan && set && bytes && bq_retirement_documents_phase(NULL, &inputs, &phase, 1, &descriptor);
+    if (bytes) *bytes = ok ? descriptor.bytes : 0;
+    return ok;
+}
+
+/* The digest-only sizing pass lane E's store plan needs before attach: the
+ * exact size of all five documents, from a driver whose untimed step
+ * finished (UNTIMED or MEASURING) and the campaign the store-based bind froze
+ * (its plan, groups, CPU and budget), without writing anything. The written
+ * documents must then have exactly these sizes. */
+static inline int bq_retirement_unit_campaign_documents_measure(BqRetirementUnitCampaign const* driver,
+    TpRetirementCampaign const* campaign, BqRetirementUnitCampaignDocumentSources const* sources,
+    uint64_t bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS])
+{
+    BqRetirementUnitCampaignDocumentSet set;
+    int ok = driver && bytes && campaign && (driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_UNTIMED ||
+        driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_MEASURING) && !driver->documented &&
+        bq_retirement_unit_campaign_documents_derive(driver, campaign, &campaign->plan, sources, 0, &set) &&
+        bq_retirement_unit_campaign_post_aa_bytes(&campaign->plan, &set,
+            &bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA]);
+    for (unsigned index = 0; bytes && index < BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA; ++index)
+        bytes[index] = ok ? set.descriptors[index].bytes : 0;
+    if (!ok && bytes) bytes[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA] = 0;
     return ok;
 }
 

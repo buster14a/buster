@@ -40314,12 +40314,16 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             /* shared.c provides the arenas (and hash.c) the store uses. */
             if (index == 0 || index == 2 || index == 3 || index == 5)
                 os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
-            if (index == 5)
+            /* The service translation unit (main.c, which the preparation
+             * runner and the eligibility probe include) plans lane E's
+             * result store in the worker-unit campaign. */
+            if (index == 0 || index == 3 || index == 5)
             {
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
                 os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_json.c"));
             }
-            if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+            if (index == 0 || index == 2 || index == 3 || index == 5)
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
             if (sanitize)
             {
                 os_argument_builder_append(&builder, S8("-g"));

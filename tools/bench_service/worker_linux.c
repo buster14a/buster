@@ -3502,7 +3502,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
             else if (ok)
             {
                 object_count += 1;
-                ok = object_count <= BQ_WORKER_BUNDLE_ENTRY_CAP - 3;
+                ok = object_count <= BQ_WORKER_BUNDLE_ENTRY_CAP - BQ_WORKER_BUNDLE_CONTROL_ENTRIES;
             }
             if (ok && !control && S_ISDIR(child_info.st_mode))
             {
@@ -5242,7 +5242,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_unit_pinned(String8 lease_file, String8 jo
 #endif
             if (retirement)
             {
-                error = bq_retirement_worker_unit_run(seams, job_number, token_number, workspace_text,
+                error = bq_retirement_worker_unit_run(seams, job_number, token_number, workspace_text, result_text,
                                                       lease.descriptor, &phase_descriptor, preparation_sha256,
                                                       execution_deadline_ns);
                 produced = true;

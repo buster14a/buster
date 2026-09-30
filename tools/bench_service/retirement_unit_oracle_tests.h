@@ -8,9 +8,12 @@
  * subject's bytes (the reference source), a toolchain whose bin/clang is a
  * copy of the host compiler, the census with #508's performance-row
  * population (and that module's expected_population), and a reference
- * template and inventory built for the rows the projection imports. The fixture driver
- * freezes the census manifest's literal compiler bytes, so the projection's
- * compiler/baseline join holds. The sequence is prepare, build (fixture
+ * template and inventory built for the rows the projection imports. The
+ * census names the stand-in compilers (retirement_stand_in_compiler.h, handed
+ * to the emitter with --compilers) and the fixture driver freezes exactly
+ * those bytes, so the projection's compiler/baseline join holds; A's
+ * candidate snapshot carries the outputs they copy
+ * (bq_prep_oracle_output_names). The sequence is prepare, build (fixture
  * broker), project, oracle authority and reference producer; the service
  * translation unit defines BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED, so forged,
  * foreign and stale tokens are exercised against the real issuer check. The
@@ -19,14 +22,15 @@
  * then shows the production gate refusing, installs a pinned #509
  * required-check authority (retirement_check_runner_tests.h) and a pinned
  * row plan (retirement_row_plan_tests.h), issues the gate through its profile
- * seam with an honest synthetic observation of that plan (the fixture's
- * matched binaries are not compilers, so the producer itself is exercised by
- * the row-plan fixture), writes the ready record, replays it and tampers with
+ * seam with an honest synthetic observation of that plan (the row producer
+ * itself is exercised by the row-plan fixture), writes the ready record,
+ * replays it and tampers with
  * each bound field, the directories, the exported reference files, the check
  * receipts and the persisted row evidence.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
+#include "retirement_stand_in_compiler.h"
 
 #define BQ_PREP_ORACLE_ROWS 192u
 /* The emitted population: 192 object rows, then link@0, self-host@1
@@ -110,12 +114,65 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_search_prefix(char const* query, char outp
     return length > 0 && length < (int)BQ_RETIREMENT_REFERENCE_FIELD_CAP;
 }
 
-/* One installed A snapshot with src/main.c and, for the baseline, the
- * census subject's bytes at tests/unit.c. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_source(char const* installed, char const* revision,
-    char const* main_contents, char const* unit_contents, BqRetirementSource* expected)
+/* The stand-in compilers' prepared outputs in A's candidate snapshot
+ * (retirement_stand_in_compiler.h copies them): an x86-64 executable for
+ * every singleton compile, a relocatable object for every batch member, the
+ * one-input object metrics record every batch writes and a single-input link
+ * record. Every census row names tests/unit.c, so one of each serves every
+ * row. Sorted by path, as the manifest lists them. */
+#define BQ_PREP_ORACLE_OUTPUTS 4u
+BUSTER_GLOBAL_LOCAL char const* const bq_prep_oracle_output_names[BQ_PREP_ORACLE_OUTPUTS] = {
+    "tests/batch.metrics", "tests/unit.c.metrics", "tests/unit.c.o", "tests/unit.c.out"};
+
+/* One stand-in output's bytes (a malloc'd buffer the caller frees). */
+BUSTER_GLOBAL_LOCAL char* bq_prep_test_oracle_output(u32 index, u32* length)
 {
-    char root[256], src[288], tests[288], file[320], manifest[320], text[1024];
+    char* bytes = malloc(1u << 16);
+    u32 size = 0;
+    char empty[SHA256_HEX_CAPACITY];
+    bq_digest("", 0, (char8*)empty);
+    BqRowTestInput input = {"tests/unit.c", "ok", "driver.none", empty, index == 0};
+    if (bytes && index < 2)
+        size = bq_row_test_metrics(bytes, 1u << 16, 0, index ? "link" : "object", &input, 1);
+    else if (bytes && index < BQ_PREP_ORACLE_OUTPUTS)
+    {
+        /* bq_row_test_elf's layout, in memory: one code section. */
+        char const* code = index == 2 ? "stand-in-object-code" : "stand-in-program-code";
+        u32 code_length = (u32)strlen(code), table = (64u + code_length + 7u) & ~7u;
+        memset(bytes, 0, table + 128u);
+        memcpy(bytes, "\177ELF\2\1\1", 7);
+        bytes[16] = index == 2 ? 1 : 2;
+        bytes[18] = 62;
+        bytes[20] = 1;
+        for (u32 byte = 0; byte < 8; byte += 1) bytes[40 + byte] = (char)((u64)table >> (byte * 8));
+        bytes[52] = 64;
+        bytes[58] = 64;
+        bytes[60] = 2;
+        memcpy(bytes + 64, code, code_length);
+        char* section = bytes + table + 64;
+        section[4] = 1;
+        section[8] = 6;
+        section[24] = 64;
+        for (u32 byte = 0; byte < 4; byte += 1) section[32 + byte] = (char)(code_length >> (byte * 8));
+        section[48] = 1;
+        size = table + 128u;
+    }
+    *length = size;
+    if (!size)
+    {
+        free(bytes);
+        bytes = NULL;
+    }
+    return bytes;
+}
+
+/* One installed A snapshot with src/main.c and, for the baseline, the
+ * census subject's bytes at tests/unit.c; with outputs (the candidate), the
+ * stand-in compilers' prepared outputs under tests/. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_source(char const* installed, char const* revision,
+    char const* main_contents, char const* unit_contents, bool outputs, BqRetirementSource* expected)
+{
+    char root[256], src[288], tests[288], file[320], manifest[320], text[2048];
     char8 main_digest[SHA256_HEX_CAPACITY] = {0}, unit_digest[SHA256_HEX_CAPACITY] = {0};
     int lengths[5] = {snprintf(root, sizeof(root), "%s/sources/%s", installed, revision),
                       snprintf(src, sizeof(src), "%s/src", root), snprintf(tests, sizeof(tests), "%s/tests", root),
@@ -142,6 +199,27 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_source(char const* installed, char 
         ok = extra > 0 && (size_t)extra < sizeof(text) - (size_t)length;
         length += extra;
     }
+    u64 output_bytes = 0;
+    ok = ok && (!outputs || (!unit_contents && mkdir(tests, 0700) == 0));
+    for (u32 index = 0; ok && outputs && index < BQ_PREP_ORACLE_OUTPUTS; index += 1)
+    {
+        u32 size = 0;
+        char* bytes = bq_prep_test_oracle_output(index, &size);
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        lengths[4] = snprintf(file, sizeof(file), "%s/%s", root, bq_prep_oracle_output_names[index]);
+        ok = bytes && lengths[4] > 0 && (size_t)lengths[4] < sizeof(file) && bq_prep_test_write_bytes(file, bytes, size);
+        if (ok) bq_digest(bytes, size, (char8*)digest);
+        int extra = ok ? snprintf(text + length, sizeof(text) - (size_t)length, "%.64s %s\n", digest,
+                                  bq_prep_oracle_output_names[index]) : -1;
+        ok = ok && extra > 0 && (size_t)extra < sizeof(text) - (size_t)length;
+        if (ok)
+        {
+            length += extra;
+            output_bytes += size;
+        }
+        free(bytes);
+    }
+    ok = ok && (!outputs || chmod(tests, 0500) == 0);
     ok = ok && bq_prep_test_write(manifest, text) && chmod(src, 0500) == 0 && chmod(root, 0500) == 0;
     if (ok)
     {
@@ -149,10 +227,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_source(char const* installed, char 
         memcpy(expected->commit, revision, strlen(revision) + 1);
         memset(expected->tree, revision[0] == 'a' ? 'c' : 'd', 40);
         bq_digest(text, (u32)length, (char8*)expected->manifest_sha256);
-        expected->entries = unit_contents ? 2 : 1;
-        expected->bytes = strlen(main_contents) + (unit_contents ? strlen(unit_contents) : 0);
-        expected->directories = unit_contents ? 3 : 2;
-        expected->max_path = unit_contents ? 12 : 10;
+        expected->entries = 1u + (unit_contents ? 1u : 0u) + (outputs ? BQ_PREP_ORACLE_OUTPUTS : 0u);
+        expected->bytes = strlen(main_contents) + (unit_contents ? strlen(unit_contents) : 0) + output_bytes;
+        expected->directories = unit_contents || outputs ? 3 : 2;
+        expected->max_path = outputs ? (u32)strlen("tests/unit.c.metrics") : unit_contents ? 12 : 10;
         expected->max_depth = 2;
         expected->manifest_bytes = (u32)length;
     }
@@ -304,10 +382,17 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
     int broker_length = snprintf(fixture->broker, sizeof(fixture->broker), "%s/fixture-broker", fixture->workspaces);
     ok = ok && broker_length > 0 && (size_t)broker_length < sizeof(fixture->broker) &&
          mkdir(fixture->recipes, 0700) == 0 && mkdir(fixture->sources, 0700) == 0;
-    /* The genuine schema-2 fixture, emitted by its Python reference. */
+    /* The genuine schema-2 fixture, emitted by its Python reference, naming
+     * the stand-in compilers the matched builds freeze. */
+    char compilers[2][160];
+    int named[2] = {snprintf(compilers[0], sizeof(compilers[0]), "%s/stand-in-base", fixture->workspaces),
+                    snprintf(compilers[1], sizeof(compilers[1]), "%s/stand-in-candidate", fixture->workspaces)};
+    ok = ok && named[0] > 0 && (size_t)named[0] < sizeof(compilers[0]) && named[1] > 0 &&
+         (size_t)named[1] < sizeof(compilers[1]) && bq_prep_test_write(compilers[0], BQ_RETIREMENT_STAND_IN_BASE) &&
+         bq_prep_test_write(compilers[1], BQ_RETIREMENT_STAND_IN_CANDIDATE);
     char* emit[] = {"python3", "-W", "error", "tools/bench_service/retirement_validator_eligibility_test.py",
-                    "--emit", fixture->census, NULL};
-    ok = ok && bq_prep_test_run(emit);
+                    "--emit", fixture->census, "--compilers", compilers[0], compilers[1], NULL};
+    ok = ok && bq_prep_test_run(emit) && unlink(compilers[0]) == 0 && unlink(compilers[1]) == 0;
     char path[320], text[BQ_PREP_ORACLE_ROWS * SHA256_HEX_CAPACITY + 8];
     int length = ok ? snprintf(path, sizeof(path), "%s/configurations.txt", fixture->census) : -1;
     ok = ok && length > 0 && (size_t)length < sizeof(path) &&
@@ -353,8 +438,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
     char const* candidate = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     BqRetirementSource subjects[2] = {0};
     ok = ok && bq_prep_test_oracle_source(fixture->installed, base, "/* census-fixture baseline */\n",
-                                          BQ_PREP_ORACLE_UNIT_SOURCE, &subjects[0]) &&
-         bq_prep_test_oracle_source(fixture->installed, candidate, "/* census-fixture candidate */\n", NULL,
+                                          BQ_PREP_ORACLE_UNIT_SOURCE, false, &subjects[0]) &&
+         bq_prep_test_oracle_source(fixture->installed, candidate, "/* census-fixture candidate */\n", NULL, true,
                                     &subjects[1]) &&
          bq_prep_test_oracle_toolchain(fixture);
     char inventory[1024], inventory_sha256[SHA256_HEX_CAPACITY] = {0};

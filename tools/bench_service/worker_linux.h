@@ -17,6 +17,10 @@
 #define BQ_WORKER_ARG_CAP 32u
 #define BQ_WORKER_BUNDLE_CAP (8u * 1024u * 1024u)
 #define BQ_WORKER_BUNDLE_ENTRY_CAP 4096u
+/* The result root's control files (the recipe's manifest, bundle and
+ * outcome, bq_worker_bundle_reserved) count against the entry cap beside the
+ * bundle's objects; the retirement producer reserves them in its store plan. */
+#define BQ_WORKER_BUNDLE_CONTROL_ENTRIES 3u
 #define BQ_WORKER_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
 /* The fixed retirement population needs millions of paired records. This is

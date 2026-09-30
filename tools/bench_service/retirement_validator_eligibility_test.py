@@ -1010,20 +1010,42 @@ EMITTED_CENSUS_FILES = (
 )
 
 
-def emit(directory):
+def replace_compilers(shard, compilers):
+    """Give one fixture shard other compiler bytes: the two executables and
+    their manifest sizes and digests, before the validator reads the shard."""
+    manifest = shard / "manifest.txt"
+    text = manifest.read_text(encoding="utf-8")
+    for (name, prefix), data in zip((("baseline-ide.exe", "baseline"), ("candidate-ide.exe", "compiler")),
+                                    compilers):
+        (shard / name).write_bytes(data)
+        for key, value in ((f"{prefix}_bytes", str(len(data))),
+                           (f"{prefix}_sha256", hashlib.sha256(data).hexdigest())):
+            lines = [line for line in text.splitlines() if line.startswith(f"{key}=")]
+            require(len(lines) == 1, f"fixture manifest lacks exactly one {key}")
+            text = text.replace(lines[0] + "\n", f"{key}={value}\n")
+    manifest.write_text(text, encoding="utf-8")
+
+
+def emit(directory, compilers=None):
     """Write the genuine fixture's eight census files for the C unit fixture.
 
     retirement_prepare_tests.c installs them as the worker unit's pinned
     census and compares the rows its projection derives with
     ``configurations.txt`` (this module's row_configuration_digest for every
     census row, in row order) and ``population.txt`` (expected_population for
-    the emitted ``performance-rows.json``). The directory must not exist yet.
+    the emitted ``performance-rows.json``). compilers, when given, is the
+    (baseline, candidate) byte pair the census names instead of the contract
+    fixture's literals: the C fixture's matched builds freeze its stand-in
+    compilers (retirement_stand_in_compiler.h). The directory must not exist
+    yet.
     """
     check_row_configuration_reference()
     directory.mkdir(mode=0o700)
     fixture = contract_test.ContractTests(methodName="runTest")
     fixture.setUp()
     try:
+        for shard in fixture.shards if compilers else ():
+            replace_compilers(shard, compilers)
         fixture.install_applicability({INAPPLICABLE_RECORD, UNAVAILABLE_RECORD})
         report_path = fixture.root / "validator-report.json"
         report = run_validator(fixture.shards, report_path)
@@ -1064,11 +1086,16 @@ def main():
                         help="compiled retirement validator eligibility probe")
     parser.add_argument("--emit", type=Path,
                         help="write the fixture's census files into this new directory instead")
+    parser.add_argument("--compilers", type=Path, nargs=2, metavar=("BASELINE", "CANDIDATE"),
+                        help="with --emit: the compiler files the census names")
     arguments = parser.parse_args()
     if (arguments.probe is None) == (arguments.emit is None):
         parser.error("give exactly one of the probe or --emit")
+    if arguments.compilers is not None and arguments.emit is None:
+        parser.error("--compilers needs --emit")
     if arguments.emit is not None:
-        emit(arguments.emit)
+        emit(arguments.emit, None if arguments.compilers is None else
+             tuple(path.read_bytes() for path in arguments.compilers))
         return
     execute(arguments.probe.resolve())
     print("schema-2 validator eligibility fixture passed "
