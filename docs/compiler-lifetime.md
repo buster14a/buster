@@ -105,7 +105,7 @@ only keep them resident.
 | Release fill (`arena_test_fill_releases`), applied by `arena_release_to_position` and so by `arena_retire` | `c_test_phase_arena_release`, `compiler_driver_test_released_phase_fill`, `arena_tests` | a surviving reader in builds without AddressSanitizer: output, diagnostics and object bytes must not change |
 | AddressSanitizer poisoning | `arena_release_to_position` | the first stale access, at its source |
 | Poisoning positive control | `arena_tests` child mode `released_read` | a sanitized build whose poisoning silently stopped working |
-| Lexer message lifetime | `c_test_lexer_diagnostic_message_lifetime` | a diagnostic message left behind in a rewound temporary arena |
+| Lexer message lifetime | `c_test_lex_diagnostic_message_lifetime` | a diagnostic message left behind in a rewound temporary arena |
 | Null handles | `compiler_driver_release_frontend` | a use of the token stream, the shape sidecar or a retired arena through the driver's result |
 
 `CPreprocessDetail.boundary` counts, exactly, what the seal copied (bytes,
