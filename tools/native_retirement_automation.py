@@ -159,7 +159,9 @@ def require_scope(policy: dict, number: int, classification: dict) -> None:
     if classification.get("kind") not in policy["classes"]:
         raise AutomationError("transition class is outside the standing grant")
     paths = classification.get("changed_paths")
-    if not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
+    # An empty list is a catch-up request (#1893): an empty candidate whose
+    # only integration output is regenerated state. A missing list is not.
+    if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
         raise AutomationError("missing trusted candidate classification")
     for path in paths:
         if any(fnmatch.fnmatchcase(path, pattern) for pattern in OWNER_ONLY_PATHS):

@@ -4,8 +4,9 @@
 remain the default. This opt-in extension implements the **cloud phase of #1791**:
 standing machine authorization and automatic scheduling through the existing
 single writer. It does not install, authorize or invoke another benchmark-host
-executor. The checked-in standing policy starts **disabled**. Source availability
-is not a claim that the live repository has been activated or demonstrated.
+executor. The standing policy shipped **disabled** and is now enabled for the
+`ordinary` class only. Source availability is not a claim that the live
+repository has been activated or demonstrated.
 
 ## Authority and ordinary operation
 
@@ -49,13 +50,16 @@ The allowed-class list does not override those path exclusions.
 
 ## Non-circular scheduling
 
-The controller reconciles main pushes, completion of `Buster CI` or the trusted
-writer, a ten-minute fallback schedule, and manual reconciliation. Event delivery
+The controller reconciles main pushes, completion of `Buster CI`, the trusted
+writer or the catch-up opener, a ten-minute fallback schedule, and manual
+reconciliation. Event delivery
 is a hint: it reads current state rather than trusting a stale event payload.
 GitHub schedule delays can increase latency; there is no real-time guarantee.
 
-Only open, non-draft, same-repository PRs targeting main are eligible. The exact
-head must have a successful GitHub Actions `CI complete`. Other existing Actions
+Only open, non-draft, same-repository PRs targeting main are eligible. Only
+trust transitions and catch-up requests need a writer run. Except for a
+catch-up request, the exact head must have a successful GitHub Actions
+`CI complete`. Other existing Actions
 checks, including performance, must be completed successfully, neutral or
 skipped. The two attestation-dependent gates, `Native retirement merge admission`
 and `Main integration admission`, are deliberately **not prerequisites for
@@ -72,10 +76,56 @@ modify queue entries. If publication clears auto-merge in the live repository,
 that intent-preservation behavior must be separately verified before calling
 end-to-end merge progression unattended.
 
+A candidate the writer would refuse (split-required, or one that edits
+integration-owned generated files) is recorded as `blocked` with the refusal
+detail. The controller keeps scanning the other PRs; one refused PR never fails
+the reconcile run. The controller and merge gate share a single
+`native_retirement_integration` module, so the gate's `IntegrationError` is the
+class the controller catches.
+
 The controller submits at most one request per run and leaves an already active
 writer alone. GitHub concurrency serializes the existing writer; the controller's
 ledger, not pending-workflow concurrency slots, carries durable request state.
 No strict freshness policy is added for unrelated PRs.
+
+## Automatic catch-up (#1893)
+
+Ordinary PRs that change admitted sources no longer need the writer. They land
+through the native merge queue, and the controller does not request writer runs
+for them. `main` then carries a committed repository-source snapshot that is
+behind its admitted sources, until one catch-up publishes the regenerated pair.
+
+The catch-up is fully automatic:
+
+1. `.github/workflows/native-retirement-catch-up.yml` runs from immutable
+   trusted `main` on every `main` push, every 30 minutes and on manual dispatch.
+   It uses the same standing policy and kill switch as the controller.
+   `snapshot_stale` compares the committed snapshot with admitted source bytes
+   read from Git objects, with no pinned closure needed. It only does the following:
+   - When the snapshot is stale and no request is open, it creates one empty
+     commit on `main`, points the bot-owned `native-retirement/catch-up` branch
+     at it, opens the PR and enables auto-merge. Its token has `contents: write`
+     and `pull-requests: write` for exactly this. It publishes no generated state
+     and cannot merge.
+   - When `main` is current, it closes any open catch-up request.
+2. The controller treats that bot-owned PR as an ordinary request with an empty
+   classification. It skips prerequisite CI, because nothing on a bot-created
+   empty head needs testing. It dispatches the existing writer through the
+   standing grant. The writer regenerates the pair for current `main` and
+   publishes the usual two-parent integration head; that push starts PR CI.
+3. Auto-merge queues the published head. The merge gate treats it as a
+   catch-up: it stays admissible after other ordinary-bound PRs land first, as
+   long as `main` has published no newer generated state since its recorded
+   base. So it cannot fail because it lost a race, and it never evicts other
+   groups. A published catch-up that is still admissible is not rebuilt when
+   `main` moves. If sources moved on, the next run opens a new catch-up after
+   this one lands.
+
+Prerequisites beyond the standing-grant activation below:
+- Settings -> Actions -> General must allow GitHub Actions to create pull
+  requests.
+- Auto-merge must be allowed in the repository.
+- Both are unverified on the live repository.
 
 ## Claim, sealed request and one dispatch
 
@@ -129,8 +179,9 @@ Historical failures are retained, never overwritten with fabricated success.
 ## Installation and activation
 
 Install the source-only bootstrap through the existing permitted main integration
-process. The new policy is disabled and the host workflow/settings are unchanged.
-A branch cannot activate its own privileged controller or writer.
+process. The bootstrap shipped the policy disabled, with the host workflow and
+settings unchanged. A branch cannot activate its own privileged controller or
+writer.
 
 After the implementation is trusted on main:
 
