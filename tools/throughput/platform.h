@@ -498,7 +498,11 @@ static uint64_t tp_process_monotonic_ns(void)
 /* A layout launch's program (lane B's runtime shape, `./{{output}}`): the
  * leaf the caller placed in the work directory (slot 7) and that file's
  * identity, as the caller observed it by fstat of the descriptor it wrote
- * and hashed. */
+ * and hashed, with that SHA-256 (lowercase hex). The change time alone cannot
+ * reveal an in-place rewrite that keeps the size: file timestamps advance by
+ * the kernel's clock tick, so a rewrite in the tick of the observation leaves
+ * it unchanged; the launch re-hashes (tp_retirement_launch_program). The
+ * child's own recheck compares the identity (tp_process_program_same). */
 typedef struct TpProcessProgram
 {
     char const* leaf;
@@ -506,6 +510,7 @@ typedef struct TpProcessProgram
     ino_t inode;
     off_t size;
     struct timespec changed;
+    char sha256[65];
 } TpProcessProgram;
 
 typedef struct TpProcessInputs

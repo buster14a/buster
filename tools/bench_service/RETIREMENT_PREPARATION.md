@@ -1395,12 +1395,16 @@ placed and the same sandbox (`bq_retirement_row_compile`). Lane D's layout
 launch accepts exactly two argv shapes (`tp_retirement_launch_layout`): a
 compiler or batch command runs the side's binary slot and names no program,
 and a runtime command runs `./<leaf>` where the launch carries the program
-(`TpProcessInputs.program`: its leaf and the device, inode, size and change
-time the service took by `fstat` of the descriptor it wrote and hashed). The
-launch requires the step's work directory (slot 7) to hold that leaf and
-nothing else, and the leaf to be, without following a link, that same
-single-link, owner-executable regular file of the service user, not group-
-or world-writable (`tp_retirement_launch_program`); the child rechecks the
+(`TpProcessInputs.program`: its leaf, the device, inode, size and change
+time the service took by `fstat` of the descriptor it wrote and hashed, and
+that SHA-256). The launch requires the step's work directory (slot 7) to
+hold that leaf and nothing else, and the leaf to be, without following a
+link, that same single-link, owner-executable regular file of the service
+user, not group- or world-writable, whose bytes it re-hashes through a
+descriptor it opens without following a link (`tp_retirement_launch_program`).
+The re-hash is needed: file timestamps advance only at the kernel's clock
+tick, so an in-place rewrite that keeps the size within the tick of the
+observation leaves the change time as observed. The child rechecks the
 identity after it entered the sandbox (`tp_process_program_same`, `ESTALE`
 otherwise) and executes `./<leaf>` from its cwd, slot 7 (`execveat` with
 `AT_FDCWD` and `AT_SYMLINK_NOFOLLOW`, so `AT_EXECFN` and the start-up stack

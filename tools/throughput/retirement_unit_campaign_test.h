@@ -1675,13 +1675,48 @@ static int test_unit_campaign_program_file(TestUnitCampaign const* fixture, int 
     return ok;
 }
 
+/* The file's current identity (fstatat, not following a link); the digest
+ * program already holds is kept. */
 static int test_unit_campaign_program_identity(int directory, char const* leaf, TpProcessProgram* program)
 {
     struct stat info;
     int ok = fstatat(directory, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0;
-    if (ok) *program = (TpProcessProgram){leaf, info.st_dev, info.st_ino, info.st_size, info.st_ctim};
+    if (ok)
+    {
+        program->leaf = leaf;
+        program->device = info.st_dev;
+        program->inode = info.st_ino;
+        program->size = info.st_size;
+        program->changed = info.st_ctim;
+    }
     return ok;
 }
+
+/* The identity and SHA-256 of a single-link file, both from one descriptor
+ * (as the service takes them from the copy it wrote). */
+static int test_unit_campaign_program_hashed(int directory, char const* leaf, TpProcessProgram* program)
+{
+    int file = openat(directory, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat info;
+    uint64_t bytes = 0;
+    int ok = file >= 0 && fstat(file, &info) == 0 && tp_retirement_file_hash(file, program->sha256, &bytes) &&
+        bytes == (uint64_t)info.st_size;
+    if (ok)
+    {
+        program->leaf = leaf;
+        program->device = info.st_dev;
+        program->inode = info.st_ino;
+        program->size = info.st_size;
+        program->changed = info.st_ctim;
+    }
+    if (file >= 0) close(file);
+    return ok;
+}
+
+/* How many 1 ms waits an in-place rewrite of the same bytes may take to
+ * reach the file system's next timestamp tick (a coarse tick is at most
+ * 10 ms; the bound leaves room for a loaded host). */
+#define TEST_UNIT_CAMPAIGN_TICK_WAITS 2000u
 
 /* One runtime launch of `command` in step directory `step` with `program`
  * through the launch boundary (tp_retirement_launch), on a fresh log. */
@@ -1742,7 +1777,7 @@ static int test_unit_campaign_step(TestUnitCampaign const* fixture, char const* 
 /* Removes step directory `name` (its files, then itself). */
 static void test_unit_campaign_step_remove(TestUnitCampaign const* fixture, int step, char const* name)
 {
-    static char const* const leaves[] = {"prog.bin", "other.bin", "link.bin", "extra.txt"};
+    static char const* const leaves[] = {"prog.bin", "prog.new", "other.bin", "link.bin", "extra.txt"};
     for (unsigned index = 0; step >= 0 && index < BUSTER_ARRAY_LENGTH(leaves); ++index) unlinkat(step, leaves[index], 0);
     if (step >= 0) close(step);
     unlinkat(fixture->cwd, name, AT_REMOVEDIR);
@@ -1754,10 +1789,13 @@ static void test_unit_campaign_step_remove(TestUnitCampaign const* fixture, int 
  * before any child: another argv[0] (another file, the binary slot, no
  * `./`, a longer path), no program, a symbolic link carrying its target's
  * identity, another step's file and directory, a compiler command naming a
- * program, a replaced (planted) file, a file rewritten in place (same
- * inode), a second link to the program, a group- or world-writable mode, no
- * owner execute bit and an extra entry in the step directory. A program
- * changed after the launch checked it is refused by the child (ESTALE). */
+ * program, a replaced (planted) file, a file rewritten in place (same inode
+ * and size) with the same bytes (the change time, after waiting out the
+ * timestamp tick) and with other bytes (the content digest alone), a second
+ * link to the program, a group- or world-writable mode, no owner execute bit
+ * and an extra entry in the step directory. A program changed after the
+ * launch checked it is refused by the child (ESTALE). Each case differs from
+ * the observed identity by construction, never by timing. */
 static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
 {
     int step = test_unit_campaign_step(fixture, "runtime-rule-a", "prog.bin");
@@ -1768,8 +1806,8 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
     int ok = step >= 3 && other >= 3 && linking >= 3 &&
         tp_retirement_executable_init(&executable, fixture->binary, fixture->binary_sha) &&
         symlinkat("../runtime-rule-a/prog.bin", linking, "link.bin") == 0 &&
-        test_unit_campaign_program_identity(step, "prog.bin", &program) &&
-        test_unit_campaign_program_identity(other, "prog.bin", &foreign);
+        test_unit_campaign_program_hashed(step, "prog.bin", &program) &&
+        test_unit_campaign_program_hashed(other, "prog.bin", &foreign);
     /* The link carries its target's identity: only not following it tells
      * them apart. */
     linked = program;
@@ -1829,21 +1867,55 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
         test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &moded, index ? "no owner execute bit" : "a writable mode");
     }
     ok = ok && fchmodat(step, "prog.bin", 0700, 0) == 0 && test_unit_campaign_program_identity(step, "prog.bin", &program);
-    /* Rewritten in place after it was observed: the same inode, size and
-     * bytes, a new change time. */
-    int rewrite = ok ? openat(step, "prog.bin", O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
+    /* Rewritten in place after it was observed (the same inode and size), in
+     * a fresh step directory whose copy no launch has run. step's program was
+     * just executed, and the kernel refuses to open a file for writing while
+     * any address space still maps it as its executable (ETXTBSY); the
+     * rewrite must not depend on how soon the exited child's is torn down. */
+    int rewriting = test_unit_campaign_step(fixture, "runtime-rule-w", "prog.bin");
+    TpProcessProgram observed_copy = {0};
+    ok = ok && rewriting >= 3 && test_unit_campaign_program_hashed(rewriting, "prog.bin", &observed_copy);
+    int rewrite = ok ? openat(rewriting, "prog.bin", O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
     unsigned char first = 0;
-    ok = rewrite >= 3 && pread(rewrite, &first, 1, 0) == 1 && pwrite(rewrite, &first, 1, 0) == 1;
-    if (rewrite >= 0) close(rewrite);
+    ok = rewrite >= 3 && pread(rewrite, &first, 1, 0) == 1;
+    /* The same bytes: only the change time can tell, and it moves only at
+     * the file system's timestamp tick, so the rewrite repeats (1 ms apart,
+     * bounded) until it has. */
     struct stat rewritten;
-    ok = ok && fstatat(step, "prog.bin", &rewritten, AT_SYMLINK_NOFOLLOW) == 0 && rewritten.st_ino == program.inode &&
-        rewritten.st_size == program.size;
+    memset(&rewritten, 0, sizeof(rewritten));
+    int moved = 0;
+    for (unsigned wait = 0; ok && !moved && wait < TEST_UNIT_CAMPAIGN_TICK_WAITS; ++wait)
+    {
+        ok = pwrite(rewrite, &first, 1, 0) == 1 && fstat(rewrite, &rewritten) == 0;
+        moved = ok && (rewritten.st_ctim.tv_sec != observed_copy.changed.tv_sec ||
+                       rewritten.st_ctim.tv_nsec != observed_copy.changed.tv_nsec);
+        if (ok && !moved) test_delay(1);
+    }
+    ok = ok && moved && rewritten.st_ino == observed_copy.inode && rewritten.st_size == observed_copy.size;
+    if (!ok) fprintf(stderr, "unit campaign runtime rule: in-place rewrite not made (errno %d)\n", errno);
     CHECK(ok);
-    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "a file rewritten in place");
-    /* A program replaced after its placement (a planted file under the same
-     * name) is not the observed one. */
-    ok = ok && test_unit_campaign_program_identity(step, "prog.bin", &program) && unlinkat(step, "prog.bin", 0) == 0 &&
-        test_unit_campaign_program_file(fixture, step, "prog.bin");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, rewriting, &observed_copy,
+                                       "a file rewritten in place with the same bytes");
+    /* Other bytes, with the identity the rewrite left (so the change time
+     * matches whatever tick it landed in): only the content digest can
+     * tell. */
+    TpProcessProgram flipped = observed_copy;
+    unsigned char other_byte = (unsigned char)(first ^ 0xffu);
+    ok = ok && pwrite(rewrite, &other_byte, 1, 0) == 1 &&
+        test_unit_campaign_program_identity(rewriting, "prog.bin", &flipped);
+    if (rewrite >= 0) close(rewrite);
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, rewriting, &flipped,
+                                       "a file rewritten in place with other bytes");
+    test_unit_campaign_step_remove(fixture, rewriting, "runtime-rule-w");
+    /* A program replaced after its placement: a planted copy renamed over
+     * it. The copy is made while the original still exists, so it cannot
+     * reuse the original's inode number, as a file created after the unlink
+     * may. */
+    struct stat replaced;
+    ok = ok && test_unit_campaign_program_identity(step, "prog.bin", &program) &&
+        test_unit_campaign_program_file(fixture, step, "prog.new") && renameat(step, "prog.new", step, "prog.bin") == 0 &&
+        fstatat(step, "prog.bin", &replaced, AT_SYMLINK_NOFOLLOW) == 0 && replaced.st_ino != program.inode;
     CHECK(ok);
     test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "a replaced file");
     /* The child's own recheck: an identity the parent never compared
