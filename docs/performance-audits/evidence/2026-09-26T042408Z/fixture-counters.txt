@@ -1,0 +1,22 @@
+files=392 compiled_by_both=364
+ssa_pending_visits                       base=     37719 cand=     37719
+ssa_simplify_agenda_words                base=         0 cand=       714
+ssa_simplify_block_visits                base=     64603 cand=     50673
+ssa_simplify_classified                  base=         0 cand=      8818
+ssa_simplify_empty_block_visits          base=     15139 cand=     15139
+ssa_simplify_incoming_visits             base=     99629 cand=     56638
+ssa_simplify_notifications               base=         0 cand=      2229
+ssa_simplify_parameter_visits            base=     63574 cand=     42944
+ssa_simplify_passes                      base=      3857 cand=      3361
+ssa_simplify_survivors                   base=         0 cand=     10153
+ssa_simplify_trivial_removals            base=         0 cand=     14455
+ssa_simplify_watch_links                 base=         0 cand=      6523
+files_with_fewer_evaluations=81 of 364
+top ('ebpf_scalar_regression.c', 34741, 23827, 20538)
+top ('windows_unicode_regression.c', 9326, 5613, 4815)
+top ('runtime_boundary_regression.c', 9171, 5483, 4692)
+top ('windows_arm64_mir_unwind.c', 1709, 721, 547)
+top ('basic_c_simd.c', 409, 295, 287)
+top ('basic_c_cleanup.c', 371, 270, 255)
+top ('basic_c_aarch64_i128_divide.c', 388, 291, 249)
+top ('basic_c_simd_translate.c', 254, 172, 161)

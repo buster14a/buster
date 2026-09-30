@@ -165,6 +165,19 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.assertIn("remain pending", self.watch())
         self.assertEqual(self.api.cancelled, [])
 
+    def test_reconciled_native_check_is_bound_by_exact_head_marker(self):
+        check = next(row for row in self.api.checks
+                     if row["name"] == "Native retirement merge admission")
+        check.update(check_suite={"id": 999999}, status="completed", conclusion="failure",
+                     external_id="buster-native-retirement-admission-v1:" + "b" * 40)
+        self.assertIn("remain pending", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+        check["external_id"] = "buster-native-retirement-admission-v1:" + "a" * 40
+        self.assertIn("Native retirement merge admission", self.watch())
+        self.assertEqual(self.api.cancelled, [run["id"] for run in self.api.runs])
+        gate = (ROOT / "tools/merge_queue_admission.py").read_text()
+        self.assertIn('RETIREMENT_MARKER = "buster-native-retirement-admission-v1"', gate)
+
     def test_changed_event_identity_cannot_cancel(self):
         self.api.event["workflow_run"]["workflow_id"] = 999
         with self.assertRaises(recovery.SkipRecovery):
@@ -278,7 +291,6 @@ class StepDeadlineTests(unittest.TestCase):
         self.api.jobs = [self.stuck] + [
             desktop_job(name, 200 + index, status="completed", step_status="completed")
             for index, name in enumerate(recovery.WORKFLOW_TOOLS_BUDGET_SECONDS)
-            if name != "macOS x86-64 release"
         ]
         self.now = T("2026-09-29T13:23:23Z")
         self.log = []
@@ -338,7 +350,9 @@ class StepDeadlineTests(unittest.TestCase):
     def test_every_desktop_lane_deadline_boundary(self):
         run = self.api.runs[0]
         start = T(INCIDENT_STEP_START)
-        for name, budget in recovery.WORKFLOW_TOOLS_BUDGET_SECONDS.items():
+        budgets = dict(recovery.WORKFLOW_TOOLS_BUDGET_SECONDS,
+                       **recovery.HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS)
+        for name, budget in budgets.items():
             with self.subTest(name=name):
                 job = desktop_job(name, 7)
                 limit = start + budget + recovery.STEP_DEADLINE_GRACE_SECONDS
@@ -687,10 +701,12 @@ class StepDeadlineTests(unittest.TestCase):
         timeout = re.search(r"^        timeout-minutes: \$\{\{ \(matrix\.os == 'windows' \|\| "
                             r"matrix\.os == 'macos'\) && (\d+) \|\| (\d+) \}\}$", step, re.M)
         slow, fast = int(timeout.group(1)), int(timeout.group(2))
-        self.assertEqual(len(lanes), 6)
+        self.assertEqual(len(lanes), 5)
         self.assertEqual(recovery.WORKFLOW_TOOLS_BUDGET_SECONDS, {
             name + " release": 60 * (slow if os in ("windows", "macos") else fast)
             for name, os in lanes})
+        self.assertEqual(recovery.HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS,
+                         {"macOS x86-64 release": 5 * 60})
 
 
 if __name__ == "__main__":

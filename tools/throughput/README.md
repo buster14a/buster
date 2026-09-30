@@ -31,6 +31,32 @@ it runs weekly, on demand, and for ready pull requests that change a harness
 input, so the Linux comparison never waits for a macOS runner. Hardware
 counters currently have a Linux implementation only.
 
+### Hosted workflow requests
+
+`Compiler throughput` runs on pull requests and cancels older in-progress or
+pending runs for the same PR when a newer run arrives. It also defines the
+reusable jobs for `Compiler throughput requests`. Start a manual comparison
+from the latter workflow; its weekly schedule uses the same entry. Manual and
+scheduled requests share one concurrency group across branches, so a schedule
+cannot replace an already-pending manual request (or vice versa).
+
+The request workflow runs one comparison at a time and retains at most 100
+pending runs through GitHub's `queue: max` policy. A new run when the queue is
+full is cancelled, with the existing pending requests retained. The wait order
+is based on when each run entered the concurrency group, which can differ from
+dispatch order. Neither another dispatch nor a schedule cancels an accepted
+request; cancel obsolete pending requests explicitly in Actions. The reusable
+workflow uses the unique run ID for non-PR concurrency, so it cannot replace a
+waiting caller through a second single-pending group. PR runs have a separate
+per-PR group and do not wait behind manual measurements. For reproducible
+manual comparisons, select an exact baseline commit rather than a moving ref;
+scheduled runs use the default `main` baseline.
+
+`python3 tools/compiler_throughput_workflow_test.py` checks the PR and request
+policies, including three overlapping non-PR requests, a manual/schedule
+collision, and capacity exhaustion. The ordinary hosted workflow lint checks
+the syntax separately; no live benchmark is part of the offline policy test.
+
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
 is also owned by `build.c`, including the Linux CI invocation.
@@ -417,8 +443,16 @@ nothing. No extra arena storage or whole-function row stream is retained.
   visits, incoming nodes examined including matches, and emitted copy
   sources. Direct/non-native consumers do not call this builder: zero
   means no work at this hook, not absence of all CFG work.
+- `debug_value_blocks` counts blocks walked for `-g` locals without a single
+  place, and `debug_value_local_visits` the per-block entries loaded, filled,
+  reset or emitted for them: every unresolved local twice per block only when
+  blocks carry `local_values`, otherwise three per parameter-filled entry.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
+- `debug_function_index_rows` counts IR functions entered into the
+  per-model symbol index that matches `-g` debug seeds to their canonical
+  locals; `debug_function_seed_scan_rows` counts rows examined by the
+  search kept for a seed without a program symbol, which codegen never emits.
 
 The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 
@@ -441,8 +475,13 @@ Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
 The `validation_*` and `preparation_*` fields attribute the canonical boundary.
 `validation_calls` counts complete module-verifier entries. The ownership fields
 count the preliminary function scan, published-CFG checks, lowered functions,
-blocks, instruction-chain steps and owner-map clear bytes. The remaining fields
-count globals/relocations and their overlap pairs, aliases, initializers, value
+blocks, instruction-chain steps and owner-map clear bytes.
+`validation_global_relocation_pairs` counts relocation overlap comparisons:
+one per relocation against its predecessor while a global's offsets ascend,
+then one per neighbour of a sorted copy for a global whose offsets do not.
+`validation_global_relocation_sorts` counts those unordered globals and
+`validation_global_relocation_sort_rows` the rows their radix passes moved.
+The remaining fields count globals, relocations, aliases, initializers, value
 and provenance visits, block parameters and incoming values, instruction,
 operand, target and result checks, opcode-operation checks, conversions,
 calls/fixed arguments, provenance-bearing opcodes and terminator checks.

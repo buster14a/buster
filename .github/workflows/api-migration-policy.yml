@@ -15,9 +15,16 @@ permissions:
   statuses: read
   checks: write
 
+env:
+  MAIN_PUSH_MAINTENANCE_SHA256: 118669698721ecc0d5da220d598bdf87afa172111dac784b6142e1f82a251ce5
+
+# Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
+# so GitHub cannot cancel or replace an older pending run. The push-only helper
+# orders the maintenance job through the Actions API before it mutates state.
+# See docs/main-push-maintenance.md for the ordering and failure contract.
 concurrency:
-  group: api-migration-policy-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: api-migration-policy-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   policy:
@@ -35,6 +42,20 @@ jobs:
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
           fi
+      - name: Check out exact combined maintenance authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify main-push maintenance authority
+        shell: bash
+        working-directory: authority
+        run: >-
+          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256"
+          tools/main_push_maintenance.py |
+          sha256sum --check --strict
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -48,7 +69,6 @@ jobs:
       - name: Test the migration audit
         working-directory: candidate
         run: python3 -B tools/api_migration_audit_test.py -v
-
   native-retirement-admission:
     name: Native retirement merge admission
     if: ${{ github.server_url == 'https://github.com' }}
@@ -157,11 +177,25 @@ jobs:
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$EVENT_NAME" == pull_request ]]; then
             # The PR event's base SHA can predate a successful current-main writer.
+            # The queue lands PRs every few minutes, so main can also advance
+            # after the trusted checkout; re-resolve against the new main a
+            # bounded number of times instead of failing the candidate (#1971).
             BASE_SHA=$(git -C trusted rev-parse HEAD)
-            if [[ "$BASE_SHA" != "$current_main" ]]; then
-              echo '::error::Main advanced after trusted PR policy checkout.' >&2
-              exit 1
-            fi
+            attempts=1
+            while [[ "$BASE_SHA" != "$current_main" ]]; do
+              if (( attempts >= 3 )); then
+                echo '::error::Main kept advancing after trusted PR policy checkout.' >&2
+                exit 1
+              fi
+              attempts=$((attempts + 1))
+              echo "::notice::Main advanced from $BASE_SHA to $current_main; re-resolving trusted PR policy."
+              git -C trusted fetch --quiet --no-tags --depth 1 origin "$current_main"
+              git -C trusted checkout --quiet --force --detach "$current_main"
+              git -C candidate fetch --quiet --no-tags origin "$current_main"
+              BASE_SHA=$(git -C trusted rev-parse HEAD)
+              current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+              [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+            done
           fi
           python3 "$tool" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
@@ -186,14 +220,18 @@ jobs:
               fi
             fi
           fi
-      - name: Invalidate stale trusted integrations after main advances
+      - name: Reconcile stale trusted integrations after main advances
         if: ${{ github.event_name == 'push' }}
         working-directory: candidate
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 tools/native_retirement_merge_gate.py invalidate-stale \
+          python3 -B tools/main_push_maintenance.py invalidate-native-retirement \
             --repository "$GITHUB_REPOSITORY" \
-            --new-main "$GITHUB_SHA" \
+            --event-main "$GITHUB_SHA" \
+            --workflow "api-migration-policy.yml" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --predecessor-job "Native retirement merge admission" \
+            --wait-seconds 1800 \
             --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             | tee "$RUNNER_TEMP/native-retirement-invalidation.json"

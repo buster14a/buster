@@ -196,6 +196,76 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_export_rva(ByteSlice image, Str
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_store(u8* bytes, u64 offset, u64 value, u32 size)
+{
+    for (u32 index = 0; index < size; index += 1)
+    {
+        bytes[offset + index] = (u8)(value >> (index * 8));
+    }
+}
+
+// A minimal ELF shared object for `machine` whose .dynsym defines each name in
+// `names` as a global function: enough for the driver's export scan to treat
+// it as a readable libc without a target sysroot on the host.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_shared_library(Arena* arena, u16 machine, String8 const* names, u32 name_count)
+{
+    enum
+    {
+        HEADER_SIZE = 64,
+        SYMBOL_SIZE = 24,
+        SECTION_HEADER_SIZE = 64,
+        SECTION_COUNT = 3,
+    };
+    u64 string_size = 1;
+    for (u32 index = 0; index < name_count; index += 1)
+    {
+        string_size += names[index].length + 1;
+    }
+    u64 string_offset = HEADER_SIZE;
+    u64 symbol_offset = align_forward(string_offset + string_size, 8);
+    u64 symbol_size = (u64)(name_count + 1) * SYMBOL_SIZE;
+    u64 section_table = symbol_offset + symbol_size;
+    u64 length = section_table + SECTION_COUNT * SECTION_HEADER_SIZE;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    memcpy(bytes, "\x7f" "ELF", 4);
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    compiler_driver_test_store(bytes, 16, 3, 2);
+    compiler_driver_test_store(bytes, 18, machine, 2);
+    compiler_driver_test_store(bytes, 20, 1, 4);
+    compiler_driver_test_store(bytes, 40, section_table, 8);
+    compiler_driver_test_store(bytes, 52, HEADER_SIZE, 2);
+    compiler_driver_test_store(bytes, 58, SECTION_HEADER_SIZE, 2);
+    compiler_driver_test_store(bytes, 60, SECTION_COUNT, 2);
+    u64 name_offset = 1;
+    for (u32 index = 0; index < name_count; index += 1)
+    {
+        u64 symbol = symbol_offset + (u64)(index + 1) * SYMBOL_SIZE;
+        memcpy(bytes + string_offset + name_offset, names[index].pointer, names[index].length);
+        compiler_driver_test_store(bytes, symbol, name_offset, 4);
+        bytes[symbol + 4] = 0x12;
+        compiler_driver_test_store(bytes, symbol + 6, 1, 2);
+        compiler_driver_test_store(bytes, symbol + 8, 0x1000 + (u64)index * 16, 8);
+        name_offset += names[index].length + 1;
+    }
+    u64 dynamic_symbols = section_table + SECTION_HEADER_SIZE;
+    compiler_driver_test_store(bytes, dynamic_symbols + 4, 11, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 24, symbol_offset, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 32, symbol_size, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 40, 2, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 44, 1, 4);
+    compiler_driver_test_store(bytes, dynamic_symbols + 48, 8, 8);
+    compiler_driver_test_store(bytes, dynamic_symbols + 56, SYMBOL_SIZE, 8);
+    u64 dynamic_strings = dynamic_symbols + SECTION_HEADER_SIZE;
+    compiler_driver_test_store(bytes, dynamic_strings + 4, 3, 4);
+    compiler_driver_test_store(bytes, dynamic_strings + 24, string_offset, 8);
+    compiler_driver_test_store(bytes, dynamic_strings + 32, string_size, 8);
+    compiler_driver_test_store(bytes, dynamic_strings + 48, 1, 8);
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
 {
     u64 offset = 0;
@@ -10033,6 +10103,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// Issue 1613: an unreferenced declaration or unneeded definition still
+// reached non-native output. LLVM bitcode carried `declare internal`, which
+// the verifier rejects, and the eBPF object wrote an undefined symbol for it.
+// Declarations a data relocation names must remain in both outputs.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unreferenced_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int unused_proto(void);\n"
+                        "static int unused_definition(void) { return 1; }\n"
+                        "extern int unused_extern_data;\n"
+                        "static int referenced_static(void);\n"
+                        "extern int referenced_extern(void);\n"
+                        "int (*referenced_pointers[])(void) = {referenced_static, referenced_extern};\n"
+                        "int main(void) { return 0; }\n");
+    String8 absent[] = {S8("unused_proto"), S8("unused_definition"), S8("unused_extern_data")};
+    String8 present[] = {S8("referenced_static"), S8("referenced_extern")};
+    // The first target is compiled with -emit-llvm; the other selects the
+    // eBPF emitter by target alone.
+    String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), S8("-target"), target_names[target_index], S8("-o"), output, input};
+            u32 skipped = target_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                if (target_index == 0)
+                {
+                    // Bitcode spells names as 6-bit fields, so count the
+                    // module's entities instead: main, both referenced
+                    // declarations, and the pointer table.
+                    LlvmBitcodeStats stats = compiled.llvm_bitcode.stats;
+                    BUSTER_TEST(arguments, compiled.has_llvm_bitcode && compiled.llvm_bitcode.success);
+                    BUSTER_TEST(arguments, stats.function_count == 3 && stats.defined_function_count == 1 && stats.global_count == 1);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, compiled.has_ebpf);
+                    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                    String8 contents = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(absent); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, absent[name_index]) == BUSTER_STRING_NO_MATCH, absent[name_index]);
+                    }
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(present); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, present[name_index]) != BUSTER_STRING_NO_MATCH, present[name_index]);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -10652,6 +10786,71 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_hea
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_leb(ByteSlice image, u64* cursor, u64 end, u64* value)
+{
+    u64 result = 0;
+    u32 shift = 0;
+    bool done = false;
+    while (*cursor < end && !done && shift < 64)
+    {
+        u8 byte = image.pointer[*cursor];
+        *cursor += 1;
+        result |= (u64)(byte & 0x7f) << shift;
+        shift += 7;
+        done = !(byte & 0x80);
+    }
+    *value = result;
+    return done;
+}
+
+// Whether a WebAssembly module's name section gives some data segment `name`
+// (data-segment subsection 9 of the extended name section).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_data_segment_named(ByteSlice image, String8 name)
+{
+    bool result = false;
+    u64 cursor = image.length >= 8 && memcmp(image.pointer, "\0asm", 4) == 0 ? 8 : image.length;
+    bool valid = true;
+    while (cursor < image.length && valid && !result)
+    {
+        u8 id = image.pointer[cursor];
+        cursor += 1;
+        u64 size = 0;
+        valid = compiler_driver_test_wasm_leb(image, &cursor, image.length, &size) && size <= image.length - cursor;
+        u64 section_end = valid ? cursor + size : cursor;
+        u64 section_name_length = 0;
+        if (valid && id == 0 && compiler_driver_test_wasm_leb(image, &cursor, section_end, &section_name_length) && section_name_length == 4 &&
+            section_end - cursor >= 4 && memcmp(image.pointer + cursor, "name", 4) == 0)
+        {
+            cursor += 4;
+            while (cursor < section_end && !result)
+            {
+                u8 subsection = image.pointer[cursor];
+                cursor += 1;
+                u64 subsection_size = 0;
+                bool subsection_valid = compiler_driver_test_wasm_leb(image, &cursor, section_end, &subsection_size) && subsection_size <= section_end - cursor;
+                u64 subsection_end = subsection_valid ? cursor + subsection_size : section_end;
+                u64 count = 0;
+                if (subsection_valid && subsection == 9 && compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &count))
+                {
+                    for (u64 entry = 0; entry < count && !result; entry += 1)
+                    {
+                        u64 index = 0;
+                        u64 length = 0;
+                        bool entry_valid = compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &index) &&
+                                           compiler_driver_test_wasm_leb(image, &cursor, subsection_end, &length) && length <= subsection_end - cursor;
+                        result = entry_valid && length == name.length && memcmp(image.pointer + cursor, name.pointer, name.length) == 0;
+                        cursor = entry_valid ? cursor + length : subsection_end;
+                    }
+                }
+                cursor = subsection_end;
+            }
+        }
+        cursor = section_end;
+    }
+
+    return result;
+}
+
 // `__attribute__((section("...")))` (issue 1276). Every native output either
 // places the definition in the named section or refuses it naming the
 // declaration: COFF and Mach-O refuse, as does thread-local storage. On a
@@ -10696,6 +10895,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                             compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object &&
                                 string_first_sequence(compiled.diagnostic, refusals[index].expected) < compiled.diagnostic.length,
                             compiled.diagnostic);
+        }
+    }
+    // WebAssembly (issue 1717) names a placed data definition's segment, as
+    // Clang does. A function's section has no Wasm counterpart and, as with
+    // Clang, is accepted without effect, still rooting the definition.
+    String8 wasm_source = S8("int wasm_placed __attribute__((section(\"wasm_named\"))) = 7;\n"
+                             "const int wasm_constant __attribute__((section(\"wasm_constants\"))) = 8;\n"
+                             "int wasm_zero __attribute__((section(\"wasm_zero\")));\n"
+                             "int wasm_ordinary = 9;\n"
+                             "__attribute__((section(\".text.wasm_kept\"))) static int wasm_kept(void) { return 1; }\n"
+                             "int wasm_local(void) { static int wasm_member __attribute__((section(\"wasm_set\"))) = 2; return wasm_member; }\n"
+                             "int main(void) { return wasm_placed + wasm_constant + wasm_zero + wasm_ordinary + wasm_local() == 26 ? 0 : 1; }\n");
+    String8 wasm_targets[] = {S8("wasm32-unknown-wasi"), S8("wasm64-unknown-freestanding")};
+    String8 wasm_segments[] = {S8("wasm_named"), S8("wasm_constants"), S8("wasm_zero"), S8("wasm_set")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(wasm_targets); index += 1)
+    {
+        String8 input = buster_test_temporary_path(arena, S8("buster-section-wasm"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-section-wasm"), S8(".wasm"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(wasm_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-target"), wasm_targets[index], input, S8("-o"), output};
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && (compiled.has_wasm || compiled.has_wasm64), compiled.diagnostic);
+            ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+            for (u32 segment = 0; segment < BUSTER_ARRAY_LENGTH(wasm_segments); segment += 1)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_wasm_data_segment_named(image, wasm_segments[segment]),
+                                string_format(arena, S8("{S8}: no data segment named {S8}"), wasm_targets[index], wasm_segments[segment]));
+            }
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_data_segment_named(image, S8(".text.wasm_kept")));
         }
     }
 #if BUSTER_LINUX && !BUSTER_ANDROID && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
@@ -10914,6 +11144,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
@@ -14408,6 +14639,67 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_STRING_TEST(arguments, c_undefined_reference.diagnostics[0].code, S8("link.unresolved-symbol"));
         BUSTER_STRING_TEST(arguments, c_undefined_reference.diagnostics[0].symbol, S8("buster_no_such_function"));
         BUSTER_TEST(arguments, !c_undefined_reference.diagnostics[0].primary.has_range && c_undefined_reference.diagnostics[0].primary.position.line == 0);
+    }
+    // The same refusal holds for every hosted ELF architecture once the
+    // target's libc is readable: an AArch64 link used to emit the missing
+    // name as a .dynsym import because no aarch64 libc.so.6 was found, and
+    // the program died at load with "symbol lookup error" (GitHub #1729).
+    // Each target reads a synthetic libc through -L, so the check needs no
+    // cross sysroot on the host.  A weak undefined reference still links.
+    {
+        static String8 const libc_names[] = {S8_INITIALIZER("exit"), S8_INITIALIZER("__cxa_atexit"), S8_INITIALIZER("puts")};
+        static String8 const cross_targets[] = {S8_INITIALIZER("x86_64-linux"), S8_INITIALIZER("aarch64-linux")};
+        static u16 const cross_machines[] = {62, 183};
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(cross_targets); target_index += 1)
+        {
+            buster_test_arena_end(arguments, driver_fixture, true);
+            driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_cross_undefined_reference"), false);
+            String8 library_directory = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-libc"), S8(""));
+            BUSTER_TEST(arguments, os_make_directory_attempt(library_directory));
+            ByteSlice libc_image = compiler_driver_test_elf_shared_library(arguments->arena, cross_machines[target_index], libc_names,
+                                                                            BUSTER_ARRAY_LENGTH(libc_names));
+            BUSTER_TEST(arguments, file_write(string_format_z(arguments->arena, S8("{S8}/libc.so.6"), library_directory), libc_image));
+            String8 missing_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-undefined"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(missing_source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                                                                       "void definitely_missing_symbol(void);\n"
+                                                                       "int main(void) { definitely_missing_symbol(); return 0; }\n"))));
+            String8 missing_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-undefined"), S8(""));
+            String8 missing_command_line[] = {
+                S8("-target"), cross_targets[target_index], S8("-L"), library_directory, S8("-o"), missing_output_path, missing_source_path,
+            };
+            CompilerDriverResult missing = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_command_line)));
+            BUSTER_TEST(arguments, missing.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_TEST(arguments, string_ends_with_sequence(missing.diagnostic, S8("unresolved symbol: definitely_missing_symbol")));
+            // Where the host carries a Debian cross libc, the default search
+            // finds it without -L, as the GNU cross toolchains do.
+            static String8 const cross_libc_paths[] = {S8_INITIALIZER("/usr/x86_64-linux-gnu/lib/libc.so.6"),
+                                                       S8_INITIALIZER("/usr/aarch64-linux-gnu/lib/libc.so.6")};
+            FileMapRead cross_libc = file_map_read(arguments->arena, cross_libc_paths[target_index], (FileReadOptions){0});
+            if (cross_libc.bytes.pointer)
+            {
+                String8 default_command_line[] = {
+                    S8("-target"), cross_targets[target_index], S8("-o"), missing_output_path, missing_source_path,
+                };
+                CompilerDriverResult default_search = compiler_driver_execute_invocation(
+                    arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command_line)));
+                BUSTER_TEST(arguments, default_search.error == COMPILER_DRIVER_ERROR_LINK);
+                BUSTER_TEST(arguments, string_ends_with_sequence(default_search.diagnostic, S8("unresolved symbol: definitely_missing_symbol")));
+            }
+            file_map_unmap(cross_libc);
+            String8 weak_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-weak"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(weak_source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                                                                    "int puts(const char*);\n"
+                                                                    "__attribute__((weak)) void maybe_missing_symbol(void);\n"
+                                                                    "int main(void) { if (maybe_missing_symbol) maybe_missing_symbol(); return puts(\"x\") < 0; }\n"))));
+            String8 weak_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cross-weak"), S8(""));
+            String8 weak_command_line[] = {
+                S8("-target"), cross_targets[target_index], S8("-L"), library_directory, S8("-o"), weak_output_path, weak_source_path,
+            };
+            CompilerDriverResult weak = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command_line)));
+            BUSTER_TEST(arguments, weak.error == COMPILER_DRIVER_ERROR_NONE);
+        }
     }
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its

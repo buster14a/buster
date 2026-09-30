@@ -87,6 +87,12 @@ non-cancelling concurrency group. Protect the
 Dispatch it with an open non-draft PR number. The default `auto` class and
 `configured` authorization mode resolve the immutable request from trusted main.
 Optional SHA and class overrides remain strict assertions.
+Resolution refuses a candidate before authorization or any branch update when
+it is non-empty and changes no admitted repository source, trusted
+implementation, or policy/schema path. It shares the merge gate's
+`classification_is_bound` predicate over the current-main source snapshot,
+because admission would reject such an integration head. Catch-ups (empty
+candidates) and bound candidates remain eligible.
 
 For a previously attested head, preparation first verifies its original trusted
 publication and recovers the original source candidate. It requires the recorded
@@ -99,6 +105,12 @@ as parents, so generated commits can be replaced without losing source history.
 Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
+
+Pull-request admission (the `Native retirement merge admission` check and the
+rebind job's policy step) evaluates against the trusted main checkout. If main
+advances after that checkout, the step re-fetches the new main into the trusted
+and candidate checkouts and re-evaluates, up to three attempts in total, rather
+than failing the candidate. It fails only if main keeps advancing throughout.
 
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at
@@ -231,12 +243,18 @@ its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
 
-For #1007, the current support declaration digest remains accepted for
-historical evidence. The trusted-reader bootstrap admits the exact proposed
-successor digest `0d878bf0a3df9f0528803a5b08275d950f9edda57e373fd7618229dee264e427` alongside both prior digests. After that
-bootstrap is trusted, a separate policy transition may update only the
-`tests/basic_c_f80_machine.c` byte/hash row and benchmark-service support pins;
-all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
+For #1007, the current support declaration digest
+`50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` and both
+earlier declaration digests remain accepted for historical evidence. The
+trusted-reader bootstrap admits the exact proposed successor digest
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932`
+(`PROPOSED_SUPPORT_*`): the current declaration with only the
+`tests/basic_c_f80_machine.c` row changed to 7,233 bytes and SHA-256
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`; the
+declaration stays 79,744 bytes. After that bootstrap is trusted, a separate
+policy transition may update only that fixture, its byte/hash row, and the
+benchmark-service support pins; all 559 inputs, 411 subjects, and 78,912 row
+identities remain fixed.
 
 ### Solo-maintainer authorization
 

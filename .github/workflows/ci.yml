@@ -1,7 +1,7 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, six
-# independent native mode lanes, four Unix differential lanes and three mobile
+# Build/test policy remains in build.c. Two shards per desktop lane, five
+# independent native mode lanes, three Unix differential lanes and two mobile
 # lanes retain full coverage. See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -65,6 +65,7 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
         shell: bash
         run: |
@@ -109,7 +110,9 @@ jobs:
           GOSUMDB: sum.golang.org
         run: |
           set -euo pipefail
-          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
+          # The pinned actionlint predates GitHub's queue: max field. The
+          # preceding policy test confines that field to the reviewed workflow.
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
         shell: bash
@@ -118,7 +121,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce with the lint command in `.github/workflows/ci.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -149,7 +152,7 @@ jobs:
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
-        lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
+        lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
         shard: [release, checks]
         include:
           - name: Linux x86-64
@@ -166,13 +169,6 @@ jobs:
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
-          - name: macOS x86-64
-            lane: macos-x86_64
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
-            zig_target: x86_64-macos
           - name: macOS AArch64
             lane: macos-aarch64
             runner: macos-26
@@ -286,12 +282,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase workflow-tools --log "$RUNNER_TEMP/buster-ci/resources-workflow-tools.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           workflow_tools_started=$SECONDS
           run_suite() {
             local suite=$1 log=$2 started=$SECONDS status
@@ -322,7 +312,9 @@ jobs:
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
           run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
           run_suite tools/ci_native_observation_test.py native-observation-test.log
+          run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
           run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
+          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
           if [[ '${{ matrix.os }}' == macos ]]; then
             run_suite tools/ci_runner_resources_test.py runner-resources-test.log
           fi
@@ -394,12 +386,6 @@ jobs:
           set -euo pipefail
           # This step also runs without the Release-only preflight steps.
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase install-zig --log "$RUNNER_TEMP/buster-ci/resources-install-zig.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
       # Ordinary mode retains the previous main-push write policy. Prime mode
@@ -495,12 +481,6 @@ jobs:
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase combinations --log "$RUNNER_TEMP/buster-ci/resources-combinations.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
@@ -518,32 +498,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
-          # The result step independently re-probes the exact compiler
-          # executables recorded by the driver. Preserve this step's selected
-          # Visual Studio/LLVM search path and target architecture for it.
-          $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
-          foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          # Export the shell's PATH and target for the result step's re-probe.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -GithubEnv $env:GITHUB_ENV `
+            -Require cl, clang, gcc, zig -ClangArch $env:CLANG_ARCH
           New-Item -ItemType Directory -Force -Path 'build' | Out-Null
           $Driver = Join-Path (Get-Location) 'build\build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
@@ -593,62 +551,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$BUSTER_CI_PYTHON" - <<'PYTHON'
-          import os
-          import shutil
-          import stat
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "buster-ci"
-          source = root.with_name("buster-ci-unsanitized")
-          if source.is_symlink() or source.is_file():
-              source.unlink()
-          elif source.is_dir():
-              shutil.rmtree(source, ignore_errors=True)
-          if root.is_symlink() or root.is_file():
-              root.unlink()
-          elif root.is_dir():
-              root.rename(source)
-          root.mkdir(parents=True, exist_ok=True)
-
-          skipped = []
-          if source.is_dir():
-              for directory, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
-                  current = Path(directory)
-                  relative = current.relative_to(source)
-                  retained_directories = []
-                  for name in dirnames:
-                      entry = current / name
-                      try:
-                          mode = entry.lstat().st_mode
-                      except OSError as error:
-                          skipped.append(f"{relative / name}: {error}")
-                          continue
-                      if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
-                          retained_directories.append(name)
-                          (root / relative / name).mkdir(parents=True, exist_ok=True)
-                      else:
-                          skipped.append(f"{relative / name}: non-directory or symbolic link")
-                  dirnames[:] = retained_directories
-                  for name in filenames:
-                      entry = current / name
-                      destination = root / relative / name
-                      try:
-                          mode = entry.lstat().st_mode
-                          if not stat.S_ISREG(mode):
-                              skipped.append(f"{relative / name}: non-regular file")
-                              continue
-                          destination.parent.mkdir(parents=True, exist_ok=True)
-                          with entry.open("rb") as input_file, destination.open("wb") as output_file:
-                              shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
-                      except OSError as error:
-                          destination.unlink(missing_ok=True)
-                          skipped.append(f"{relative / name}: {error}")
-
-          report = root / "artifact-sanitization.txt"
-          report.write_text("\n".join(skipped) + ("\n" if skipped else ""), encoding="utf-8")
-          shutil.rmtree(source, ignore_errors=True)
-          PYTHON
+          "$BUSTER_CI_PYTHON" tools/ci_sanitize_logs.py --root "$RUNNER_TEMP/buster-ci"
 
       - name: Retain desktop logs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -663,7 +566,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The mode matrix is independent from the combination matrix on all six
+  # The mode matrix is independent from the combination matrix on all five
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
@@ -688,11 +591,6 @@ jobs:
             platform: unix
             os: linux
             arch: aarch64
-          - name: macOS x86-64 native
-            runner: macos-26-intel
-            platform: unix
-            os: macos
-            arch: x86_64
           - name: macOS AArch64 native
             runner: macos-26
             platform: unix
@@ -786,12 +684,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/modes.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase native-modes --log "$RUNNER_TEMP/buster-ci/resources-native-modes.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           # generate recreates build/, so the driver and logs must live outside it.
           driver="$RUNNER_TEMP/buster-build"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain             --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -814,24 +706,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          $VsPath = $VsPaths[0].Trim()
-          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
-          foreach ($Compiler in @('cl', 'clang')) {
-            where.exe $Compiler
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
-            throw "clang does not default to a ${env:CLANG_ARCH} target"
-          }
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
+            -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang -ClangArch $env:CLANG_ARCH
           & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py toolchain `
             --root $env:BUSTER_CI_OBSERVATION_ROOT --compiler clang --cmake cmake --ninja ninja
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -867,10 +743,8 @@ jobs:
           VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'MSVC toolchain missing' }
-          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          # cl.exe only: no installed LLVM and no clang probe in this step.
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
           $Root = Join-Path $env:RUNNER_TEMP 'buster-ci'
           $Sources = Join-Path $Root 'msvc source with spaces'
@@ -942,12 +816,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/differential.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase native-differential --log "$RUNNER_TEMP/buster-ci/resources-native-differential.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           driver="$RUNNER_TEMP/buster-build"
           if [[ ! -f "$BUSTER_CI_OBSERVATION_ROOT/toolchain.json" ]]; then
             "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain               --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -984,7 +852,7 @@ jobs:
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
           BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
-        run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
+        run: python_command=$BUSTER_CI_PYTHON; test -n "$python_command" || python_command=python3; "$python_command" tools/ci_native_observation.py package --root "$BUSTER_CI_OBSERVATION_ROOT" --python "$python_command" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
@@ -1036,10 +904,6 @@ jobs:
           - name: Android x86-64
             runner: ubuntu-26.04
             os: android
-            arch: x86_64
-          - name: iOS x86-64
-            runner: macos-26-intel
-            os: ios
             arch: x86_64
           - name: iOS AArch64
             runner: macos-26
@@ -1170,18 +1034,12 @@ jobs:
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+          BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/ios.log") 2>&1
-          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
-            python3 tools/ci_runner_resources.py --parent-pid "$$" \
-              --phase ios-simulator --log "$RUNNER_TEMP/buster-ci/resources-ios-simulator.jsonl" &
-            resource_sampler=$!
-            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
-          fi
           ./ios/test_ci.sh --all
 
       - name: Mobile result and reproduction
@@ -1312,12 +1170,11 @@ jobs:
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
 
-          reference_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            reference_materialized=false
-          fi
+          reference_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1398,12 +1255,11 @@ jobs:
               exit 1
             fi
           done
-          expected_materialized=true
-          if [[ "$candidate_revision" == "$reference_revision" && \
-                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
-                "$COMPARISON_REQUESTED" == false ]]; then
-            expected_materialized=false
-          fi
+          expected_materialized="$(python3 tools/analyzer_reference.py materialization \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
@@ -1529,8 +1385,8 @@ jobs:
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
         run: |
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All twelve desktop shards | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
-            printf '| All six native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All ten desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
