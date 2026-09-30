@@ -26,6 +26,25 @@ ACTOR_POLICY = ROOT / ".github" / "benchmark-actions-policy.json"
 MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
 ADMISSION_GUIDE = SERVICE / "deploy" / "GITHUB_ADMISSION.md"
 OPERATOR_PACKET = SERVICE / "deploy" / "ISSUE_880_OPERATOR_PACKET.md"
+BROKER = SERVICE / "systemd_broker.c"
+RECIPE_TEST = SERVICE / "dispatch_recipe_test.py"
+
+# The reviewed dispatch allowlist (#2071): recipe -> service runtime budget in
+# seconds. The broker enforces one fixed RuntimeMaxSec for every recipe, so
+# each budget must equal it; a shorter wait would give up on a job the service
+# still runs. A recipe that needs a different budget needs a reviewed broker
+# change first. The installed service still refuses any recipe its compiled
+# registry does not serve.
+REVIEWED_RECIPES = (("validate-buster-v1", 3600), ("zen5-calibration-v1", 3600))
+FINALIZATION_ALLOWANCE = 600
+JOB_MARGIN = 300
+JOB_TIMEOUT_MINUTES = 120
+BUDGET_STEP = "      - name: Select the reviewed recipe and its result-wait budget"
+SUBMIT_COMMAND = (
+    'receipt="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service '
+    "gateway submit-recipe \\",
+    '"$BQ_RECIPE" "$BQ_IDEMPOTENCY_KEY" "$BQ_BASE_COMMIT" "$BQ_CANDIDATE_COMMIT" 2>&1)"',
+)
 
 # Cheap context checks shared by both jobs. The authorize job then proves the
 # same identity, by login and numeric ID, from GitHub's record of the attempt.
@@ -262,6 +281,7 @@ def main() -> int:
             "types: [checks_requested]",
             "tools/bench_service/exclusive_admission_test.c",
             '"$RUNNER_TEMP/exclusive-admission-test"',
+            "python3 -B tools/bench_service/dispatch_recipe_test.py",
         ):
             if marker not in policy:
                 errors.append(f"workflow-policy check is missing marker: {marker}")
@@ -390,7 +410,7 @@ def main() -> int:
             sum("https://" in line for line in dispatch.splitlines()) != 1:
         errors.append("only authorize may fetch, once, from its fixed run-attempt API URL")
 
-    input_line = re.compile(r"^\s+BQ_(IDEMPOTENCY_KEY|BASE_COMMIT|CANDIDATE_COMMIT): \$\{\{ inputs\.")
+    input_line = re.compile(r"^\s+BQ_(IDEMPOTENCY_KEY|BASE_COMMIT|CANDIDATE_COMMIT|RECIPE): \$\{\{ inputs\.")
     for number, line in enumerate(dispatch.splitlines(), 1):
         if "${{ inputs." in line and not input_line.match(line):
             errors.append(f"line {number} interpolates an input outside the validated environment")
@@ -410,7 +430,104 @@ def main() -> int:
     ):
         errors.append("submission must use exactly one literal installed-gateway command")
 
+    check_recipe_selection(dispatch, submit, errors)
     return report(errors)
+
+
+def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) -> None:
+    """Recipe choice comes from the reviewed allowlist; the wait from its budget."""
+    names = [name for name, _ in REVIEWED_RECIPES]
+    if not RECIPE_TEST.is_file():
+        errors.append("missing executable dispatch recipe test")
+    if names[0] != "validate-buster-v1" or len(set(names)) != len(names):
+        errors.append("the reviewed allowlist must start with validate-buster-v1 and be unique")
+
+    recipe_input = input_block(dispatch, "recipe")
+    expected_input = [
+        "        description: Installed service recipe from the reviewed allowlist",
+        "        required: true",
+        "        type: choice",
+        "        default: validate-buster-v1",
+        "        options:",
+        *[f"          - {name}" for name in names],
+    ]
+    if recipe_input != expected_input:
+        errors.append(f"recipe input must be a required choice of exactly the allowlist: {recipe_input}")
+
+    broker = BROKER.read_text(encoding="utf-8") if BROKER.is_file() else ""
+    runtime = re.findall(r'"--property=RuntimeMaxSec=([1-9][0-9]*)us"', broker)
+    if len(runtime) != 1 or int(runtime[0]) % 1000000:
+        errors.append("the broker must define one whole-second RuntimeMaxSec")
+    else:
+        for name, budget in REVIEWED_RECIPES:
+            if budget != int(runtime[0]) // 1000000:
+                errors.append(f"{name} budget must equal the broker RuntimeMaxSec")
+
+    timeout = f"    timeout-minutes: {JOB_TIMEOUT_MINUTES}"
+    if [line for line in submit if line.startswith("    timeout-minutes:")] != [timeout]:
+        errors.append(f"submit job must keep {timeout.strip()}")
+    if f"      BQ_JOB_TIMEOUT_SECONDS: {JOB_TIMEOUT_MINUTES * 60}" not in submit:
+        errors.append("BQ_JOB_TIMEOUT_SECONDS must equal the submit job timeout")
+    if "      BQ_RECIPE: ${{ inputs.recipe }}" not in submit:
+        errors.append("submit job must receive the recipe only through its validated environment")
+    for _, budget in REVIEWED_RECIPES:
+        if budget + FINALIZATION_ALLOWANCE + JOB_MARGIN >= JOB_TIMEOUT_MINUTES * 60:
+            errors.append("a reviewed recipe budget leaves no admission window in the job timeout")
+
+    steps = [line for line in submit if line.startswith("      - name: ")]
+    if not steps or steps[0] != BUDGET_STEP:
+        errors.append("the recipe/budget step must run before any gateway command")
+    scripts = run_scripts(submit)
+    budget = [line.strip() for line in scripts[0]] if scripts else []
+    arms = [line for line in budget if re.fullmatch(r"[a-z0-9-]+\) runtime_budget=[0-9]+ ;;", line)]
+    if arms != [f"{name}) runtime_budget={value} ;;" for name, value in REVIEWED_RECIPES]:
+        errors.append(f"budget step allowlist differs from the reviewed allowlist: {arms}")
+    refusal = ("*)", "echo 'BENCH_DISPATCH_RECIPE_REFUSED recipe is not in the reviewed allowlist' >&2",
+               "exit 1", ";;", "esac")
+    if not contains_block(budget, refusal):
+        errors.append("budget step must refuse every recipe outside the allowlist")
+    for marker in (
+        f"finalization_allowance={FINALIZATION_ALLOWANCE}",
+        f"job_margin={JOB_MARGIN}",
+        "wait_seconds=$((runtime_budget + finalization_allowance))",
+        "job_deadline=$((started + BQ_JOB_TIMEOUT_SECONDS - job_margin))",
+        "admission_deadline=$((job_deadline - wait_seconds))",
+        "if ((admission_deadline <= started)); then",
+    ):
+        if marker not in budget:
+            errors.append(f"budget step is missing: {marker}")
+    if budget[:2] != ["set -euo pipefail", 'started="$(date +%s)"']:
+        errors.append("budget step must read the clock before any other check")
+
+    flat = [line.strip() for script in scripts for line in script]
+    for block in (
+        ('if (($(date +%s) >= BQ_ADMISSION_DEADLINE)); then', "break"),
+        ("deadline=$(($(date +%s) + BQ_WAIT_SECONDS))", "if ((deadline > BQ_JOB_DEADLINE)); then",
+         "deadline=$BQ_JOB_DEADLINE", "fi"),
+        ("while (($(date +%s) < deadline)); do",),
+        SUBMIT_COMMAND,
+    ):
+        if not contains_block(flat, block):
+            errors.append(f"submit job is missing deadline or selection control: {block[0]}")
+    # The admission attempt cap stays; the fixed recipe and poll-count wait go.
+    if dispatch.count("for ((attempt = 0; attempt < 180; attempt += 1)); do") != 1:
+        errors.append("admission must keep its 180-attempt cap")
+    for marker in ("service-recipes=validate-buster-v1", "attempt < 360"):
+        if marker in dispatch:
+            errors.append(f"dispatch workflow keeps a superseded fixed control: {marker}")
+
+
+def input_block(workflow: str, name: str) -> list[str]:
+    """Lines of one workflow_dispatch input, excluding its header and comments."""
+    lines = workflow.splitlines()
+    header = f"      {name}:"
+    block: list[str] = []
+    if header in lines:
+        for line in lines[lines.index(header) + 1:]:
+            if not line.startswith("        "):
+                break
+            block.append(line)
+    return block
 
 
 def job_blocks(workflow: str) -> dict[str, list[str]]:

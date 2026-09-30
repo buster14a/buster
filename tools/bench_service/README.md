@@ -598,16 +598,21 @@ The installed executable also provides a fixed smoke request encoder:
 ```sh
 /usr/local/libexec/buster-bench-service gateway capabilities
 /usr/local/libexec/buster-bench-service gateway submit KEY BASE_SHA CANDIDATE_SHA
+/usr/local/libexec/buster-bench-service gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway status JOB
 /usr/local/libexec/buster-bench-service gateway result JOB
 /usr/local/libexec/buster-bench-service gateway logs JOB [AFTER_SEQUENCE]
 /usr/local/libexec/buster-bench-service gateway cancel JOB
 ```
 
-`gateway` fixes `/run/buster-bench/control.sock`, principal `github-actions`
-and recipe `validate-buster-v1`. It accepts full lowercase immutable source
-identities and bounded keys, never a recipe override, path, command, flag or
-environment override. It shares `client`'s typed transport and reply validator;
+`gateway` fixes `/run/buster-bench/control.sock` and principal
+`github-actions`. `submit` fixes recipe `validate-buster-v1`; `submit-recipe`
+names one recipe, which must pass the same compiled-registry
+`bq_recipe_service` check as every other submission, so unknown, blocked, fake
+and supervisor-internal names are refused before transport and again by the
+service. Both encode identical request bytes for `validate-buster-v1`. The
+gateway accepts full lowercase immutable source identities and bounded keys,
+never a path, command, flag or environment override. It shares `client`'s typed transport and reply validator;
 it never opens the queue. Installed-source allowlisting and all materialization
 checks remain service-owned under the host lease.
 

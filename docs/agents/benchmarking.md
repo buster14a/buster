@@ -328,9 +328,14 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   group is `.github/workflows/9700x-service-dispatch.yml`; it selects that group
   and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
   repository content, and invokes only the operator-installed fixed gateway.
-  Its admitted path is the one-pair `validate-buster-v1`
-  smoke recipe; it is not the former stage-1 diagnostic, an A/A
-  qualification, or a performance verdict.
+  Its `recipe` input chooses from a reviewed allowlist
+  (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
+  the installed service still serves only its compiled registry, which today
+  admits only the one-pair `validate-buster-v1` smoke recipe. That recipe is
+  not the former stage-1 diagnostic, an A/A qualification, or a performance
+  verdict. The result wait comes from the selected recipe's reviewed budget
+  and is capped by the job timeout; see
+  [`tools/bench_service/deploy/VALIDATE_BUSTER_V1.md`](../../tools/bench_service/deploy/VALIDATE_BUSTER_V1.md).
   Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
   manual approval step: a per-attempt `authorize` job and the `submit` job
   condition skip every other requester and re-run.
