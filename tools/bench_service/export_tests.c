@@ -397,25 +397,25 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
     if (root >= 0 && inventory != MAP_FAILED)
     {
         int file = openat(root, "regular", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK &&
+        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_OK &&
                  inventory->files == 1 && inventory->bytes == 1 && bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(pwrite(file, "b", 1, 0) == 1 && !bq_export_inventory_unchanged(root, inventory));
-        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_OK);
         BQ_CHECK(renameat(root, "regular", root, "replacement") == 0 && !bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(renameat(root, "replacement", root, "regular") == 0);
-        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
         /* A full 64 MiB A1 metrics or transcript shard is exactly one
          * admissible entry: only a larger file is oversized. */
         BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP) == 0 &&
-                 bq_export_inventory(root, inventory, BQ_EXPORT_RETIREMENT_TOTAL_CAP, deadline) == BQ_OK &&
+                 bq_export_inventory(root, inventory, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, deadline) == BQ_OK &&
                  inventory->files == 1 && inventory->bytes == BQ_WORKER_BUNDLE_FILE_CAP);
         BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP + 1) == 0 &&
-                 bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
+                 bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(ftruncate(file, 1) == 0);
-        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
-        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "fifo", 0) == 0);
         u8 byte = 0;
         BQ_CHECK(bq_export_io(file, &byte, 1, 0, false, 0) == BQ_EXPORT_TIMEOUT);
@@ -430,7 +430,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             directory = child;
         }
         if (directory >= 0) close(directory);
-        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(bq_remove_workspace_payload(root));
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {
@@ -440,7 +440,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             BQ_CHECK(fd >= 0);
             if (fd >= 0) close(fd);
         }
-        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_OVERSIZED);
         /* The generic worker cleanup intentionally has the same entry cap. */
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {
@@ -451,6 +451,233 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
         BQ_CHECK(!bq_worker_bundle_path_valid("../escape") && !bq_worker_bundle_path_valid("a/../escape") &&
                  !bq_worker_bundle_path_valid("/absolute") && !bq_worker_bundle_path_valid("a//b"));
     }
+    if (inventory != MAP_FAILED) munmap(inventory, sizeof(*inventory));
+    if (root >= 0) close(root);
+    BQ_CHECK(rmdir(path) == 0);
+}
+
+/* A sparse fixture file of `size` bytes (no buffer of that size exists)
+ * whose last byte is `tail`, so a digest covers the whole length. */
+BUSTER_GLOBAL_LOCAL bool bq_test_evidence_sparse(int root, char const* name, u64 size, char tail)
+{
+    int file = openat(root, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    bool ok = file >= 0 && size && ftruncate(file, (off_t)size) == 0 &&
+              pwrite(file, &tail, 1, (off_t)(size - 1)) == 1 && fchmod(file, 0400) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* Rewrite the last byte of a sealed fixture in place: same inode and size. */
+BUSTER_GLOBAL_LOCAL bool bq_test_evidence_tail(int root, char const* name, char tail)
+{
+    struct stat info = {0};
+    bool ok = fchmodat(root, name, 0600, 0) == 0;
+    int file = ok ? openat(root, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    ok = file >= 0 && fstat(file, &info) == 0 && info.st_size > 0 &&
+         pwrite(file, &tail, 1, info.st_size - 1) == 1 && fchmod(file, 0400) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* The process's peak resident set in bytes (monotonic). */
+BUSTER_GLOBAL_LOCAL u64 bq_test_peak_rss(void)
+{
+    struct rusage usage = {0};
+    u64 result = getrusage(RUSAGE_SELF, &usage) == 0 ? (u64)usage.ru_maxrss * 1024u : UINT64_MAX;
+    return result;
+}
+
+/* A retirement export archive with one file entry `path` of `size` sparse
+ * bytes, and its receipt's digest. The receipt is well formed for the
+ * admitted retirement recipe; the archive carries no result binding, so an
+ * archive whose entries all unpack still ends BQ_EXPORT_INVALID. */
+BUSTER_GLOBAL_LOCAL bool bq_test_evidence_archive(char const* archive, char const* path, u64 size,
+                                                  char receipt_digest[SHA256_HEX_CAPACITY])
+{
+    BqRequest request = {0};
+    u8 receipt[BQ_EXPORT_RECEIPT_CAP] = {0};
+    u32 length = (u32)strlen(path);
+    u64 total = 16u + length + size;
+    bool ok = bq_test_retirement_request(BQ_EXPORT_PRINCIPAL, "evidence-cap", &request) && bq_request_valid(&request);
+    int file = ok ? open(archive, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+    ok = ok && file >= 0;
+    if (ok)
+    {
+        u8 header[16] = {0};
+        char tail = 'z';
+        bq_put32(header, 2);
+        bq_put32(header + 4, length);
+        bq_put64(header + 8, size);
+        ok = pwrite(file, header, sizeof(header), BQ_EXPORT_RECEIPT_CAP) == (ssize_t)sizeof(header) &&
+             pwrite(file, path, length, BQ_EXPORT_RECEIPT_CAP + sizeof(header)) == (ssize_t)length &&
+             ftruncate(file, (off_t)(BQ_EXPORT_RECEIPT_CAP + total)) == 0 &&
+             pwrite(file, &tail, 1, (off_t)(BQ_EXPORT_RECEIPT_CAP + total - 1)) == 1;
+    }
+    Sha256 hash;
+    sha256_init(&hash);
+    for (u64 offset = 0; ok && offset < total;)
+    {
+        u8 bytes[BQ_EXPORT_CHUNK_CAP];
+        u64 count = total - offset < sizeof(bytes) ? total - offset : sizeof(bytes);
+        ok = pread(file, bytes, (size_t)count, (off_t)(BQ_EXPORT_RECEIPT_CAP + offset)) == (ssize_t)count;
+        if (ok) sha256_add(&hash, bytes, count);
+        offset += count;
+    }
+    if (ok)
+    {
+        String8 principal = bq_field(&request, 0), recipe = bq_field(&request, 2);
+        String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+        char digest[SHA256_HEX_CAPACITY];
+        memcpy(receipt, "BQEXP001", 8);
+        bq_put64(receipt + 8, 1);
+        bq_put64(receipt + 16, 1);
+        bq_put64(receipt + 24, total);
+        bq_put64(receipt + 32, size);
+        bq_put32(receipt + 40, 1);
+        bq_put32(receipt + 44, 1);
+        for (u32 offset = 48; offset < 496; offset += 64) memset(receipt + offset, '0', 64);
+        bq_request_digest(&request, digest);
+        memcpy(receipt + 48, digest, 64);
+        sha256_finish_hex(&hash, (char8*)digest);
+        memcpy(receipt + 304, digest, 64);
+        memcpy(receipt + 496, principal.pointer, (size_t)principal.length);
+        memcpy(receipt + 560, recipe.pointer, (size_t)recipe.length);
+        bq_digest(profile.pointer, (u32)profile.length, digest);
+        memcpy(receipt + 608, digest, 64);
+        memcpy(receipt + 672, request.bytes, request.size);
+        bq_put32(receipt + 992, request.size);
+        bq_put32(receipt + 1012, BQ_SUCCEEDED);
+        bq_put32(receipt + 1016, BQ_VALID);
+        bq_put32(receipt + 1020, BQ_FINISHED);
+        ok = bq_export_receipt_valid(receipt) && bq_export_receipt_recipe(receipt) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED &&
+             pwrite(file, receipt, sizeof(receipt), 0) == (ssize_t)sizeof(receipt);
+        bq_digest(receipt, sizeof(receipt), receipt_digest);
+    }
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* Unpack `archive` into a new `replay`; returns the result and whether the
+ * entry `name` was created there with `size` bytes. The replay directory and
+ * the archive are removed afterwards. */
+BUSTER_GLOBAL_LOCAL BqError bq_test_evidence_unpack(char const* archive, char const* replay, char const* receipt,
+                                                    char const* name, u64 size, bool* created)
+{
+    BqError error = bq_export_unpack(archive, replay, receipt);
+    int root = open(replay, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat info = {0};
+    *created = root >= 0 && fstatat(root, name, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
+               (u64)info.st_size == size;
+    BQ_CHECK(root >= 0 && bq_remove_workspace_payload(root));
+    if (root >= 0) close(root);
+    BQ_CHECK(rmdir(replay) == 0 && unlink(archive) == 0);
+    return error;
+}
+
+/* #1880: a retirement evidence entry (BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX,
+ * flat) may reach BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP through the
+ * producer's index, the worker's bundle validation, export and unpack; one
+ * byte more, any other file over BQ_WORKER_BUNDLE_FILE_CAP, and an evidence
+ * name under another recipe are still refused, and a changed byte of a large
+ * entry fails its digest. The fixtures are sparse and every reader streams,
+ * so the peak resident set grows by far less than one entry. */
+BUSTER_GLOBAL_LOCAL void bq_test_export_evidence_cap(void)
+{
+    u64 const cap = BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP;
+    char const* evidence = BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX "toolchain--bin--clang";
+    char const* other = "retirement-other.bin";
+    BQ_CHECK(bq_worker_bundle_file_cap(true, evidence) == cap && cap > BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(false, evidence) == BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(true, BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX) == BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(true, "nested/retirement-evidence-x") == BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(true, "retirement-evidence-x/y") == BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(true, other) == BQ_WORKER_BUNDLE_FILE_CAP &&
+             bq_worker_bundle_file_cap(true, NULL) == BQ_WORKER_BUNDLE_FILE_CAP);
+    /* Index lines: the size is checked against the entry's own cap. */
+    char line[BQ_WORKER_BUNDLE_LINE_CAP];
+    BqWorkerBundleEntry entry;
+    char const* zeros = "0000000000000000000000000000000000000000000000000000000000000000";
+    snprintf(line, sizeof(line), "%s %" PRIu64 " %s", zeros, cap, evidence);
+    BQ_CHECK(bq_worker_bundle_entry_parse(line, true, &entry) && entry.size == cap &&
+             !bq_worker_bundle_entry_parse(line, false, &entry));
+    snprintf(line, sizeof(line), "%s %" PRIu64 " %s", zeros, cap + 1, evidence);
+    BQ_CHECK(!bq_worker_bundle_entry_parse(line, true, &entry));
+    snprintf(line, sizeof(line), "%s %" PRIu64 " %s", zeros, (u64)BQ_WORKER_BUNDLE_FILE_CAP + 1, other);
+    BQ_CHECK(!bq_worker_bundle_entry_parse(line, true, &entry));
+
+    BqRecipeFiles retirement = {0};
+    char path[BQ_PATH_CAP + 1] = "/tmp/bq-evidence-cap-XXXXXX";
+    BQ_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &retirement) &&
+             bq_test_mkdtemp_physical(path, sizeof(path)));
+    int root = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    BqExportInventory* inventory = mmap(NULL, sizeof(*inventory), PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = 1}});
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_EXPORT_PREPARE_MILLISECONDS);
+    u64 peak = bq_test_peak_rss();
+    BQ_CHECK(root >= 0 && inventory != MAP_FAILED && arena);
+    if (root >= 0 && inventory != MAP_FAILED && arena)
+    {
+        /* Export inventory: at the cap only for retirement, never above it. */
+        BQ_CHECK(bq_test_evidence_sparse(root, evidence, cap, 'a') &&
+                 bq_export_inventory(root, inventory, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, deadline) == BQ_OK &&
+                 inventory->files == 1 && inventory->bytes == cap &&
+                 bq_export_inventory(root, inventory, BQ_RECIPE_VALIDATE_BUSTER, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(fchmodat(root, evidence, 0600, 0) == 0);
+        int grow = openat(root, evidence, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+        BQ_CHECK(grow >= 0 && ftruncate(grow, (off_t)cap + 1) == 0 &&
+                 bq_export_inventory(root, inventory, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, deadline) ==
+                     BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(grow >= 0 && ftruncate(grow, (off_t)cap) == 0 && pwrite(grow, "a", 1, (off_t)cap - 1) == 1 &&
+                 fchmod(grow, 0400) == 0);
+        if (grow >= 0) close(grow);
+        BQ_CHECK(bq_test_evidence_sparse(root, other, BQ_WORKER_BUNDLE_FILE_CAP + 1, 'b') &&
+                 bq_export_inventory(root, inventory, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, deadline) ==
+                     BQ_EXPORT_OVERSIZED);
+        /* The producer's index and the worker's validation: a non-evidence
+         * file over the ordinary cap refuses the index and writes nothing. */
+        char digest[SHA256_HEX_CAPACITY] = {0};
+        struct stat absent = {0};
+        BQ_CHECK(!bq_retirement_worker_bundle_write(arena, root, &retirement, digest) &&
+                 fstatat(root, retirement.bundle, &absent, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+        BQ_CHECK(unlinkat(root, other, 0) == 0 && bq_test_evidence_sparse(root, other, BQ_WORKER_BUNDLE_FILE_CAP, 'b'));
+        char full[SHA256_HEX_CAPACITY] = {0};
+        BQ_CHECK(bq_retirement_worker_bundle_write(arena, root, &retirement, digest) &&
+                 bq_worker_bundle_validate_recipe(root, &retirement, digest, full) == BQ_OK && full[0]);
+        /* One changed byte of the large entry, same inode and size. */
+        BQ_CHECK(bq_test_evidence_tail(root, evidence, 'c') &&
+                 bq_worker_bundle_validate_recipe(root, &retirement, digest, full) == BQ_CONFIGURATION_MISMATCH);
+        BQ_CHECK(bq_test_evidence_tail(root, evidence, 'a') &&
+                 bq_worker_bundle_validate_recipe(root, &retirement, digest, full) == BQ_OK);
+        /* One byte over the evidence cap refuses the index. */
+        BQ_CHECK(unlinkat(root, retirement.bundle, 0) == 0 && unlinkat(root, evidence, 0) == 0 &&
+                 bq_test_evidence_sparse(root, evidence, cap + 1, 'a') &&
+                 !bq_retirement_worker_bundle_write(arena, root, &retirement, digest) &&
+                 fstatat(root, retirement.bundle, &absent, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+        BQ_CHECK(bq_remove_workspace_payload(root));
+
+        /* Unpack: the receipt's recipe decides; each entry is refused before
+         * anything is created for it. */
+        char archive[BQ_PATH_CAP + 64], replay[BQ_PATH_CAP + 64], receipt[SHA256_HEX_CAPACITY] = {0};
+        snprintf(archive, sizeof(archive), "%s/evidence.bqexport", path);
+        snprintf(replay, sizeof(replay), "%s/replay", path);
+        bool created = false;
+        bq_test_retirement_admit(true);
+        BQ_CHECK(bq_test_evidence_archive(archive, evidence, cap, receipt) &&
+                 bq_test_evidence_unpack(archive, replay, receipt, evidence, cap, &created) == BQ_EXPORT_INVALID &&
+                 created);
+        BQ_CHECK(bq_test_evidence_archive(archive, evidence, cap + 1, receipt) &&
+                 bq_test_evidence_unpack(archive, replay, receipt, evidence, cap + 1, &created) == BQ_EXPORT_CORRUPT &&
+                 !created);
+        BQ_CHECK(bq_test_evidence_archive(archive, other, BQ_WORKER_BUNDLE_FILE_CAP + 1, receipt) &&
+                 bq_test_evidence_unpack(archive, replay, receipt, other, BQ_WORKER_BUNDLE_FILE_CAP + 1, &created) ==
+                     BQ_EXPORT_CORRUPT && !created);
+        bq_test_retirement_admit(false);
+        u64 grown = bq_test_peak_rss() - peak;
+        if (grown >= BQ_WORKER_BUNDLE_FILE_CAP) fprintf(stderr, "EVIDENCE_CAP_TEST peak_rss_growth=%" PRIu64 "\n", grown);
+        BQ_CHECK(grown < BQ_WORKER_BUNDLE_FILE_CAP);
+    }
+    if (arena) arena_destroy(arena, 1);
     if (inventory != MAP_FAILED) munmap(inventory, sizeof(*inventory));
     if (root >= 0) close(root);
     BQ_CHECK(rmdir(path) == 0);

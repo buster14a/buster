@@ -136,9 +136,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_io(int fd, void* bytes, u64 size, u64 offs
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inventory, u64 total_cap, u64 deadline)
+/* The recipe fixes the archive total (bq_export_total_cap) and whether a
+ * retirement evidence entry may use its own per-file cap
+ * (bq_worker_bundle_file_cap, #1880). */
+BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inventory, BqRecipe recipe, u64 deadline)
 {
     memset(inventory, 0, sizeof(*inventory));
+    u64 total_cap = bq_export_total_cap(recipe);
+    bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
     /* A bounded breadth-first walk also inventories empty directories. Every
      * component is reopened without symlinks; each entry is rechecked after
      * validation and after copying, including directory timestamps. */
@@ -178,7 +183,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inv
                          (info->st_uid != 0 && info->st_uid != geteuid()) || (info->st_mode & 022) ||
                          (S_ISREG(info->st_mode) && info->st_nlink != 1)) error = BQ_EXPORT_CORRUPT;
                 else if (info->st_size < 0 || (S_ISREG(info->st_mode) &&
-                         (u64)info->st_size > BQ_WORKER_BUNDLE_FILE_CAP)) error = BQ_EXPORT_OVERSIZED;
+                         (u64)info->st_size > bq_worker_bundle_file_cap(retirement, entry->path)))
+                    error = BQ_EXPORT_OVERSIZED;
                 else
                 {
                     if (S_ISREG(info->st_mode))
@@ -268,7 +274,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_snapshot(BqJob const* job, int output, u64
     BqExportInventory* inventory = mmap(NULL, sizeof(*inventory), PROT_READ | PROT_WRITE,
                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (inventory == MAP_FAILED) error = BQ_FULL;
-    if (error == BQ_OK) error = bq_export_inventory(root, inventory, total_cap, deadline);
+    if (error == BQ_OK) error = bq_export_inventory(root, inventory, selected, deadline);
     if (error == BQ_OK && bq_worker_result_binding_validate_at(job, root) != BQ_OK) error = BQ_EXPORT_INVALID;
     u64 offset = 0;
     for (u32 i = 0; error == BQ_OK && i < inventory->count; i += 1)

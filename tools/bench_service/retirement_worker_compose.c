@@ -1043,7 +1043,9 @@ typedef struct BqRetirementWorkerBundleEntry
 } BqRetirementWorkerBundleEntry;
 
 /* A regular, single-link, service-owned file's size and SHA-256, read from
- * the same inode it was listed as. */
+ * the same inode it was listed as, in 64 KiB reads: at most its own per-file
+ * cap (bq_worker_bundle_file_cap; a retirement evidence entry has the larger
+ * evidence cap, #1880). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_bundle_hash(int directory, char const* name, struct stat const* listed,
     BqRetirementWorkerBundleEntry* entry)
 {
@@ -1051,7 +1053,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_bundle_hash(int directory, char co
     struct stat info = {0};
     bool ok = file >= 0 && fstat(file, &info) == 0 && info.st_dev == listed->st_dev && info.st_ino == listed->st_ino &&
               S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 022) &&
-              (u64)info.st_size <= BQ_WORKER_BUNDLE_FILE_CAP;
+              (u64)info.st_size <= bq_worker_bundle_file_cap(true, name);
     Sha256 hash;
     sha256_init(&hash);
     u8 buffer[65536];

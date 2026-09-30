@@ -36,7 +36,9 @@ never from a value a candidate produced as its own expectation:
   (``validator_closure``). It installs those verified bytes into a private
   directory (``install_validator``) and runs them isolated (``python -I -B``,
   an empty private bytecode prefix, a minimal environment). It copies the
-  result into a new clean directory, imports lane F's directory there
+  result into a new clean directory in fixed chunks, each file at its own
+  per-file cap (``replay.result_file_cap``: flat evidence may reach 512 MiB,
+  #1880), imports lane F's directory there
   (``replay.lane_f_import``), checks the final binding, lays out the flat
   ``retirement-evidence-*`` files at the paths the binding names
   (``evidence_layout``) and runs the validator. The verdict record names the
@@ -103,7 +105,7 @@ PROFILE_PATH = "tools/bench_service/profiles/native-retirement-performance-v1.bl
 # flat result-root entry (bq_retirement_worker_evidence_map, #1998): this
 # prefix, then the named path's segments joined by "--", in [A-Za-z0-9._-]
 # and at most BQ_RETIREMENT_WORKER_EVIDENCE_PATH_CAP bytes (evidence_name).
-EVIDENCE_PREFIX = "retirement-evidence-"
+EVIDENCE_PREFIX = replay.EVIDENCE_PREFIX
 EVIDENCE_SEPARATOR = "--"
 EVIDENCE_PATH_CAP = 128
 EVIDENCE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+\Z")
@@ -291,10 +293,10 @@ def composed_state(result):
         entry = binding._keys(item, ("name", "path", "bytes", "sha256"), f"seal.files[{index}]")
         artifact = binding._artifact({key: entry[key] for key in ("path", "bytes", "sha256")},
                                      f"seal.files[{index}]")
-        if artifact["bytes"] > replay.FILE_CAP:
-            fail("a sealed closure file exceeds the per-file cap")
-        binding._check_evidence(root, dict(artifact, path=sources.get(artifact["path"], artifact["path"])),
-                                f"seal.files[{index}]")
+        stored = sources.get(artifact["path"], artifact["path"])
+        if artifact["bytes"] > replay.result_file_cap(stored):
+            fail(f"sealed closure file {stored} exceeds its per-file cap")
+        binding._check_evidence(root, dict(artifact, path=stored), f"seal.files[{index}]")
         if entry["name"] in by_name:
             fail("sealed closure names one identity twice")
         by_name[entry["name"]] = artifact
@@ -422,13 +424,17 @@ def create_exclusive(path, data=None, mode=0o400):
 
 
 def copy_bounded(source, target, cap):
-    """Copy SOURCE to a new TARGET, returning (bytes, SHA-256)."""
+    """Copy SOURCE to a new TARGET in fixed chunks, returning (bytes,
+    SHA-256). A source already over CAP is refused before TARGET exists."""
     descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     digest = hashlib.sha256()
     copied = 0
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
             fail(f"{source} is not a regular file")
+        if info.st_size > cap:
+            fail(f"{source} exceeds its {cap}-byte bound")
         output = create_exclusive(target)
         try:
             while True:
@@ -644,7 +650,7 @@ def copy_result(source, destination):
                 os.mkdir(target, 0o700)
                 pending.append(child)
             elif stat.S_ISREG(info.st_mode):
-                copy_bounded(directory / name, target, replay.FILE_CAP)
+                copy_bounded(directory / name, target, replay.result_file_cap(child.as_posix()))
             else:
                 fail("unpacked result holds a link or a special file")
 

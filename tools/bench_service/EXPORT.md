@@ -407,7 +407,7 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Export reply frame / body | 65,672 / 65,648 bytes |
 | Chunk and cursor quantum | 65,536 bytes |
 | Entries, including directories and control files | 4,096 |
-| Individual file | 64 MiB |
+| Individual file | 64 MiB; 512 MiB for a retirement evidence entry (below) |
 | Existing indexed non-control payload | 512 MiB for smoke; 128 GiB reserved for blocked retirement recipe |
 | Existing bundle index | 8 MiB |
 | Total archive, including controls and entry headers | 546,177,024 bytes for smoke; 137,448,259,584 bytes reserved for retirement |
@@ -416,6 +416,21 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Receipt | 1,024 bytes |
 | Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds for smoke; 86,400 / 30 / 86,400 seconds reserved for retirement |
 | Socket send/receive wait | 1 second; initial receipt wait 305 seconds for smoke, 86,405 seconds for an explicit matched retirement recipe |
+
+Retirement evidence (#1880) has its own per-file cap. In a retirement
+result, a flat result-root file named `retirement-evidence-` plus a non-empty
+rest is one of the evidence files the binding context names (lane F lays it
+out at its binding path in the clean replay). That evidence includes the
+frozen toolchain, whose files reach 512 MiB (`BQ_RETIREMENT_TOOLCHAIN_FILE_CAP`),
+so such an entry may hold up to `BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP`
+(512 MiB). Every other file, any nested path, and every file of the smoke
+recipe keep the 64 MiB cap. One rule, `bq_worker_bundle_file_cap`, is applied
+by the producer's index, the worker's bundle validation, the export inventory
+and `unpack-export` (which checks each entry's own cap before creating it);
+`retirement_export_replay.result_file_cap` applies it in lane F's
+sealed-closure check and clean copy. Every one of them hashes and copies in
+fixed chunks, so memory stays bounded, and every byte is still hashed and
+bound to its descriptor.
 
 The inventory is one fixed-capacity mapping; payload buffers are 64 KiB.
 The smoke chunk index has at most 8,334 fixed 64-byte hashes; the reserved
