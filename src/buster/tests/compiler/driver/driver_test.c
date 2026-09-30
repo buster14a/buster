@@ -23030,6 +23030,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // legacy local-to-mutable-register transformation.
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
             bool generic_identity = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_generic.c"));
+            fixture_invocation.verify_codegen |= generic_identity;
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
             fixture_invocation.disable_direct_ssa = (generic_identity && fixture_index == 1) || string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||

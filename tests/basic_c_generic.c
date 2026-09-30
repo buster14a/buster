@@ -457,6 +457,26 @@ static int identity_parity(void)
     return parity_P1() || parity_P2() || parity_P3() || parity_P4() || parity_P5() || parity_P6() || parity_P7() || parity_P8() || parity_P9() || parity_L1() || parity_L2() || parity_L3() || parity_L4() || parity_L5() || parity_F1() || parity_F2() || parity_C1() || parity_C2() || parity_C3() || parity_C4() || parity_C5() || parity_B1() || parity_B2() || parity_B3() || parity_B4() || parity_B5();
 }
 
+static volatile int qualified_result(void)
+{
+    return 2;
+}
+
+static int identity_conversions(void)
+{
+    volatile int v = 3;
+    int failed = _Generic((v = 5), int: 0, default: 1);
+    failed |= _Generic((0, v), int: 0, default: 1);
+    failed |= _Generic(({ v; }), int: 0, default: 1);
+    failed |= _Generic(qualified_result(), int: 0, default: 1);
+    failed |= v != 3;
+    failed |= _Generic(&g_ca, const int (*)[3]: 0, default: 1);
+    failed |= !__builtin_types_compatible_p(int (*)[3], int (*)[3]);
+    failed |= __builtin_types_compatible_p(const int (*)[3], int (*)[3]);
+    failed |= !__builtin_types_compatible_p(void (*)(const int), void (*)(int));
+    return failed;
+}
+
 int main(void)
 {
     int control = 0;
@@ -469,5 +489,5 @@ int main(void)
     int third = 3 + _Generic(pointer, int*: 29, default: unselected());
     int nested = _Generic(_Generic(floating, double: control, default: floating), int: 31, default: unselected());
     int string_type = _Generic("buster", char*: 37, default: unselected());
-    return identity_family() || identity_parity() || first != 17 || second != 23 || third != 32 || nested != 31 || string_type != 37 || control != 0 || selected_calls != 1 || unselected_calls != 0;
+    return identity_family() || identity_parity() || identity_conversions() || first != 17 || second != 23 || third != 32 || nested != 31 || string_type != 37 || control != 0 || selected_calls != 1 || unselected_calls != 0;
 }

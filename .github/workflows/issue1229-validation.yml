@@ -9,10 +9,10 @@ concurrency:
   cancel-in-progress: true
 jobs:
   baseline:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
       - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
@@ -21,10 +21,10 @@ jobs:
       - run: ./build.sh test_self_host --config Release
       - run: ./build.sh build --config Release -t test_all
   candidate:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y tcc clang lld cmake ninja-build
       - run: ./build.sh generate --cc clang --ci --no-sanitize --no-fuzz --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
       - run: ./build.sh build --config Release -t ide
