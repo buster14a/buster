@@ -1,7 +1,7 @@
 #pragma once
 
 // Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag, definition-index,
-// label-provenance gate and validation-candidate queries.
+// label-provenance gate, validation-candidate and type-compatibility walk queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -31,6 +31,12 @@ BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPrepr
 // two-population cursor over every [start, end) up to limit.
 BUSTER_F_DECL u32 c_test_parse_call_shape_mismatches(CTokenShape const* shapes, u32 count);
 BUSTER_F_DECL u32 c_test_parse_candidate_merge_mismatches(u32* first, u32 first_count, u32* second, u32 second_count, u32 limit);
+// c_parse_types_compatible as production calls it, and the pair-stack walk
+// it falls back to without the self-comparison chain in front: the oracle
+// that chain must agree with. `reserve_types` makes room for hand-built rows.
+BUSTER_F_DECL bool c_test_types_compatible(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right);
+BUSTER_F_DECL bool c_test_types_compatible_walk(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right);
+BUSTER_F_DECL bool c_test_parse_reserve_types(CParseResult* result, u32 additional);
 // Tokens of [start, start + count) where the body scope map built under root
 // disagrees with c_parse_scope_for_token's descent; UINT32_MAX without a
 // children index.

@@ -165,6 +165,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `IrSimdShape` owns integer/internal-predicate boundaries, consumed by C
   result typing and canonical validation. C masks remain integer values.
 
+- Identifier identity is established once, by `c_symbol_intern` in the
+  preprocessor: the token pass interns every lexed identifier and the `##`
+  paste interns the identifier it forms, so every identifier in the final
+  stream carries its exact id. Semantic analysis and lowering key names on
+  the id a token, entity (`CEntity.symbol`), member (`CMember.symbol`),
+  enumerator or parameter carries, so no lexed or pasted name is interned
+  again after preprocessing (the stage-1 self-host unit and the pinned
+  fixture grow the table by nothing). Every entity is named by an identifier
+  token, so entity and typedef lookups answer a punctuator or literal token
+  with "none" instead of interning its spelling. The lowering function-name
+  index inserts nothing: it groups declarations by their entity's id, and a
+  spelling without a carried id (a builtin's link name) asks the read-only
+  `c_symbol_find`. Spelling fallbacks, which may intern, remain for
+  symbol-less synthesized or hand-built rows and for parses without a table. `c_test_identifier_identity_once`
+  pins the no-growth contract, `c_test_symbol_find_collisions` the exact
+  probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
+  both the carried ids and the fallback on the same stream with ids cleared.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record
@@ -290,6 +308,19 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   key prefix while querying it. Neither publication rewinds the TU arena:
   canonical lowering copies the map's pointers into `IrProgram.source_map`,
   whose diagnostic, DWARF and CodeView consumers still borrow their storage.
+- `c_parse_types_compatible` answers a type id compared with itself (96.8%
+  of stage-1 calls) through `c_parse_types_self_compatible`, the pair walk
+  specialized to one chain: pointer, vector, array and enum steps keep the
+  walk's verdicts (an out-of-range id or array bound record is still
+  incompatible) and its side effect (an aggregate step asks
+  `c_parse_unqualified_type` for both halves, which appends a row for a
+  qualified aggregate lacking its link). Function types and enums whose
+  underlying type is not a leaf fall back to the unchanged
+  `c_parse_types_compatible_walk` before any side effect. The pair stack,
+  still sized by the whole type table (#1502), is allocated only for that
+  walk. `c_test_type_self_compatibility` compares the two for every type of a
+  type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be

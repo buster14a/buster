@@ -805,6 +805,10 @@ struct CMember
 {
     String8 name;
     CSourceLocation location;
+    // Interned id of `name`, carried from the declarator token; 0 for an
+    // unnamed member or a parse without a symbol table. Member lookups key
+    // on it and compare spellings only when either side lacks one.
+    u32 symbol;
     CTypeId type;
     u32 alignment_start;
     u32 alignment_count;
