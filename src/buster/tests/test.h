@@ -62,6 +62,10 @@ struct BatchTestResult
 
 typedef struct UnitTestArguments UnitTestArguments;
 typedef void ShowCallback(UnitTestArguments*, String8, ...);
+#if BUSTER_INCLUDE_TESTS
+// One module's live scope position, read by the fixture watchdog (test.c).
+typedef struct TestWatchSlot TestWatchSlot;
+#endif
 struct UnitTestArguments
 {
     Arena* arena;
@@ -77,6 +81,8 @@ struct UnitTestArguments
     String8 memory_top_peak_fixture;
     u64 memory_top_retained_bytes;
     u64 memory_top_peak_bytes;
+    // Scope transitions publish here while a watchdog runs; null otherwise.
+    TestWatchSlot* watch_slot;
     bool memory_report;
     bool fixture_timing_report;
     u8 reserved[6];
@@ -109,10 +115,14 @@ struct TestArenaScope
     TestArenaMark marks[1 + SCRATCH_ARENA_COUNT];
     String8 name;
     u64 index;
+    // The watched position this scope replaced; end restores it.
+    String8 watch_parent;
+    u64 watch_parent_index;
     TimeDataType start;
     bool module;
     bool timing;
-    u8 reserved[6];
+    bool watch_parent_module;
+    u8 reserved[5];
 };
 
 BUSTER_F_DECL TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module);

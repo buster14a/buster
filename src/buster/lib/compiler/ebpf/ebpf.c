@@ -14,6 +14,11 @@
 // ebpf_initialize_symbols seeds the dense key domain; ebpf_add_symbol_record
 // publishes stable record indices, and ebpf_symbol_by_key also serves ELF
 // relocation resolution. Symbol rows retain insertion order through emission.
+// Kernel verifier rules the emitter must satisfy itself: the 512-byte frame
+// (ebpf_fe_allocate), no instruction unreachable from the entry
+// (ebpf_fe_reachable_blocks), width-aligned stack accesses even for packed
+// members (ebpf_fe_access_width), and switch labels compared at the
+// operand's canonical 64-bit image (ebpf_integer_image).
 
 typedef struct EbpfBuffer EbpfBuffer;
 struct EbpfBuffer
@@ -65,6 +70,7 @@ struct EbpfSymbolRecord
     u8 type;
     bool defined;
     bool synthetic;
+    bool referenced;
 };
 
 typedef struct EbpfFunctionRecord EbpfFunctionRecord;
@@ -932,42 +938,53 @@ static EbpfGlobalRecord* ebpf_global_for_symbol(EbpfContext* context, IrSymbolId
     return 0;
 }
 
+// Normalization rewrites only `reg`. Any scratch register could hold a live
+// operand, such as the address base in R9 while an index is loaded into R8.
 static void ebpf_fe_normalize(EbpfFunctionEmitter* emitter, u8 reg, IrType* type, bool signed_value)
 {
-    if (type && ebpf_type_is_integer(type))
+    u32 bits = ebpf_type_is_integer(type) ? ebpf_type_bits(type) : 64;
+    if (type && type->kind == IR_TYPE_BOOLEAN)
     {
-        u32 bits = ebpf_type_bits(type);
-        if (type->kind == IR_TYPE_BOOLEAN)
+        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JNE | EBPF_SRC_K, reg, 0, 2, 0);
+        ebpf_fe_mov_imm(emitter, reg, 0);
+        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
+        ebpf_fe_mov_imm(emitter, reg, 1);
+    }
+    else if (bits && bits < 64 && signed_value)
+    {
+        ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, reg, (s32)(64 - bits));
+        ebpf_fe_alu_imm(emitter, EBPF_OP_ARSH, reg, (s32)(64 - bits));
+    }
+    else if (bits && bits < 32)
+    {
+        ebpf_fe_alu_imm(emitter, EBPF_OP_AND, reg, (s32)((UINT32_C(1) << bits) - 1));
+    }
+    else if (bits == 32)
+    {
+        // A 32-bit move zero-extends into the upper half.
+        ebpf_fe_insn(emitter, EBPF_CLASS_ALU | EBPF_OP_MOV | EBPF_SRC_X, reg, reg, 0, 0);
+    }
+    else if (bits && bits < 64)
+    {
+        ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, reg, (s32)(64 - bits));
+        ebpf_fe_alu_imm(emitter, EBPF_OP_RSH, reg, (s32)(64 - bits));
+    }
+}
+
+// The register image ebpf_fe_normalize produces for a `bits`-wide integer.
+static u64 ebpf_integer_image(u64 value, u32 bits, bool signed_value)
+{
+    u64 result = value;
+    if (bits && bits < 64)
+    {
+        u64 mask = (UINT64_C(1) << bits) - 1;
+        result = value & mask;
+        if (signed_value && (result >> (bits - 1)) & 1)
         {
-            ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JNE | EBPF_SRC_K, reg, 0, 2, 0);
-            ebpf_fe_mov_imm(emitter, reg, 0);
-            ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
-            ebpf_fe_mov_imm(emitter, reg, 1);
-            return;
-        }
-        if (bits && bits < 64)
-        {
-            if (signed_value)
-            {
-                ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, reg, (s32)(64 - bits));
-                ebpf_fe_alu_imm(emitter, EBPF_OP_ARSH, reg, (s32)(64 - bits));
-            }
-            else
-            {
-                u64 mask = (UINT64_C(1) << bits) - 1;
-                if (mask <= INT32_MAX)
-                {
-                    ebpf_fe_alu_imm(emitter, EBPF_OP_AND, reg, (s32)mask);
-                }
-                else
-                {
-                    u8 temporary = reg == EBPF_REG_9 ? EBPF_REG_8 : EBPF_REG_9;
-                    ebpf_fe_mov_imm(emitter, temporary, (s64)mask);
-                    ebpf_fe_alu_reg(emitter, EBPF_OP_AND, reg, temporary);
-                }
-            }
+            result |= ~mask;
         }
     }
+    return result;
 }
 
 static void ebpf_fe_emit_value(EbpfFunctionEmitter* emitter, u8 destination, IrValueId value);
@@ -1732,11 +1749,18 @@ static void ebpf_fe_emit_switch(EbpfFunctionEmitter* emitter, IrBlock* predecess
                   instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
+    // JEQ compares all 64 bits, so the operand and every label are extended
+    // from the operand's width by its signedness: `case -1` of an int is all
+    // ones, not the zero-extended immediate 0xffffffff.
+    IrType* switched = ebpf_fe_value_type(emitter, instruction->operands[0]);
+    u32 bits = ebpf_type_bits(switched);
+    bool signed_value = switched && switched->kind == IR_TYPE_INTEGER && switched->is_signed;
     ebpf_fe_emit_value(emitter, EBPF_REG_8, instruction->operands[0]);
+    ebpf_fe_normalize(emitter, EBPF_REG_8, switched, signed_value);
     u32* case_jumps = arena_allocate(emitter->context->arena, u32, instruction->immediate_count ? instruction->immediate_count : 1);
     for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
     {
-        ebpf_fe_mov_imm(emitter, EBPF_REG_9, (s64)instruction->immediates[case_index]);
+        ebpf_fe_mov_imm(emitter, EBPF_REG_9, (s64)ebpf_integer_image(instruction->immediates[case_index], bits, signed_value));
         case_jumps[case_index] = ebpf_section_instruction_count(emitter->section);
         ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JEQ | EBPF_SRC_X, EBPF_REG_8, EBPF_REG_9, 0, 0);
     }
@@ -1765,6 +1789,115 @@ static void ebpf_fe_emit_switch(EbpfFunctionEmitter* emitter, IrBlock* predecess
         IrBlock* target = emitter->function->blocks + target_id.value;
         ebpf_fe_parallel_copy(emitter, predecessor, target);
         ebpf_fe_jump_to_block(emitter, target->id);
+    }
+}
+
+// The largest power of two, at most EBPF_SLOT_BYTES, that divides `offset`.
+static u32 ebpf_offset_alignment(u64 offset)
+{
+    u64 low_bit = offset & (0 - offset);
+    return low_bit && low_bit < EBPF_SLOT_BYTES ? (u32)low_bit : EBPF_SLOT_BYTES;
+}
+
+// The kernel requires every stack access to be aligned to its width, and a
+// packed member can sit at any offset. An access may assume the alignment of
+// the constant offsets along its rematerialized address recipe combined with
+// that of the recipe's base: the exact frame offset of a local or snapshot,
+// or otherwise what C guarantees for the object an opaque pointer addresses.
+// Aligned context and map fields therefore keep their exact-width accesses.
+static u32 ebpf_fe_access_width(EbpfFunctionEmitter* emitter, IrValueId address, IrType* type)
+{
+    IrFunction* function = emitter->function;
+    u32 size = ebpf_type_size(type);
+    u32 offsets = EBPF_SLOT_BYTES;
+    // Until a member or element step names its container, an opaque pointer
+    // addresses the accessed object itself.
+    u32 base = ebpf_offset_alignment(type ? type->layout.alignment : 0);
+    IrValueId cursor = address;
+    bool walking = true;
+    // Recipes are acyclic SSA; the value count also bounds malformed input.
+    for (u32 step = 0; walking && step < function->value_count; step += 1)
+    {
+        IrInstruction* definition = cursor.value < function->value_count ? ebpf_fe_definition(emitter, cursor) : 0;
+        IrType* container = definition && definition->operand_count ? ebpf_fe_value_type(emitter, definition->operands[0]) : 0;
+        walking = false;
+        switch (definition ? definition->opcode : IR_OPCODE_COUNT)
+        {
+        case IR_OPCODE_LOCAL:
+            if (emitter->local_offsets[cursor.value] != EBPF_SLOT_NONE)
+            {
+                base = ebpf_offset_alignment((u64)(-(s64)emitter->local_offsets[cursor.value]));
+            }
+            break;
+        case IR_OPCODE_FIELD:
+        {
+            u64 field = definition->immediate_count ? definition->immediates[0] : UINT64_MAX;
+            walking = container && (container->kind == IR_TYPE_STRUCT || container->kind == IR_TYPE_UNION) && field < container->field_count;
+            if (walking)
+            {
+                u32 member = ebpf_offset_alignment(container->fields[field].offset);
+                offsets = BUSTER_MIN(offsets, member);
+                base = ebpf_offset_alignment(container->layout.alignment);
+                cursor = definition->operands[0];
+            }
+        }
+        break;
+        case IR_OPCODE_INDEX:
+        {
+            IrType* element = container ? ebpf_type(emitter->context, container->element_type) : 0;
+            u32 element_size = ebpf_type_size(element);
+            walking = element_size != 0;
+            if (walking)
+            {
+                u32 stride = ebpf_offset_alignment(element_size);
+                offsets = BUSTER_MIN(offsets, stride);
+                base = ebpf_offset_alignment(element->layout.alignment);
+                cursor = definition->operands[0];
+            }
+        }
+        break;
+        case IR_OPCODE_ADDRESS_OF:
+        case IR_OPCODE_DEREFERENCE:
+            walking = definition->operand_count != 0;
+            cursor = walking ? definition->operands[0] : cursor;
+            break;
+        default:
+            // Aggregate snapshots occupy slot-aligned private frame bytes.
+            if (definition && emitter->value_slots[cursor.value] != EBPF_SLOT_NONE &&
+                function->values[cursor.value].category == IR_VALUE_VALUE &&
+                ebpf_type_is_local_aggregate(ebpf_fe_value_type(emitter, cursor)))
+            {
+                base = EBPF_SLOT_BYTES;
+            }
+            break;
+        }
+    }
+    u32 alignment = BUSTER_MIN(offsets, base);
+    return BUSTER_MIN(alignment, size);
+}
+
+// R1 holds the address. Narrow pieces are zero-extended and assembled
+// little-endian into R0; R2 is scratch.
+static void ebpf_fe_load_pieces(EbpfFunctionEmitter* emitter, u32 size, u32 width)
+{
+    ebpf_fe_load_memory(emitter, EBPF_REG_0, EBPF_REG_1, 0, width);
+    for (u32 offset = width; offset < size; offset += width)
+    {
+        ebpf_fe_load_memory(emitter, EBPF_REG_2, EBPF_REG_1, (s16)offset, width);
+        ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, EBPF_REG_2, (s32)(offset * 8));
+        ebpf_fe_alu_reg(emitter, EBPF_OP_OR, EBPF_REG_0, EBPF_REG_2);
+    }
+}
+
+// R1 holds the address and R0 the value, which is preserved; R2 is scratch.
+static void ebpf_fe_store_pieces(EbpfFunctionEmitter* emitter, u32 size, u32 width)
+{
+    ebpf_fe_store_memory(emitter, EBPF_REG_1, 0, EBPF_REG_0, width);
+    for (u32 offset = width; offset < size; offset += width)
+    {
+        ebpf_fe_mov_reg(emitter, EBPF_REG_2, EBPF_REG_0);
+        ebpf_fe_alu_imm(emitter, EBPF_OP_RSH, EBPF_REG_2, (s32)(offset * 8));
+        ebpf_fe_store_memory(emitter, EBPF_REG_1, (s16)offset, EBPF_REG_2, width);
     }
 }
 
@@ -1831,8 +1964,11 @@ BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_aggregate(EbpfFunctionEmitter* emitter, Ir
             }
             else
             {
+                // The snapshot is slot-aligned; a packed member offset is not.
+                u32 size = ebpf_type_size(operand_type);
+                u32 alignment = ebpf_offset_alignment(offset);
                 ebpf_fe_emit_value(emitter, EBPF_REG_0, operand);
-                ebpf_fe_store_memory(emitter, EBPF_REG_1, 0, EBPF_REG_0, ebpf_type_size(operand_type));
+                ebpf_fe_store_pieces(emitter, size, BUSTER_MIN(alignment, size));
             }
         }
     }
@@ -1911,7 +2047,7 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
             break;
         }
         ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->operands[0]);
-        ebpf_fe_load_memory(emitter, EBPF_REG_0, EBPF_REG_1, 0, size);
+        ebpf_fe_load_pieces(emitter, size, ebpf_fe_access_width(emitter, instruction->operands[0], type));
         ebpf_fe_store_result(emitter, instruction, EBPF_REG_0, ebpf_type_is_integer(type),
                              type->kind == IR_TYPE_INTEGER && type->is_signed);
     }
@@ -1941,7 +2077,7 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
         }
         ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->operands[0]);
         ebpf_fe_emit_value(emitter, EBPF_REG_0, instruction->operands[1]);
-        ebpf_fe_store_memory(emitter, EBPF_REG_1, 0, EBPF_REG_0, size);
+        ebpf_fe_store_pieces(emitter, size, ebpf_fe_access_width(emitter, instruction->operands[0], stored_type));
     }
     break;
     case IR_OPCODE_CONSTANT_FLOAT:
@@ -2071,6 +2207,40 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
     }
 }
 
+// The kernel verifier rejects any instruction that no path from the entry
+// reaches, such as the implicit `return 0` block after an if/else whose arms
+// both return. Mark the published CFG from the entry with an explicit stack.
+static u8* ebpf_fe_reachable_blocks(EbpfFunctionEmitter* emitter)
+{
+    IrFunction* function = emitter->function;
+    IrPublishedCfg const* cfg = function->published_cfg;
+    u32 count = function->block_count ? function->block_count : 1;
+    u8* reachable = arena_allocate_zeroed(emitter->context->arena, u8, count);
+    TemporalArena temporary = scratch_begin(&emitter->context->arena, 1);
+    u32* pending = arena_allocate(temporary.arena, u32, count);
+    u32 pending_count = 0;
+    if (function->entry.value < function->block_count)
+    {
+        reachable[function->entry.value] = 1;
+        pending[pending_count++] = function->entry.value;
+    }
+    while (pending_count)
+    {
+        IrCfgBlock const* block = cfg->blocks + pending[--pending_count];
+        for (u32 index = 0; index < block->successor_count; index += 1)
+        {
+            u32 successor = cfg->edges[block->successor_offset + index].destination.value;
+            if (successor < function->block_count && !reachable[successor])
+            {
+                reachable[successor] = 1;
+                pending[pending_count++] = successor;
+            }
+        }
+    }
+    scratch_end(temporary);
+    return reachable;
+}
+
 static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
 {
     EbpfFunctionEmitter emitter = {.context = context, .record = record, .function = record->function, .section = record->section};
@@ -2087,8 +2257,11 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
     emitter.section_start = record->offset;
     emitter.cached_slot = EBPF_SLOT_NONE;
     ebpf_fe_emit_prologue(&emitter);
+    u8* reachable = ebpf_fe_reachable_blocks(&emitter);
     // Execution falls through the prologue into the declared entry, which
     // need not have block ID zero. Branch fixups still use the original IDs.
+    // Every emitted block ends in EXIT or JA, so omitting an unreachable block
+    // changes no fallthrough, and no emitted branch targets one.
     for (u32 ordinal = 0; ordinal < emitter.function->block_count && !ebpf_failed(context); ordinal += 1)
     {
         u32 entry = emitter.function->entry.value;
@@ -2099,6 +2272,10 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
             ebpf_fail(context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("eBPF block ID is out of range"), emitter.function, block, 0,
                       IR_SYMBOL_ID_INVALID);
             break;
+        }
+        if (!reachable[block->id.value])
+        {
+            continue;
         }
         emitter.cached_slot = EBPF_SLOT_NONE;
         emitter.block_starts[block->id.value] = ebpf_section_instruction_count(emitter.section);
@@ -3034,6 +3211,19 @@ static bool ebpf_build_symbol_table(EbpfContext* context, EbpfSection* symtab, E
         ebpf_elf_symbol(&symtab->data, 0, EBPF_STB_LOCAL, EBPF_STT_SECTION, (u16)section->elf_index, 0, 0);
         elf_symbol_index += 1;
     }
+    // An undefined symbol is written only when a relocation names it.
+    for (u32 section_index = 0; section_index < context->section_count; section_index += 1)
+    {
+        EbpfSection* section = context->sections + section_index;
+        for (u32 relocation_index = 0; relocation_index < section->relocation_count; relocation_index += 1)
+        {
+            EbpfSymbolRecord* symbol = ebpf_symbol_by_key(context, section->relocations[relocation_index].symbol_key);
+            if (symbol)
+            {
+                symbol->referenced = true;
+            }
+        }
+    }
     for (u32 pass = 0; pass < 2; pass += 1)
     {
         u8 binding = pass == 0 ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL;
@@ -3044,7 +3234,7 @@ static bool ebpf_build_symbol_table(EbpfContext* context, EbpfSection* symtab, E
         for (u32 index = 0; index < context->symbol_count; index += 1)
         {
             EbpfSymbolRecord* symbol = context->symbols + index;
-            if (symbol->binding != binding)
+            if (symbol->binding != binding || (!symbol->defined && !symbol->referenced))
             {
                 continue;
             }
@@ -3324,7 +3514,7 @@ EbpfArtifact ebpf_emit_with_options(Arena* arena, IrProgram* program, IrModule* 
 
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        IrValidationResult validation = ir_prepare_canonical_module(program, modules + module_index, false);
+        IrValidationResult validation = ir_prepare_canonical_module(program, modules + module_index, options.assume_validated);
         if (validation.error != IR_VALIDATION_NONE)
         {
             context.error.code = EBPF_ERROR_IR_VALIDATION;

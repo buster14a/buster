@@ -30,6 +30,7 @@
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/ir/ir_append.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
 #include <buster/lib/simd.h>
@@ -75,6 +76,48 @@ String8 ir_construction_counter_name(IrConstructionCounter counter)
 #define IR_CONSTRUCTION_NAME(id, name) case IR_CONSTRUCTION_##id: result = S8(#name); break;
         IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_NAME)
 #undef IR_CONSTRUCTION_NAME
+        default: break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrDiagnosticCensus ir_diagnostic_census_totals;
+
+void ir_diagnostic_census_record(IrDiagnosticCensusCounter counter, u64 amount)
+{
+    if ((u32)counter < IR_DIAGNOSTIC_CENSUS_COUNT)
+    {
+        u64* value = ir_diagnostic_census_totals.values + counter;
+        if (amount > UINT64_MAX - *value)
+        {
+            *value = UINT64_MAX;
+            ir_diagnostic_census_totals.overflowed = true;
+        }
+        else
+        {
+            *value += amount;
+        }
+    }
+    else
+    {
+        ir_diagnostic_census_totals.overflowed = true;
+    }
+    return;
+}
+
+IrDiagnosticCensus ir_diagnostic_census(void)
+{
+    return ir_diagnostic_census_totals;
+}
+
+String8 ir_diagnostic_census_counter_name(IrDiagnosticCensusCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define IR_DIAGNOSTIC_CENSUS_NAME(id, name) case IR_DIAGNOSTIC_CENSUS_##id: result = S8(#name); break;
+        IR_DIAGNOSTIC_CENSUS_COUNTERS(IR_DIAGNOSTIC_CENSUS_NAME)
+#undef IR_DIAGNOSTIC_CENSUS_NAME
         default: break;
     }
     return result;
@@ -396,6 +439,7 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
             }
         }
         cursor = ir_source_search_offsets(offsets, low, high, local);
+        IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_CHECKPOINT_SEARCHES, 1);
         if (checkpoint_cursor)
         {
             *checkpoint_cursor = cursor;
@@ -428,9 +472,12 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
 // that a full position runs after it — the difference between the two is paid
 // once per lowered instruction, so the short answer has its own entry point,
 // and the key it reads carries the source beside the start it matched on.
-u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+// Forced inline: lowering's per-instruction range path depends on it, and a
+// second caller (record sites) was enough for Clang to outline it there.
+BUSTER_SHARED_INLINE u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
     u32 result;
+    IR_DIAGNOSTIC_CENSUS_RECORD(SOURCE_QUERIES, 1);
     if (!map || !map->keys)
     {
         result = 0;
@@ -446,6 +493,7 @@ u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* 
 
 IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_QUERIES, 1);
     if (!map || !map->keys)
     {
         return (IrSourcePosition){0};
@@ -458,6 +506,7 @@ IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSo
     }
     if (offset == cursor->memo_offset)
     {
+        IR_DIAGNOSTIC_CENSUS_RECORD(POSITION_MEMO_HITS, 1);
         return cursor->memo_position;
     }
     u32 index = ir_source_map_region(map, offset, cursor);
@@ -471,8 +520,10 @@ IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 off
 {
     IrSourcePosition result = {0};
     bool done = false;
+    IR_DIAGNOSTIC_CENSUS_RECORD(ORIGINAL_QUERIES, 1);
     for (u32 step = 0; map && map->keys && step < map->count && !done; step += 1)
     {
+        IR_DIAGNOSTIC_CENSUS_RECORD(ORIGINAL_STEPS, 1);
         u32 index = ir_source_map_find(map, offset);
         IrSourceRegion const* region = map->regions + index;
         if (!region->origin_plus_one)
@@ -498,6 +549,7 @@ IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 off
 IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor)
 {
     IrSourcePosition result;
+    IR_DIAGNOSTIC_CENSUS_RECORD(TEXT_POSITION_QUERIES, 1);
     if (!text.pointer || offset > text.length)
     {
         result = (IrSourcePosition){.source = source};
@@ -523,6 +575,7 @@ IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, I
             line = cursor->memo_position.line;
             line_start = cursor->memo_offset + 1 - cursor->memo_position.column;
         }
+        IR_DIAGNOSTIC_CENSUS_RECORD(TEXT_BYTES_SCANNED, offset - scanned);
         for (; scanned < offset; scanned += 1)
         {
             if (text.pointer[scanned] == '\n')

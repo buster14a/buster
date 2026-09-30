@@ -245,6 +245,16 @@
 #define BUSTER_V_IMPL
 #endif
 
+// BUSTER_INLINE for a function other modules declare with BUSTER_F_DECL (or a
+// frontend's shared linkage): forced only in the unity build, where those
+// declarations are static too. Elsewhere the function keeps external linkage,
+// which a forced-inline definition does not promise on every compiler.
+#if BUSTER_UNITY_BUILD
+#define BUSTER_SHARED_INLINE BUSTER_INLINE
+#else
+#define BUSTER_SHARED_INLINE
+#endif
+
 #define BUSTER_PACKED __attribute__((packed))
 
 // Over-alignment for a buffer. The self-hosted C frontend accepts `_Alignas`
