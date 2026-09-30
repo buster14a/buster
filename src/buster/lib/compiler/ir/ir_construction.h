@@ -25,6 +25,8 @@
     X(INSTRUCTION_ROWS_COPIED, instruction_rows_copied) \
     X(SOURCE_ROWS_COPIED, source_rows_copied) \
     X(SOURCE_ROWS_CLEARED, source_rows_cleared) \
+    X(DEBUG_FUNCTION_INDEX_ROWS, debug_function_index_rows) \
+    X(DEBUG_FUNCTION_SEED_SCAN_ROWS, debug_function_seed_scan_rows) \
     X(FUNCTION_STARTS, function_starts) \
     X(BODY_TOKENS, body_tokens) \
     X(PARAMETERS, parameters) \
