@@ -1268,6 +1268,8 @@ complete fixture profile.
    exits.
 4. It waits for the producer on a pidfd until the execution deadline plus
    twice the 10-second stop budget. A producer still running then is killed.
+   The exited producer is reaped only after the SIGTERM forwarder is
+   disarmed, so the forwarder never names a reusable pid.
 
 `bq_worker_unit_pinned` then stops the keeper as before and returns the
 mapped status:

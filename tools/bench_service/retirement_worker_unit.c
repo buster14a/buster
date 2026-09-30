@@ -249,34 +249,34 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSe
     return status;
 }
 
-/* Waits for the producer, at most until bound_ns when a pidfd is available
- * (otherwise the unit's RuntimeMax bounds it). A producer still running then
- * is killed and reaped; reaped reports whether it exited by itself. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_unit_wait(pid_t producer, u64 bound_ns, int* status)
+/* Waits until the producer has exited without reaping it (WNOWAIT), so its
+ * pid stays reserved while the SIGTERM forwarder may still name it. With a
+ * pidfd the wait ends at bound_ns (otherwise the unit's RuntimeMax bounds it)
+ * and a producer still running then is killed. Returns whether it exited by
+ * itself. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_unit_wait(pid_t producer, u64 bound_ns)
 {
     int process = -1;
 #ifdef SYS_pidfd_open
     process = (int)syscall(SYS_pidfd_open, producer, 0);
 #endif
-    bool reaped = false, expired = false, lost = false;
-    while (!reaped && !expired && !lost)
+    bool exited = false, expired = false, lost = false;
+    while (!exited && !expired && !lost)
     {
         u64 now = bq_phase_clock();
         expired = process >= 0 && (!now || now >= bound_ns);
         u64 remaining = expired || process < 0 ? 0 : (bound_ns - now) / 1000000ull + 1ull;
         struct pollfd waiting = {process, POLLIN, 0};
         if (remaining) poll(&waiting, 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
-        pid_t waited = expired ? 0 : waitpid(producer, status, process >= 0 ? WNOHANG : 0);
-        reaped = waited == producer;
-        lost = waited < 0 && errno != EINTR;
+        siginfo_t info = {0};
+        int waited = expired ? 0 : waitid(P_PID, (id_t)producer, &info,
+                                           WEXITED | WNOWAIT | (process >= 0 ? WNOHANG : 0));
+        exited = waited == 0 && info.si_pid == producer;
+        lost = waited != 0 && errno != EINTR;
     }
-    if (expired)
-    {
-        kill(producer, SIGKILL);
-        while (waitpid(producer, status, 0) < 0 && errno == EINTR) {}
-    }
+    if (expired) kill(producer, SIGKILL);
     if (process >= 0) close(process);
-    return reaped;
+    return exited;
 }
 
 /* Called by bq_worker_unit after its pause and pre-exec lease recheck, with
@@ -316,19 +316,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnit
         *phase_descriptor = -1;
     }
     if (masked && sigprocmask(SIG_SETMASK, &prior, NULL) != 0 && result == BQ_OK) result = BQ_IO;
-    int status = 0;
     u64 bound = deadline_ns <= UINT64_MAX - 2ull * BQ_RETIREMENT_WORKER_UNIT_STOP_NS ?
                 deadline_ns + 2ull * BQ_RETIREMENT_WORKER_UNIT_STOP_NS : UINT64_MAX;
-    bool reaped = producer > 0 && bq_retirement_worker_unit_wait(producer, bound, &status);
-    int code = reaped && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    if (result == BQ_OK)
-        result = !reaped || WIFSIGNALED(status) ? BQ_CLEANUP_FAILED :
-                 code > BQ_OK && code <= BQ_EXPORT_TIMEOUT ? (BqError)code : BQ_WORKER_FAILED;
-    /* Restore the disposition with SIGTERM blocked, so the handler never sees
-     * a reaped pid. */
+    bool exited = producer > 0 && bq_retirement_worker_unit_wait(producer, bound);
+    /* Disarm the forwarder with SIGTERM blocked, then reap: the handler never
+     * names a reaped (reusable) pid. */
     bool reblocked = masked && sigprocmask(SIG_BLOCK, &blocked, NULL) == 0;
     if (handled && sigaction(SIGTERM, &previous, NULL) != 0 && result == BQ_OK) result = BQ_IO;
     bq_retirement_worker_unit_producer = 0;
+    int status = 0;
+    pid_t reaped = -1;
+    if (producer > 0)
+    {
+        do reaped = waitpid(producer, &status, 0);
+        while (reaped < 0 && errno == EINTR);
+    }
+    int code = reaped == producer && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (result == BQ_OK)
+        result = !exited || reaped != producer || WIFSIGNALED(status) ? BQ_CLEANUP_FAILED :
+                 code > BQ_OK && code <= BQ_EXPORT_TIMEOUT ? (BqError)code : BQ_WORKER_FAILED;
     if (reblocked && sigprocmask(SIG_SETMASK, &prior, NULL) != 0 && result == BQ_OK) result = BQ_IO;
     return result;
 }
