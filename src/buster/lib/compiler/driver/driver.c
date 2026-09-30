@@ -5,6 +5,8 @@
 // mode — rejecting unknown languages and retired options explicitly
 // rather than guessing. It first replaces `@path` arguments through
 // compiler_driver_expand_response_files (bounded, one level, no nesting).
+// Comma-separated -Wl payloads become individual linker arguments;
+// link_validate_linker_arguments owns their supported semantic subset.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse, lowering, codegen, and object/executable
@@ -1127,7 +1129,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // At most one resource directory plus four sysroot directories. Native
     // Windows INCLUDE entries reserve their own exact-sized array below.
     u64 default_include_capacity = 5;
-    if (arguments.length > UINT32_MAX - default_include_capacity)
+    u64 linker_argument_capacity = arguments.length;
+    for (u64 index = 0; index < arguments.length; index += 1)
+    {
+        String8 argument = arguments.pointer[index];
+        if (string_starts_with_sequence(argument, S8("-Wl,")))
+        {
+            for (u64 offset = 4; offset < argument.length; offset += 1)
+            {
+                linker_argument_capacity += argument.pointer[offset] == ',';
+            }
+        }
+    }
+    if (arguments.length > UINT32_MAX - default_include_capacity || linker_argument_capacity > UINT32_MAX)
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("too many compiler arguments");
@@ -1142,7 +1156,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
     invocation.frameworks = arena_allocate(arena, String8, arguments.length);
-    invocation.linker_arguments = arena_allocate(arena, String8, arguments.length);
+    invocation.linker_arguments = arena_allocate(arena, String8, linker_argument_capacity);
     invocation.gpu_arguments = arena_allocate(arena, String8, arguments.length);
     u64 feature_override_capacity = 0;
     for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
@@ -1789,10 +1803,29 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.c_dialect_explicit = true;
             continue;
         }
-        value = compiler_driver_option_value(argument, S8("-Wl,"));
-        if (value.length)
+        if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
-            invocation.linker_arguments[invocation.linker_argument_count++] = value;
+            u64 start = 4;
+            for (u64 end = start; end <= argument.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; end += 1)
+            {
+                if (end == argument.length || argument.pointer[end] == ',')
+                {
+                    if (end == start)
+                    {
+                        compiler_driver_argument_error(arena, &invocation, S8("empty linker argument in {S8}"), argument);
+                    }
+                    else
+                    {
+                        invocation.linker_arguments[invocation.linker_argument_count++] = string_slice(argument, start, end);
+                    }
+                    start = end + 1;
+                }
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
             continue;
         }
         String8 prefix = {
@@ -2018,8 +2051,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI && invocation.linker_argument_count)
         {
-            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            invocation.diagnostic = S8("raw linker arguments are not supported for UEFI targets");
+            compiler_driver_argument_error(arena, &invocation, S8("raw linker arguments are not supported for UEFI targets: {S8}"),
+                                           invocation.linker_arguments[0]);
         }
         else if (!invocation.has_gpu_target && invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS &&
                  invocation.target.os != OPERATING_SYSTEM_IOS)
@@ -2031,6 +2064,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation.diagnostic = S8("no input files");
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.linker_argument_count)
+    {
+        String8 unsupported = invocation.linker_arguments[0];
+        NativeExecutableLinkOptions options = {
+            .linker_arguments = invocation.linker_arguments,
+            .linker_argument_count = invocation.linker_argument_count,
+            .image_kind = (u8)invocation.image_kind,
+        };
+        if (invocation.action != COMPILER_DRIVER_ACTION_LINK || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+            !link_validate_linker_arguments(invocation.target, options, true, &unsupported))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported linker argument for this output: {S8}"), unsupported);
         }
     }
     return invocation;
@@ -4417,6 +4464,22 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
         goto finish;
+    }
+    if (invocation.linker_argument_count)
+    {
+        String8 unsupported = invocation.linker_arguments ? invocation.linker_arguments[0] : S8("(missing argument storage)");
+        NativeExecutableLinkOptions options = {
+            .linker_arguments = invocation.linker_arguments,
+            .linker_argument_count = invocation.linker_argument_count,
+            .image_kind = (u8)invocation.image_kind,
+        };
+        if (invocation.action != COMPILER_DRIVER_ACTION_LINK || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+            !link_validate_linker_arguments(invocation.target, options, true, &unsupported))
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = string_format(arena, S8("unsupported linker argument for this output: {S8}"), unsupported);
+            goto finish;
+        }
     }
     if ((invocation.input_languages && invocation.input_language_count != invocation.input_count) ||
         (!invocation.input_languages && invocation.input_language_count))

@@ -173,6 +173,9 @@ struct NativeExecutableLinkResult
 // The enumerator's own spelling, so a failed link names its reason rather than
 // only its number.
 BUSTER_F_DECL String8 link_error_name(LinkError error);
+// Validate individual linker arguments for the selected target/image. The
+// dispatcher checks the actual dynamic/static shape again before writing.
+BUSTER_F_DECL bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions options, bool dynamic_image, String8* unsupported);
 BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
 // Synthetic compiler-runtime input for hosted Windows executable links only;
 // object and relocatable output paths, UEFI, and non-Windows targets do not use it.

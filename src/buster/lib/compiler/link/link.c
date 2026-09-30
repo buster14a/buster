@@ -16,6 +16,7 @@
 // dispatcher refuses the kind on every other target, and its own comment
 // states the relocation and preemption rules. link_elf_version_plan_build is
 // the symbol-version construction it shares with the x86-64 dynamic writer.
+// link_validate_linker_arguments refuses unconsumed options before any writer.
 // Before x86-64 Linux writer selection,
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
@@ -6926,8 +6927,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
     static char8 const runtime_library[] = "libc.so.6";
     static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
-    static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined"), S8_INITIALIZER("-z,defs"),
-                                                     S8_INITIALIZER("defs")};
+    static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
+    bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
+    for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
+    {
+        no_undefined |= string_equal(options.linker_arguments[index], S8("-z")) && string_equal(options.linker_arguments[index + 1], S8("defs"));
+    }
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
     LinkElfPicImage image = {.object = object, .exports = exports, .shared = shared};
     if ((options.dynamic_library_count && !options.dynamic_libraries) || options.dynamic_library_count == UINT32_MAX ||
@@ -7006,7 +7011,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         memset(image.dynamic_tls_indices, 0xff, symbol_count * sizeof(u32));
         memset(image.static_tls_indices, 0xff, symbol_count * sizeof(u32));
         link_elf_pic_classify(&image, link_elf_linker_argument_present(options, export_dynamic_spellings, BUSTER_ARRAY_LENGTH(export_dynamic_spellings)),
-                              link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings)));
+                              no_undefined);
         // The entry stub calls `exit` and `__cxa_atexit` through the PLT
         // when the program does not define them itself.
         for (u32 hosted = 0; !shared && hosted < 2; hosted += 1)
@@ -13359,7 +13364,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
         }
     }
     NativeExecutableLinkResult result = {0};
-    if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
+    else if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
         result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
@@ -13519,6 +13528,43 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
+bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions options, bool dynamic_image, String8* unsupported)
+{
+    bool valid = !options.linker_argument_count || options.linker_arguments != 0;
+    bool elf = (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID) &&
+               (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+    for (u32 index = 0; valid && index < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        bool export_dynamic = string_equal(argument, S8("-E")) || string_equal(argument, S8("-export-dynamic")) ||
+                              string_equal(argument, S8("--export-dynamic"));
+        bool no_undefined = string_equal(argument, S8("--no-undefined")) || string_equal(argument, S8("-no-undefined"));
+        bool soname_pair = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
+        bool soname_joined = string_starts_with_sequence(argument, S8("-soname=")) || string_starts_with_sequence(argument, S8("--soname="));
+        valid = elf && (no_undefined || (export_dynamic && dynamic_image));
+        if (elf && string_equal(argument, S8("-z")))
+        {
+            valid = index + 1 < options.linker_argument_count && string_equal(options.linker_arguments[index + 1], S8("defs"));
+            if (valid) index += 1;
+        }
+        else if (elf && (soname_pair || soname_joined))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind == NATIVE_IMAGE_SHARED;
+            if (soname_pair)
+            {
+                valid = valid && index + 1 < options.linker_argument_count && options.linker_arguments[index + 1].length;
+                if (valid) index += 1;
+            }
+            else
+            {
+                valid = valid && argument.pointer[argument.length - 1] != '=';
+            }
+        }
+        if (!valid && unsupported) *unsupported = argument.length ? argument : S8("(empty argument)");
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -13531,6 +13577,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    else if (!link_validate_linker_arguments(object->target, options, true, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
@@ -13555,7 +13605,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             {
                 dynamic_image = link_elf_symbol_needs_dynamic_import(exports, object->symbols + index);
             }
-            if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+            if (!link_validate_linker_arguments(object->target, options, dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE, &result.symbol))
+            {
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            else if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
             {
                 result = link_native_image_elf64_x86_64_position_independent(arena, object, options, exports);
             }

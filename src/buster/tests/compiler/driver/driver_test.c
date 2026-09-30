@@ -9478,6 +9478,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/driver_pass_through_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 
@@ -11651,6 +11652,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
@@ -12212,7 +12216,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-pthread"),
         S8("-L/sdk/lib"),
         S8("-l:libandroid.so"),
-        S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
         S8("-o"),
         S8("output.o"),
@@ -12252,7 +12255,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.library_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.library_paths[0], S8("/sdk/lib"));
     BUSTER_STRING_TEST(arguments, invocation.libraries[0], S8(":libandroid.so"));
-    BUSTER_TEST(arguments, invocation.linker_argument_count == 1);
+    BUSTER_TEST(arguments, invocation.linker_argument_count == 0);
     BUSTER_TEST(arguments, invocation.input_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
