@@ -9551,6 +9551,69 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
     return result;
 }
 
+BusterX86MetadataEmitResult buster_x86_metadata_emit_selection(BusterX86MetadataEmitQuery query,
+                                                             BusterX86MetadataSelectResult selection)
+{
+    BusterX86MetadataEmitResult result = {.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT, .form_id = query.form_id};
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && query.form_id == selection.form_id &&
+        buster_x86_metadata_emit_physical_query_valid(query.physical))
+    {
+        // Selection may infer a fixed memory element width from the form schema
+        // when the caller supplied an unsized address.  Reuse that exact physical
+        // query for emission rather than asking the form emitter to rediscover a
+        // width and risking a different candidate or an operand mismatch.
+        BusterX86MetadataPhysicalOperand nop_projected_operand = {0}, cmpxchg_projected_operand = {0};
+        BusterX86MetadataPhysicalQuery physical = query.physical;
+        buster_x86_metadata_nop_memory_projection(query.physical, &nop_projected_operand, &physical);
+        buster_x86_metadata_cmpxchg_memory_projection(query.physical, &cmpxchg_projected_operand, &physical);
+        BusterX86MetadataPhysicalOperand operands[16] = {0};
+        if (selection.selected_memory_width && selection.selected_memory_operand < physical.operand_count)
+        {
+            memcpy(operands, physical.operands, physical.operand_count * sizeof(*operands));
+            operands[selection.selected_memory_operand].width = selection.selected_memory_width;
+            BusterX86MetadataForm selected_form = {0};
+            u16 selected_scalar_width = 0;
+            bool aggregate_source_width_cleared = buster_x86_metadata_form(selection.form_id, &selected_form) &&
+                (buster_x86_metadata_block_memory_source_topology_internal(selected_form, physical, &selected_scalar_width) ||
+                 buster_x86_metadata_aggregate_memory_source_topology_internal(selected_form, physical, &selected_scalar_width)) &&
+                operands[selection.selected_memory_operand].memory.source_width == 512;
+            if (selection.selected_memory_source_width_cleared || aggregate_source_width_cleared)
+                operands[selection.selected_memory_operand].memory.source_width = 0;
+            physical.operands = operands;
+        }
+        // The retained form proves NDD. Do not scan mnemonic alternatives again.
+        BusterX86MetadataForm selected_form = {0};
+        if (buster_x86_metadata_form(selection.form_id, &selected_form) &&
+            (selected_form.apx_flags & BUSTER_X86_METADATA_APX_NDD))
+            physical.attributes.apx_flags |= BUSTER_X86_METADATA_APX_NDD;
+        BusterX86MetadataPhysicalOperand projected_operand = {0};
+        BusterX86MetadataPhysicalQuery projected_query = {0};
+        if (selection.form_id != UINT32_MAX &&
+            buster_x86_metadata_xchg_accumulator_projection(physical, &projected_operand, &projected_query))
+            physical = projected_query;
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = physical,
+            .form_id = selection.form_id,
+            .output = query.output,
+            .output_capacity = query.output_capacity,
+            .relocations = query.relocations,
+            .relocation_capacity = query.relocation_capacity,
+        });
+        // Selection diagnostics identify the canonical candidate even when the
+        // second, structural emission pass rejects a malformed physical query or
+        // runs out of output/relocation capacity.  Preserve that identity and
+        // diagnostic context across the combined bridge instead of returning a
+        // partially reset emit result.
+        if (emitted.form_id == UINT32_MAX) emitted.form_id = selection.form_id;
+        if (!emitted.stable_hash) emitted.stable_hash = selection.stable_hash;
+        if (!emitted.diagnostic_operand && selection.diagnostic_operand) emitted.diagnostic_operand = selection.diagnostic_operand;
+        if (!emitted.diagnostic_value && selection.diagnostic_value) emitted.diagnostic_value = selection.diagnostic_value;
+        if (!emitted.required_feature.length && selection.required_feature.length) emitted.required_feature = selection.required_feature;
+        result = emitted;
+    }
+    return result;
+}
+
 BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQuery query)
 {
     BusterX86MetadataEmitResult result = {
@@ -9574,52 +9637,10 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
     result.required_feature = selection.required_feature;
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS) return result;
 
-    // Selection may infer a fixed memory element width from the form schema
-    // when the caller supplied an unsized address.  Reuse that exact physical
-    // query for emission rather than asking the form emitter to rediscover a
-    // width and risking a different candidate or an operand mismatch.
-    BusterX86MetadataPhysicalQuery physical = physical_query;
-    BusterX86MetadataPhysicalOperand operands[16] = {0};
-    if (selection.selected_memory_width && selection.selected_memory_operand < physical.operand_count)
-    {
-        memcpy(operands, physical.operands, physical.operand_count * sizeof(*operands));
-        operands[selection.selected_memory_operand].width = selection.selected_memory_width;
-        BusterX86MetadataForm selected_form = {0};
-        u16 selected_scalar_width = 0;
-        bool aggregate_source_width_cleared = buster_x86_metadata_form(selection.form_id, &selected_form) &&
-            (buster_x86_metadata_block_memory_source_topology_internal(selected_form, physical, &selected_scalar_width) ||
-             buster_x86_metadata_aggregate_memory_source_topology_internal(selected_form, physical, &selected_scalar_width)) &&
-            operands[selection.selected_memory_operand].memory.source_width == 512;
-        if (selection.selected_memory_source_width_cleared || aggregate_source_width_cleared)
-            operands[selection.selected_memory_operand].memory.source_width = 0;
-        physical.operands = operands;
-    }
-    BusterX86MetadataPhysicalQuery apx_projected_query = {0};
-    if (buster_x86_metadata_apx_ndd_projection(physical, &apx_projected_query)) physical = apx_projected_query;
-    BusterX86MetadataPhysicalOperand projected_operand = {0};
-    BusterX86MetadataPhysicalQuery projected_query = {0};
-    if (selection.form_id != UINT32_MAX &&
-        buster_x86_metadata_xchg_accumulator_projection(physical, &projected_operand, &projected_query))
-        physical = projected_query;
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-        .physical = physical,
-        .form_id = selection.form_id,
-        .output = query.output,
-        .output_capacity = query.output_capacity,
-        .relocations = query.relocations,
-        .relocation_capacity = query.relocation_capacity,
-    });
-    // Selection diagnostics identify the canonical candidate even when the
-    // second, structural emission pass rejects a malformed physical query or
-    // runs out of output/relocation capacity.  Preserve that identity and
-    // diagnostic context across the combined bridge instead of returning a
-    // partially reset emit result.
-    if (emitted.form_id == UINT32_MAX) emitted.form_id = selection.form_id;
-    if (!emitted.stable_hash) emitted.stable_hash = selection.stable_hash;
-    if (!emitted.diagnostic_operand && selection.diagnostic_operand) emitted.diagnostic_operand = selection.diagnostic_operand;
-    if (!emitted.diagnostic_value && selection.diagnostic_value) emitted.diagnostic_value = selection.diagnostic_value;
-    if (!emitted.required_feature.length && selection.required_feature.length) emitted.required_feature = selection.required_feature;
-    return emitted;
+    return buster_x86_metadata_emit_selection((BusterX86MetadataEmitQuery){
+        .physical = query.physical, .form_id = selection.form_id, .output = query.output,
+        .output_capacity = query.output_capacity, .relocations = query.relocations,
+        .relocation_capacity = query.relocation_capacity}, selection);
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_mnemonic_matches(String8 mnemonic, u32 form_id)
