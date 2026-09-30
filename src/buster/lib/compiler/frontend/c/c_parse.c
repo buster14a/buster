@@ -4958,7 +4958,7 @@ BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CType
     else if ((source_pointer && target_float) || (source_float && target_pointer))
         message = S8("cannot convert between a pointer and a floating-point type");
     else if (runtime && to == C_TYPE_FLOAT16 && (from == C_TYPE_LONG_DOUBLE || from == C_TYPE_LONG_DOUBLE_COMPLEX) &&
-             target_data_layout(target).long_double_type.bit_width > 64 &&
+             target_data_layout(target).long_double_type.bit_width > 64 && !c_ir_target_supports_f128_transport(target) &&
              !(target.cpu_arch == CPU_ARCH_X86_64 && target_data_layout(target).long_double_type.bit_width == 80))
         message = S8("C IR lowering does not support this runtime conversion to binary16");
     return message;
@@ -5872,6 +5872,7 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
     u32 capacity = end - start + 64;
     CTypeParseMachine machine = {
         .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+        .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
         .mutations = arena_allocate(scratch, CTypeMutation, capacity),
         .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
         .scratch_arena = scratch,
@@ -6445,6 +6446,14 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
                     }
                 }
                 type_index = type_end;
+            }
+            else if (type.value == C_ID_UNDERLYING_INVALID && requires_typed_evaluation_out)
+            {
+                // GNU `_Alignof` over an expression answers the object's
+                // alignment, `_Alignas` included, which this walk has no
+                // records for: canonical-IR constant evaluation reads them
+                // (c_ir_alignof_object_alignment), so the assertion goes there.
+                *requires_typed_evaluation_out = true;
             }
             if (!have_layout && (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
                                  !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment)))
@@ -7565,6 +7574,8 @@ struct CParseConstant
 
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                        CScopeId scope, u32 start, u32 end, u32* alignment);
 BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMachine* machine, Arena* arena,
                                                                   CPreprocessResult preprocess, CParseResult* result,
                                                                   CScopeId scope, u32 start, u32 end);
@@ -21443,6 +21454,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             alignment = 4;
             value.valid = true;
         }
+        if (value.valid && c_parse_alignof_word(spelling) && !(type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION))
+        {
+            value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
+        }
         value.integer = c_parse_alignof_word(spelling) ? alignment : size;
         value.type = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
     }
@@ -23018,6 +23033,125 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
     return message;
 }
 
+BUSTER_C_SHARED bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
+                                               u32* count_out)
+{
+    bool found = false;
+    CEntity const* object = entity.value < result->entity_count ? result->entities + entity.value : 0;
+    if (object && !*cursor)
+    {
+        *cursor = 1;
+        *start_out = object->alignment_start;
+        *count_out = object->alignment_count;
+        found = true;
+    }
+    // A redeclaration can add the alignment: `extern int g; _Alignas(32) int
+    // g;` keeps the entity of the first declaration, whose own run is empty.
+    // Only file-scope objects are redeclared, and each declaration's run is
+    // what the storage merges. A declaration counts once it is complete, so
+    // `_Alignas(_Alignof(g)) int g;` measures the earlier declarations only.
+    bool indexed = result->declarations_by_entity_offsets != 0;
+    u32 end = !object || object->kind != C_ENTITY_OBJECT ? 0
+              : indexed                                  ? result->declarations_by_entity_offsets[entity.value + 1] - result->declarations_by_entity_offsets[entity.value]
+                                                         : result->declaration_count;
+    while (!found && *cursor - 1 < end)
+    {
+        u32 position = *cursor - 1;
+        *cursor += 1;
+        u32 declaration_index = indexed ? result->declarations_by_entity[result->declarations_by_entity_offsets[entity.value] + position] : position;
+        CDeclaration const* declaration = result->declarations + declaration_index;
+        if (declaration->entity.value == entity.value && declaration->kind == C_DECLARATION_OBJECT && declaration->alignment_count &&
+            declaration->token_start + declaration->token_count <= token_index)
+        {
+            *start_out = declaration->alignment_start;
+            *count_out = declaration->alignment_count;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// GNU `_Alignof`/`__alignof__` over an object answers the object's alignment,
+// not only its type's: GCC and Clang both fold `_Alignas(32) int g;
+// _Alignof(g)` to 32. When the operand, under redundant parentheses, is one
+// name bound to an object, raises `*alignment` -- the type's answer -- by the
+// runs c_alignof_object_next_run names. c_ir_alignof_object_alignment answers
+// the same question for canonical IR, and the two must agree. False when a
+// run does not resolve, or when evaluating runs nests past
+// C_ALIGNOF_OBJECT_DEPTH_LIMIT anywhere below this operand: a run may itself
+// spell `_Alignof(object)` and reach this function again through
+// c_parse_typed_constant.
+BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                        CScopeId scope, u32 start, u32 end, u32* alignment)
+{
+    bool valid = true;
+    while (end > start + 1 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+    {
+        start += 1;
+        end -= 1;
+    }
+    CEntityId entity = end == start + 1 && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
+                           ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[start]) : C_ENTITY_ID_INVALID;
+    CEntity const* object = entity.value < result->entity_count ? result->entities + entity.value : 0;
+    if (object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
+    {
+        u32 cursor = 0;
+        u32 run_start = 0;
+        u32 run_count = 0;
+        while (valid && c_alignof_object_next_run(result, entity, start, &cursor, &run_start, &run_count))
+        {
+            if (!run_count)
+            {
+                continue;
+            }
+            valid = machine->alignof_object_depth < C_ALIGNOF_OBJECT_DEPTH_LIMIT;
+            machine->alignof_object_refused |= !valid;
+            // An enum initializer runs inside the type machine, whose
+            // in-progress state the run's layout queries must not mutate: it
+            // takes only runs of plain integer expressions and builtin types,
+            // `_Alignas(32)` and `_Alignas(double)`, and refuses the others
+            // rather than answer the type's alignment.
+            for (u32 index = 0; valid && machine->enum_constant_members_active && index < run_count; index += 1)
+            {
+                CAlignmentSpecifier specifier = result->alignments[run_start + index];
+                u64 requested = 0;
+                u64 mark = machine->scratch_arena->position;
+                CPreprocessResult evaluation = {
+                    .diagnostics = arena_allocate(machine->scratch_arena, CDiagnostic, specifier.token_count + 1),
+                    .target = preprocess.target,
+                    .dialect = preprocess.dialect,
+                };
+                u64 builtin_size = 0;
+                u32 builtin_alignment = 0;
+                bool builtin = specifier.type.value < result->type_count &&
+                               c_parse_builtin_type_layout(preprocess.target, result->types[specifier.type.value].kind, &builtin_size, &builtin_alignment);
+                requested = builtin_alignment;
+                valid = builtin ||
+                        (specifier.type.value >= result->type_count &&
+                         c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + specifier.token_start,
+                                                      specifier.token_count, 65536, &evaluation, &requested) &&
+                         !evaluation.diagnostic_count && requested <= UINT32_MAX && !(requested & (requested - 1)));
+                arena_set_position(machine->scratch_arena, mark);
+                *alignment = valid ? BUSTER_MAX(*alignment, (u32)requested) : *alignment;
+            }
+            if (valid && !machine->enum_constant_members_active)
+            {
+                machine->alignof_object_depth += 1;
+                u32 raised = 0;
+                valid = !c_parse_validate_alignment_range(machine, result, preprocess, object->scope, object->type, run_start, run_count, &raised).length &&
+                        !machine->alignof_object_refused;
+                *alignment = valid ? BUSTER_MAX(*alignment, raised) : *alignment;
+                machine->alignof_object_depth -= 1;
+            }
+        }
+        // A nested refusal can be answered past, so the flag carries it out to
+        // the outermost operand, which clears it once refused.
+        machine->alignof_object_refused &= machine->alignof_object_depth != 0;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachine* machine, CParseResult* result,
     CPreprocessResult preprocess, CScopeId scope, CTypeId destination, u32 start, u32 end, CParseInitializerDiagnostic* diagnostic)
 {
@@ -23667,7 +23801,10 @@ BUSTER_C_INTERNAL void c_parse_validate_signature(CTypeParseMachine* machine, CP
         valid = type.value < result->type_count;
         if (!valid) continue;
         CType value = result->types[type.value];
-        if (index && function.is_variadic && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
+        bool binary128 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target);
+        bool x87 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic &&
+                   c_ir_target_supports_f80(preprocess.target);
+        if (index && function.is_variadic && !binary128 && !x87 && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
         if (value.kind == C_TYPE_VECTOR)
         {
             u64 size = 0;
@@ -23747,8 +23884,6 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
         u32 location = entity->declaration_statement_start >= body_start && entity->declaration_statement_start <= start
                            ? entity->declaration_statement_start
                            : start;
-        if (location < preprocess.token_count && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[location]), S8("__attribute__")))
-            c_parse_lowering_constraint_consider(diagnostic, S8("could not lower unbound identifier '__attribute__'"), location, location);
         String8 alignment_message = c_parse_validate_alignment_range(machine, result, preprocess, entity->scope, entity->type,
                                                                       entity->alignment_start, entity->alignment_count, 0);
         c_parse_lowering_constraint_consider_kind(diagnostic, alignment_message, C_DIAGNOSTIC_INVALID_ALIGNMENT, start, location);
@@ -24805,6 +24940,9 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                         target_data_layout(preprocess.target).long_double_type.bit_width == 80 && !value.is_atomic &&
                         value.kind != C_TYPE_LONG_DOUBLE_COMPLEX &&
                         c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment) && size <= 16;
+                    supported |= !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target) &&
+                                 (value.kind == C_TYPE_LONG_DOUBLE || value.kind == C_TYPE_LONG_DOUBLE_COMPLEX || value.kind == C_TYPE_STRUCT ||
+                                  value.kind == C_TYPE_UNION || value.kind == C_TYPE_ARRAY);
                     if (!supported) message = S8("C IR lowering does not yet support wide floating-point va_arg");
                 }
             }

@@ -1380,7 +1380,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -1730,6 +1730,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSGD"));
             object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TLSLD:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSLD"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
@@ -2384,6 +2399,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
     {
         object_assembly_append_string(buffer, S8("@TLSGD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+    {
+        object_assembly_append_string(buffer, S8("@TLSLD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+    {
+        object_assembly_append_string(buffer, S8("@DTPOFF"));
     }
     else if (relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32)
     {
@@ -4520,17 +4543,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     return result;
 }
 
-// The families this reader does not carry, by name, so a refusal says which
-// one it met. The supported vocabulary is deliberately absent: R_X86_64_64,
-// PC32, PLT32, 32, 32S, TPOFF32 and the three GOTPCREL spellings all read,
-// and the ones left here are the thread-local models -- general dynamic,
-// local dynamic and initial exec -- which this compiler neither emits nor
-// resolves.
 // The x86-64 ELF relocation vocabulary this file knows by name, which the
-// refusal above uses to say which one it met. Most of these read: the GOT
-// families and the initial-exec and general-dynamic thread-local pairs all
-// have a kind. R_X86_64_TLSLD is the one named here that has none -- local
-// dynamic is a model this compiler neither emits nor resolves.
+// refusal below uses to say which one it met.  Every one named here reads;
+// the table is what keeps a refusal of an unnamed type (TLSDESC, PC64, ...)
+// from being a bare number next to names the reader accepts.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
     switch (type)
@@ -4547,10 +4563,14 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32");
     case 11:
         return S8("R_X86_64_32S");
+    case 17:
+        return S8("R_X86_64_DTPOFF64");
     case 19:
         return S8("R_X86_64_TLSGD");
     case 20:
         return S8("R_X86_64_TLSLD");
+    case 21:
+        return S8("R_X86_64_DTPOFF32");
     case 22:
         return S8("R_X86_64_GOTTPOFF");
     case 23:
@@ -5599,7 +5619,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 43                        ? OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
                                    : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 17 ? OBJECT_RELOCATION_X86_64_DTPOFF64
                                    : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 20 ? OBJECT_RELOCATION_X86_64_TLSLD
+                                   : relocation_type == 21 ? OBJECT_RELOCATION_X86_64_DTPOFF32
                                    : relocation_type == 22 ? OBJECT_RELOCATION_X86_64_GOTTPOFF
                                    : relocation_type == 23 ? OBJECT_RELOCATION_X86_64_TPOFF32
                                                            : OBJECT_RELOCATION_COUNT;
@@ -5631,7 +5654,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        relocation_width = object_relocation_kind_width(kind);
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
@@ -5727,7 +5750,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -5757,6 +5780,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                                     kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
@@ -9719,6 +9743,11 @@ bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
 }
 
+u32 object_relocation_kind_width(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : 4;
+}
+
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -11748,7 +11777,10 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
                : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
                : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? 42
                : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? 43
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF64         ? 17
                : kind == OBJECT_RELOCATION_X86_64_TLSGD            ? 19
+               : kind == OBJECT_RELOCATION_X86_64_TLSLD            ? 20
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF32         ? 21
                : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF      ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32       ? 23
                : kind == OBJECT_RELOCATION_ABSOLUTE64           ? 1
@@ -14232,7 +14264,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 relocation_size = object_relocation_kind_width(relocation->kind);
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
@@ -14373,6 +14405,9 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                  relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                  relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
