@@ -5,6 +5,8 @@ Pull-request and merge-group admission stay in merge_conflict_preflight.py.  Thi
 module owns only the repository-wide push/workflow-dispatch sweep.  It replaces
 per-PR before/after API reads and repeated default-branch fetches with bounded
 inventory snapshots, batched immutable-head fetches, and delta reconciliation.
+One advisory merge-queue read per sweep names the queued PRs that now conflict
+with main; GitHub keeps them queued with locked branches until dequeued (#1865).
 """
 
 from __future__ import annotations
@@ -197,11 +199,39 @@ def _active_failures(snapshot: Sequence[PullIdentity],
     return active, superseded
 
 
+def _queue_summary(queue: preflight.MergeQueueLookup | None,
+                   completed: Sequence[dict]) -> dict:
+    return {
+        "lookup": ("not_attempted" if queue is None else
+                   "unavailable" if queue.heads is None else "complete"),
+        "error": queue.error if queue is not None else None,
+        "queued_pull_requests": sorted(
+            entry["pull_request"] for entry in completed
+            if entry["merge_queue"] == preflight.QUEUE_QUEUED),
+        "dequeue_required": sorted(
+            entry["pull_request"] for entry in completed if entry["dequeue_required"]),
+    }
+
+
+def _write_queue_summary(record: dict, summary: Path | None) -> None:
+    if summary is not None:
+        with summary.open("a", encoding="utf-8") as stream:
+            if record["dequeue_required"]:
+                stream.write(
+                    "Queued PR(s) that conflict with main: " +
+                    ", ".join(f"#{number}" for number in record["dequeue_required"]) +
+                    ". GitHub keeps them queued and refuses pushes to their branches (GH006); "
+                    "dequeue each one before pushing its resolution.\n")
+            if record["lookup"] == "unavailable":
+                stream.write(f"Merge-queue membership unavailable: {record['error']}\n")
+
+
 def _finish(refresh: dict, snapshot: Sequence[PullIdentity],
             published: dict[tuple[int, str], dict],
             failures: dict[tuple[int, str], dict],
             global_failures: Sequence[dict], report_dir: Path,
-            summary: Path | None, pending: Sequence[PullIdentity]) -> int:
+            summary: Path | None, pending: Sequence[PullIdentity],
+            queue: preflight.MergeQueueLookup | None = None) -> int:
     completed, superseded = _current_entries(snapshot, published)
     active_failures, superseded_failures = _active_failures(
         snapshot, failures, global_failures)
@@ -219,7 +249,10 @@ def _finish(refresh: dict, snapshot: Sequence[PullIdentity],
     refresh["superseded_failures"] = superseded_failures
     refresh["not_attempted"] = pending_numbers
     refresh["blocking_count"] = sum(int(entry["blocking"]) for entry in completed)
-    return preflight._finish_refresh(refresh, report_dir, summary)
+    refresh["merge_queue"] = _queue_summary(queue, completed)
+    status = preflight._finish_refresh(refresh, report_dir, summary)
+    _write_queue_summary(refresh["merge_queue"], summary)
+    return status
 
 
 def refresh_event(repo: Path, api: preflight.GitHubApi, event: dict,
@@ -273,6 +306,9 @@ def refresh_event(repo: Path, api: preflight.GitHubApi, event: dict,
         pending = list(snapshot)
         return _finish(refresh, snapshot, published, failures, global_failures,
                        report_dir, summary, pending)
+    # One read for the whole sweep; PRs it does not cover at their exact head
+    # are reported as unknown membership rather than re-read per PR.
+    queue = preflight.lookup_merge_queue(api, default_branch)
     pending = list(snapshot)
     for pass_number in range(1, MAX_SNAPSHOT_PASSES + 1):
         refresh["snapshot_passes"] = pass_number
@@ -309,6 +345,7 @@ def refresh_event(repo: Path, api: preflight.GitHubApi, event: dict,
             stage = "analyze"
             try:
                 report = _analyze_identity(repo, api, main, identity, context)
+                preflight.apply_merge_queue(report, queue, identity.number)
                 preflight._write_report(
                     report,
                     report_dir / f"pr-{identity.number}-{identity.head}.json",
@@ -322,6 +359,8 @@ def refresh_event(repo: Path, api: preflight.GitHubApi, event: dict,
                     "head": identity.head,
                     "main": main,
                     "blocking": report["outcome"]["blocking"],
+                    "merge_queue": report["merge_queue"]["membership"],
+                    "dequeue_required": report["merge_queue"]["dequeue_required_before_push"],
                 }
             except preflight.PreflightError as error:
                 record = _failure(error, stage, identity)
@@ -413,7 +452,7 @@ def refresh_event(repo: Path, api: preflight.GitHubApi, event: dict,
                 if identity.key in unstable or identity.key not in resolution.resolved
             ]
     return _finish(refresh, snapshot, published, failures, global_failures,
-                   report_dir, summary, pending)
+                   report_dir, summary, pending, queue)
 
 
 def _parser() -> argparse.ArgumentParser:
