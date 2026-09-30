@@ -1858,7 +1858,10 @@ descriptor count changed.
   smoke job. The request, finalization and launch gates refuse the recipe
   with no seams, the compiled profile or a blocked status, and admit it with
   the complete seams. A malformed request is refused either way, and the
-  queue's `bq_request_valid` still refuses the recipe.
+  queue's `bq_request_valid` still refuses the recipe. On a `BQPHASE2`
+  channel, `bq_retirement_unit_campaign_begin` is refused right after
+  PREPARING without touching the channel, and it starts SETTLING after
+  RETIREMENT_READY.
 - **SIGTERM.** A SIGTERM to the unit during job 63's hanging generate is
   forwarded to the self-pipe. The unit returns `BQ_WORKER_CANCEL_SIGNAL`, the
   stage's pid is gone and no ready record exists.
@@ -1889,7 +1892,24 @@ In every case the keeper's socket is gone and no descriptor or child leaks.
 - not stopping the keeper;
 - mapping a signalled producer by its exit code;
 - not becoming a subreaper, or not sweeping a surviving descendant;
-- not consuming a SIGTERM held in the teardown window.
+- not consuming a SIGTERM held in the teardown window;
+- (PR 4) opening a `BQPHASE1` channel, or not sending RETIREMENT_READY;
+- (PR 4) ignoring the completeness gate in the request, finalization or
+  launch gate;
+- (PR 4) skipping the replay in the finish hook, ignoring its result, or not
+  requiring the ready digest;
+- (PR 4) letting the campaign begin require PREPARING instead of SETTLING as
+  the next phase.
+
+The service suite (`phase_channel_tests.h`, `worker_deadline_tests.c`) fails
+when the version-2 check or make ignores the digest rule, when the order skips
+RETIREMENT_READY, when a truncated packet or the other magic is accepted, when
+the digest codec accepts upper case or zero, when a version-2 MEASURED keeps
+the 5-second cap, when `BQPHASE1`'s magic changes, when the coordinator skips
+the handoff, either deadline check, keeping the ready digest, the
+version-aware receipt validation or keeping the job in PREPARING at
+RETIREMENT_READY, and when the budget loader skips the pin or accepts a
+writable `recipes/`.
 
 A stop budget that drifts from `BQ_WORKER_STOP_MILLISECONDS` does not
 compile.

@@ -42,7 +42,8 @@
  * (bq_worker_finish's hook) needs both digests and passes the smoke recipe;
  * and bq_retirement_request_valid_pinned, bq_worker_finalization_recipe and
  * bq_worker_recipe_launchable admit the recipe only through the complete
- * seams. */
+ * seams. bq_prep_worker_unit_campaign_order checks that the campaign's
+ * SETTLING follows RETIREMENT_READY on a BQPHASE2 channel. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 
@@ -375,11 +376,68 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fi
     {
         BqWorkerFinalization gate = {.result_directory = -1, .retirement = gated[index]};
         bool admitted = bq_worker_finalization_recipe(&attempt->job, &gate);
-        BQ_PREP_CHECK(admitted == (index == 3) && bq_worker_recipe_launchable(&gate) == (index == 3) &&
+        /* The launch gate on a bound retirement recipe decides by itself. */
+        BqWorkerFinalization launch = {.result_directory = -1, .retirement = gated[index]};
+        BQ_PREP_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &launch.recipe));
+        BQ_PREP_CHECK(admitted == (index == 3) && bq_worker_recipe_launchable(&launch) == (index == 3) &&
                       (index != 3 || !strcmp(gate.recipe.name, "native-retirement-performance-v1")));
         BqWorkerFinalization plain = {.result_directory = -1, .retirement = gated[index]};
         BQ_PREP_CHECK(bq_worker_finalization_recipe(&smoke, &plain) && bq_worker_recipe_launchable(&plain));
     }
+}
+
+/* #881 PR 4: on the worker-unit's BQPHASE2 channel the in-unit campaign
+ * (PR 2) starts SETTLING only after RETIREMENT_READY carried the digest; a
+ * begin right after PREPARING is refused without touching the channel. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_campaign_order(void)
+{
+    int pair[2] = {-1, -1}, cancel[2] = {-1, -1};
+    char root[] = "/tmp/bq-worker-unit-order-XXXXXX";
+    bool ok = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0 &&
+              pipe2(cancel, O_CLOEXEC | O_NONBLOCK) == 0 && mkdtemp(root) != NULL;
+    pid_t peer = ok ? fork() : -1;
+    if (peer == 0)
+    {
+        close(pair[0]);
+        bool answered = true;
+        for (u32 index = 0; answered && index < 3; index += 1)
+        {
+            unsigned char message[BQ_PHASE_MESSAGE_CAP] = {0};
+            answered = recv(pair[1], message, sizeof(message), 0) == BQ_PHASE_V2_MESSAGE_BYTES;
+            bq_phase_put(message + 40, 1u);
+            answered = answered && send(pair[1], message, BQ_PHASE_V2_MESSAGE_BYTES, MSG_NOSIGNAL) ==
+                                   BQ_PHASE_V2_MESSAGE_BYTES;
+        }
+        close(pair[1]);
+        _exit(answered ? 0 : 1);
+    }
+    if (pair[1] >= 0) close(pair[1]);
+    int work = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int logs = work >= 3 && mkdirat(work, "logs", 0700) == 0 ?
+               openat(work, "logs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BqPhaseChannel phases = {.descriptor = -1, .failed = 1};
+    u64 deadline = bq_phase_clock() + 60000000000ull;
+    ok = ok && peer > 0 && logs >= 3 && bq_phase_init_version(&phases, pair[0], 1, 2, BQ_PHASE_VERSION_2) &&
+         bq_phase_exchange(&phases, BQ_PHASE_PREPARING);
+    BqRetirementUnitCampaign early = {0}, driver = {0};
+    BQ_PREP_CHECK(ok && !bq_retirement_unit_campaign_begin(&early, &phases, cancel[0], deadline, work, logs) &&
+                  phases.sequence == BQ_PHASE_PREPARING && !phases.failed);
+    BQ_PREP_CHECK(bq_phase_exchange_digest_until(&phases, BQ_PHASE_RETIREMENT_READY,
+                      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", deadline) &&
+                  bq_retirement_unit_campaign_begin(&driver, &phases, cancel[0], deadline, work, logs) &&
+                  phases.sequence == BQ_PHASE_SETTLING && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING);
+    int status = 0;
+    if (pair[0] >= 0) close(pair[0]);
+    if (peer > 0) BQ_PREP_CHECK(waitpid(peer, &status, 0) == peer && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (logs >= 0) close(logs);
+    if (work >= 0)
+    {
+        unlinkat(work, "logs", AT_REMOVEDIR);
+        close(work);
+        rmdir(root);
+    }
+    for (u32 side = 0; side < 2; side += 1)
+        if (cancel[side] >= 0) close(cancel[side]);
 }
 
 /* bq_retirement_profile_complete over the fixture's complete profile: every
@@ -423,6 +481,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_profiles(char const* complete)
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
+    bq_prep_worker_unit_campaign_order();
     BqPrepOracleFixture* fixture = calloc(1, sizeof(*fixture));
     BqPrepOracleAttempt* reference = calloc(1, sizeof(*reference));
     BqPrepUnitAttempt* attempt = calloc(1, sizeof(*attempt));
