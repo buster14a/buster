@@ -59,6 +59,7 @@ MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBI
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
+MAIN_REUSE_JOB = "Main CI reuse decision"
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
@@ -98,7 +99,9 @@ def measure(run):
     """A successful declared-inventory first attempt, or an explicit exclusion reason."""
     reason = None
     result = None
-    jobs = run.get("jobs", [])
+    # The read-only main admission is extra metadata, never a workload. A
+    # reused main run is a separate cohort and cannot be pooled with full runs.
+    jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
     combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
@@ -111,6 +114,10 @@ def measure(run):
         reason = run.get("conclusion") or "no-conclusion"
     elif run.get("run_attempt") != 1:
         reason = "rerun"
+    elif run.get("event") == "push" and any(
+            job.get("name") in NATIVE + MOBILE + UEFI and job.get("conclusion") == "skipped"
+            for job in jobs):
+        reason = "reused-queue-coverage"
     elif names != sorted(HISTORICAL_PLATFORMS) and not sharded:
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
@@ -205,7 +212,8 @@ def summarize(data):
         if reason:
             excluded[reason] += 1
         else:
-            runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", [])))) for job in run["jobs"]))
+            runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", []))))
+                                   for job in run["jobs"] if job.get("name") != MAIN_REUSE_JOB))
             cohorts[(run["workflow_blob_sha"], runners)].append(sample)
     rows = []
     for (revision, runners), samples in sorted(cohorts.items()):
@@ -438,7 +446,8 @@ def _job_evidence(jobs, interruptions=None):
     return evidence
 
 
-def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_request=False):
+def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_request=False, *,
+                           expected_names=COMBINATION_JOBS, complete_active=True):
     """Pure fail-closed gate for the latest jobs of this exact workflow run.
 
     A partial rerun may retain a successful job from an earlier attempt of the
@@ -450,7 +459,7 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
     if not isinstance(jobs, list):
         return [_metadata_pending("job inventory is not a list")]
     names = [logical_job_name(job.get("name")) if isinstance(job, dict) else None for job in jobs]
-    if Counter(names) != Counter(COMBINATION_JOBS):
+    if Counter(names) != Counter(expected_names):
         errors.append(_metadata_pending("required job identities are missing, duplicated or unexpected"))
     for job in jobs:
         if not isinstance(job, dict):
@@ -466,7 +475,7 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
         if base is not None and not (draft_pull_request and attempt == 1):
             errors.append(f"{name}: only the first attempt of a draft pull-request run may defer {base}; "
                           f"this run requires the {base} job itself")
-        if name == "CI complete":
+        if name == "CI complete" and complete_active:
             if attempt != run_attempt or job.get("status") != "in_progress":
                 errors.append(_metadata_pending("CI complete is not the current active attempt"))
         elif job.get("status") != "completed":
@@ -529,6 +538,24 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
         if logical not in latest or attempt > latest[logical]["run_attempt"]:
             latest[logical] = job
     return list(latest.values())
+
+
+def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False):
+    """Keep the optional cheap admission out of the required job contract."""
+    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
+    errors = []
+    if len(decision) > 1 or (required and len(decision) != 1):
+        errors.append("main reuse decision is missing or ambiguous")
+    for job in decision:
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or
+                not 1 <= job["run_attempt"] <= run_attempt or
+                job.get("status") != "completed" or
+                job.get("conclusion") not in ("success", "skipped")):
+            errors.append("main reuse decision has invalid identity or result")
+        if required and job.get("conclusion") != "success":
+            errors.append("main reuse decision did not succeed")
+    return [job for job in jobs if job.get("name") != MAIN_REUSE_JOB], errors
 
 
 def require_jobs(args):
@@ -614,7 +641,10 @@ def require_jobs(args):
                 jobs = []
                 errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
             else:
-                errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha, draft)
+                jobs, decision_errors = separate_reuse_job(
+                    jobs, args.run_id, args.run_attempt, head_sha)
+                errors = decision_errors + validate_required_jobs(
+                    jobs, args.run_id, args.run_attempt, head_sha, draft)
         if not _metadata_can_refresh(errors) or snapshot_attempt >= len(JOB_METADATA_REFRESH_DELAYS_SECONDS):
             break
         delay = JOB_METADATA_REFRESH_DELAYS_SECONDS[snapshot_attempt]
