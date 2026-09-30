@@ -24162,13 +24162,95 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // -- so one allocator answers them, unlike the type-generic fixture above
     // whose sizes reach code generation.  -std=c99 is again part of the test.
     {
+        // A GNU attribute list *leading* a block-scope declaration (#1685):
+        //
+        //     __attribute__((unused)) unsigned long long r;
+        //
+        // The parser bound the declaration, but the lowering body walker classified
+        // the statement from its first token, which is `__attribute__`, and lowered
+        // it as an expression -- "could not lower unbound identifier
+        // '__attribute__'". The walker already stepped over a C23 `[[...]]` sequence
+        // in that position; the GNU spelling reaches it through Buster's own
+        // BUSTER_UNUSED_DECL in the tests-enabled unity build.
+        //
+        // `aligned` is here because stepping over the list in the walker is only
+        // correct while the parser still reads what it says off the declaration.
+        //
+        // The native-retirement support contract freezes the tracked test
+        // inventory, so this case is written from here instead of a file
+        // under tests/.
+        String8 leading_gnu_attribute_path =
+            buster_test_temporary_path(arguments->arena, S8("buster-c-leading-gnu-attribute-declaration"), S8(".c"));
+        String8 leading_gnu_attribute_source = S8(
+            "typedef unsigned long long u64;\n"
+            "\n"
+            "struct pair\n"
+            "{\n"
+            "    int first;\n"
+            "    int second;\n"
+            "};\n"
+            "\n"
+            "static int fall(int value)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    switch (value)\n"
+            "    {\n"
+            "    case 0:\n"
+            "        result += 1;\n"
+            "        __attribute__((fallthrough));\n"
+            "    case 1:\n"
+            "        result += 2;\n"
+            "        break;\n"
+            "    default:\n"
+            "        break;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    __attribute__((unused)) unsigned long long unassigned;\n"
+            "    __attribute__((unused)) u64 named = 7;\n"
+            "    __attribute__((unused)) static int kept = 3;\n"
+            "    __attribute__((unused)) const int first = 2, second = 5;\n"
+            "    __attribute__((unused)) struct pair pair = {11, 13};\n"
+            "    __attribute__((unused)) __attribute__((unused)) int twice = 4;\n"
+            "    __attribute((unused)) int short_spelling = 1;\n"
+            "    __attribute__((aligned(64))) char aligned_first;\n"
+            "    __attribute__((aligned(64))) char aligned_second;\n"
+            "    int loop_total = 0;\n"
+            "    for (__attribute__((unused)) int index = 0; index < 3; index += 1)\n"
+            "    {\n"
+            "        loop_total += index;\n"
+            "    }\n"
+            "    if (named + (u64)kept != 10 || first + second != 7 || pair.first + pair.second != 24)\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n"
+            "    if (twice != 4 || short_spelling != 1 || loop_total != 3)\n"
+            "    {\n"
+            "        return 2;\n"
+            "    }\n"
+            "    if (((unsigned long long)&aligned_first % 64) != 0 || ((unsigned long long)&aligned_second % 64) != 0)\n"
+            "    {\n"
+            "        return 3;\n"
+            "    }\n"
+            "    if (fall(0) != 3 || fall(1) != 2)\n"
+            "    {\n"
+            "        return 4;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n");
+        BUSTER_TEST(arguments, file_write(leading_gnu_attribute_path, BUSTER_SLICE_TO_BYTE_SLICE(leading_gnu_attribute_source)));
         String8 gnu_specifier_fixtures[] = {
             S8("tests/basic_c_local_typedef_attribute.c"),
             S8("tests/basic_c_offsetof_subscript.c"),
+            leading_gnu_attribute_path,
         };
         String8 gnu_specifier_names[] = {
             S8("buster-c-local-typedef-attribute"),
             S8("buster-c-offsetof-subscript"),
+            S8("buster-c-leading-gnu-attribute-declaration-program"),
         };
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(gnu_specifier_fixtures); fixture_index += 1)
         {

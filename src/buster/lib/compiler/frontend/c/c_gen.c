@@ -34877,6 +34877,25 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     return UINT32_MAX;
 }
 
+// One GNU `__attribute__((...))` (or `__attribute((...))`) list at `index`:
+// true with `after_out` one past its closing parenthesis. An unbalanced list
+// answers false and is left for the statement it begins to diagnose.
+BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out)
+{
+    CPreprocessResult* preprocess = &builder->preprocess;
+    bool result = index + 1 < end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
+                  c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
+                                            C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
+                  c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    u32 close = result ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) : end;
+    result = result && close < end;
+    if (result)
+    {
+        *after_out = close + 1;
+    }
+    return result;
+}
+
 /* The prefix a statement may carry before its unlabelled form. `name :`,
    `default :`, and `case <constant> :` may repeat before the statement they
    label, and a controlled substatement is allowed to carry them — `if (c)
@@ -38516,9 +38535,17 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             // label, or a block-scope declaration. None of them is lowered
             // from the attribute's own tokens, so the walker steps over the
             // sequence and classifies the statement from the token past it;
-            // `[[fallthrough]];` reduces to the null statement below.
-            for (u32 attribute_end = 0; c_parse_c23_attribute_at(builder->preprocess, index, task.end, &attribute_end);)
+            // `[[fallthrough]];` reduces to the null statement below. A GNU
+            // `__attribute__((...))` list in the same place is stepped over
+            // the same way: the parser already read what it says onto the
+            // declared entities (#1685). The skip is narrower than
+            // c_parse_skip_attributes, whose `__extension__` and asm-label
+            // cases may begin an expression or asm statement instead.
+            for (bool attribute_run = true; attribute_run;)
             {
+                u32 attribute_end = index;
+                attribute_run = c_parse_c23_attribute_at(builder->preprocess, index, task.end, &attribute_end) ||
+                                c_ir_gnu_attribute_at(builder, index, task.end, &attribute_end);
                 index = attribute_end;
             }
             if (index >= task.end)
