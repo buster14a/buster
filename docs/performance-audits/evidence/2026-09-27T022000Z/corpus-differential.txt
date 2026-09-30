@@ -1,0 +1,3 @@
+candidate A: SUMMARY compiles=6272 pairs=3136 identical=3136 differ=0 outputs=2388
+candidate B: SUMMARY compiles=6272 pairs=3136 identical=3136 differ=0 outputs=2388
+candidate C: SUMMARY compiles=6272 pairs=3136 identical=3136 differ=0 outputs=2388
