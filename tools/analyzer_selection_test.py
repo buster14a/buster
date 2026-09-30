@@ -599,7 +599,7 @@ esac
                     provenance.write_manifest(reference, changed)
                     fields = self.select(root, "merge_group", False, head, head, candidate, reference, output)
                     self.assertEqual(fields["selection"], "compare")
-            for state in ("incomplete", "unknown-context", "changed-command"):
+            for state in ("incomplete", "unknown-context", "changed-command", "missing-policy", "missing-root"):
                 with self.subTest(state=state):
                     changed = copy.deepcopy(original)
                     if state == "incomplete":
@@ -607,8 +607,14 @@ esac
                         changed["issues"] = ["fixture uncertainty"]
                     elif state == "unknown-context":
                         changed["execution_context"] = None
-                    else:
+                    elif state == "changed-command":
                         changed["execution_context"]["compile_command"].append("-DCHANGED")
+                    elif state == "missing-policy":
+                        path = changed["policy_inputs"][0]["path"]
+                        changed["policy_inputs"][0] = {"path": path, "state": "missing"}
+                    else:
+                        changed["dependencies"] = [entry for entry in changed["dependencies"] if entry["path"] != "build.c"]
+                    changed["closure_sha256"] = provenance.closure_fingerprint(changed["dependencies"], changed["policy_inputs"])
                     provenance.write_manifest(candidate, changed)
                     provenance.write_manifest(reference, changed)
                     fields = self.select(root, "merge_group", False, head, head, candidate, reference, output)

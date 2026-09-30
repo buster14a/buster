@@ -488,9 +488,12 @@ def same_driver_skip(
         canonical = depfile.is_absolute() and command == driver_command(
             Path(context["compiler"]), depfile, Path(context["driver"])
         )
+    known_policy = ([entry.get("path") for entry in candidate["policy_inputs"]] == sorted(POLICY_INPUTS)
+                    and all(entry.get("state") == "blob" for entry in candidate["policy_inputs"]))
+    known_root = any(entry.get("path") == ROOT_SOURCE for entry in candidate["dependencies"])
     return (event == "merge_group" and not requested and candidate_commit == reference_commit
             and candidate["complete"] and reference["complete"]
-            and context is not None and canonical and candidate == reference)
+            and known_policy and known_root and context is not None and canonical and candidate == reference)
 
 
 def validate_request(event: str, requested_text: str) -> bool:
