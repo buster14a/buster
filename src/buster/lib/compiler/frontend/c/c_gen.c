@@ -10457,6 +10457,30 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 }
 #endif
 
+// Round a typed-half token before widening its result into the f64 carrier.
+// A binary64 intermediate can erase the side of a binary16 midpoint, and
+// decimal accumulation can move an exact midpoint according to host FMA.
+BUSTER_C_INTERNAL bool c_ir_float16_literal_bits(String8 spelling, u64* bits_out)
+{
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
+    s32 binary_exponent = 0;
+    u8 status = C_IR_ROUND_FAILED;
+    if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+    {
+        status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, 10, -14, 15, 5, bits_out);
+        if (status == C_IR_ROUND_OVERFLOW)
+        {
+            *bits_out = UINT64_C(0x7c00);
+        }
+        else if (status == C_IR_ROUND_UNDERFLOW)
+        {
+            *bits_out = 0;
+        }
+    }
+    return status != C_IR_ROUND_FAILED;
+}
+
 // The value a float literal denotes, for the static-initializer paths that
 // need it as one f64: constant-expression evaluation and the two global
 // initializer writers.  A literal has to decode identically wherever it
@@ -10466,9 +10490,8 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 // leaves its small exact window, and flushes subnormals to zero, which is
 // what made a global disagree with a local.
 //
-// The rational path answers only for finite nonzero results, so the
-// accumulation stays as the fallback that turns an overflowing or
-// underflowing spelling into the infinity or zero it must become.
+// Typed halves use the exact path for zero, subnormal, and special results
+// too. Other widths retain their existing accumulation fallback.
 //
 // An f suffix rounds to float first and widens the result: the literal's own
 // type is float, so `double d = 1.1f;` must hold that float, and the
@@ -10476,24 +10499,26 @@ bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerato
 // with the same bits.
 BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out, char8* suffix_out)
 {
-    bool result = c_ir_float_parse(spelling, value_out, suffix_out);
-    if (result)
+    c_ir_float_suffix(spelling, suffix_out);
+    bool result;
+    if (*suffix_out == 'h')
     {
+        u64 bits;
+        result = c_ir_float16_literal_bits(spelling, &bits);
+        if (result)
+        {
+            *value_out = c_ir_float16_to_f64(bits);
+        }
+    }
+    else
+    {
+        result = c_ir_float_parse(spelling, value_out, suffix_out);
         bool single = *suffix_out == 'f' || *suffix_out == 'F';
-        bool half = *suffix_out == 'h';
         CIrExt80Big numerator;
         CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
-        if (half)
-        {
-            // The half literal rounds through the shared binary16 encoder
-            // rather than the rational one: its range is narrow enough that
-            // overflow and subnormals are the common cases, and the encoder
-            // already answers both from the exactly-decoded binary64 value.
-            *value_out = c_ir_float16_round(*value_out);
-        }
-        else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
+        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
             c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
                                     single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
         {
@@ -11677,20 +11702,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     // exponent leaves its small exact-power window (for example 123e+127),
     // which changes the observable `%g` rendering in cJSON's print tests.
     // The bounded integer path is shared with x87 literals and implements
-    // round-to-nearest-even for both IEEE widths.
+    // round-to-nearest-even at the literal's declared IEEE width.
     CIrExt80Big numerator;
     CIrExt80Big denominator;
     s32 binary_exponent = 0;
     bool converted = false;
     if (type_value->bit_width == 16)
     {
-        // A `f16` literal rounds through the shared binary16 encoder, which
-        // is the same step the static-initializer writer takes for the same
-        // spelling; the exactly-decoded binary64 it reads is a value the
-        // rational path would have produced unchanged.
-        f64 value = 0.0;
-        converted = c_ir_float_literal_value(spelling, &value, &suffix);
-        bits = converted ? c_ir_float16_bits_from_f64(value) : 0;
+        converted = c_ir_float16_literal_bits(spelling, &bits);
     }
     else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
     {

@@ -27,12 +27,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `vector_size` element ladder, and `_Float16 _Complex` beside it as clang's
   extension (`C_TYPE_FLOAT16_COMPLEX`, two contiguous halves). The C23
   `f16`/`F16` constant suffix and the `__FLT16_*__` prelude macros carry it,
-  and every constant rounds through one encoder pair,
-  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64` in `c_gen.c`: no host
+  and typed-half tokens round directly from their exact decimal/hex rational
+  value to binary16 through `c_ir_float16_literal_bits` in `c_gen.c`. Only
+  after rounding may a half value widen into the binary64 carrier; rounding
+  a source token to binary64 first can lose its side of a half midpoint.
+  Genuine double-source conversions still use
+  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64`: no host
   half type is used, because the compiler builds under four C compilers and
   cross-compiles. Every static-initializer writer routes its 16-bit case
-  through that pair; the byte strings in `c_test_float16_type` were taken
-  from clang 18 compiling the same spellings.
+  through that pair after rounding the token in its declared source format.
+  `c_test_float16_type` retains Clang 18 goldens and exact-grid #1226
+  regressions for midpoint parity, signs, subnormals and decimal zero padding.
+  The registered driver test observes static bytes and executed literal stores
+  from separately compiled objects in both Clang/Buster link directions.
 
   **Native code generation implements the binary16 runtime vocabulary.**
   Scalar arguments and results use the ABI's real floating position: the low
