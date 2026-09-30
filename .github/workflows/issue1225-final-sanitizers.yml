@@ -1,0 +1,36 @@
+name: Issue 1225 final sanitizer validation
+on:
+  push:
+    branches: ['codex/1225-constant-truth-sanitizers']
+permissions:
+  contents: read
+jobs:
+  sanitize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision matching compiler and sanitizer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang-19 libclang-rt-19-dev
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
+      - name: Bootstrap and configure sanitizers
+        run: |
+          mkdir -p evidence
+          clang --version
+          test -f "$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT --sanitize > evidence/configure.log 2>&1
+      - name: Full sanitized suite
+        run: |
+          "$RUNNER_TEMP/buster-build" build -t test_all > evidence/sanitizers.log 2>&1
+      - name: Retain sanitizer evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1225-final-sanitizers-${{ github.sha }}
+          path: evidence/
+          retention-days: 14
