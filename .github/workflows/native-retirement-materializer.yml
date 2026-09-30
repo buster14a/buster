@@ -31,7 +31,11 @@ jobs:
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
-        runner: [ubuntu-26.04, macos-26]
+        # Every merge group runs this optional check whatever it changes, and
+        # it gates nothing there, so it keeps only the Linux leg (#1825).
+        # Pull requests and main pushes that change the materializer, and
+        # manual runs, still exercise macOS.
+        runner: ${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-26.04"]' || '["ubuntu-26.04", "macos-26"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:

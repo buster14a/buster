@@ -1,0 +1,147 @@
+# Identity census, stage-1 self-host compile+link (-g), pinned main ade6ac4b vs each candidate
+# columns: phase kind tag calls(main) calls(candidate) delta bytes(main) bytes(candidate) aux(main) aux(candidate)
+
+## candidate A
+phase      kind             tag         calls A     calls B      Δcalls       bytes A       bytes B       aux A       aux B
+other      string_equal                     474         474           0          1204          1204          10          10
+preprocess string_equal                  308995      308995           0        362365        362365       23545       23545
+preprocess hash64                          1922        1922           0         49242         49242           0           0
+preprocess fnv                              315         315           0          4242          4242           0           0
+preprocess symbol_intern                 833192      833472         280       7223498       7227978     1037301     1037891
+preprocess symbol_middle                 131325      131599         274       1476384       1479211           0           0
+preprocess symbol_insert                  34716       34730          14        754195        754656           0           0
+syntax     string_equal                  782495      764480      -18015        503609        502538       15961       15961
+semantic   string_equal                27765298    17056705   -10708593      13819746       8766580      521055      213481
+semantic   fnv                             4377        3830        -547         92928         74333           0           0
+semantic   symbol_intern                 196280           0     -196280       1188275             0      351648           0
+semantic   symbol_middle                  58391           0      -58391       1200863             0           0           0
+semantic   symbol_insert                   5937           0       -5937        111489             0           0           0
+semantic   structural       tag1         108554      108554           0             0             0      105088      105088
+semantic   structural       tag103         7183        7183           0             0             0           0           0
+semantic   structural       tag105         1946        1946           0             0             0           0           0
+semantic   structural       tag106            4           4           0             0             0           0           0
+semantic   structural       tag107          149         149           0             0             0           0           0
+semantic   structural       tag108           49          49           0             0             0           0           0
+semantic   structural       tag109         3873        3873           0             0             0           0           0
+semantic   structural       tag110          124         124           0             0             0           0           0
+semantic   structural       tag111         1345        1345           0             0             0           0           0
+semantic   structural       tag119            7           7           0             0             0           0           0
+semantic   structural       tag125            1           1           0             0             0           0           0
+semantic   structural       tag127           15          15           0             0             0           0           0
+semantic   structural       tag130           15          15           0             0             0           0           0
+semantic   structural       tag131        90094       90094           0             0             0           0           0
+semantic   structural       tag132           18          18           0             0             0           0           0
+semantic   structural       tag133          265         265           0             0             0           0           0
+semantic   structural       tag2         116218      116218           0             0             0      110173      110173
+semantic   structural       tag3         108554      108554           0  270157468992  270157468992           0           0
+lower      string_equal                12834338    12720985     -113353      13101253      11753142      414828      342454
+lower      hash64                         68065           0      -68065       1625306             0           0           0
+lower      symbol_intern                   8873           0       -8873        130024             0       11204           0
+lower      symbol_middle                   7409           0       -7409        121043             0           0           0
+lower      probe            tag7              0           2           2             0            12           0           0
+lower      structural       tag4             10          10           0           237           237           8           8
+lower      structural       tag5           6951        6951           0             0             0        6951        6951
+ir_prepare string_equal                  545902      545902           0        113981        113981           0           0
+codegen    string_equal                  584868      584868           0        126411        126411        1474        1474
+codegen    hash64                         29580       29580           0        343853        343853           0           0
+object     string_equal                   92697       92697           0        741779        741779       82113       82113
+object     hash64                         90385       90385           0       1210949       1210949           0           0
+object     object_name_hash               51437       51437           0       1030244       1030244           0           0
+link       string_equal                   99830       99830           0         32566         32566         608         608
+link       hash64                          4766        4766           0         55357         55357           0           0
+
+## candidate B
+phase      kind             tag         calls A     calls B      Δcalls       bytes A       bytes B       aux A       aux B
+other      string_equal                     474         474           0          1204          1204          10          10
+preprocess string_equal                  308995      308995           0        362365        362365       23545       23545
+preprocess hash64                          1922        1922           0         49242         49242           0           0
+preprocess fnv                              315         315           0          4242          4242           0           0
+preprocess symbol_intern                 833192      833192           0       7223498       7223498     1037301     1037301
+preprocess symbol_middle                 131325      131325           0       1476384       1476384           0           0
+preprocess symbol_insert                  34716       34716           0        754195        754195           0           0
+syntax     string_equal                  782495      782495           0        503609        503609       15961       15961
+semantic   string_equal                27765298    27765298           0      13819746      13819746      521055      521055
+semantic   fnv                             4377        4377           0         92928         92928           0           0
+semantic   symbol_intern                 196280      196280           0       1188275       1188275      351648      351648
+semantic   symbol_middle                  58391       58391           0       1200863       1200863           0           0
+semantic   symbol_insert                   5937        5937           0        111489        111489           0           0
+semantic   structural       tag1         108554      108554           0             0             0      105088      105088
+semantic   structural       tag103         7183        7183           0             0             0           0           0
+semantic   structural       tag105         1946        1946           0             0             0           0           0
+semantic   structural       tag106            4           4           0             0             0           0           0
+semantic   structural       tag107          149         149           0             0             0           0           0
+semantic   structural       tag108           49          49           0             0             0           0           0
+semantic   structural       tag109         3873        3873           0             0             0           0           0
+semantic   structural       tag110          124         124           0             0             0           0           0
+semantic   structural       tag111         1345        1345           0             0             0           0           0
+semantic   structural       tag119            7           7           0             0             0           0           0
+semantic   structural       tag125            1           1           0             0             0           0           0
+semantic   structural       tag127           15          15           0             0             0           0           0
+semantic   structural       tag130           15          15           0             0             0           0           0
+semantic   structural       tag131        90094       90094           0             0             0           0           0
+semantic   structural       tag132           18          18           0             0             0           0           0
+semantic   structural       tag133          265         265           0             0             0           0           0
+semantic   structural       tag2         116218      116218           0             0             0      110173      110173
+semantic   structural       tag3         108554      108554           0  270157468992  270157468992           0           0
+lower      string_equal                12834338    12834338           0      13101253      13101253      414828      414828
+lower      hash64                         68065       68065           0       1625306       1625306           0           0
+lower      symbol_intern                   8873        8873           0        130024        130024       11204       11204
+lower      symbol_middle                   7409        7409           0        121043        121043           0           0
+lower      structural       tag4             10          10           0           237           237           8           8
+lower      structural       tag5           6951        6951           0             0             0        6951        6951
+ir_prepare string_equal                  545902      545902           0        113981        113981           0           0
+codegen    string_equal                  584868      584868           0        126411        126411        1474        1474
+codegen    hash64                         29580       29580           0        343853        343853           0           0
+object     string_equal                   92697       58847      -33850        741779        435515       82113       51426
+object     hash64                         90385       90385           0       1210949       1210949           0           0
+object     object_name_hash               51437       20655      -30782       1030244        447885           0           0
+link       string_equal                   99830       99830           0         32566         32566         608         608
+link       hash64                          4766        4766           0         55357         55357           0           0
+
+## candidate C
+phase      kind             tag         calls A     calls B      Δcalls       bytes A       bytes B       aux A       aux B
+other      string_equal                     474         474           0          1204          1204          10          10
+preprocess string_equal                  308995      308995           0        362365        362365       23545       23545
+preprocess hash64                          1922        1922           0         49242         49242           0           0
+preprocess fnv                              315         315           0          4242          4242           0           0
+preprocess symbol_intern                 833192      833192           0       7223498       7223498     1037301     1037301
+preprocess symbol_middle                 131325      131325           0       1476384       1476384           0           0
+preprocess symbol_insert                  34716       34716           0        754195        754195           0           0
+syntax     string_equal                  782495      782495           0        503609        503609       15961       15961
+semantic   string_equal                27765298    27674963      -90335      13819746      13819746      521055      430720
+semantic   fnv                             4377        4377           0         92928         92928           0           0
+semantic   symbol_intern                 196280      196280           0       1188275       1188275      351648      351648
+semantic   symbol_middle                  58391       58391           0       1200863       1200863           0           0
+semantic   symbol_insert                   5937        5937           0        111489        111489           0           0
+semantic   structural       tag1         108554      108554           0             0             0      105088      105088
+semantic   structural       tag103         7183        7183           0             0             0           0           0
+semantic   structural       tag105         1946        1946           0             0             0           0           0
+semantic   structural       tag106            4           4           0             0             0           0           0
+semantic   structural       tag107          149         149           0             0             0           0           0
+semantic   structural       tag108           49          49           0             0             0           0           0
+semantic   structural       tag109         3873        3873           0             0             0           0           0
+semantic   structural       tag110          124         124           0             0             0           0           0
+semantic   structural       tag111         1345        1345           0             0             0           0           0
+semantic   structural       tag119            7           7           0             0             0           0           0
+semantic   structural       tag125            1           1           0             0             0           0           0
+semantic   structural       tag127           15          15           0             0             0           0           0
+semantic   structural       tag130           15          15           0             0             0           0           0
+semantic   structural       tag131        90094       90094           0             0             0           0           0
+semantic   structural       tag132           18          18           0             0             0           0           0
+semantic   structural       tag133          265         265           0             0             0           0           0
+semantic   structural       tag2         116218       10865     -105353             0             0      110173        4820
+semantic   structural       tag3         108554        3481     -105073  270157468992    5358880548           0           0
+lower      string_equal                12834338    12834338           0      13101253      13101253      414828      414828
+lower      hash64                         68065       68065           0       1625306       1625306           0           0
+lower      symbol_intern                   8873        8873           0        130024        130024       11204       11204
+lower      symbol_middle                   7409        7409           0        121043        121043           0           0
+lower      structural       tag4             10          10           0           237           237           8           8
+lower      structural       tag5           6951        6951           0             0             0        6951        6951
+ir_prepare string_equal                  545902      545902           0        113981        113981           0           0
+codegen    string_equal                  584868      584868           0        126411        126411        1474        1474
+codegen    hash64                         29580       29580           0        343853        343853           0           0
+object     string_equal                   92697       92697           0        741779        741779       82113       82113
+object     hash64                         90385       90385           0       1210949       1210949           0           0
+object     object_name_hash               51437       51437           0       1030244       1030244           0           0
+link       string_equal                   99830       99830           0         32566         32566         608         608
+link       hash64                          4766        4766           0         55357         55357           0           0

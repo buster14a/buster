@@ -26,6 +26,7 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "merge-conflict-preflight.
 REGRESSION_WORKFLOW_PATH = (REPO_ROOT / ".github" / "workflows" /
                             "merge-conflict-preflight-regression.yml")
 GUIDANCE_PATH = REPO_ROOT / "docs" / "agents" / "workflow.md"
+ADMISSION_GUIDE_PATH = REPO_ROOT / "docs" / "merge-queue-admission.md"
 INTEGRATION_PATH = Path(__file__).with_name("native_retirement_integration.py")
 SPEC = importlib.util.spec_from_file_location("merge_conflict_preflight", TOOL_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -327,6 +328,17 @@ class MergeConflictPreflightTest(unittest.TestCase):
         self.assertIn("does not change refs, the index, the worktree or either input", guidance)
         self.assertIn("does not choose `ours`, `theirs`, a union driver", guidance)
 
+    def test_guidance_prescribes_dequeue_for_a_conflicted_queued_pull(self) -> None:
+        guidance = GUIDANCE_PATH.read_text(encoding="utf-8")
+        admission = ADMISSION_GUIDE_PATH.read_text(encoding="utf-8")
+        self.assertIn("**Dequeue a conflicted queued PR before pushing its fix.**", guidance)
+        self.assertIn("`GH006`", guidance)
+        self.assertIn("`q=queued`", guidance)
+        self.assertIn("## Queued PRs that start conflicting", admission)
+        self.assertIn("v1 m=<main> h=<head> o=<n> c=<state> q=queued", admission)
+        self.assertIn("Live case, 2026-09-29 (#1865)", admission)
+        self.assertNotIn("the queue removes/blocks the PR", admission)
+
     def test_main_movement_invalidates_the_previous_exact_result(self) -> None:
         base = self.initial({"src/main.c": "base\n", "src/head.c": "base\n"})
         self.repo.branch("candidate", base)
@@ -411,7 +423,111 @@ class MergeConflictPreflightTest(unittest.TestCase):
         assert match is not None
         self.assertEqual(match.group("main"), main)
         self.assertEqual(match.group("head"), head)
+        self.assertIsNone(match.group("queue"))
         self.assertLessEqual(len(description), 140)
+        queued = f"v1 m={main} h={head} o=2 c=conflicted q=queued"
+        match = PREFLIGHT.STATUS_DESCRIPTION.fullmatch(queued)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group("queue"), "queued")
+        self.assertEqual(match.group("head"), head)
+        self.assertLessEqual(len(queued), 140)
+        self.assertIsNone(PREFLIGHT.STATUS_DESCRIPTION.fullmatch(queued + " q=queued"))
+
+    def conflicting_report(self) -> dict:
+        base = self.initial({"src/shared.c": "base\n"})
+        self.repo.branch("main-side", base)
+        self.repo.write("src/shared.c", "main\n")
+        main = self.repo.commit("main side")
+        self.repo.branch("queued-side", base)
+        self.repo.write("src/shared.c", "queued\n")
+        head = self.repo.commit("queued side")
+        return self.analyze(main, head)
+
+    def test_exact_analysis_does_not_claim_queue_membership(self) -> None:
+        report = self.conflicting_report()
+        self.assertEqual(report["merge_queue"], {
+            "membership": PREFLIGHT.QUEUE_NOT_CHECKED,
+            "lookup_error": None,
+            "branch_locked_by_queue": None,
+            "dequeue_required_before_push": False,
+            "action": None,
+        })
+        self.assertNotIn("Merge queue", PREFLIGHT.report_markdown(report))
+
+    def test_queued_conflict_requires_dequeue_without_changing_outcome(self) -> None:
+        report = self.conflicting_report()
+        head = report["head"]["sha"]
+        outcome = copy.deepcopy(report["outcome"])
+        PREFLIGHT.apply_merge_queue(report, PREFLIGHT.MergeQueueLookup({7: (head, True)}), 7)
+
+        self.assertEqual(report["outcome"], outcome)
+        self.assertTrue(report["outcome"]["blocking"])
+        self.assertEqual(report["merge_queue"]["membership"], PREFLIGHT.QUEUE_QUEUED)
+        self.assertTrue(report["merge_queue"]["branch_locked_by_queue"])
+        self.assertTrue(report["merge_queue"]["dequeue_required_before_push"])
+        self.assertEqual(report["merge_queue"]["action"], PREFLIGHT.QUEUE_LOCKED_ACTION)
+        markdown = PREFLIGHT.report_markdown(report)
+        self.assertIn("- Merge queue: **queued**.", markdown)
+        self.assertIn("**Merge queue:** This PR is still in the merge queue.", markdown)
+        self.assertIn("(GH006)", markdown)
+        self.assertIn("Dequeue the PR first", markdown)
+
+    def test_unqueued_unknown_and_moved_heads_get_matching_queue_guidance(self) -> None:
+        report = self.conflicting_report()
+        head = report["head"]["sha"]
+        PREFLIGHT.apply_merge_queue(report, PREFLIGHT.MergeQueueLookup({7: (head, False)}), 7)
+        self.assertEqual(report["merge_queue"]["membership"], PREFLIGHT.QUEUE_NOT_QUEUED)
+        self.assertFalse(report["merge_queue"]["branch_locked_by_queue"])
+        self.assertFalse(report["merge_queue"]["dequeue_required_before_push"])
+        self.assertIsNone(report["merge_queue"]["action"])
+
+        # A read at another head, or of another PR, says nothing about this head.
+        for lookup in (PREFLIGHT.MergeQueueLookup({7: ("f" * 40, True)}),
+                       PREFLIGHT.MergeQueueLookup({8: (head, True)}),
+                       PREFLIGHT.MergeQueueLookup(None, "HTTP 403")):
+            with self.subTest(lookup=lookup):
+                PREFLIGHT.apply_merge_queue(report, lookup, 7)
+                self.assertEqual(report["merge_queue"]["membership"], PREFLIGHT.QUEUE_UNKNOWN)
+                self.assertIsNone(report["merge_queue"]["branch_locked_by_queue"])
+                self.assertFalse(report["merge_queue"]["dequeue_required_before_push"])
+                self.assertEqual(report["merge_queue"]["action"], PREFLIGHT.QUEUE_UNKNOWN_ACTION)
+                self.assertEqual(report["merge_queue"]["lookup_error"], lookup.error)
+        self.assertIn("(lookup failed: HTTP 403)", PREFLIGHT.report_markdown(report))
+
+    def test_queued_clean_head_is_locked_but_needs_no_dequeue(self) -> None:
+        base = self.initial({"src/main.c": "base\n", "src/head.c": "base\n"})
+        self.repo.branch("queued-clean", base)
+        self.repo.write("src/head.c", "queued\n")
+        head = self.repo.commit("queued clean")
+        report = self.analyze(base, head)
+        PREFLIGHT.apply_merge_queue(report, PREFLIGHT.MergeQueueLookup({7: (head, True)}), 7)
+        self.assertTrue(report["merge_queue"]["branch_locked_by_queue"])
+        self.assertFalse(report["merge_queue"]["dequeue_required_before_push"])
+        self.assertIsNone(report["merge_queue"]["action"])
+
+    def test_status_carries_queue_token_only_for_a_queued_head(self) -> None:
+        report = self.conflicting_report()
+        head = report["head"]["sha"]
+        api = PREFLIGHT.GitHubApi("buster14a/buster", "test", "https://api.example.invalid")
+        descriptions = {}
+        for queued in (True, False):
+            PREFLIGHT.apply_merge_queue(
+                report, PREFLIGHT.MergeQueueLookup({7: (head, queued)}), 7)
+            with mock.patch.object(api, "_request", return_value=None) as request:
+                api.publish_status(head, report, PREFLIGHT.STATUS_CONTEXT, "https://example.invalid")
+            method, path, payload = request.call_args.args
+            self.assertEqual((method, path), ("POST", f"/repos/buster14a/buster/statuses/{head}"))
+            self.assertEqual(payload["state"], "failure")
+            descriptions[queued] = payload["description"]
+        self.assertTrue(descriptions[True].endswith(" o=2 c=conflicted q=queued"))
+        self.assertTrue(descriptions[False].endswith(" o=2 c=conflicted"))
+        for description in descriptions.values():
+            self.assertLessEqual(len(description), 140)
+            match = PREFLIGHT.STATUS_DESCRIPTION.fullmatch(description)
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match.group("head"), head)
 
 
 class GitHubTransportTests(unittest.TestCase):
@@ -524,6 +640,70 @@ class GitHubTransportTests(unittest.TestCase):
             self.assertEqual(urlopen.call_count, 1)
             sleep.assert_not_called()
 
+    @staticmethod
+    def queue_page(nodes: list, has_next: bool = False, cursor=None) -> dict:
+        return {"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            "nodes": nodes,
+        }}}}
+
+    def test_queue_membership_paginates_one_graphql_read_per_page(self):
+        first = [{"number": 1521, "headRefOid": "1" * 40, "isInMergeQueue": True}]
+        second = [{"number": 1523, "headRefOid": "2" * 40, "isInMergeQueue": False}]
+        with mock.patch.object(self.api, "_request", side_effect=[
+                self.queue_page(first, True, "page-2"), self.queue_page(second)]) as request:
+            heads = self.api.queue_membership("main")
+        self.assertEqual(heads, {1521: ("1" * 40, True), 1523: ("2" * 40, False)})
+        self.assertEqual(request.call_count, 2)
+        for call, cursor in zip(request.call_args_list, (None, "page-2")):
+            method, path, payload = call.args
+            self.assertEqual((method, path), ("POST", "/graphql"))
+            self.assertIn("isInMergeQueue", payload["query"])
+            self.assertEqual(payload["variables"], {
+                "owner": "buster14a", "name": "buster", "base": "main", "cursor": cursor,
+            })
+
+    def test_malformed_or_failed_queue_reads_become_unknown_membership(self):
+        node = {"number": 1521, "headRefOid": "1" * 40, "isInMergeQueue": True}
+        failures = (
+            {"errors": [{"message": "Resource not accessible by integration"}], "data": None},
+            {"data": None},
+            {"data": {"repository": None}},
+            self.queue_page([{**node, "isInMergeQueue": None}]),
+            self.queue_page([{**node, "headRefOid": "main"}]),
+            self.queue_page([{**node, "number": True}]),
+            self.queue_page([node, node]),
+            self.queue_page([node], True, None),
+        )
+        for response in failures:
+            with (self.subTest(response=response),
+                  mock.patch.object(self.api, "_request", return_value=response)):
+                with self.assertRaises(PREFLIGHT.PreflightError):
+                    self.api.queue_membership("main")
+                lookup = PREFLIGHT.lookup_merge_queue(self.api, "main")
+                self.assertIsNone(lookup.heads)
+                self.assertTrue(lookup.error)
+                self.assertEqual(lookup.membership(1521, "1" * 40), PREFLIGHT.QUEUE_UNKNOWN)
+        with mock.patch.object(self.api, "_request", side_effect=PREFLIGHT.ApiRequestError(
+                "POST /graphql HTTP 502", 1, False, False)):
+            lookup = PREFLIGHT.lookup_pull_merge_queue(self.api, 1521)
+        self.assertIsNone(lookup.heads)
+        self.assertIn("HTTP 502", lookup.error)
+        with mock.patch.object(self.api, "_request", return_value={
+                "data": {"repository": {"pullRequest": {**node, "number": 1523}}}}):
+            with self.assertRaisesRegex(PREFLIGHT.PreflightError, "returned #1523"):
+                self.api.pull_queue_membership(1521)
+
+    def test_pull_queue_membership_binds_number_and_head(self):
+        node = {"number": 1521, "headRefOid": "1" * 40, "isInMergeQueue": True}
+        with mock.patch.object(self.api, "_request", return_value={
+                "data": {"repository": {"pullRequest": node}}}) as request:
+            lookup = PREFLIGHT.lookup_pull_merge_queue(self.api, 1521)
+        self.assertEqual(lookup.heads, {1521: ("1" * 40, True)})
+        self.assertEqual(lookup.membership(1521, "1" * 40), PREFLIGHT.QUEUE_QUEUED)
+        self.assertEqual(request.call_args.args[2]["variables"],
+                         {"owner": "buster14a", "name": "buster", "number": 1521})
+
     def test_retry_wait_cannot_consume_the_refresh_budget(self):
         self.api.deadline = 10
         with (mock.patch.object(PREFLIGHT.time, "monotonic", return_value=8),
@@ -553,6 +733,7 @@ class PushRefreshTests(unittest.TestCase):
         self.summary = self.root / "summary.md"
         self.event = {"repository": {"default_branch": "main"}}
         self.api = mock.Mock()
+        self.api.pull_queue_membership.return_value = {}
         self.api.open_pull_requests.return_value = [
             {"number": number, "head": {"sha": self.head}, "base": {"ref": "main"}}
             for number in (1, 2, 3)
@@ -656,6 +837,7 @@ class PushRefreshTests(unittest.TestCase):
         pull = {"number": 1, "head": {"sha": self.head}, "base": {"ref": "main"}}
         self.api.pull_request.return_value = pull
         self.api.previous_status.return_value = None
+        self.api.pull_queue_membership.return_value = {1: (self.head, True)}
         with mock.patch.object(PREFLIGHT, "_fetch_ref", side_effect=[
             self.report["main"]["sha"], self.head, advanced,
             advanced, self.head, advanced,
@@ -666,6 +848,10 @@ class PushRefreshTests(unittest.TestCase):
         self.assertEqual(head, self.head)
         self.assertEqual(report["main"]["sha"], advanced)
         self.assertNotEqual(report["main"]["sha"], self.report["main"]["sha"])
+        # Membership is read once, after the exact head and main are stable.
+        self.api.pull_queue_membership.assert_called_once_with(1)
+        self.assertEqual(report["merge_queue"]["membership"], PREFLIGHT.QUEUE_QUEUED)
+        self.assertFalse(report["merge_queue"]["dequeue_required_before_push"])
 
 
 if __name__ == "__main__":
