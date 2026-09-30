@@ -1014,9 +1014,11 @@ class ApprovedSupplementSetTests(unittest.TestCase):
         ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-linux-gnu"),
         ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-uefi"),
     )
-    # The census cross-product reads only subject rows; dependency-only support-file rows change with
-    # unrelated edits, so the pin covers the subject rows of the declaration the job-log report bound.
-    CENSUS_SUBJECT_ROWS_SHA256 = "7fd70733ce749ae7372a5e4b194eb9e6650d334388c966788e1c3feb8bfdaa7d"
+    # The census cross-product reads only the subject paths and their obligation, so the pin covers those
+    # columns of the declaration the job-log report bound. Subject bytes and hashes change with fixture
+    # edits; whether a census still fails exactly on the approved rows is checked on the real report by
+    # _supplement_resolved_rows, which refuses any other set.
+    CENSUS_SUBJECT_ROWS_SHA256 = "91a21395777ebf8f8795281bcdf3bfbc38f5c9001f0023a1ea3f4f7e9adc4551"
     HOST_FIXTURES = ["tests/basic_c_asm_goto_identity.c", "tests/basic_c_compiler_barrier_fallback.c",
                      "tests/basic_c_wide_vector_abi.c", "tests/differential/native_aggregate_host.c",
                      "tests/differential/win64_vector.c", "tests/differential/win64_wide.c"]
@@ -1024,8 +1026,9 @@ class ApprovedSupplementSetTests(unittest.TestCase):
     def census(self):
         """The approved census row order: the checked-in declaration's cross-product."""
         root = Path(__file__).resolve().parents[1]
-        declaration = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes().splitlines(keepends=True)
-        subject_rows = b"".join(line for line in declaration[1:] if line.split(b"\t")[1] == b"subject")
+        declaration = [line.split(b"\t") for line in
+                       (root / binding.SUPPORT_DECLARATION_PATH).read_bytes().splitlines()[1:]]
+        subject_rows = b"".join(row[0] + b"\t" + row[2] + b"\n" for row in declaration if row[1] == b"subject")
         self.assertEqual(hashlib.sha256(subject_rows).hexdigest(), self.CENSUS_SUBJECT_ROWS_SHA256)
         with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
             subjects = [row["path"] for row in csv.DictReader(stream, delimiter="\t")
