@@ -1163,11 +1163,11 @@ jobs:
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
           rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
           rm -rf "$reference_root"
-          bootstrap_context=()
+          bootstrap_arguments=(bootstrap)
           if [[ "$EVENT_NAME" == merge_group ]]; then
-            bootstrap_context=(--bind-context)
+            bootstrap_arguments+=(--bind-context)
           fi
-          python3 tools/analyzer_reference.py bootstrap "${bootstrap_context[@]}" \
+          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
             --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
@@ -1187,7 +1187,7 @@ jobs:
               echo '::error::Historical analyzer reference contains a symlink.'
               exit 1
             fi
-            python3 tools/analyzer_reference.py bootstrap "${bootstrap_context[@]}" \
+            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
               --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
@@ -1255,13 +1255,13 @@ jobs:
               exit 1
             fi
           done
-          candidate_context=()
-          reference_context=()
+          candidate_arguments=(manifest)
+          reference_arguments=(manifest)
           if [[ "$EVENT_NAME" == merge_group ]]; then
-            candidate_context=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
-            reference_context=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
+            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
+            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
           fi
-          python3 tools/analyzer_reference.py manifest "${candidate_context[@]}" \
+          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$expected_directory/candidate.json"
@@ -1281,7 +1281,7 @@ jobs:
               echo '::error::Historical analyzer reference evidence is missing or unsafe.'
               exit 1
             fi
-            python3 tools/analyzer_reference.py manifest "${reference_context[@]}" \
+            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$expected_directory/reference.json"
