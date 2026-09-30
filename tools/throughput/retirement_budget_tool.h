@@ -20,7 +20,8 @@
  *                                      also written by the service's
  *                                      `retirement-records budget-counts`
  *   tp_retirement_budget_review        every rule, with a diagnostic
- *   tp_retirement_budget_cli           encode and preflight; each writes its
+ *   tp_retirement_budget_evaluate      encode or preflight over bytes
+ *   tp_retirement_budget_cli           the same over files; each writes its
  *                                      output only after every rule passed
  *
  * Map: TpRetirementBudgetText (whole-file reads), TpRetirementBudgetOwnedCounts,
@@ -31,6 +32,11 @@
 #include "retirement_budget.h"
 #include "../bench_service/systemd_runtime.h"
 #include <stdarg.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define TP_RETIREMENT_BUDGET_INPUT_SCHEMA "tp-retirement-campaign-budget-input-v1"
 #define TP_RETIREMENT_BUDGET_COUNTS_SCHEMA "tp-retirement-budget-counts-v1"
@@ -49,7 +55,9 @@ static inline void tp_retirement_budget_say(char* diagnostic, char const* format
     va_end(arguments);
 }
 
-/* A whole regular file read into a NUL-terminated heap copy. */
+/* A whole regular file read into a NUL-terminated heap copy. On POSIX the
+ * name is opened without following a final symlink and without blocking on
+ * a FIFO, and must be a regular file of at most cap bytes. */
 typedef struct TpRetirementBudgetText
 {
     char* bytes;
@@ -58,13 +66,30 @@ typedef struct TpRetirementBudgetText
 
 static inline int tp_retirement_budget_read(char const* path, size_t cap, TpRetirementBudgetText* text)
 {
-    FILE* file = path ? fopen(path, "rb") : NULL;
     *text = (TpRetirementBudgetText){0};
+    size_t size = 0;
+#ifdef _WIN32
+    FILE* file = path ? fopen(path, "rb") : NULL;
     text->bytes = file ? (char*)malloc(cap + 1) : NULL;
     int ok = text->bytes != NULL;
-    size_t size = ok ? fread(text->bytes, 1, cap + 1, file) : 0;
+    size = ok ? fread(text->bytes, 1, cap + 1, file) : 0;
     ok = ok && !ferror(file) && size && size <= cap;
     if (file && fclose(file) != 0) ok = 0;
+#else
+    int file = path ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    struct stat info;
+    int ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
+        (uint64_t)info.st_size <= cap;
+    text->bytes = ok ? (char*)malloc((size_t)info.st_size + 1) : NULL;
+    ok = ok && text->bytes;
+    while (ok && size < (size_t)info.st_size)
+    {
+        ssize_t count = read(file, text->bytes + size, (size_t)info.st_size - size);
+        ok = count > 0;
+        size += ok ? (size_t)count : 0;
+    }
+    if (file >= 0 && close(file) != 0) ok = 0;
+#endif
     if (ok)
     {
         text->bytes[size] = 0;
@@ -80,11 +105,14 @@ static inline int tp_retirement_budget_read(char const* path, size_t cap, TpReti
 
 /* ------------------------------------------------------------ frozen counts */
 
-/* Parsed counts; the three per-group arrays of both lists share `storage`. */
+/* Parsed counts; the three per-group arrays of both lists share `storage`.
+ * population_sha256 and declaration_sha256 name what they were derived from:
+ * the census's population seal and the reviewed row-plan declaration. */
 typedef struct TpRetirementBudgetOwnedCounts
 {
     TpRetirementBudgetCounts counts;
     unsigned* storage;
+    char population_sha256[65], declaration_sha256[65];
 } TpRetirementBudgetOwnedCounts;
 
 static inline void tp_retirement_budget_counts_release(TpRetirementBudgetOwnedCounts* owned)
@@ -96,7 +124,9 @@ static inline void tp_retirement_budget_counts_release(TpRetirementBudgetOwnedCo
     }
 }
 
-/* Canonical ASCII: `schema=`, `pairs=`, `runtime-rows=`, `timed-groups=<n>`
+/* Canonical ASCII: `schema=`, `population=<census population seal>`,
+ * `declaration=<SHA-256 of the row-plan declaration>`, `pairs=`,
+ * `runtime-rows=`, `timed-groups=<n>`
  * and one `timed=<stage> <inputs>` per timed group in campaign order, then
  * `untimed-groups=<n>` and one `untimed=<stage> <inputs>` per untimed group in
  * the validator's untimed-partition order. An object group's inputs are its
@@ -112,7 +142,7 @@ typedef struct TpRetirementBudgetWriter
 
 static inline void tp_retirement_budget_line(TpRetirementBudgetWriter* writer, char const* format, ...)
 {
-    char line[128];
+    char line[320];
     va_list arguments;
     va_start(arguments, format);
     int written = vsnprintf(line, sizeof(line), format, arguments);
@@ -123,13 +153,22 @@ static inline void tp_retirement_budget_line(TpRetirementBudgetWriter* writer, c
     if (writer->ok) writer->size += (size_t)written;
 }
 
-static inline size_t tp_retirement_budget_counts_encode(TpRetirementBudgetCounts const* counts, char* output,
-    size_t capacity)
+static inline int tp_retirement_budget_hex64(char const* text)
 {
-    TpRetirementBudgetWriter writer = {output, capacity, 0, counts != NULL};
+    int ok = text != NULL;
+    for (unsigned i = 0; ok && i < 64; ++i) ok = (text[i] >= '0' && text[i] <= '9') || (text[i] >= 'a' && text[i] <= 'f');
+    return ok && !text[64];
+}
+
+static inline size_t tp_retirement_budget_counts_encode(TpRetirementBudgetCounts const* counts,
+    char const population[65], char const declaration[65], char* output, size_t capacity)
+{
+    TpRetirementBudgetWriter writer = {output, capacity, 0,
+        counts && tp_retirement_budget_hex64(population) && tp_retirement_budget_hex64(declaration)};
     if (writer.ok)
-        tp_retirement_budget_line(&writer, "schema=%s\npairs=%u\nruntime-rows=%u\n", TP_RETIREMENT_BUDGET_COUNTS_SCHEMA,
-                                  counts->pairs, counts->runtime_rows);
+        tp_retirement_budget_line(&writer, "schema=%s\npopulation=%s\ndeclaration=%s\npairs=%u\nruntime-rows=%u\n",
+                                  TP_RETIREMENT_BUDGET_COUNTS_SCHEMA, population, declaration, counts->pairs,
+                                  counts->runtime_rows);
     for (unsigned list = 0; writer.ok && list < 2; ++list)
     {
         TpRetirementBudgetGroups const* groups = list ? &counts->untimed : &counts->timed;
@@ -178,6 +217,20 @@ static inline int tp_retirement_budget_counts_parse(char const* text, size_t siz
     int ok = text && size > sizeof(schema) - 1 && size <= TP_RETIREMENT_BUDGET_COUNTS_BYTES &&
         !memcmp(text, schema, sizeof(schema) - 1);
     offset = sizeof(schema) - 1;
+    static char const* const digests[2] = {"population=", "declaration="};
+    for (unsigned d = 0; ok && d < 2; ++d)
+    {
+        size_t key = strlen(digests[d]);
+        char* digest = d ? owned->declaration_sha256 : owned->population_sha256;
+        ok = size - offset > key + 64 && !memcmp(text + offset, digests[d], key) && text[offset + key + 64] == '\n';
+        if (ok)
+        {
+            memcpy(digest, text + offset + key, 64);
+            digest[64] = 0;
+            ok = tp_retirement_budget_hex64(digest);
+            offset += key + 65;
+        }
+    }
     ok = ok && tp_retirement_budget_counts_number(text, size, &offset, "pairs=", UINT32_MAX, &pairs) &&
         tp_retirement_budget_counts_number(text, size, &offset, "runtime-rows=", TP_RETIREMENT_MAX_CELLS, &runtime) &&
         tp_retirement_budget_counts_number(text, size, &offset, "timed-groups=", TP_RETIREMENT_MAX_CELLS, &timed);
@@ -225,10 +278,11 @@ static inline int tp_retirement_budget_counts_parse(char const* text, size_t siz
         owned->counts = (TpRetirementBudgetCounts){{inputs, kinds, stages, timed},
             {inputs + timed, kinds + timed, stages + timed, untimed}, runtime, pairs};
     }
-    size_t canonical = ok && offset == size ? tp_retirement_budget_counts_encode(&owned->counts, NULL, 0) : 0;
+    size_t canonical = ok && offset == size ? tp_retirement_budget_counts_encode(&owned->counts,
+        owned->population_sha256, owned->declaration_sha256, NULL, 0) : 0;
     char* bytes = canonical == size ? (char*)malloc(canonical) : NULL;
-    ok = bytes && tp_retirement_budget_counts_encode(&owned->counts, bytes, canonical) == size &&
-        !memcmp(bytes, text, size);
+    ok = bytes && tp_retirement_budget_counts_encode(&owned->counts, owned->population_sha256,
+        owned->declaration_sha256, bytes, canonical) == size && !memcmp(bytes, text, size);
     free(bytes);
     if (!ok) tp_retirement_budget_counts_release(owned);
     return ok;
@@ -406,10 +460,12 @@ static inline int tp_retirement_budget_groups_review(TpRetirementCampaignBudget 
 }
 
 /* Every rule a pinned budget must meet, first failure described: the record's
- * own validity, the reviewed ceiling whose whole-second floor must lie in the
- * broker's retirement range and hold every fixed-phase bound, every counted
- * object group covered by a class and the metrics cap, and the derivation's
- * required time within the ceiling (*preflight, zeroed on failure). */
+ * own validity, the reviewed ceiling whose whole-second floor (the limit the
+ * coordinator and systemd enforce) must lie in the broker's retirement range
+ * and hold every fixed-phase bound, every counted object group covered by a
+ * class and the metrics cap, and the derivation's required time within that
+ * same floor, not merely within reviewed-ns (*preflight, zeroed on failure;
+ * its remaining_ns is measured from the floor). */
 static inline int tp_retirement_budget_review(TpRetirementCampaignBudget const* budget,
     TpRetirementBudgetCounts const* counts, TpRetirementBudgetPreflight* preflight, char* diagnostic)
 {
@@ -448,7 +504,8 @@ static inline int tp_retirement_budget_review(TpRetirementCampaignBudget const* 
     ok = ok && tp_retirement_budget_groups_review(budget, &counts->timed, 0, diagnostic) &&
         tp_retirement_budget_groups_review(budget, &counts->untimed, 1, diagnostic);
     TpRetirementBudgetPreflight result = {0};
-    if (ok && !tp_retirement_budget_preflight(budget, counts, &result))
+    uint64_t enforced = usec * UINT64_C(1000);
+    if (ok && !(tp_retirement_budget_preflight(budget, counts, &result) && result.required_ns <= enforced))
     {
         /* The same derivation with an unbounded ceiling names the shortfall. */
         TpRetirementCampaignBudget unbounded = *budget;
@@ -456,11 +513,13 @@ static inline int tp_retirement_budget_review(TpRetirementCampaignBudget const* 
         TpRetirementBudgetPreflight required = {0};
         ok = 0;
         if (tp_retirement_budget_preflight(&unbounded, counts, &required))
-            tp_retirement_budget_say(diagnostic, "the derivation requires %" PRIu64 " ns, above reviewed-ns %" PRIu64,
-                                     required.required_ns, budget->reviewed_ns);
+            tp_retirement_budget_say(diagnostic, "the derivation requires %" PRIu64 " ns, above the enforced "
+                                     "whole-second ceiling %" PRIu64 " ns (reviewed-ns %" PRIu64 ")",
+                                     required.required_ns, enforced, budget->reviewed_ns);
         else tp_retirement_budget_say(diagnostic, "the counts are outside the derivation (no timed group, more "
                                       "runtime rows than timed groups, an odd or out-of-range pair count, or overflow)");
     }
+    if (ok) result.remaining_ns = enforced - result.required_ns;
     *preflight = ok ? result : (TpRetirementBudgetPreflight){0};
     return ok;
 }
@@ -483,47 +542,68 @@ static inline int tp_retirement_budget_report(FILE* output, char const digest[65
 
 /* ------------------------------------------------------------------- CLI */
 
+/* The whole check over bytes: encode (the reviewed input) or preflight (a
+ * canonical record) against canonical counts. On success canonical holds the
+ * record, *size its length, digest its pin and *result the derivation. */
+static inline int tp_retirement_budget_evaluate(int encode, char const* record, size_t record_size, char const* counts,
+    size_t counts_size, char canonical[TP_RETIREMENT_BUDGET_BYTES], size_t* size, char digest[65],
+    TpRetirementBudgetPreflight* result, char* diagnostic)
+{
+    TpRetirementBudgetOwnedCounts owned = {0};
+    TpRetirementCampaignBudget budget = {0};
+    *size = 0;
+    digest[0] = 0;
+    *result = (TpRetirementBudgetPreflight){0};
+    int ok = tp_retirement_budget_counts_parse(counts, counts_size, &owned);
+    if (!ok) tp_retirement_budget_say(diagnostic, "the counts are not canonical %s", TP_RETIREMENT_BUDGET_COUNTS_SCHEMA);
+    if (ok && encode) ok = tp_retirement_budget_input_parse(record, record_size, &budget, diagnostic);
+    if (ok && !encode && !tp_retirement_budget_decode(record, record_size, &budget))
+    {
+        ok = 0;
+        tp_retirement_budget_say(diagnostic, "the budget is not a canonical %s record", TP_RETIREMENT_BUDGET_SCHEMA);
+    }
+    ok = ok && tp_retirement_budget_review(&budget, &owned.counts, result, diagnostic);
+    if (ok)
+    {
+        *size = tp_retirement_budget_encode(&budget, canonical, TP_RETIREMENT_BUDGET_BYTES);
+        TpRetirementCampaignBudget again = {0};
+        ok = *size && tp_retirement_budget_decode(canonical, *size, &again) && tp_retirement_budget_digest(&budget, digest);
+        if (!ok) tp_retirement_budget_say(diagnostic, "the record does not encode canonically");
+    }
+    tp_retirement_budget_counts_release(&owned);
+    if (!ok)
+    {
+        *size = 0;
+        *result = (TpRetirementBudgetPreflight){0};
+    }
+    return ok;
+}
+
 /* `encode INPUT COUNTS`: the canonical record on output, only when every
  * rule holds against the frozen counts. `preflight BUDGET COUNTS`: strict
  * decode of an existing record, the same rules and the derivation's terms.
- * 0 on success, 2 with one diagnostic line and nothing on output otherwise. */
+ * 0 on success, 2 with one diagnostic line and nothing on output otherwise.
+ * (The service's retirement-records wraps tp_retirement_budget_evaluate with
+ * an exclusive output file and its counts check.) */
 static inline int tp_retirement_budget_cli(int argc, char** argv, FILE* output, FILE* diagnostics)
 {
     char diagnostic[TP_RETIREMENT_BUDGET_DIAGNOSTIC] = "usage: encode REVIEWED_INPUT COUNTS | preflight BUDGET COUNTS";
     int encode = argc == 3 && !strcmp(argv[0], "encode");
     int ok = encode || (argc == 3 && !strcmp(argv[0], "preflight"));
     TpRetirementBudgetText record = {0}, counts_text = {0};
-    TpRetirementBudgetOwnedCounts counts = {0};
-    TpRetirementCampaignBudget budget = {0};
     TpRetirementBudgetPreflight result = {0};
     char canonical[TP_RETIREMENT_BUDGET_BYTES], digest[65] = {0};
     size_t size = 0;
-    if (ok && !tp_retirement_budget_read(argv[1], encode ? TP_RETIREMENT_BUDGET_INPUT_BYTES :
-                                         TP_RETIREMENT_BUDGET_BYTES - 1u, &record))
+    if (ok && !(tp_retirement_budget_read(argv[1], encode ? TP_RETIREMENT_BUDGET_INPUT_BYTES :
+                                          TP_RETIREMENT_BUDGET_BYTES - 1u, &record) &&
+                tp_retirement_budget_read(argv[2], TP_RETIREMENT_BUDGET_COUNTS_BYTES, &counts_text)))
     {
         ok = 0;
-        tp_retirement_budget_say(diagnostic, "cannot read %s (missing, empty or too large)", argv[1]);
+        tp_retirement_budget_say(diagnostic, "cannot read %s or %s (missing, not a regular file, empty or too large)",
+                                 argv[1], argv[2]);
     }
-    if (ok && !(tp_retirement_budget_read(argv[2], TP_RETIREMENT_BUDGET_COUNTS_BYTES, &counts_text) &&
-                tp_retirement_budget_counts_parse(counts_text.bytes, counts_text.size, &counts)))
-    {
-        ok = 0;
-        tp_retirement_budget_say(diagnostic, "%s is not canonical %s", argv[2], TP_RETIREMENT_BUDGET_COUNTS_SCHEMA);
-    }
-    if (ok && encode) ok = tp_retirement_budget_input_parse(record.bytes, record.size, &budget, diagnostic);
-    if (ok && !encode && !tp_retirement_budget_decode(record.bytes, record.size, &budget))
-    {
-        ok = 0;
-        tp_retirement_budget_say(diagnostic, "%s is not a canonical %s record", argv[1], TP_RETIREMENT_BUDGET_SCHEMA);
-    }
-    ok = ok && tp_retirement_budget_review(&budget, &counts.counts, &result, diagnostic);
-    if (ok)
-    {
-        size = tp_retirement_budget_encode(&budget, canonical, sizeof(canonical));
-        TpRetirementCampaignBudget again = {0};
-        ok = size && tp_retirement_budget_decode(canonical, size, &again) && tp_retirement_budget_digest(&budget, digest);
-        if (!ok) tp_retirement_budget_say(diagnostic, "the record does not encode canonically");
-    }
+    ok = ok && tp_retirement_budget_evaluate(encode, record.bytes, record.size, counts_text.bytes, counts_text.size,
+                                             canonical, &size, digest, &result, diagnostic);
     int checked = ok;
     if (ok && encode) ok = fwrite(canonical, 1, size, output) == size;
     else if (ok) ok = tp_retirement_budget_report(output, digest, &result);
@@ -532,7 +612,6 @@ static inline int tp_retirement_budget_cli(int argc, char** argv, FILE* output, 
     if (!ok) fprintf(diagnostics, "retirement-budget: %s\n", diagnostic);
     free(record.bytes);
     free(counts_text.bytes);
-    tp_retirement_budget_counts_release(&counts);
     return ok ? 0 : 2;
 }
 #endif

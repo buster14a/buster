@@ -1776,30 +1776,50 @@ entry still refuses one.
 
 ## Generating the campaign authorities (#881)
 
-Four campaign authorities are pinned by the admitted profile:
+The admitted profile pins three campaign authorities:
 
-- the row plan;
-- the untimed-command contract;
-- the campaign budget;
-- the frozen counts the budget is checked against.
+- the row plan (`row-plan-sha256=`);
+- the untimed-command contract (`untimed-commands-sha256=`);
+- the campaign budget (`campaign-budget-sha256=`).
+
+The budget is checked against frozen counts. No pin binds the counts:
+production recomputes them from the sealed gate
+(`tp_retirement_campaign_freeze`). The counts file below is only the
+reviewable input of the budget writer and its preflight.
 
 `retirement-records` in the service binary (`retirement_records.c`) writes
-all four. Its `budget-encode` and `budget-preflight` subcommands are lane D's
-budget writer, `tp_retirement_budget_cli` in
+all three records and the counts. Its `budget-encode` and `budget-preflight`
+subcommands run lane D's budget checker, `tp_retirement_budget_evaluate` in
 `../throughput/retirement_budget_tool.h`
 ([throughput README](../throughput/README.md), "Writing the record"). The
 tool admits nothing, picks no value and needs no `build.c` change.
 
 ```sh
-service retirement-records budget-counts INSTALLED PROFILE DECLARATION PAIRS       > counts
-service retirement-records budget-encode REVIEWED_INPUT counts                     > campaign-budget
-service retirement-records row-plan INSTALLED PROFILE DECLARATION campaign-budget CPU_MODEL_SHA256 CPU > row-plan
-service retirement-records untimed-commands INSTALLED PROFILE DECLARATION row-plan > untimed-commands
+service retirement-records budget-counts INSTALLED PROFILE DECLARATION PAIRS counts
+service retirement-records budget-encode REVIEWED_INPUT counts campaign-budget
+service retirement-records budget-preflight INSTALLED PROFILE DECLARATION campaign-budget counts
+service retirement-records row-plan INSTALLED PROFILE DECLARATION campaign-budget CPU_MODEL_SHA256 CPU row-plan
+service retirement-records untimed-commands INSTALLED PROFILE DECLARATION row-plan untimed-commands
 ```
 
-Run them in that order. Each command writes its record to stdout. On a
-refusal it writes one `retirement-records:` or `retirement-budget:`
-diagnostic line and nothing to stdout.
+Run them in that order.
+
+- **Output.** The last argument, `OUTPUT`, is the file each generator
+  creates. The generator writes a new temporary sibling (`O_CREAT | O_EXCL`,
+  mode `0444`, fsynced) and links it to `OUTPUT` with `linkat`, which never
+  replaces an existing name. It then removes the temporary file and fsyncs
+  the directory. An existing `OUTPUT` is refused and left untouched. `-`
+  writes to stdout instead, which the tests use.
+- **Preflight.** `budget-preflight` regenerates the counts from the census,
+  the declaration and the profile's pair count, and requires the `counts`
+  file to be exactly those counts. Stale counts, from another census,
+  declaration or pair count, are refused. It then prints the budget's
+  derivation.
+- **Refusals.** On a refusal a command prints one `retirement-records:` or
+  `retirement-budget:` diagnostic line. It writes nothing to `OUTPUT` or
+  stdout.
+- **Inputs.** Every input file must be a regular file. A final symlink, a
+  FIFO or any other file type is refused without blocking.
 
 **Inputs.**
 
@@ -1876,8 +1896,9 @@ reviewed budget record, so it matches what `tp_retirement_campaign_freeze`
 requires. Before writing, the generator runs the importer's own decode, bind
 and derive on its output (`bq_retirement_row_plan_parse`, also used by
 `bq_retirement_row_plan_import`). This covers the batch contracts, the
-population seal and the command digests. It also requires distinct batch
-keys. The generator refuses:
+population seal and the command digests. The generator then requires
+distinct batch keys itself, sorted as the correctness gate sorts its frozen
+groups. The generator refuses:
 
 - an undeclared or singleton group;
 - a row without a rule;
@@ -1895,13 +1916,21 @@ plan's templates must be the declaration's. The generator parses its output
 with the campaign's parser (`bq_retirement_worker_untimed_parse`, which
 `bq_retirement_worker_untimed_import` also uses) before writing it.
 
-**Counts.** `budget-counts` writes `tp-retirement-budget-counts-v1`:
+**Counts.** `budget-counts` writes `tp-retirement-budget-counts-v1`. It
+does not re-parse its own output; the fixture parses it, and
+`budget-encode` and `budget-preflight` parse it strictly. The format is:
 
-- `pairs=` is the frozen pair count, the profile's `campaign-pairs=`;
+- `population=` is the census population seal the counts were derived from;
+- `declaration=` is the SHA-256 of the declaration;
+- `pairs=` is the frozen pair count. The profile must carry `campaign-pairs=`
+  (once, an even count in 60..254, as `bq_retirement_unit_campaign_pins`
+  requires), and `PAIRS` must equal it;
 - `runtime-rows=` counts the native generated-runtime rows;
 - the timed partition follows in campaign order, each object group counted
   with its declared controls;
 - then the untimed partition.
+
+Every singleton must be a link or self-host row; any other stage is refused.
 
 **What still needs the 9700X host or review.**
 
@@ -1921,9 +1950,15 @@ them. Both generated records import through
 `bq_retirement_row_plan_import_profile` and
 `bq_retirement_worker_untimed_import` from their pinned files. The generated
 counts preflight the fixture budget through `tp_retirement_budget_review`.
-The fixture also runs every refusal above, a forged census digest, a declared
-control and the CLI seam, including `budget-encode` and `budget-preflight`;
-each refusal leaves nothing on stdout.
+The fixture also runs the following, asserting each refusal's diagnostic
+and that nothing is written:
+
+- every refusal above, and a forged census digest;
+- a declared control, whose group's `metrics-bytes-max` counts it;
+- the CLI seam, including `budget-encode` and `budget-preflight`, with
+  stale counts and a pair count other than the profile's;
+- the exclusive `OUTPUT`: created read-only, never replaced, and no
+  temporary file left behind.
 
 ## Capacity derivation
 

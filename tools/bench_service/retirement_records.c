@@ -33,7 +33,10 @@
  * BqRetirementRecordsRule, BqRetirementRecordsTimed, BqRetirementRecordsControl
  * and BqRetirementRecordsUntimed), bq_retirement_records_raw (verbatim bytes
  * into a BqRetirementRowText), bq_retirement_records_fixture,
- * bq_retirement_records_cover (declaration against a partition).
+ * bq_retirement_records_cover (declaration against a partition),
+ * bq_retirement_records_pairs (the profile's campaign-pairs=),
+ * bq_retirement_records_publish (exclusive OUTPUT), bq_retirement_records_generate
+ * and bq_retirement_records_encode (the subcommands).
  */
 
 #define BQ_RETIREMENT_RECORDS_DECLARATION_HEADER "BQ-RETIREMENT-ROW-PLAN-DECLARATION-V1"
@@ -42,9 +45,11 @@
 /* One rule per (stage, target, runtime-or-not). */
 #define BQ_RETIREMENT_RECORDS_RULES_CAP (3u * 12u * 2u)
 #define BQ_RETIREMENT_RECORDS_FIXTURE_CAP 513u
-#define BQ_RETIREMENT_RECORDS_DIAGNOSTIC 320u
+#define BQ_RETIREMENT_RECORDS_DIAGNOSTIC 512u
 /* Every generated leaf fits this. */
 #define BQ_RETIREMENT_RECORDS_LEAF_CAP 40u
+/* An OUTPUT path and its temporary sibling. */
+#define BQ_RETIREMENT_RECORDS_PATH_CAP 4096u
 
 /* The pinned census as the unit derives it (job and attempt zero), its
  * performance-row population and the validator's two partitions. */
@@ -156,7 +161,8 @@ typedef struct BqRetirementRecordsUntimed
  *   untimed-groups=<n>
  *   untimed=<untimed-partition-group> <batch-template> <target-word> <allocator>
  * Rules ascend by (stage, target, runtime-or-not); groups ascend by partition
- * group. templates_offset/templates_length is the verbatim template section. */
+ * group. templates_offset/templates_length is the verbatim template section;
+ * sha256 is the digest of the whole declaration, which the counts name. */
 typedef struct BqRetirementRecordsDeclaration
 {
     char* text;
@@ -168,6 +174,7 @@ typedef struct BqRetirementRecordsDeclaration
     BqRetirementRecordsUntimed* untimed;
     u64 templates_offset, templates_length;
     u32 template_count, rule_count, timed_count, control_count, untimed_count;
+    char sha256[SHA256_HEX_CAPACITY];
 } BqRetirementRecordsDeclaration;
 
 BUSTER_GLOBAL_LOCAL void bq_retirement_records_declaration_release(BqRetirementRecordsDeclaration* declaration)
@@ -337,6 +344,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_declaration_parse(u8 const* bytes
     {
         memcpy(declaration->original, bytes, length);
         memcpy(declaration->text, bytes, length);
+        bq_digest(bytes, length, (char8*)declaration->sha256);
         declaration->text[length] = 0;
         for (u32 index = 0; index < length; index += 1)
             if (declaration->text[index] == '\n') declaration->text[index] = 0;
@@ -602,14 +610,30 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_row_plan(BqRetirementRecordsCensu
         bq_retirement_records_say(diagnostic, "the generated plan does not import (a control's status and error "
                                   "disagree, a template breaks the A1 contract, or the population seal fails)");
     }
-    for (u32 left = 0; ok && left < plan.group_count; left += 1)
-        for (u32 right = left + 1u; ok && right < plan.group_count; right += 1)
+    /* No two groups share a batch key: sorted, as the correctness gate
+     * checks its frozen groups (bq_retirement_correctness_key_order). */
+    char const** keys = ok && plan.group_count > 1 ? malloc((size_t)plan.group_count * sizeof(*keys)) : NULL;
+    if (ok && plan.group_count > 1 && !keys)
+    {
+        ok = false;
+        bq_retirement_records_say(diagnostic, "out of memory");
+    }
+    for (u32 group = 0; keys && group < plan.group_count; group += 1) keys[group] = plan.groups[group].key_sha256;
+    if (keys) qsort(keys, plan.group_count, sizeof(*keys), bq_retirement_correctness_key_order);
+    for (u32 index = 1; ok && keys && index < plan.group_count; index += 1)
+    {
+        ok = strcmp(keys[index - 1u], keys[index]) != 0;
+        if (!ok)
         {
-            ok = memcmp(plan.groups[left].key_sha256, plan.groups[right].key_sha256, SHA256_HEX_CAPACITY) != 0;
-            if (!ok)
-                bq_retirement_records_say(diagnostic, "timed groups %u and %u share a batch key (template and allocator)",
-                                          declaration->timed[left].partition, declaration->timed[right].partition);
+            size_t stride = sizeof(*plan.groups);
+            u32 left = (u32)((size_t)((char const*)keys[index - 1u] - plan.groups[0].key_sha256) / stride);
+            u32 right = (u32)((size_t)((char const*)keys[index] - plan.groups[0].key_sha256) / stride);
+            bq_retirement_records_say(diagnostic, "timed groups %u and %u share a batch key (template and allocator)",
+                                      declaration->timed[left < right ? left : right].partition,
+                                      declaration->timed[left < right ? right : left].partition);
         }
+    }
+    free(keys);
     bq_retirement_row_plan_release(&plan);
     free(marks);
     if (!ok)
@@ -682,10 +706,11 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_untimed(BqRetirementRecordsCensus
     return ok;
 }
 
-/* The frozen counts of the campaign: the timed partition in campaign order
- * (each object group's members plus its declared controls, each singleton
- * by its stage), the runtime-eligible timed rows, the frozen pair count and
- * the untimed partition. */
+/* The frozen counts of the campaign, naming the census population seal and
+ * the declaration's digest: the timed partition in campaign order (each
+ * object group's members plus its declared controls, each singleton by its
+ * link or self-host stage), the runtime-eligible timed rows, the frozen pair
+ * count and the untimed partition. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_records_counts(BqRetirementRecordsCensus const* census,
     BqRetirementRecordsDeclaration const* declaration, u32 pairs, BqRetirementRowText* text, char* diagnostic)
 {
@@ -716,19 +741,29 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_counts(BqRetirementRecordsCensus 
             kinds[used] = object ? TP_RETIREMENT_GROUP_OBJECT : TP_RETIREMENT_GROUP_SINGLETON;
             stages[used] = object ? TP_RETIREMENT_BUDGET_STAGE_OBJECT :
                            stage == BQ_RETIREMENT_STAGE_SELF_HOST ? TP_RETIREMENT_BUDGET_STAGE_SELF_HOST :
-                           TP_RETIREMENT_BUDGET_STAGE_LINK;
+                           stage == BQ_RETIREMENT_STAGE_LINK ? TP_RETIREMENT_BUDGET_STAGE_LINK :
+                           TP_RETIREMENT_BUDGET_STAGE_COUNT;
+            /* A singleton is a link or self-host row, as the layout builder
+             * and bq_retirement_worker_untimed_build require. */
+            if (ok && stages[used] == TP_RETIREMENT_BUDGET_STAGE_COUNT)
+            {
+                ok = false;
+                bq_retirement_records_say(diagnostic, "%s singleton group %u (row %u) is neither a link nor a "
+                                          "self-host row", list ? "untimed" : "timed", group, leader);
+            }
         }
     }
     u32 timed = census->timed.count;
     TpRetirementBudgetCounts counts = {{inputs, kinds, stages, timed},
         {inputs ? inputs + timed : NULL, kinds ? kinds + timed : NULL, stages ? stages + timed : NULL,
          census->untimed.count}, runtime, pairs};
-    size_t size = ok ? tp_retirement_budget_counts_encode(&counts, NULL, 0) : 0;
+    char const* population = projection->population_sha256;
+    size_t size = ok ? tp_retirement_budget_counts_encode(&counts, population, declaration->sha256, NULL, 0) : 0;
     if (ok && !size)
-        bq_retirement_records_say(diagnostic, "a group exceeds %u inputs or a singleton is not a link or self-host row",
-                                  TP_RETIREMENT_BATCH_INPUTS);
+        bq_retirement_records_say(diagnostic, "a group exceeds %u inputs", TP_RETIREMENT_BATCH_INPUTS);
     text->bytes = size ? malloc(size + 1u) : NULL;
-    ok = ok && text->bytes && tp_retirement_budget_counts_encode(&counts, text->bytes, size) == size;
+    ok = ok && text->bytes &&
+         tp_retirement_budget_counts_encode(&counts, population, declaration->sha256, text->bytes, size) == size;
     if (ok)
     {
         text->bytes[size] = 0;
@@ -745,10 +780,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_counts(BqRetirementRecordsCensus 
     return ok;
 }
 
-/* A whole regular file (at most cap bytes) into a heap copy. */
+/* A whole regular file (at most cap bytes) into a heap copy; a final
+ * symlink, a FIFO or any other non-regular file is refused without
+ * blocking. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_records_read(char const* path, u32 cap, u8** bytes, u32* length)
 {
-    int file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     struct stat info = {0};
     bool ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
               (u64)info.st_size <= cap;
@@ -764,42 +801,116 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_records_read(char const* path, u32 cap, u
     return ok;
 }
 
-/* `retirement-records row-plan INSTALLED PROFILE DECLARATION BUDGET CPU_MODEL_SHA256 CPU`,
- * `... untimed-commands INSTALLED PROFILE DECLARATION ROW_PLAN` and
- * `... budget-counts INSTALLED PROFILE DECLARATION PAIRS`: the record on
- * output, or one diagnostic line and nothing on output. INSTALLED is the
- * absolute staged installed root whose recipes/ holds the census the
+/* The profile's frozen pair count (campaign-pairs=), under the rules
+ * bq_retirement_unit_campaign_pins applies: present once, canonical, even,
+ * within 60..254. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_records_pairs(String8 profile, u32* pairs)
+{
+    String8 value = {0};
+    uint64_t number = 0;
+    bool ok = bq_retirement_unit_campaign_profile_value(profile, BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY, &value) &&
+              bq_retirement_unit_campaign_decimal(value, &number) && number >= TP_RETIREMENT_MIN_PAIRS_PER_ROUND &&
+              number <= TP_RETIREMENT_EXECUTION_MAX_PAIRS && !(number & 1);
+    *pairs = ok ? (u32)number : 0;
+    return ok;
+}
+
+/* Writes bytes to path exclusively: a new temporary sibling
+ * (O_CREAT | O_EXCL, mode 0444, fsynced) linked to path with linkat, which
+ * never replaces an existing name, then the temporary unlinked and the
+ * directory fsynced. "-" is output. Nothing is left behind on failure. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_records_publish(char const* path, char const* bytes, u64 length, FILE* output,
+    char* diagnostic)
+{
+    bool stream = !strcmp(path, "-");
+    char directory[BQ_RETIREMENT_RECORDS_PATH_CAP], temporary[BQ_RETIREMENT_RECORDS_PATH_CAP];
+    char const* slash = strrchr(path, '/');
+    char const* leaf = slash ? slash + 1 : path;
+    size_t prefix = slash ? (size_t)(slash - path) : 0;
+    bool ok = stream || (leaf[0] && strcmp(leaf, ".") && strcmp(leaf, "..") && prefix < sizeof(directory) &&
+                         strlen(leaf) + 32u < sizeof(temporary));
+    if (ok && !stream)
+    {
+        memcpy(directory, slash ? path : ".", slash ? prefix : 1u);
+        directory[slash ? prefix : 1u] = 0;
+        if (slash && !prefix) snprintf(directory, sizeof(directory), "/");
+        snprintf(temporary, sizeof(temporary), ".%s.tmp-%ld", leaf, (long)getpid());
+    }
+    int parent = ok && !stream ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int file = parent >= 0 ? openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0444) : -1;
+    bool created = file >= 0;
+    if (stream) ok = fwrite(bytes, 1, (size_t)length, output) == length && fflush(output) == 0;
+    else
+    {
+        ok = created && length <= UINT32_MAX && bq_write_all(file, (u8 const*)bytes, (u32)length) && fsync(file) == 0;
+        if (file >= 0 && close(file) != 0) ok = false;
+        ok = ok && linkat(parent, temporary, parent, leaf, 0) == 0;
+        if (created && unlinkat(parent, temporary, 0) != 0) ok = false;
+        ok = ok && fsync(parent) == 0;
+    }
+    if (parent >= 0) close(parent);
+    if (!ok)
+        bq_retirement_records_say(diagnostic, "cannot write %s (it must not exist yet; its directory must be "
+                                  "writable)", path);
+    return ok;
+}
+
+/* The generators:
+ *   row-plan INSTALLED PROFILE DECLARATION BUDGET CPU_MODEL_SHA256 CPU OUTPUT
+ *   untimed-commands INSTALLED PROFILE DECLARATION ROW_PLAN OUTPUT
+ *   budget-counts INSTALLED PROFILE DECLARATION PAIRS OUTPUT
+ *   budget-preflight INSTALLED PROFILE DECLARATION BUDGET COUNTS
+ * Each record goes to OUTPUT exclusively (bq_retirement_records_publish;
+ * "-" is output); budget-preflight regenerates the counts, requires COUNTS to
+ * be exactly them (so stale counts, of another census, declaration or pair
+ * count, refuse) and reports the budget's derivation on output. INSTALLED is
+ * the absolute staged installed root whose recipes/ holds the census the
  * profile's pins name (read-only files, as the service requires);
- * census_profile is the validator profile its report must declare. */
+ * census_profile is the validator profile its report must declare; PAIRS
+ * must equal the profile's campaign-pairs=. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_generate(int argc, char** argv, String8 census_profile,
     FILE* output, FILE* diagnostics)
 {
     char diagnostic[BQ_RETIREMENT_RECORDS_DIAGNOSTIC] = "usage: retirement-records row-plan INSTALLED PROFILE "
-        "DECLARATION BUDGET CPU_MODEL_SHA256 CPU | untimed-commands INSTALLED PROFILE DECLARATION ROW_PLAN | "
-        "budget-counts INSTALLED PROFILE DECLARATION PAIRS | budget-encode REVIEWED_INPUT COUNTS | "
-        "budget-preflight BUDGET COUNTS";
-    bool plan = argc == 7 && !strcmp(argv[0], "row-plan");
-    bool untimed = argc == 5 && !strcmp(argv[0], "untimed-commands");
-    bool counts = argc == 5 && !strcmp(argv[0], "budget-counts");
-    BqError result = (plan || untimed || counts) && argv[1][0] == '/' ? BQ_OK : BQ_BAD_REQUEST;
+        "DECLARATION BUDGET CPU_MODEL_SHA256 CPU OUTPUT | untimed-commands INSTALLED PROFILE DECLARATION ROW_PLAN "
+        "OUTPUT | budget-counts INSTALLED PROFILE DECLARATION PAIRS OUTPUT | budget-encode REVIEWED_INPUT COUNTS "
+        "OUTPUT | budget-preflight INSTALLED PROFILE DECLARATION BUDGET COUNTS";
+    bool plan = argc == 8 && !strcmp(argv[0], "row-plan");
+    bool untimed = argc == 6 && !strcmp(argv[0], "untimed-commands");
+    bool counts = argc == 6 && !strcmp(argv[0], "budget-counts");
+    bool preflight = argc == 6 && !strcmp(argv[0], "budget-preflight");
+    BqError result = (plan || untimed || counts || preflight) && argv[1][0] == '/' ? BQ_OK : BQ_BAD_REQUEST;
     u8* profile = NULL;
     u8* declared = NULL;
     u8* extra = NULL;
-    u32 profile_length = 0, declared_length = 0, extra_length = 0, number = 0;
+    u8* frozen = NULL;
+    u32 profile_length = 0, declared_length = 0, extra_length = 0, frozen_length = 0, number = 0, pairs = 0;
     if (result == BQ_OK &&
         !(bq_retirement_records_read(argv[2], BQ_RETIREMENT_RECORDS_PROFILE_BYTES_CAP, &profile, &profile_length) &&
           bq_retirement_records_read(argv[3], BQ_RETIREMENT_RECORDS_DECLARATION_BYTES_CAP, &declared, &declared_length) &&
-          (counts || bq_retirement_records_read(argv[4], plan ? TP_RETIREMENT_BUDGET_BYTES - 1u :
-                                                BQ_RETIREMENT_ROW_PLAN_BYTES_CAP, &extra, &extra_length))))
+          (counts || bq_retirement_records_read(argv[4], plan || preflight ? TP_RETIREMENT_BUDGET_BYTES - 1u :
+                                                BQ_RETIREMENT_ROW_PLAN_BYTES_CAP, &extra, &extra_length)) &&
+          (!preflight || bq_retirement_records_read(argv[5], TP_RETIREMENT_BUDGET_COUNTS_BYTES, &frozen,
+                                                    &frozen_length))))
     {
         result = BQ_IO;
-        bq_retirement_records_say(diagnostic, "cannot read the profile, declaration or input file");
+        bq_retirement_records_say(diagnostic, "cannot read an input file (missing, not a regular file, empty or too "
+                                  "large)");
     }
+    String8 profile_text = {(char8*)profile, profile_length};
     if (result == BQ_OK && ((plan && !bq_retirement_check_decimal(argv[6], CPU_SETSIZE - 1, &number)) ||
                             (counts && !bq_retirement_check_decimal(argv[4], UINT32_MAX, &number))))
     {
         result = BQ_BAD_REQUEST;
         bq_retirement_records_say(diagnostic, "%s is not a canonical decimal in range", plan ? argv[6] : argv[4]);
+    }
+    if (result == BQ_OK && (counts || preflight) &&
+        !(bq_retirement_records_pairs(profile_text, &pairs) && (!counts || number == pairs)))
+    {
+        result = BQ_RECIPE_MISMATCH;
+        bq_retirement_records_say(diagnostic, "the profile's campaign-pairs= is missing, not an even count in "
+                                  "%u..%u, or not the given pair count", TP_RETIREMENT_MIN_PAIRS_PER_ROUND,
+                                  TP_RETIREMENT_EXECUTION_MAX_PAIRS);
     }
     TpRetirementCampaignBudget budget = {0};
     if (result == BQ_OK && plan && !tp_retirement_budget_decode((char const*)extra, extra_length, &budget))
@@ -814,8 +925,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_generate(int argc, char** argv
     BqRetirementRecordsCensus census = {0};
     if (result == BQ_OK)
     {
-        result = bq_retirement_records_census(installed, (String8){(char8*)profile, profile_length}, census_profile,
-                                              &census);
+        result = bq_retirement_records_census(installed, profile_text, census_profile, &census);
         if (result != BQ_OK)
             bq_retirement_records_say(diagnostic, "the census under %s/recipes does not match the profile's pins or "
                                       "does not project (%s)", argv[1], bq_error_name(result));
@@ -824,13 +934,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_generate(int argc, char** argv
     bool made = result == BQ_OK &&
                 (plan ? bq_retirement_records_row_plan(&census, &declaration, &budget, argv[5], number, &text, diagnostic) :
                  untimed ? bq_retirement_records_untimed(&census, &declaration, extra, extra_length, &text, diagnostic) :
-                 bq_retirement_records_counts(&census, &declaration, number, &text, diagnostic));
+                 bq_retirement_records_counts(&census, &declaration, pairs, &text, diagnostic));
     if (result == BQ_OK && !made) result = BQ_RECIPE_MISMATCH;
-    if (result == BQ_OK && !(fwrite(text.bytes, 1, (size_t)text.length, output) == text.length && fflush(output) == 0))
+    if (result == BQ_OK && preflight && !(frozen_length == text.length && !memcmp(frozen, text.bytes, frozen_length)))
     {
-        result = BQ_IO;
-        bq_retirement_records_say(diagnostic, "cannot write the output");
+        result = BQ_RECIPE_MISMATCH;
+        bq_retirement_records_say(diagnostic, "%s are not the counts of this census, declaration and pair count "
+                                  "(regenerate them with budget-counts)", argv[5]);
     }
+    char canonical[TP_RETIREMENT_BUDGET_BYTES], digest[SHA256_HEX_CAPACITY] = {0};
+    size_t canonical_size = 0;
+    TpRetirementBudgetPreflight derived = {0};
+    if (result == BQ_OK && preflight &&
+        !(tp_retirement_budget_evaluate(0, (char const*)extra, extra_length, text.bytes, (size_t)text.length, canonical,
+                                        &canonical_size, digest, &derived, diagnostic) &&
+          tp_retirement_budget_report(output, digest, &derived) && fflush(output) == 0))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK && !preflight &&
+        !bq_retirement_records_publish(argv[argc - 1], text.bytes, text.length, output, diagnostic))
+        result = BQ_IO;
     if (result != BQ_OK) fprintf(diagnostics, "retirement-records: %s\n", diagnostic);
     free(text.bytes);
     bq_retirement_records_census_release(&census);
@@ -839,22 +961,42 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_generate(int argc, char** argv
     free(profile);
     free(declared);
     free(extra);
+    free(frozen);
     return result;
 }
 
-/* The generators, or `budget-encode REVIEWED_INPUT COUNTS` and
- * `budget-preflight BUDGET COUNTS`, lane D's budget writer
- * (tp_retirement_budget_cli, retirement_budget_tool.h). */
+/* `budget-encode REVIEWED_INPUT COUNTS OUTPUT`: lane D's budget writer
+ * (tp_retirement_budget_evaluate, retirement_budget_tool.h) with the record
+ * published exclusively. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_encode(char** argv, FILE* output, FILE* diagnostics)
+{
+    char diagnostic[BQ_RETIREMENT_RECORDS_DIAGNOSTIC] = {0};
+    u8* input = NULL;
+    u8* counts = NULL;
+    u32 input_length = 0, counts_length = 0;
+    char canonical[TP_RETIREMENT_BUDGET_BYTES], digest[SHA256_HEX_CAPACITY] = {0};
+    size_t size = 0;
+    TpRetirementBudgetPreflight derived = {0};
+    BqError result = bq_retirement_records_read(argv[1], TP_RETIREMENT_BUDGET_INPUT_BYTES, &input, &input_length) &&
+                     bq_retirement_records_read(argv[2], TP_RETIREMENT_BUDGET_COUNTS_BYTES, &counts, &counts_length) ?
+                     BQ_OK : BQ_IO;
+    if (result != BQ_OK) tp_retirement_budget_say(diagnostic, "cannot read %s or %s", argv[1], argv[2]);
+    if (result == BQ_OK && !tp_retirement_budget_evaluate(1, (char const*)input, input_length, (char const*)counts,
+                                                          counts_length, canonical, &size, digest, &derived, diagnostic))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK && !bq_retirement_records_publish(argv[3], canonical, size, output, diagnostic)) result = BQ_IO;
+    if (result != BQ_OK) fprintf(diagnostics, "retirement-budget: %s\n", diagnostic);
+    free(input);
+    free(counts);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_records_run(int argc, char** argv, String8 census_profile, FILE* output,
     FILE* diagnostics)
 {
-    bool encode = argc == 3 && !strcmp(argv[0], "budget-encode");
-    bool preflight = argc == 3 && !strcmp(argv[0], "budget-preflight");
-    char encode_name[] = "encode", preflight_name[] = "preflight";
-    char* forwarded[3] = {encode ? encode_name : preflight_name, argc == 3 ? argv[1] : NULL, argc == 3 ? argv[2] : NULL};
-    BqError result = !(encode || preflight) ? bq_retirement_records_generate(argc, argv, census_profile, output,
-                                                                             diagnostics) :
-                     tp_retirement_budget_cli(3, forwarded, output, diagnostics) == 0 ? BQ_OK : BQ_RECIPE_MISMATCH;
+    bool encode = argc == 4 && !strcmp(argv[0], "budget-encode");
+    BqError result = encode ? bq_retirement_records_encode(argv, output, diagnostics) :
+                     bq_retirement_records_generate(argc, argv, census_profile, output, diagnostics);
     return result;
 }
 

@@ -89,6 +89,9 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_records_declaration(BqRetirementRecordsCensus c
     return text->ok;
 }
 
+/* The last generator run's diagnostic. */
+BUSTER_GLOBAL_LOCAL char bq_prep_records_diagnostic[BQ_RETIREMENT_RECORDS_DIAGNOSTIC];
+
 /* One generator run over a fresh declaration of edit: 0 plan, 1 untimed
  * (over plan_bytes), 2 counts. The output is in *text on success. */
 BUSTER_GLOBAL_LOCAL bool bq_prep_records_generate(BqRetirementRecordsCensus const* census, char const* plan,
@@ -111,6 +114,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_records_generate(BqRetirementRecordsCensus cons
                                                           (unsigned)edit, kind, diagnostic);
     /* A refusal leaves nothing behind. */
     if (!ok) BQ_PREP_CHECK(!text->bytes && !text->length && diagnostic[0]);
+    memcpy(bq_prep_records_diagnostic, diagnostic, sizeof(diagnostic));
     bq_retirement_records_declaration_release(&declaration);
     free(declared.bytes);
     return ok;
@@ -232,6 +236,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
                   tp_retirement_budget_counts_parse(counts.bytes, (size_t)counts.length, &owned) &&
                   owned.counts.timed.count == census.timed.count && owned.counts.untimed.count == census.untimed.count &&
                   owned.counts.runtime_rows == runtime && owned.counts.pairs == 60 &&
+                  !memcmp(owned.population_sha256, projection->population_sha256, SHA256_HEX_CAPACITY) &&
                   tp_retirement_budget_review(&budget, &owned.counts, &preflight, diagnostic) && preflight.fits);
     tp_retirement_budget_counts_release(&owned);
 
@@ -240,27 +245,37 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
      * failing control, a control on a compiler-eligible row, bad host facts,
      * and a plan with another digest for the untimed contract. */
     BqRetirementRowText refused_text = {0};
-    static BqPrepRecordsEdit const plan_refusals[] = {BQ_PREP_RECORDS_DROP_TIMED, BQ_PREP_RECORDS_NO_RULES,
-        BQ_PREP_RECORDS_RULES_UNORDERED, BQ_PREP_RECORDS_EXIT_WITHOUT_FAILURE, BQ_PREP_RECORDS_ELIGIBLE_CONTROL};
+    static struct
+    {
+        BqPrepRecordsEdit edit;
+        char const* expect;
+    } const plan_refusals[] = {
+        {BQ_PREP_RECORDS_DROP_TIMED, "timed object group 0 (first row"},
+        {BQ_PREP_RECORDS_NO_RULES, "has no compile rule"},
+        {BQ_PREP_RECORDS_RULES_UNORDERED, "is not canonical " BQ_RETIREMENT_RECORDS_DECLARATION_HEADER},
+        {BQ_PREP_RECORDS_EXIT_WITHOUT_FAILURE, "must be nonzero exactly when a control fails"},
+        {BQ_PREP_RECORDS_ELIGIBLE_CONTROL, "is not a native, compiler-ineligible object row"},
+        {BQ_PREP_RECORDS_SHARED_KEY, "share a batch key"},
+        {BQ_PREP_RECORDS_SINGLETON_TIMED, "is a singleton, not an object group"},
+    };
     for (u32 index = 0; ready && index < BUSTER_ARRAY_LENGTH(plan_refusals); index += 1)
-        BQ_PREP_CHECK(census.timed.object_groups &&
-                      !bq_prep_records_generate(&census, plan, plan_refusals[index], control_row, eligible_row, 0,
-                                                cpu_model, cpu, NULL, 0, &refused_text));
-    if (ready && census.timed.object_groups > 1)
-        BQ_PREP_CHECK(!bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_SHARED_KEY, control_row, eligible_row, 0,
-                                                cpu_model, cpu, NULL, 0, &refused_text));
-    if (ready && census.timed.count > census.timed.object_groups)
-        BQ_PREP_CHECK(!bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_SINGLETON_TIMED, control_row, eligible_row,
-                                                0, cpu_model, cpu, NULL, 0, &refused_text));
+    {
+        bool applies = plan_refusals[index].edit == BQ_PREP_RECORDS_SHARED_KEY ? census.timed.object_groups > 1 :
+                       plan_refusals[index].edit == BQ_PREP_RECORDS_SINGLETON_TIMED ?
+                       census.timed.count > census.timed.object_groups : census.timed.object_groups > 0;
+        BQ_PREP_CHECK(applies && !bq_prep_records_generate(&census, plan, plan_refusals[index].edit, control_row,
+                                                           eligible_row, 0, cpu_model, cpu, NULL, 0, &refused_text) &&
+                      strstr(bq_prep_records_diagnostic, plan_refusals[index].expect));
+    }
     BQ_PREP_CHECK(ready && !bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_EXACT, control_row, eligible_row, 0,
                                                      "not-a-digest", cpu, NULL, 0, &refused_text) &&
+                  strstr(bq_prep_records_diagnostic, "64 lowercase hex") &&
                   !bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_EXACT, control_row, eligible_row, 0, cpu_model,
                                             CPU_SETSIZE, NULL, 0, &refused_text));
-    if (ready && census.untimed.object_groups)
-        BQ_PREP_CHECK(generated.bytes &&
-                      !bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_DROP_UNTIMED, control_row, eligible_row,
-                                                1, cpu_model, cpu, generated.bytes, (u32)generated.length,
-                                                &refused_text));
+    BQ_PREP_CHECK(ready && census.untimed.object_groups && generated.bytes &&
+                  !bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_DROP_UNTIMED, control_row, eligible_row,
+                                            1, cpu_model, cpu, generated.bytes, (u32)generated.length, &refused_text) &&
+                  strstr(bq_prep_records_diagnostic, "untimed object group"));
     /* A plan naming another census digest (or with any byte changed) does
      * not bind to this census. */
     char* forged = generated.bytes ? malloc(generated.length + 1u) : NULL;
@@ -269,7 +284,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
     if (census_line) census_line[8] = census_line[8] == '0' ? '1' : '0';
     BQ_PREP_CHECK(census_line && !bq_prep_records_generate(&census, plan, BQ_PREP_RECORDS_EXACT, control_row,
                                                            eligible_row, 1, cpu_model, cpu, forged,
-                                                           (u32)generated.length, &refused_text));
+                                                           (u32)generated.length, &refused_text) &&
+                  strstr(bq_prep_records_diagnostic, "does not import against this census"));
     free(forged);
     /* A declared control (a native, compiler-ineligible object row, or one
      * naming no row when the census has none) yields a plan that imports,
@@ -290,6 +306,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
                       (control_row == UINT32_MAX || decoded.completed[control_row].batch_control) &&
                       decoded.groups[0].exit_status == 1 &&
                       decoded.groups[0].input_count == members + 1u &&
+                      decoded.groups[0].metrics_bytes_max ==
+                          budget.metrics_header_bytes + (u64)(members + 1u) * budget.metrics_input_bytes &&
                       decoded.inputs[decoded.groups[0].input_count - 1u].row ==
                           (control_row == UINT32_MAX ? TP_RETIREMENT_BATCH_NO_ROW : control_row) &&
                       !decoded.inputs[decoded.groups[0].input_count - 1u].member);
@@ -297,15 +315,15 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
         free(controlled.bytes);
     }
 
-    /* (d) The CLI seam: files in, exactly the record out; a refusal writes
-     * nothing. */
+    /* (d) The CLI seam: files in, exactly the record out ("-" is the
+     * stream); a refusal writes nothing. */
     BqRetirementRowText declared = {0};
     char directory[] = "/tmp/bq-records-XXXXXX";
     char profile_path[256], declaration_path[256], budget_path[256], plan_path[256], cpu_text[16];
     char budget_text[TP_RETIREMENT_BUDGET_BYTES];
     size_t budget_size = tp_retirement_budget_encode(&budget, budget_text, sizeof(budget_text));
     snprintf(cpu_text, sizeof(cpu_text), "%u", cpu);
-    bool files = ready && generated.bytes && budget_size && mkdtemp(directory) &&
+    bool files = ready && generated.bytes && counts.bytes && budget_size && mkdtemp(directory) &&
                  bq_prep_records_declaration(&census, plan, BQ_PREP_RECORDS_EXACT, control_row, eligible_row, &declared) &&
                  bq_prep_records_file(directory, "records-profile", fixture->profile, strlen(fixture->profile),
                                       profile_path) &&
@@ -317,64 +335,122 @@ BUSTER_GLOBAL_LOCAL void bq_prep_records_test(BqPrepOracleFixture* fixture, BqRe
     char* output = NULL;
     u32 output_length = 0;
     char* plan_argv[] = {"row-plan", fixture->installed, profile_path, declaration_path, budget_path,
-                         (char*)cpu_model, cpu_text};
-    BQ_PREP_CHECK(files && bq_prep_records_cli(plan_argv, 7, &output, &output_length) == BQ_OK &&
+                         (char*)cpu_model, cpu_text, "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(plan_argv, 8, &output, &output_length) == BQ_OK &&
                   output_length == generated.length && !memcmp(output, generated.bytes, output_length));
     free(output);
-    char* untimed_argv[] = {"untimed-commands", fixture->installed, profile_path, declaration_path, plan_path};
-    BQ_PREP_CHECK(files && bq_prep_records_cli(untimed_argv, 5, &output, &output_length) == BQ_OK &&
+    char* untimed_argv[] = {"untimed-commands", fixture->installed, profile_path, declaration_path, plan_path, "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(untimed_argv, 6, &output, &output_length) == BQ_OK &&
                   output_length == untimed_length && !memcmp(output, untimed, untimed_length));
     free(output);
-    char* counts_argv[] = {"budget-counts", fixture->installed, profile_path, declaration_path, "60"};
-    BQ_PREP_CHECK(files && counts.bytes && bq_prep_records_cli(counts_argv, 5, &output, &output_length) == BQ_OK &&
+    char* counts_argv[] = {"budget-counts", fixture->installed, profile_path, declaration_path, "60", "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(counts_argv, 6, &output, &output_length) == BQ_OK &&
                   output_length == counts.length && !memcmp(output, counts.bytes, output_length));
     free(output);
+    /* The pair count is the profile's campaign-pairs=: another count, or a
+     * profile without the pin, refuses. */
+    char* other_pairs[] = {"budget-counts", fixture->installed, profile_path, declaration_path, "62", "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(other_pairs, 6, &output, &output_length) == BQ_RECIPE_MISMATCH &&
+                  output_length == 0);
+    free(output);
+    char unpinned_path[256] = {0}, unpinned[4096];
+    char const* pairs_line = strstr(fixture->profile, BQ_RETIREMENT_UNIT_CAMPAIGN_PAIRS_KEY);
+    char const* pairs_end = pairs_line ? strchr(pairs_line, '\n') : NULL;
+    int unpinned_length = pairs_end ? snprintf(unpinned, sizeof(unpinned), "%.*s%s", (int)(pairs_line - fixture->profile),
+                                               fixture->profile, pairs_end + 1) : -1;
+    char* no_pairs[] = {"budget-counts", fixture->installed, unpinned_path, declaration_path, "60", "-"};
+    BQ_PREP_CHECK(files && unpinned_length > 0 && (size_t)unpinned_length < sizeof(unpinned) &&
+                  bq_prep_records_file(directory, "records-unpinned", unpinned, (u64)unpinned_length, unpinned_path) &&
+                  bq_prep_records_cli(no_pairs, 6, &output, &output_length) == BQ_RECIPE_MISMATCH && output_length == 0);
+    free(output);
+    /* An OUTPUT file is written exclusively: created read-only with exactly
+     * the record, never replaced (a second run refuses and leaves it), and
+     * no temporary sibling remains either way. */
+    char exclusive[300];
+    snprintf(exclusive, sizeof(exclusive), "%s/row-plan", directory);
+    char* file_argv[] = {"row-plan", fixture->installed, profile_path, declaration_path, budget_path, (char*)cpu_model,
+                         cpu_text, exclusive};
+    struct stat published = {0};
+    u32 published_length = 0;
+    int listing = files ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BQ_PREP_CHECK(files && bq_prep_records_cli(file_argv, 8, &output, &output_length) == BQ_OK && output_length == 0 &&
+                  stat(exclusive, &published) == 0 && (published.st_mode & 0777) == 0444);
+    free(output);
+    char* written = listing >= 0 ? bq_prep_worker_unit_slurp(listing, "row-plan", &published_length) : NULL;
+    BQ_PREP_CHECK(written && published_length == generated.length && !memcmp(written, generated.bytes, published_length));
+    free(written);
+    BQ_PREP_CHECK(files && bq_prep_records_cli(file_argv, 8, &output, &output_length) == BQ_IO && output_length == 0);
+    free(output);
+    written = listing >= 0 ? bq_prep_worker_unit_slurp(listing, "row-plan", &published_length) : NULL;
+    BQ_PREP_CHECK(written && published_length == generated.length && !memcmp(written, generated.bytes, published_length));
+    free(written);
+    DIR* entries = listing >= 0 ? fdopendir(dup(listing)) : NULL;
+    u32 temporaries = 0;
+    for (struct dirent* entry = entries ? readdir(entries) : NULL; entry; entry = readdir(entries))
+        temporaries += strstr(entry->d_name, ".tmp-") != NULL;
+    BQ_PREP_CHECK(entries && temporaries == 0);
+    if (entries) closedir(entries);
+    if (listing >= 0) close(listing);
     /* Lane D's budget writer through the same entry: the canonical record's
      * values as a reviewed input encode back to the record, which preflights
-     * against the generated counts; a record that is not canonical refuses. */
-    char input_path[256] = {0}, counts_path[256] = {0}, input[TP_RETIREMENT_BUDGET_BYTES + 64];
+     * against the counts regenerated from the census; counts naming another
+     * declaration (stale) and a record that is not canonical refuse. */
+    char input_path[256] = {0}, counts_path[256] = {0}, stale_path[256] = {0}, input[TP_RETIREMENT_BUDGET_BYTES + 64];
     char const* values = budget_size ? strchr(strchr(budget_text, '\n') + 1, '\n') + 1 : NULL;
     int input_length = values ? snprintf(input, sizeof(input), "schema=%s\n# fixture values\n%.*s",
                                          TP_RETIREMENT_BUDGET_INPUT_SCHEMA,
                                          (int)(budget_size - (size_t)(values - budget_text)), values) : -1;
-    bool budget_files = files && counts.bytes && input_length > 0 && (size_t)input_length < sizeof(input) &&
+    char* stale = counts.bytes ? malloc(counts.length + 1u) : NULL;
+    char* stale_digest = stale ? (memcpy(stale, counts.bytes, counts.length + 1u), strstr(stale, "\ndeclaration=")) : NULL;
+    if (stale_digest) stale_digest[13] = stale_digest[13] == '0' ? '1' : '0';
+    bool budget_files = files && stale_digest && input_length > 0 && (size_t)input_length < sizeof(input) &&
                         bq_prep_records_file(directory, "records-input", input, (u64)input_length, input_path) &&
-                        bq_prep_records_file(directory, "records-counts", counts.bytes, counts.length, counts_path);
-    char* encode_argv[] = {"budget-encode", input_path, counts_path};
-    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(encode_argv, 3, &output, &output_length) == BQ_OK &&
+                        bq_prep_records_file(directory, "records-counts", counts.bytes, counts.length, counts_path) &&
+                        bq_prep_records_file(directory, "records-stale", stale, counts.length, stale_path);
+    free(stale);
+    char* encode_argv[] = {"budget-encode", input_path, counts_path, "-"};
+    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(encode_argv, 4, &output, &output_length) == BQ_OK &&
                   output_length == budget_size && !memcmp(output, budget_text, budget_size));
     free(output);
-    char* preflight_argv[] = {"budget-preflight", budget_path, counts_path};
-    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(preflight_argv, 3, &output, &output_length) == BQ_OK &&
+    char* preflight_argv[] = {"budget-preflight", fixture->installed, profile_path, declaration_path, budget_path,
+                              counts_path};
+    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(preflight_argv, 6, &output, &output_length) == BQ_OK &&
                   !strncmp(output, "budget-sha256=", 14) && strstr(output, "\nfits=1\n"));
     free(output);
-    char* refused_argv[] = {"budget-preflight", input_path, counts_path};
-    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(refused_argv, 3, &output, &output_length) == BQ_RECIPE_MISMATCH &&
+    char* stale_argv[] = {"budget-preflight", fixture->installed, profile_path, declaration_path, budget_path,
+                          stale_path};
+    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(stale_argv, 6, &output, &output_length) == BQ_RECIPE_MISMATCH &&
                   output_length == 0);
     free(output);
-    if (budget_files) BQ_PREP_CHECK(unlink(input_path) == 0 && unlink(counts_path) == 0);
+    char* refused_argv[] = {"budget-preflight", fixture->installed, profile_path, declaration_path, input_path,
+                            counts_path};
+    BQ_PREP_CHECK(budget_files && bq_prep_records_cli(refused_argv, 6, &output, &output_length) != BQ_OK &&
+                  output_length == 0);
+    free(output);
     /* The untimed contract refuses the budget file as a plan, the plan
      * generator a malformed CPU, and the public entry this self-test census
      * (it requires the full census): each with nothing on output. */
-    char* wrong_plan[] = {"untimed-commands", fixture->installed, profile_path, declaration_path, budget_path};
-    BQ_PREP_CHECK(files && bq_prep_records_cli(wrong_plan, 5, &output, &output_length) == BQ_RECIPE_MISMATCH &&
+    char* wrong_plan[] = {"untimed-commands", fixture->installed, profile_path, declaration_path, budget_path, "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(wrong_plan, 6, &output, &output_length) == BQ_RECIPE_MISMATCH &&
                   output_length == 0);
     free(output);
     char* wrong_cpu[] = {"row-plan", fixture->installed, profile_path, declaration_path, budget_path, (char*)cpu_model,
-                         "01"};
-    BQ_PREP_CHECK(files && bq_prep_records_cli(wrong_cpu, 7, &output, &output_length) == BQ_BAD_REQUEST &&
+                         "01", "-"};
+    BQ_PREP_CHECK(files && bq_prep_records_cli(wrong_cpu, 8, &output, &output_length) == BQ_BAD_REQUEST &&
                   output_length == 0);
     free(output);
     FILE* stream = tmpfile();
     FILE* sink = fopen("/dev/null", "w");
-    BQ_PREP_CHECK(files && stream && sink && bq_retirement_records_cli(7, plan_argv, stream, sink) == BQ_SOURCE_MISMATCH &&
+    BQ_PREP_CHECK(files && stream && sink && bq_retirement_records_cli(8, plan_argv, stream, sink) == BQ_SOURCE_MISMATCH &&
                   fseek(stream, 0, SEEK_END) == 0 && ftell(stream) == 0 &&
                   bq_retirement_records_cli(3, plan_argv, stream, sink) == BQ_BAD_REQUEST && ftell(stream) == 0);
     if (stream) fclose(stream);
     if (sink) fclose(sink);
-    char const* const names[] = {profile_path, declaration_path, budget_path, plan_path};
-    for (u32 index = 0; files && index < BUSTER_ARRAY_LENGTH(names); index += 1) BQ_PREP_CHECK(unlink(names[index]) == 0);
-    if (files) BQ_PREP_CHECK(rmdir(directory) == 0);
+    char const* const names[] = {profile_path, declaration_path, budget_path, plan_path, unpinned_path, exclusive,
+                                 input_path, counts_path, stale_path};
+    for (u32 index = 0; files && budget_files && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        BQ_PREP_CHECK(unlink(names[index]) == 0);
+    if (files && budget_files) BQ_PREP_CHECK(rmdir(directory) == 0);
     free(declared.bytes);
     free(generated.bytes);
     free(again.bytes);
