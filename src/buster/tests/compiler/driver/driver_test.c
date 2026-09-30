@@ -11646,6 +11646,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "Float16Vector8 float16_vector_divide(Float16Vector8 left, Float16Vector8 right);\n"
         "Float16Vector8 float16_vector_negate(Float16Vector8 value);\n"
         "Float16Mask8 float16_vector_less(Float16Vector8 left, Float16Vector8 right);\n"
+        "extern const _Float16 float16_literal_values[];\n"
+        "void float16_literal_store(_Float16* out);\n"
         "#if __LDBL_MANT_DIG__ == 64\n"
         "_Float16 float16_from_x87(long double value);\n"
         "_Float16 float16_from_x87_complex(_Complex long double value);\n"
@@ -11796,6 +11798,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "    return value;\n"
         "}\n"
         "#endif\n");
+    // #1226: integer goldens from the binary16 grid, observed with memcpy by
+    // the separately compiled caller. Both object-link directions run them.
+    struct
+    {
+        String8 spelling;
+        u16 bits;
+    } literal_cases[] = {
+        {S8("0x1.00200000000001p0F16"), 0x3c01},
+        {S8("-0x1.00200000000001p0F16"), 0xbc01},
+        {S8("0x1.002p0F16"), 0x3c00},
+        {S8("0x1.005fffffffffffFp0F16"), 0x3c01},
+        {S8("-0x1.005fffffffffffFp0F16"), 0xbc01},
+        {S8("0x1.006p0F16"), 0x3c02},
+        {S8("0x1.00200000000001p0"), 0x3c00},
+        {S8("0x1.005fffffffffffFp0"), 0x3c02},
+        {S8("0x80000000000001p-80F16"), 0x0001},
+        {S8("-0x80000000000001p-80F16"), 0x8001},
+        {S8("0x1p-25F16"), 0x0000},
+        {S8("-0x1p-25F16"), 0x8000},
+        {S8("0x17fffffffffffffp-80F16"), 0x0001},
+        {S8("-0x17fffffffffffffp-80F16"), 0x8001},
+        {S8("0x3p-25F16"), 0x0002},
+        {S8("0x80000000000001p-80"), 0x0000},
+        {S8("0x17fffffffffffffp-80"), 0x0002},
+        {S8("1.7026367187500000"), 0x3ed0},
+        {S8("1.7075195312500000"), 0x3ed4},
+        {S8("65519.999999999999999F16"), 0x7bff},
+        {S8("65520.0F16"), 0x7c00},
+        {S8("-65520.0F16"), 0xfc00},
+        {S8("0.0F16"), 0x0000},
+        {S8("-0.0F16"), 0x8000},
+        {S8("1e1000F16"), 0x7c00},
+        {S8("1e-1000F16"), 0x0000},
+    };
+    enum { FLOAT16_LITERAL_PADDING_COUNT = 17, FLOAT16_LITERAL_FAMILY_COUNT = 2, FLOAT16_LITERAL_SIGN_COUNT = 2 };
+    u32 literal_count = BUSTER_ARRAY_LENGTH(literal_cases) +
+                        FLOAT16_LITERAL_PADDING_COUNT * FLOAT16_LITERAL_FAMILY_COUNT * FLOAT16_LITERAL_SIGN_COUNT;
+    String8* global_parts = arena_allocate(arguments->arena, String8, literal_count + 2);
+    String8* local_parts = arena_allocate(arguments->arena, String8, literal_count + 2);
+    String8* expected_parts = arena_allocate(arguments->arena, String8, literal_count + 2);
+    global_parts[0] = S8("const _Float16 float16_literal_values[] = {\n");
+    local_parts[0] = S8("void float16_literal_store(_Float16* out)\n{\n");
+    expected_parts[0] = S8("    unsigned short literal_expected[] = {\n");
+    for (u32 index = 0; index < literal_count; index += 1)
+    {
+        String8 spelling;
+        u16 bits;
+        if (index < BUSTER_ARRAY_LENGTH(literal_cases))
+        {
+            spelling = literal_cases[index].spelling;
+            bits = literal_cases[index].bits;
+        }
+        else
+        {
+            u32 padded_index = index - (u32)BUSTER_ARRAY_LENGTH(literal_cases);
+            u32 padding = padded_index % FLOAT16_LITERAL_PADDING_COUNT;
+            u32 family = padded_index / FLOAT16_LITERAL_PADDING_COUNT % FLOAT16_LITERAL_FAMILY_COUNT;
+            bool negative = padded_index / (FLOAT16_LITERAL_PADDING_COUNT * FLOAT16_LITERAL_FAMILY_COUNT) != 0;
+            String8 zeroes = S8("0000000000000000");
+            zeroes.length = padding;
+            spelling = string_format(arguments->arena, S8("{S8}{S8}{S8}f16"), negative ? S8("-") : S8(""),
+                                     family ? S8("1.70751953125") : S8("1.70263671875"), zeroes);
+            bits = (u16)((family ? 0x3ed4u : 0x3ed0u) | (negative ? 0x8000u : 0));
+        }
+        global_parts[index + 1] = string_format(arguments->arena, S8("    {S8},\n"), spelling);
+        local_parts[index + 1] = string_format(arguments->arena, S8("    out[{u32}] = {S8};\n"), index, spelling);
+        expected_parts[index + 1] = string_format(arguments->arena, S8("        {u32},\n"), (u32)bits);
+    }
+    global_parts[literal_count + 1] = S8("};\n");
+    local_parts[literal_count + 1] = S8("}\n");
+    expected_parts[literal_count + 1] = S8("    };\n");
+    String8 float16_literal_callee = string_format(
+        arguments->arena, S8("{S8}{S8}"),
+        string_join_arena(arguments->arena, (SliceString8){.pointer = global_parts, .length = literal_count + 2}, false),
+        string_join_arena(arguments->arena, (SliceString8){.pointer = local_parts, .length = literal_count + 2}, false));
+    String8 float16_literal_caller = string_format(
+        arguments->arena,
+        S8("{S8}"
+           "    _Float16 literal_locals[{u32}];\n"
+           "    float16_literal_store(literal_locals);\n"
+           "    for (int index = 0; !status && index < {u32}; index += 1)\n"
+           "    {{\n"
+           "        unsigned short global_bits;\n"
+           "        unsigned short local_bits;\n"
+           "        __builtin_memcpy(&global_bits, &float16_literal_values[index], sizeof(global_bits));\n"
+           "        __builtin_memcpy(&local_bits, &literal_locals[index], sizeof(local_bits));\n"
+           "        if (global_bits != literal_expected[index]) status = 29;\n"
+           "        else if (local_bits != literal_expected[index]) status = 30;\n"
+           "    }}\n"),
+        string_join_arena(arguments->arena, (SliceString8){.pointer = expected_parts, .length = literal_count + 2}, false),
+        literal_count, literal_count);
     String8 float16_caller_body = S8(
         "\n"
         "static int float16_same_bits(_Float16 value, unsigned short bits)\n"
@@ -11908,8 +12001,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "    return status;\n"
         "}\n");
     String8 source_bodies[] = {
-        string_format(arguments->arena, S8("{S8}{S8}{S8}"), float16_shared_source, float16_callee_body, float16_x87_callee_body),
-        string_format(arguments->arena, S8("{S8}{S8}{S8}"), float16_shared_source, float16_caller_body, float16_x87_caller_tail),
+        string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), float16_shared_source, float16_callee_body, float16_x87_callee_body,
+                      float16_literal_callee),
+        string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), float16_shared_source, float16_caller_body, float16_literal_caller,
+                      float16_x87_caller_tail),
     };
     String8 sources[BUSTER_ARRAY_LENGTH(source_bodies)];
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(source_bodies); source_index += 1)

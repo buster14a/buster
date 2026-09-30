@@ -22918,8 +22918,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
 // `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
 // only real floating type narrower than `float` this frontend has. The three
 // groups below are the contract: the layout every supported target gives it,
-// the binary16 encoding of its constants -- every expected byte string here
-// was taken from clang 18 compiling the same source -- and the specifier
+// the binary16 encoding of its constants -- Clang 18 goldens below, with the
+// #1226 midpoint regressions derived from the exact binary16 grid -- and the specifier
 // combinations that are not a type at all.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* arguments)
 {
@@ -23008,6 +23008,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         // between the spelling and these bytes.
         {S8("_Float16 values[] = {1.5f16, 0.1f16, 65504.0F16, 65520.0f16, 1e-8f16, 0x1p-24f16};"),
          S8("\x00\x3e\x66\x2e\xff\x7b\x00\x7c\x00\x00\x01\x00")},
+        // Direct half tokens retain the side of a midpoint beyond binary64
+        // precision. Unsuffixed controls deliberately round to double first.
+        {S8("_Float16 values[] = {0x1.00200000000001p0F16, -0x1.00200000000001p0F16, 0x1.002p0F16,"
+            "0x1.005fffffffffffFp0F16, -0x1.005fffffffffffFp0F16, 0x1.006p0F16,"
+            "0x1.00200000000001p0, 0x1.005fffffffffffFp0};"),
+         S8("\x01\x3c\x01\xbc\x00\x3c\x01\x3c\x01\xbc\x02\x3c\x00\x3c\x02\x3c")},
+        {S8("_Float16 values[] = {0x80000000000001p-80F16, -0x80000000000001p-80F16, 0x1p-25F16, -0x1p-25F16,"
+            "0x17fffffffffffffp-80F16, -0x17fffffffffffffp-80F16, 0x3p-25F16,"
+            "0x80000000000001p-80, 0x17fffffffffffffp-80};"),
+         S8("\x01\x00\x01\x80\x00\x00\x00\x80\x01\x00\x01\x80\x02\x00\x00\x00\x02\x00")},
+        // Exact decimal ties of opposite parity, with padding beyond the
+        // approximate parser's small-mantissa path. 3487/2048 and 3497/2048
+        // both choose the even encoding, independently of host contraction.
+        {S8("_Float16 values[] = {1.70263671875f16, 1.7026367187500000f16, 1.702636718750000000000000000f16,"
+            "-1.7026367187500000F16, 1.70751953125f16, 1.7075195312500000f16, 1.707519531250000000000000000f16,"
+            "-1.7075195312500000F16, 1.7026367187500000, 1.7075195312500000};"),
+         S8("\xd0\x3e\xd0\x3e\xd0\x3e\xd0\xbe\xd4\x3e\xd4\x3e\xd4\x3e\xd4\xbe\xd0\x3e\xd4\x3e")},
         // An integer source rounds at the destination's precision, and one
         // past the largest finite half becomes an infinity.
         {S8("_Float16 values[] = {1, -1, 100, 65504, 65505, 100000, -100000};"),
@@ -23043,12 +23060,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 1.5;"), S8("float16-scalar.c"), constant_target.target,
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 0x1.00200000000001p0F16;"), S8("float16-scalar.c"), constant_target.target,
                                                      &preprocess, &parse);
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         IrGlobal* scalar = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("scalar")) : 0;
         BUSTER_TEST(arguments, scalar && scalar->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
-        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3e00);
+        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3c01);
         IrType* scalar_type = scalar && lowered.program ? ir_type_from_id(&lowered.program->types, scalar->type) : 0;
         BUSTER_TEST(arguments, scalar_type && scalar_type->kind == IR_TYPE_FLOAT && scalar_type->bit_width == 16 && scalar_type->layout.size == 2);
         scratch_end(temporary);
