@@ -340,6 +340,52 @@ BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessRe
     return (String8){0};
 }
 
+// The section an entity's declarations of `kind` request: the definition's
+// own when it names one, and otherwise the first declaration's that does,
+// because GNU C merges the attribute across the declarations of one entity --
+// a prototype carrying it places the definition that follows (issue 1276).
+BUSTER_C_INTERNAL String8 c_entity_section_name(Arena* arena, CPreprocessResult preprocess, CAnalysisResult* parse, u32 entity_index,
+                                                CDeclaration* definition, CDeclarationKind kind)
+{
+    String8 result = definition ? c_declaration_section_name(arena, preprocess, *definition) : (String8){0};
+    u32 bucket_end = parse->declarations_by_entity_offsets[entity_index + 1];
+    for (u32 bucket_index = parse->declarations_by_entity_offsets[entity_index]; bucket_index < bucket_end && !result.length; bucket_index += 1)
+    {
+        CDeclaration* declaration = parse->declarations + parse->declarations_by_entity[bucket_index];
+        if (declaration->kind == kind && declaration != definition)
+        {
+            result = c_declaration_section_name(arena, preprocess, *declaration);
+        }
+    }
+
+    return result;
+}
+
+// The native output a `section` attribute cannot be honoured in, named for
+// the refusal, or empty where it can (issue 1276): ELF objects place it, and
+// the COFF and Mach-O writers, which have one section per kind and nowhere to
+// put a named one, refuse it rather than drop it. The non-native emitters
+// answer for themselves: eBPF's program sections are the attribute's own
+// spelling, and Wasm is not decided here.
+BUSTER_C_INTERNAL String8 c_section_attribute_unsupported_output(Target target)
+{
+    String8 result = {0};
+    if (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64)
+    {
+        result = (String8){0};
+    }
+    else if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+    {
+        result = S8("COFF");
+    }
+    else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+    {
+        result = S8("Mach-O");
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL String8 c_declaration_link_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
@@ -6300,6 +6346,34 @@ BUSTER_C_INTERNAL String8 c_ir_static_local_link_name(CIntegerIrBuilder* builder
     CEntity* entity_value = builder->parse.entities + entity.value;
     String8 function_name = builder->function ? builder->function->name : S8("anonymous");
     return string_format(builder->arena, S8(".L.{S8}.{S8}.{u32}"), function_name, entity_value->name, entity.value);
+}
+
+// The section a block-scope static's declaration tokens [start, end) request
+// (issue 1276). Its storage is placed like a file-scope object's, so it is
+// refused on the same outputs and for thread-local storage; false leaves the
+// refusal in failure_message.
+BUSTER_C_INTERNAL bool c_ir_static_local_section_name(CIntegerIrBuilder* builder, CToken name, u32 start, u32 end, bool is_thread_local,
+                                                      String8* section_name)
+{
+    *section_name = c_declaration_section_name(builder->arena, builder->preprocess,
+                                               (CDeclaration){
+                                                   .token_start = start,
+                                                   .token_count = end - start,
+                                               });
+    String8 unsupported_output = c_section_attribute_unsupported_output(builder->target);
+    bool result = !section_name->length || (!unsupported_output.length && !(is_thread_local && c_attribute_native_binding_target(builder->target)));
+    if (!result)
+    {
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, name);
+        builder->failure_message =
+            unsupported_output.length
+                ? string_format(builder->arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"), spelling,
+                                *section_name, unsupported_output)
+                : string_format(builder->arena, S8("thread-local '{S8}' is declared __attribute__((section(\"{S8}\"))), which cannot be placed"), spelling,
+                                *section_name);
+    }
+
+    return result;
 }
 
 // A block-scope function declarator binds a local entity that designates the
@@ -35284,6 +35358,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             builder->failure_message = string_format(builder->arena, S8("could not allocate static local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
             return false;
         }
+        String8 local_section_name = {0};
+        if (!c_ir_static_local_section_name(builder, name, start, end, local_thread_local, &local_section_name))
+        {
+            return false;
+        }
+        ir_symbol_from_id(&builder->program->symbols, symbol)->section_name = local_section_name;
         IrGlobal global = {
             .symbol = symbol,
             .initializer_symbol = IR_SYMBOL_ID_INVALID,
@@ -39447,9 +39527,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     String8 symbol_name = c_ir_static_local_link_name(builder, entity);
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
+                    String8 local_section_name = {0};
+                    if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
+                    {
+                        return false;
+                    }
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
                                                                                     .name = symbol_name,
                                                                                     .link_name = symbol_name,
+                                                                                    .section_name = local_section_name,
                                                                                     .source = local_source,
                                                                                     .type = local_type,
                                                                                     .kind = IR_SYMBOL_DATA,
@@ -49344,12 +49430,14 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // also what keeps it out of the per-type budget the aggregate and alias
     // reports share, and a third per declaration for a `constructor`/
     // `destructor` on a target with no initializer array, which is reported
-    // after every body is lowered and so shares neither of the first two.
+    // after every body is lowered and so shares neither of the first two, and
+    // a fourth per declaration and a second per entity for a `section`
+    // attribute the output cannot place (issue 1276).
     // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        3 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                        4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
                                             parse.array_bound_count + 2);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
@@ -50748,7 +50836,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_OBJECT),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_DATA,
@@ -50759,6 +50848,23 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
                                                                       });
+        // A placement only a definition makes (issue 1276): refused where the
+        // output has nowhere to put it, and for thread-local storage, whose
+        // one TLS block per object the native writers do not split.
+        String8 section_name = definition ? ir_symbol_from_id(&program->symbols, entity_symbols[entity_index])->section_name : (String8){0};
+        String8 unsupported_output = c_section_attribute_unsupported_output(target);
+        if (section_name.length && (unsupported_output.length || (is_thread_local && c_attribute_native_binding_target(target))))
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = unsupported_output.length
+                               ? string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
+                                               entity->name, section_name, unsupported_output)
+                               : string_format(arena, S8("thread-local '{S8}' is declared __attribute__((section(\"{S8}\"))), which cannot be placed"),
+                                               entity->name, section_name),
+                .location = definition->location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+        }
     }
     // One slot per preprocessed token, holding the owning definition's index
     // plus one so the absent value is zero.  The array is a fresh allocation
@@ -50905,7 +51011,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_FUNCTION),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -50953,7 +51060,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_FUNCTION),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -51997,6 +52105,26 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                           .priority = entity_destructor_priority[declaration.entity.value],
                                           .is_destructor = true,
                                       });
+        }
+    }
+    // A function's requested section is refused on the same outputs as an
+    // object's, above (issue 1276); only a kept definition places anything.
+    String8 section_unsupported_output = c_section_attribute_unsupported_output(target);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count && section_unsupported_output.length; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        IrFunction* function = declaration_functions[declaration_index];
+        IrSymbol* symbol = function && declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition && function->state == IR_FUNCTION_LOWERED
+                               ? ir_symbol_from_id(&program->symbols, function->symbol)
+                               : 0;
+        if (symbol && symbol->section_name.length)
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
+                                         declaration.name, symbol->section_name, section_unsupported_output),
+                .location = declaration.location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
         }
     }
     // The array-type-name resolver's own report, made after every declaration
