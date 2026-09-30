@@ -21635,6 +21635,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_sizeof_call_array_bound.c"),
         S8("tests/basic_c_sizeof_function_designator.c"),
         S8("tests/basic_c_alignof_expression.c"),
+        S8("tests/basic_c_alignof_object.c"),
         // The two sbase fixtures belong here for the same reason: a wrong
         // lowering of a self-referential initializer or of `onestr + 1` still
         // produces a program, and only running it reads the pointer.
@@ -21648,6 +21649,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-sizeof-call-array-bound"),
         S8("buster-c-sizeof-function-designator"),
         S8("buster-c-alignof-expression"),
+        S8("buster-c-alignof-object"),
         S8("buster-c-sbase-declarations"),
         S8("buster-c-sbase-expressions"),
     };
