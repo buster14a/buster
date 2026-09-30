@@ -195,8 +195,9 @@ on the PR head. A failure after staging can leave a temporary
 Configure `NATIVE_RETIREMENT_PUBLICATION_TOKEN` as an Actions secret in the
 protected `native-retirement-integration` environment to trigger PR CI from
 the publication push automatically. Use a fine-grained personal access token
-restricted to this repository with Contents read/write and Workflows read/write
-(for candidates changing workflow files). Give it an expiry and rotate it.
+restricted to this repository with Contents read/write, Workflows read/write
+(for candidates changing workflow files) and Pull requests read/write (to queue
+a published catch-up). Give it an expiry and rotate it.
 Never paste the token into a PR, workflow input, log, or chat.
 
 The secret is exposed only to the final publication step, after independent
@@ -382,15 +383,16 @@ Two requirements are part of the decision:
    - **Dispatch.** `native-retirement-catch-up.yml` runs from trusted `main`
      on `main` pushes and every 30 minutes. When `snapshot_stale` finds the
      committed snapshot behind the admitted sources, it opens one bot-owned
-     PR from `native-retirement/catch-up` whose only commit is empty, and
-     enables auto-merge. The standing-authorization controller
+     PR from `native-retirement/catch-up` whose only commit is empty. It does
+     not enable auto-merge, because a `GITHUB_TOKEN` enqueue starts no
+     `merge_group` workflows. The standing-authorization controller
      (`native-retirement-automation.yml`, #1791) then dispatches the existing
      writer for it as an ordinary request, with no prerequisite CI. No human
      dispatches anything; see
      [automation](native-retirement-automation.md#automatic-catch-up-1893).
    - **Route to `main`.** The writer publishes the usual two-parent
-     integration head on that PR, and auto-merge queues it in the same native
-     queue. The writer gets no direct write path to `main` and no ruleset
+     integration head on that PR, then enables auto-merge with its
+     publication credential, which queues it in the same native queue. The writer gets no direct write path to `main` and no ruleset
      bypass.
    - **Admission.** A catch-up is a writer integration of an empty candidate.
      It is admitted when all of these hold:
