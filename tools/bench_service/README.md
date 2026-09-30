@@ -618,8 +618,12 @@ the landed readers and the handoff consumer. It also covers plan tampering, a
 pinned-tool mismatch, a missing and an unlisted tree identity, two different
 sources, an exhausted timing reserve, a frozen binary changed before the
 oracle, before the captures stage and after it, and a stage that overruns the
-deadline. It honors `TMPDIR` and fails on a host without python3 or an x86
-`/proc/cpuinfo`. The service self-test binds the kept result tree through the
+deadline. It honors `TMPDIR`. Host eligibility is exact: a Linux x86-64
+build, an x86 `/proc/cpuinfo` and python3 at `/usr/bin` or `/usr/local/bin`. An
+eligible host must run and pass every case (zero cases fail); any other host
+prints `result=skipped-ineligible-host reason=...` and exits 4, which the
+service self-test's bridge accepts only when it also finds the host
+ineligible. The service self-test binds the kept result tree through the
 worker's finalization, exports it with the server's snapshot and replays it
 with the client unpack. Nothing here has run on the physical 9700X.
 

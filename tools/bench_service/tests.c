@@ -5099,7 +5099,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
+/* The driver child's exit status, or -1 when it could not start, was killed
+ * by a signal or outlived its 120-second deadline. */
+BUSTER_GLOBAL_LOCAL int bq_test_recipe_driver_status(char const* driver, char* const arguments[])
 {
     pid_t child = driver && driver[0] == '/' ? fork() : -1;
     if (child == 0)
@@ -5108,7 +5110,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
         execv(driver, arguments);
         _exit(127);
     }
-    int status = 0;
+    int status = 0, exit_status = -1;
     bool reaped = false, exited = false;
     u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 120000);
     while (child > 0 && !reaped)
@@ -5117,7 +5119,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
         if (waited == child)
         {
             reaped = true;
-            exited = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            exited = WIFEXITED(status);
+            if (exited) exit_status = WEXITSTATUS(status);
         }
         else if (waited < 0 && errno != EINTR)
         {
@@ -5137,7 +5140,13 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
         }
     }
-    return child > 0 && reaped && exited;
+    return exit_status;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
+{
+    bool passed = bq_test_recipe_driver_status(driver, arguments) == 0;
+    return passed;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
@@ -5314,22 +5323,69 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_export(char const* root, char const* works
     free(job);
 }
 
+/* The zen5 recipe self-test's host eligibility, restated here so a skip on a
+ * host that should run it is a failure: a Linux x86-64 build, an x86
+ * /proc/cpuinfo ("cpu family" on its first page) and python3 at /usr/bin or
+ * /usr/local/bin (bench_service_zen5_test_ineligible_reason in
+ * zen5_recipe_test.c). */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_host_eligible(void)
+{
+    bool eligible = false;
+#if defined(__linux__) && defined(__x86_64__)
+    char cpuinfo[4096] = {0};
+    int descriptor = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC);
+    ssize_t count = descriptor >= 0 ? read(descriptor, cpuinfo, sizeof(cpuinfo) - 1) : -1;
+    if (descriptor >= 0) close(descriptor);
+    eligible = count > 0 && strstr(cpuinfo, "cpu family") != NULL &&
+               (access("/usr/bin/python3", X_OK) == 0 || access("/usr/local/bin/python3", X_OK) == 0);
+#endif
+    return eligible;
+}
+
+typedef enum BqZen5BridgeVerdict BqZen5BridgeVerdict;
+enum BqZen5BridgeVerdict
+{
+    BQ_ZEN5_BRIDGE_PASS,
+    BQ_ZEN5_BRIDGE_FAIL,
+    BQ_ZEN5_BRIDGE_SKIP,
+};
+
+/* The child's recorded skip (exit PROCESS_RESULT_NOT_EXISTENT) is accepted
+ * only on an ineligible host; on an eligible host it is a failure, as is any
+ * other nonzero or abnormal exit. */
+BUSTER_GLOBAL_LOCAL BqZen5BridgeVerdict bq_test_zen5_bridge_verdict(bool eligible, int exit_status)
+{
+    BqZen5BridgeVerdict verdict = exit_status == 0 ? BQ_ZEN5_BRIDGE_PASS :
+                                  !eligible && exit_status == (int)PROCESS_RESULT_NOT_EXISTENT ? BQ_ZEN5_BRIDGE_SKIP :
+                                  BQ_ZEN5_BRIDGE_FAIL;
+    return verdict;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
 {
+    BQ_CHECK(bq_test_zen5_bridge_verdict(true, (int)PROCESS_RESULT_NOT_EXISTENT) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(false, (int)PROCESS_RESULT_NOT_EXISTENT) == BQ_ZEN5_BRIDGE_SKIP &&
+             bq_test_zen5_bridge_verdict(false, 1) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(true, -1) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(true, 0) == BQ_ZEN5_BRIDGE_PASS);
     char root[] = "/tmp/buster-bench-zen5-bridge-XXXXXX";
     bool ok = driver != NULL && mkdtemp(root) != NULL;
     if (!driver) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=unavailable\n");
     if (ok)
     {
         char* arguments[] = {(char*)driver, (char*)"bench_service_zen5_recipe_self_test", root, NULL};
-        ok = bq_test_recipe_driver_run(driver, arguments);
-        BQ_CHECK(ok);
+        bool eligible = bq_test_zen5_host_eligible();
+        BqZen5BridgeVerdict verdict = bq_test_zen5_bridge_verdict(eligible, bq_test_recipe_driver_status(driver, arguments));
+        if (verdict == BQ_ZEN5_BRIDGE_SKIP) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=skipped-ineligible-host\n");
+        BQ_CHECK(verdict != BQ_ZEN5_BRIDGE_FAIL);
+        ok = verdict == BQ_ZEN5_BRIDGE_PASS;
     }
     char result[BQ_PATH_CAP + 1] = {0};
     int length = ok ? snprintf(result, sizeof(result), "%s/workspaces/results/job-1-attempt-2", root) : -1;
     int directory = length > 0 && (u32)length < sizeof(result) ?
                     open(result, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    if (ok && directory < 0) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=unsupported-host\n");
+    /* A passing child must have kept its result tree. */
+    if (ok) BQ_CHECK(directory >= 0);
     if (directory >= 0)
     {
         BqRecipeFiles files;

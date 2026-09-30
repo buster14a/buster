@@ -19,8 +19,11 @@
  * runner's spec digests can notice) and after it; and a stage that
  * runs past the recipe deadline. With KEEP_DIR only the success case runs and
  * its result tree is kept for the tests.c export-content bridge. Fixtures
- * honor TMPDIR. Needs python3 and an x86 /proc/cpuinfo; any other host fails
- * with result=unsupported-host, so a run that exercised nothing is never green.
+ * honor TMPDIR. Eligibility is exact (bench_service_zen5_test_ineligible_reason:
+ * Linux x86-64, an x86 /proc/cpuinfo and python3): an eligible host must run
+ * and pass every case, and zero cases there fail; an ineligible host prints
+ * result=skipped-ineligible-host reason=... and exits 4, neither success nor
+ * failure (bench_service_zen5_test_verdict).
  */
 #if BUSTER_LINUX
 #define BENCH_SERVICE_ZEN5_TEST_REVISION "1111111111111111111111111111111111111111"
@@ -455,6 +458,50 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
     return ok;
 }
 
+/* Host eligibility, exactly: a Linux x86-64 build of this driver, a readable
+ * /proc/cpuinfo whose first page has the x86 kernel's "cpu family" field, and
+ * an executable python3 at /usr/bin or /usr/local/bin (the landed readers and
+ * the real PMU tool run under it). Returns NULL when eligible, otherwise the
+ * reason printed in the skip line. tests.c's zen5 bridge applies the same
+ * definition, so an eligible host can never report a skip as green. */
+BUSTER_GLOBAL_LOCAL char const* bench_service_zen5_test_ineligible_reason(void)
+{
+    char const* reason = NULL;
+#if defined(__x86_64__)
+    /* procfs reports a zero size, so read the first page directly. */
+    char cpuinfo[4096] = {0};
+    int descriptor = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC);
+    ssize_t count = descriptor >= 0 ? read(descriptor, cpuinfo, sizeof(cpuinfo) - 1) : -1;
+    if (descriptor >= 0) close(descriptor);
+    if (count <= 0 || strstr(cpuinfo, "cpu family") == NULL) reason = "no-x86-proc-cpuinfo";
+    else if (access("/usr/bin/python3", X_OK) != 0 && access("/usr/local/bin/python3", X_OK) != 0) reason = "no-python3";
+#else
+    reason = "not-linux-x86-64";
+#endif
+    return reason;
+}
+
+typedef enum BenchServiceZen5TestVerdict BenchServiceZen5TestVerdict;
+enum BenchServiceZen5TestVerdict
+{
+    BENCH_SERVICE_ZEN5_TEST_PASS,
+    BENCH_SERVICE_ZEN5_TEST_FAIL,
+    BENCH_SERVICE_ZEN5_TEST_SKIP,
+};
+
+/* An eligible host passes only when every case ran and passed; zero cases on
+ * an eligible host is a failure, never a skip. Only an ineligible host skips. */
+BUSTER_GLOBAL_LOCAL BenchServiceZen5TestVerdict bench_service_zen5_test_verdict(bool eligible, bool ok, u32 cases,
+                                                                                u32 expected)
+{
+    BenchServiceZen5TestVerdict verdict = !eligible ? BENCH_SERVICE_ZEN5_TEST_SKIP :
+                                          ok && expected > 0 && cases == expected ? BENCH_SERVICE_ZEN5_TEST_PASS :
+                                          BENCH_SERVICE_ZEN5_TEST_FAIL;
+    return verdict;
+}
+
+/* Exit status: 0 pass, 1 fail, and PROCESS_RESULT_NOT_EXISTENT (4) for a
+ * recorded skip on an ineligible host, which is neither success nor failure. */
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* arena, SliceString8 arguments)
 {
     char scripts[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, keep[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
@@ -462,19 +509,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* are
     bool ok = arguments.length <= 1 && (!keep_mode || (bench_service_recipe_path(arguments.pointer[0]) &&
                                                        snprintf(keep, sizeof(keep), "%.*s", (int)arguments.pointer[0].length,
                                                                 arguments.pointer[0].pointer) > 0));
-    /* procfs reports a zero size, so read the first page directly. */
-    char cpuinfo[4096] = {0};
-    int descriptor = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC);
-    ssize_t count = descriptor >= 0 ? read(descriptor, cpuinfo, sizeof(cpuinfo) - 1) : -1;
-    if (descriptor >= 0) close(descriptor);
-    bool supported = count > 0 && strstr(cpuinfo, "cpu family") != NULL &&
-                     (access("/usr/bin/python3", X_OK) == 0 || access("/usr/local/bin/python3", X_OK) == 0);
+    /* The verdict rule itself: an eligible host with zero cases fails. */
+    ok = ok && bench_service_zen5_test_verdict(true, true, 0, 11) == BENCH_SERVICE_ZEN5_TEST_FAIL &&
+         bench_service_zen5_test_verdict(true, false, 11, 11) == BENCH_SERVICE_ZEN5_TEST_FAIL &&
+         bench_service_zen5_test_verdict(true, true, 10, 11) == BENCH_SERVICE_ZEN5_TEST_FAIL &&
+         bench_service_zen5_test_verdict(true, true, 11, 11) == BENCH_SERVICE_ZEN5_TEST_PASS &&
+         bench_service_zen5_test_verdict(false, true, 0, 11) == BENCH_SERVICE_ZEN5_TEST_SKIP;
+    char const* ineligible = bench_service_zen5_test_ineligible_reason();
+    u32 expected = keep_mode ? 1u : (u32)BENCH_SERVICE_ZEN5_TEST_CASE_COUNT;
     u32 cases = 0;
-    if (ok && supported)
+    if (ok && !ineligible)
     {
         ok = bench_service_zen5_test_scripts(arena, scripts);
-        u32 count = keep_mode ? 1u : (u32)BENCH_SERVICE_ZEN5_TEST_CASE_COUNT;
-        for (u32 test_case = 0; ok && test_case < count; test_case += 1)
+        for (u32 test_case = 0; ok && test_case < expected; test_case += 1)
         {
             ok = bench_service_zen5_test_case(arena, (BenchServiceZen5TestCase)test_case, keep_mode ? keep : NULL);
             cases += ok ? 1u : 0u;
@@ -488,16 +535,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* are
     bench_service_zen5_test_gap_ns = 0;
     bench_service_zen5_test_cpu_set = false;
     if (scripts[0]) remove_path_recursive(arena, string_from_pointer(scripts));
-    string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases,
-                 string_from_pointer(ok && supported ? "pass" : ok ? "unsupported-host" : "fail"));
-    return ok && supported ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    /* A malformed invocation or a broken verdict rule fails on any host. */
+    BenchServiceZen5TestVerdict verdict = !ok && ineligible ? BENCH_SERVICE_ZEN5_TEST_FAIL :
+                                          bench_service_zen5_test_verdict(!ineligible, ok, cases, expected);
+    if (verdict == BENCH_SERVICE_ZEN5_TEST_SKIP)
+        string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST cases=0 result=skipped-ineligible-host reason={S8}\n"),
+                     string_from_pointer(ineligible));
+    else
+        string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases,
+                     string_from_pointer(verdict == BENCH_SERVICE_ZEN5_TEST_PASS ? "pass" : "fail"));
+    ProcessResult result = verdict == BENCH_SERVICE_ZEN5_TEST_PASS ? PROCESS_RESULT_SUCCESS :
+                           verdict == BENCH_SERVICE_ZEN5_TEST_SKIP ? PROCESS_RESULT_NOT_EXISTENT : PROCESS_RESULT_FAILED;
+    return result;
 }
 #else
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_zen5_recipe_self_test(Arena* arena, SliceString8 arguments)
 {
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(arguments);
-    string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST result=unsupported\n"));
-    return PROCESS_RESULT_FAILED;
+    string_print(S8("BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST cases=0 result=skipped-ineligible-host reason=not-linux-x86-64\n"));
+    return PROCESS_RESULT_NOT_EXISTENT;
 }
 #endif
