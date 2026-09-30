@@ -141,5 +141,33 @@ class DispatchRecipeTest(unittest.TestCase):
                 self.assertEqual(completed.returncode == 0, expected, completed.stderr)
 
 
+def service_capabilities() -> str:
+    """The Linux capabilities reply compiled into tools/bench_service/protocol.c."""
+    source = (policy.SERVICE / "protocol.c").read_text(encoding="utf-8")
+    block = source[source.index("bq_capabilities_v2[] ="):]
+    block = block[:block.index("#ifdef _WIN32")]
+    block = re.sub(r"#else.*?#endif", "", block, flags=re.S)
+    block = block.replace("#ifdef __linux__", "")
+    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', block)).replace("\\n", "\n")
+
+
+@unittest.skipUnless(BASH, "bash is required to execute the workflow scripts")
+class InstalledCapabilityTest(unittest.TestCase):
+    """zen5-calibration-v1 is registered but held, so the installed service
+    does not serve it and the workflow refuses it before any submission."""
+
+    def test_held_recipe_is_refused_by_the_real_capabilities(self):
+        capabilities = service_capabilities()
+        self.assertIn("service-recipes=validate-buster-v1 ", capabilities)
+        self.assertNotIn("zen5", capabilities)
+        script = 'grep -Eq "' + MEMBERSHIP.group(1) + '" <<<"$capabilities"'
+        for recipe, expected in (("validate-buster-v1", True), ("zen5-calibration-v1", False)):
+            with self.subTest(recipe=recipe):
+                completed = subprocess.run([BASH, "-c", script], env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BQ_RECIPE": recipe,
+                    "capabilities": capabilities}, capture_output=True, text=True, timeout=30, check=False)
+                self.assertEqual(completed.returncode == 0, expected, completed.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

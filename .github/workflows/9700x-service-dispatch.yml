@@ -130,8 +130,10 @@ jobs:
       BQ_RECIPE: ${{ inputs.recipe }}
       BQ_JOB_TIMEOUT_SECONDS: 7200
     steps:
-      # Reviewed allowlist: recipe -> service runtime budget in seconds. Each
-      # budget must equal the broker's fixed RuntimeMaxSec, so the wait never
+      # Reviewed allowlist: recipe -> service runtime budget in seconds.
+      # validate-buster-v1 waits for the broker's fixed RuntimeMaxSec;
+      # zen5-calibration-v1 enforces the budget-seconds pinned in its installed
+      # profile, which never exceeds RuntimeMaxSec. Either way the wait never
       # gives up before the service itself would stop the job. The service
       # finalization allowance covers the TERM/KILL escalation, stage cleanup,
       # workspace removal, bundle publication and one bounded client poll.
@@ -144,7 +146,7 @@ jobs:
           started="$(date +%s)"
           case "$BQ_RECIPE" in
             validate-buster-v1) runtime_budget=3600 ;;
-            zen5-calibration-v1) runtime_budget=3600 ;;
+            zen5-calibration-v1) runtime_budget=2700 ;;
             *)
               echo 'BENCH_DISPATCH_RECIPE_REFUSED recipe is not in the reviewed allowlist' >&2
               exit 1

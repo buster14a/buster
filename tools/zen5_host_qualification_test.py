@@ -280,6 +280,26 @@ def run_self_test() -> int:
     invalid_result["qualification_status"] = "pmu-qualified"
     assert any("pmu-qualified result" in problem for problem in validate_result(invalid_result, manifest, manifest_digest))
 
+    with tempfile.TemporaryDirectory(prefix="buster-zen5-identity-") as temporary:
+        root = Path(temporary)
+        identity_path = root / "repository.json"
+        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "c" * 40, "status": ""}), encoding="utf-8")
+        identity, problems = capture_tool.load_repository_identity(identity_path, root)
+        assert not problems and identity["identity_source"] == "service-snapshot"
+        assert identity["revision"] == "b" * 40 and identity["tree"] == "c" * 40 and identity["status"] == ""
+        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "short", "status": "M x"}), encoding="utf-8")
+        _, problems = capture_tool.load_repository_identity(identity_path, root)
+        assert problems == ["repository tree is not a full object id", "repository checkout is not clean"], problems
+        for malformed in ({"revision": "b" * 40, "tree": "c" * 40}, {"revision": "b" * 40, "tree": "c" * 40, "status": 0},
+                          {"revision": "b" * 40, "tree": "c" * 40, "status": "", "extra": 1}, []):
+            identity_path.write_text(json.dumps(malformed), encoding="utf-8")
+            try:
+                capture_tool.load_repository_identity(identity_path, root)
+            except QualificationError:
+                pass
+            else:
+                raise AssertionError(f"malformed repository identity accepted: {malformed!r}")
+
     print("zen5_host_qualification self-test passed")
     return 0
 
