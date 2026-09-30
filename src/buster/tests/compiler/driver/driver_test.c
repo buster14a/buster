@@ -5921,6 +5921,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_assignment_res
         }
     }
     if (written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
