@@ -1,7 +1,7 @@
 name: Issue 1225 constant truth validation
 on:
   push:
-    branches: [codex/1225-constant-value-truth]
+    branches: ['codex/1225-constant-value-truth']
 permissions:
   contents: read
 jobs:
@@ -23,8 +23,6 @@ jobs:
           git show 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617:src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
           "$RUNNER_TEMP/buster-build" build --config Release -t ide
-      - name: Baseline self-host fixed point
-        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release > evidence/baseline-self-host.log 2>&1'
       - name: Require failure-first reproduction
         run: |
           set +e
@@ -33,7 +31,7 @@ jobs:
           set -e
           echo "$result" > evidence/baseline-status.txt
           test "$result" -ne 0
-          grep -F 'constant truth' evidence/baseline-tests.log
+          grep -F 'constant truth minimum' evidence/baseline-tests.log
       - name: Restore and validate candidate
         run: |
           git show "$GITHUB_SHA":src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c

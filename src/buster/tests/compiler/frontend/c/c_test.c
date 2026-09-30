@@ -27274,6 +27274,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             }
         }
     }
+    // Keep both original minima independent of the larger initializer family.
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        Arena* conflicts[] = {arguments->arena, sources.arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("static const int zero = 0; static int folded = zero ? 3 : 4;"
+               "static volatile int value; int probe(void) { return __builtin_constant_p(!value); }"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-truth-minima.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* folded = c_test_find_ir_global(module, lowered.program, S8("folded"));
+            BUSTER_TEST_RAW(arguments, folded && folded->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && folded->initializer_bits == 4,
+                S8("constant truth minimum: static const zero selects 4"));
+            IrFunction* probe = c_test_find_ir_function(module, S8("probe"));
+            if (BUSTER_REQUIRE(arguments, probe != 0))
+            {
+                u32 values = 0, effects = 0;
+                bool zero = false;
+                for (u32 index = 0; index < probe->instruction_count; index += 1)
+                {
+                    IrInstruction* instruction = probe->instructions + index;
+                    values += instruction->opcode == IR_OPCODE_CONSTANT_INTEGER;
+                    zero |= instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediates[0] == 0;
+                    effects += instruction->opcode == IR_OPCODE_CALL || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_STORE;
+                }
+                BUSTER_TEST_RAW(arguments, values == 1 && zero, S8("constant truth minimum: volatile NOT is not constant"));
+                BUSTER_TEST(arguments, effects == 0);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        Arena* conflicts[] = {arguments->arena, sources.arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("static int null_condition = nullptr ? 3 : 4; static int null_not = !nullptr; static _Bool null_bool = (_Bool)nullptr;"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("nullptr-truth.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* condition = c_test_find_ir_global(module, lowered.program, S8("null_condition"));
+            IrGlobal* negated = c_test_find_ir_global(module, lowered.program, S8("null_not"));
+            IrGlobal* boolean = c_test_find_ir_global(module, lowered.program, S8("null_bool"));
+            BUSTER_TEST(arguments, condition && condition->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && condition->initializer_bits == 4);
+            BUSTER_TEST(arguments, negated && negated->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && negated->initializer_bits == 1);
+            BUSTER_TEST(arguments, boolean && (boolean->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER || boolean->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO) &&
+                                   boolean->initializer_bits == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
     String8 invalid[] = {
         S8("unsigned u = 5; static int bad = u + 1;"),
         S8("unsigned u = 5; static int bad = u > 0;"),
