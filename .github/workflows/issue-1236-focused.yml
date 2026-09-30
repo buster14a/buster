@@ -2,6 +2,9 @@ name: Issue 1236 focused validation
 on:
   push:
     branches: [codex/1236-bit-field-validation]
+concurrency:
+  group: issue-1236-focused
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -91,6 +94,6 @@ jobs:
             done
           done
       - name: Verify volatile operation counts
-        run: build/Release/ide test --module=c_tests
+        run: build/Release/ide test --module=c_frontend_tests
       - name: Check source growth
         run: '"$RUNNER_TEMP/buster-build" source_size --rev 155a62a14bd6daa9744c0be6bbbc69da449ce3d0 --base 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617'
