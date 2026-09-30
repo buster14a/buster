@@ -168,7 +168,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_shift_layout(UnitTestArguments*
                      .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                                 .has_index = true, .index = {.index = 9, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                                 .scale = 4, .source_width = width, .has_displacement = true, .displacement = displacements[displacement_index],
-                                .has_symbol = displacement_index == 5, .symbol = S8("external_disp")}},
+                                .has_symbol = displacement_index == 5, .symbol = displacement_index == 5 ? S8("external_disp") : (String8){0}}},
                     {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 8, .has_value = true, .value = 127},
                     {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 8, .has_value = true, .value = 127},
                 };
@@ -350,7 +350,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_scalar_layout(UnitTestArguments
                      .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                                 .has_index = true, .index = {.index = 9, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                                 .scale = 4, .source_width = width, .has_displacement = true, .displacement = displacements[displacement_index],
-                                .has_symbol = displacement_index == 5, .symbol = S8("external_disp")}},
+                                .has_symbol = displacement_index == 5, .symbol = displacement_index == 5 ? S8("external_disp") : (String8){0}}},
                     {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .has_value = true, .value = 127},
                 };
                 String8 features[] = {S8("*")};
@@ -496,7 +496,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_legacy_layout(UnitTestArguments
                 {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = width,
                  .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                             .source_width = width, .has_displacement = true, .displacement = displacements[displacement_index],
-                            .has_symbol = displacement_index == 5, .symbol = S8("external_disp")}},
+                            .has_symbol = displacement_index == 5, .symbol = displacement_index == 5 ? S8("external_disp") : (String8){0}}},
             };
             String8 features[] = {S8("*")};
             UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
@@ -602,7 +602,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* 
             {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 512,
              .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                         .source_width = 512, .has_displacement = true, .displacement = displacements[displacement_index],
-                        .has_symbol = displacement_index == 6, .symbol = S8("external_disp")}},
+                        .has_symbol = displacement_index == 6, .symbol = displacement_index == 6 ? S8("external_disp") : (String8){0}}},
         };
         String8 features[] = {S8("*")};
         UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
@@ -710,7 +710,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_apx_layout(UnitTestArguments* a
                 {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
                  .memory = {.has_base = true, .base = {.index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                             .source_width = 64, .has_displacement = true, .displacement = symbolic ? 0 : 127,
-                            .has_symbol = symbolic != 0, .symbol = S8("external_disp")}},
+                            .has_symbol = symbolic != 0, .symbol = symbolic ? S8("external_disp") : (String8){0}}},
             };
             if (mode == 0) operands[1] = operands[2];
             String8 features[] = {S8("*")};

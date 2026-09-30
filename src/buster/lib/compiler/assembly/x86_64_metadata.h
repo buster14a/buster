@@ -1102,6 +1102,10 @@ BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(Bust
 // entry point is the public bridge for producers that do not retain a durable
 // form key; output and relocation storage are borrowed for the call.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQuery query);
+// Emit a retained selection, reapplying its physical source projections and
+// all structural/policy checks without searching for another encoding.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_selection(BusterX86MetadataEmitQuery query,
+                                                                          BusterX86MetadataSelectResult selection);
 // ELF TLS sequences are ABI recipes, not additional ISA encoders. The GD
 // envelope has two PC-relative fields, both with addend -4; object producers
 // assign TLSGD and PLT32 meanings to those fields. Relaxation preserves the
