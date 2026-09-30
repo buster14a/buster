@@ -1257,17 +1257,6 @@ BUSTER_C_INTERNAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWide
     return cache->state[root_type.value] == C_IR_WIDE_FLOAT_UNSUPPORTED;
 }
 
-// The C frontend only exposes the canonical x87 spelling on a target whose
-// selected ABI actually carries it.  The target layout is the frontend's
-// source of truth for the spelling; the ABI classifier below is the source of
-// truth for how a value with that spelling crosses a function boundary.
-// x86_64 Android deliberately shares the ELF System V ABI with x86_64 Linux:
-// target_data_layout supplies sixteen-byte, 80-bit long double and
-// ir_abi_convention_for_target supplies SYSTEMV_X86_64.  Keep the OS check in
-// sync with those two target-model facts rather than treating Android as a
-// generic Linux-like target with a narrower long double.
-
-
 // A wide value is safe for the canonical x86 backend only when the existing
 // SysV classifier proves the complete value is the two-part x87 return shape.
 // This intentionally asks the classifier rather than walking fields here:

@@ -4509,7 +4509,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArg
                     invocation.reject_machine_fallback = mode != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 9 && compiled.codegen_statistics.fallback_function_count == 0);
+                    // The two named-x87 variadic definitions exist only where long
+                    // double is x87; Android x86-64 long double is binary128.
+                    u32 expected_functions = target == 2 ? 9 : 11;
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == expected_functions &&
+                                           compiled.codegen_statistics.fallback_function_count == 0);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                     if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
                     {

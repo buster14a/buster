@@ -649,11 +649,14 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
     return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
 }
 
-// Base AAPCS64 long double is IEEE binary128. This predicate deliberately
-// admits only the exact scalar representation whose shared ABI classification
-// is one sixteen-byte vector-file part. Lowering transports it directly and
-// carries its arithmetic, comparisons and rounding conversions as compiler-
-// runtime calls; the parser's lowering-constraint mirror asks the same fact.
+// The C frontend only exposes the canonical x87 spelling on a target whose
+// selected ABI actually carries it.  The target layout is the frontend's
+// source of truth for the spelling; the shared ABI classifier is the source of
+// truth for how a value with that spelling crosses a function boundary.
+// x86_64 Android shares the ELF System V convention, but target_data_layout
+// gives it sixteen-byte IEEE binary128 long double, so the exact
+// representation checks below keep it off this x87 path.  Lowering and the
+// parser's lowering-constraint mirror ask this same predicate.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);
@@ -665,6 +668,11 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(T
            layout.long_double_type.alignment == 16;
 }
 
+// Base AAPCS64 long double is IEEE binary128. This predicate deliberately
+// admits only the exact scalar representation whose shared ABI classification
+// is one sixteen-byte vector-file part. Lowering transports it directly and
+// carries its arithmetic, comparisons and rounding conversions as compiler-
+// runtime calls; the parser's lowering-constraint mirror asks the same fact.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);
