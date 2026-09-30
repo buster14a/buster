@@ -253,6 +253,8 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   work counters are detached. Casts, generic controllers/association types and
   `typeof` use the same private explicit frames, with machineless scalar reads
   that cannot define or complete tags. New tag bodies remain unresolved.
+  Private model growth uses a separate scratch arena from expression frames;
+  its rows survive frame rewinds until stable integer facts have been extracted.
   Ordinary and pending enumerator bindings precede typedef cast detection.
   The returned signed magnitude, rank and target width survive the query;
   temporary type IDs do not. Declaration owners publish scalar types afterwards.

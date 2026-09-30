@@ -105,6 +105,16 @@ def cases() -> dict[str, dict]:
 
     add("stage0_shadowed_typedef_enum", statement_program("typedef int K;", "enum { K = 5 }; enum { E = (K) + 5 }; printf(\"E=%d\\n\", E);"), 0)
     add("stage0_shadowed_typedef_assert", statement_program("typedef int K;", "enum { K = 5 }; _Static_assert((K) + 5 == 10, \"scope\"); printf(\"scope=10\\n\");"), 0)
+    floating_note = "Dialect diagnostic: ISO ICE admits floating constants only as immediate cast operands; GNU folding extensions may admit arithmetic. Classify strict and GNU references separately."
+    for label, expression in {
+        "immediate": "(int)3.0", "parenthesized": "(int)(3.0)",
+        "addition": "(int)(1.0 + 2.0)", "multiply": "(int)(1.5 * 2.0)",
+        "mixed_addition": "(int)(1 + 2.0)", "unary": "(int)+3.0",
+    }.items():
+        add("stage0_floating_ice_" + label, statement_program("", "enum { E = " + expression + " }; printf(\"E=%d\\n\", E);"), 0, "oracle-sensitive", floating_note)
+    add("width_floating_ice_arithmetic", layout_program("", "typedef struct { char c; unsigned b : (int)(1.0 + 2.0); char x; } T;"), 0, "oracle-sensitive", floating_note)
+    add("bound_floating_ice_arithmetic", layout_program("", "typedef struct { char c; char x[(int)(1.0 + 2.0)]; } T;"), 0, "oracle-sensitive", floating_note)
+    add("alignment_floating_ice_arithmetic", layout_program("", "typedef struct { char c; _Alignas((int)(4.0 + 4.0)) int x; } T;"), 0, "oracle-sensitive", floating_note)
     add("width_promotion", statement_program("", "struct S { unsigned b : (3); } s = {0}; printf(\"promotion=%d\\n\", _Generic(+s.b, int: 1, unsigned: 2, default: 3));"), 1)
     add("bound_inferred", statement_program("", "static char a[] = {1,2,3,4,5}; enum { N = sizeof a }; printf(\"inferred=%d,%zu\\n\", N, sizeof a);"), 3)
     add("bound_vla", statement_program("", "int n = 5; char a[n]; printf(\"vla=%zu\\n\", sizeof a);"), 3)
@@ -165,6 +175,7 @@ def main() -> int:
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--reference", action="append", help="Repeat compiler command; defaults to clang and gcc.")
+    parser.add_argument("--reference-flags", default="-std=gnu2x -w", help="Shared reference flags; explicit dialect flags here override the default.")
     parser.add_argument("--variant", action="append", help="Repeat 'name=flags'; defaults to default=.")
     parser.add_argument("--require-stage", type=int, choices=range(5), help="Also fail unchanged mismatches for cases at/below completed stage.")
     parser.add_argument("--case", action="append", help="Run only named cases; repeatable.")
@@ -190,6 +201,7 @@ def main() -> int:
         print("Materialized %d cases; no compiler executed." % len(selected))
         return 0
     references = arguments.reference or ["clang", "gcc"]
+    reference_flags = shlex.split(arguments.reference_flags)
     variants = arguments.variant or ["default="]
     variant_flags = {}
     for item in variants:
@@ -204,7 +216,7 @@ def main() -> int:
         report["provenance"][label] = {"path": str(binary.resolve()), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
     for name, case in selected.items():
         source = arguments.out / (name + ".c")
-        oracle = {ref: evaluate(shlex.split(ref) + ["-std=gnu2x", "-w"], source, arguments.out / (name + ".ref" + str(index)), arguments.timeout) for index, ref in enumerate(references)}
+        oracle = {ref: evaluate(shlex.split(ref) + reference_flags, source, arguments.out / (name + ".ref" + str(index)), arguments.timeout) for index, ref in enumerate(references)}
         reference_signatures = {signature(value) for value in oracle.values()}
         available = all(not action.get("unavailable") and not action["timeout"] for value in oracle.values() for action in value.values() if action is not None)
         if not available:

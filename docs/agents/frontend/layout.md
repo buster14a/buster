@@ -118,6 +118,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   written through is the unsigned integer of the same width, because the shift
   has to see the raw byte. A zero-width bit-field keeps aligning to its declared
   type even inside a packed aggregate, which is also what Clang and GCC do.
+  Aggregate member construction stages each record's direct `CMember` values
+  on its range frame until that range completes, then publishes one contiguous
+  run. A nested definition may therefore complete before the enclosing record
+  without mixing its members into the enclosing run. The range's scratch mark
+  precedes every child; successful completion, failed completion, and discarded
+  frame cleanup release its staging allocations. CORE receives the explicit
+  published start/count instead of deriving them from a global append delta.
   **A width is produced once at its member declaration** (#1247), with that
   declaration's scope, by the protected type-constant evaluator. Its integer
   value and `CMember.bit_width_resolved` occupy the existing member record;

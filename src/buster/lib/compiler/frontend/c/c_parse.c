@@ -1066,7 +1066,7 @@ BUSTER_C_INTERNAL bool c_type_parse_frame_push(CTypeParseMachine* machine, CType
         machine->failed = true;
         return false;
     }
-    if (frame.kind == C_TYPE_PARSE_FRAME_SIZEOF)
+    if (frame.kind == C_TYPE_PARSE_FRAME_SIZEOF || frame.kind == C_TYPE_PARSE_FRAME_AGGREGATE_RANGE)
     {
         frame.task_mark = machine->expression_task_count;
         frame.arena_mark = machine->scratch_arena->position;
@@ -1082,6 +1082,10 @@ BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, C
     if (frame->kind == C_TYPE_PARSE_FRAME_SIZEOF)
     {
         machine->expression_task_count = frame->task_mark;
+        arena_set_position(machine->scratch_arena, frame->arena_mark);
+    }
+    if (frame->kind == C_TYPE_PARSE_FRAME_AGGREGATE_RANGE)
+    {
         arena_set_position(machine->scratch_arena, frame->arena_mark);
     }
     machine->frame_count -= 1;
@@ -11161,6 +11165,40 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
 }
 
+// Only the nearest range owns this member. Its vector was allocated before
+// any child that can rewind scratch, and the parent cannot grow it while that
+// child is active. A failed segment fails its range before this run publishes.
+BUSTER_C_INTERNAL bool c_type_parse_aggregate_append_member(CTypeParseMachine* machine, CMember member)
+{
+    CTypeParseFrame* range = 0;
+    for (u32 index = machine->frame_count; index && !range; index -= 1)
+    {
+        if (machine->frames[index - 1].kind == C_TYPE_PARSE_FRAME_AGGREGATE_RANGE)
+            range = machine->frames + index - 1;
+    }
+    bool valid = range != 0;
+    if (valid && range->staged_member_count == range->staged_member_capacity)
+    {
+        u32 limit = range->end - range->start + 1;
+        u32 capacity = range->staged_member_capacity ? range->staged_member_capacity * 2 : 8;
+        if (capacity < range->staged_member_capacity || capacity > limit) capacity = limit;
+        valid = capacity > range->staged_member_count;
+        if (valid)
+        {
+            CMember* members = arena_allocate(machine->scratch_arena, CMember, capacity);
+            if (range->staged_member_count)
+                memcpy(members, range->staged_members, sizeof(*members) * range->staged_member_count);
+            range->staged_members = members;
+            range->staged_member_capacity = capacity;
+        }
+    }
+    if (valid)
+        range->staged_members[range->staged_member_count++] = member;
+    else
+        machine->failed = true;
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
@@ -11228,7 +11266,13 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
         frame->segment_start = frame->index + 1;
         frame->index += 1;
     }
-    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+    CParseResult* result = frame->result;
+    u32 member_start = result->member_count;
+    BUSTER_VALIDATE(frame->staged_member_count <= result->member_capacity - member_start);
+    if (frame->staged_member_count)
+        memcpy(result->members + member_start, frame->staged_members, sizeof(*result->members) * frame->staged_member_count);
+    result->member_count += frame->staged_member_count;
+    c_type_parse_frame_complete(machine, (CTypeId){.value = frame->staged_member_count}, member_start, true);
 }
 
 // Narrows an aggregate segment's alignment run to the records one member
@@ -11544,13 +11588,16 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             bool microsoft_anonymous = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && (defined_in_place || unqualified->is_complete);
             if ((defined_in_place && !base->tag.length) || microsoft_anonymous)
             {
-                BUSTER_VALIDATE(result->member_count < result->member_capacity);
-                result->members[result->member_count++] = (CMember){
+                if (!c_type_parse_aggregate_append_member(machine, (CMember){
                     .location = c_preprocess_token_location(frame->preprocess, frame->first),
                     .type = frame->base_type,
                     .alignment_start = frame->alignment_start,
                     .alignment_count = frame->alignment_count,
-                };
+                }))
+                {
+                    c_type_parse_aggregate_segment_fail(machine, frame, result->diagnostic_count);
+                    return;
+                }
             }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
@@ -11904,8 +11951,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, message);
         }
     }
-    BUSTER_VALIDATE(result->member_count < result->member_capacity);
-    result->members[result->member_count++] = (CMember){
+    if (!c_type_parse_aggregate_append_member(machine, (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_location(&preprocess, name),
         .symbol = name.symbol,
@@ -11918,7 +11964,12 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_token_count = bit_width_token_count,
         .is_bit_field = is_bit_field,
         .is_packed = member_packed,
-    };
+    }))
+    {
+        c_type_parse_aggregate_segment_fail(machine, frame, result->diagnostic_count);
+        return;
+    }
+
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     if (frame->declarator_end + 1 == frame->end)
@@ -12667,17 +12718,6 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
             c_type_parse_frame_complete(machine, type, declarator_start, true);
             return;
         }
-        bool nested_aggregate = false;
-        for (u32 index = 0; index + 1 < machine->frame_count; index += 1)
-        {
-            nested_aggregate |= machine->frames[index].kind == C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT;
-        }
-        if (nested_aggregate)
-        {
-            type = c_parse_apply_trailing_qualifiers(result, *frame->preprocess, type, &declarator_start, frame->end);
-            c_type_parse_frame_complete(machine, type, declarator_start, true);
-            return;
-        }
         CType* root = type.value < result->type_count ? result->types + type.value : 0;
         if (!root || root->kind == C_TYPE_ENUM)
         {
@@ -12723,7 +12763,8 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
     }
-    completed->member_count = result->member_count - completed->member_start;
+    completed->member_start = machine->result_index;
+    completed->member_count = machine->result_type.value;
     completed->is_complete = true;
     c_parse_validate_flexible_array_members(result, completed);
     c_parse_complete_aggregate_alignment_values(machine, result, preprocess, completed_id);
@@ -13381,7 +13422,7 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
         // failure a speculative parse rolls back shrinks every later budget.
         for (u32 index = frame_start; index < machine->frame_count; index += 1)
         {
-            if (machine->frames[index].kind == C_TYPE_PARSE_FRAME_SIZEOF)
+            if (machine->frames[index].kind == C_TYPE_PARSE_FRAME_SIZEOF || machine->frames[index].kind == C_TYPE_PARSE_FRAME_AGGREGATE_RANGE)
             {
                 machine->expression_task_count = machine->frames[index].task_mark;
                 arena_set_position(machine->scratch_arena, machine->frames[index].arena_mark);
@@ -14299,7 +14340,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     {
         type = C_TYPE_ID_INVALID;
     }
-    if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
+    if (type.value != C_ID_UNDERLYING_INVALID && (result->types[type.value].is_complete ||
+        (result->types[type.value].definition_start && result->types[type.value].definition_start != open + 1)))
     {
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
                            string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
@@ -22008,11 +22050,19 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
     CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
     if (start < end && end <= preprocess.token_count && end - start <= UINT32_MAX - 16)
     {
+        // Expression frames rewind machine scratch when they finish. Private
+        // type rows must outlive those frames, so keep their growth in the
+        // other scratch arena until the stable integer value has been read.
+        TemporalArena model_temporary = scratch_begin(&arena, 1);
         CParseResult query = *result;
-        query.arena = arena;
+        query.arena = model_temporary.arena;
         // Stable indexes contain mutable headers, and spelling caches write
         // shared token rows even during reads. Neither belongs to this query.
-        query.aggregate_lookup = 0;
+        // An incomplete private index requests the scope-aware fallback.
+        // A null index's legacy fallback instead takes the oldest tag.
+        CAggregateLookupSlot aggregate_slot = {0};
+        CAggregateLookup aggregates = {.slots = &aggregate_slot, .slot_count = 1, .incomplete = true};
+        query.aggregate_lookup = &aggregates;
         query.definition_index = 0;
         query.token_classes = 0;
         query.symbols = 0;
@@ -22059,9 +22109,9 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         if (query.position_index) syntax_positions = *query.position_index;
         String8 error = single ? (String8){0}
                               : c_parse_constant_expression_syntax_error(&query_machine, &query, preprocess, scope, start, end, &error_token);
-        // Syntax probing rewinds its scratch arena. Any tables it grew there
-        // and scalar IDs it appended were private to that probe; restore the
-        // pre-probe model before the value walk can allocate over their bytes.
+        // Syntax probing appended rows only to its private model. Restore
+        // those counts and scalar IDs before the value walk; model storage
+        // remains alive across the probe's independent scratch rewind.
         query = syntax_checkpoint;
         if (query.position_index) *query.position_index = syntax_positions;
         if (result->expression_scalar_types) memcpy(scalar_types, result->expression_scalar_types, sizeof(scalar_types));
@@ -22073,6 +22123,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
             constant = c_parse_typed_integer_constant(&query_machine, arena, preprocess, &query, scope, start, end);
             if (constant.type.value >= result->type_count) constant.type = C_TYPE_ID_INVALID;
         }
+        scratch_end(model_temporary);
     }
     return constant;
 }
@@ -26459,7 +26510,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
     result.type_capacity = token_count * 2 + 1;
     result.parameter_capacity = comma_count + open_parenthesis_count + 1;
-    result.member_capacity = identifier_count + semicolon_count + 1;
+    result.member_capacity = identifier_count + semicolon_count + comma_count + 1;
     result.enum_member_capacity = identifier_count + 1;
     result.array_bound_capacity = open_bracket_count + 1;
     result.alignment_capacity = 4;

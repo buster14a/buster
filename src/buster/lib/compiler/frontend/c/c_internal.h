@@ -866,6 +866,11 @@ struct CTypeParseFrame
     CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
+    // Direct members wait here until this range completes. Nested records
+    // publish their own disjoint runs while this vector stays on scratch.
+    CMember* staged_members;
+    u32 staged_member_count;
+    u32 staged_member_capacity;
     CType qualifiers;
     CType original_type;
     CTypeId type;

@@ -12,6 +12,8 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
+BUSTER_GLOBAL_LOCAL IrGlobal* c_test_find_ir_global(IrModule* module, IrProgram* program, String8 name);
+
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
 {
     UnitTestResult result = {0};
@@ -1762,6 +1764,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
                 }
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
+        }
+        scratch_end(temporary);
+    }
+    // An unnamed declarator adds no identifier; commas must therefore pay
+    // for its member row instead of relying on the identifier/semicolon census.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, S8("struct Many { int :1,:1,:1,:1,:1,:1,:1; };\n"), options);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            BUSTER_TEST(arguments, parse.member_count == 7);
+            for (u32 index = 0; index < parse.member_count; index += 1)
+                BUSTER_TEST(arguments, parse.members[index].is_bit_field && parse.members[index].bit_width_resolved && parse.members[index].bit_width == 1);
         }
         scratch_end(temporary);
     }
@@ -16338,6 +16354,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("sizeof((int[3]){1,2,3})"), 12, true},
         {S8("sizeof(0 ? obj : obj)"), 4, true},
         {S8("sizeof(struct F *)"), 8, true},
+        {S8("sizeof(struct F)"), 2, true},
+        {S8("sizeof(struct G *)"), 8, true},
+        {S8("sizeof(struct Missing *)"), 8, true},
         {S8("_Generic((struct S *)0, struct S *: 9, default: 3)"), 9, true},
         {S8("_Generic((__typeof__(obj) *)0, __typeof__(obj) *: 11, default: 3)"), 11, true},
         {S8("_Generic(0, int: _Generic(0, int: 7, default: 9), default: 3)"), 7, true},
@@ -16367,8 +16386,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         TemporalArena temporary = scratch_begin(0, 0);
         CTestTypeConstantCase test = cases[case_index];
         String8 source = string_format(temporary.arena,
-            S8("typedef int K; struct S { int q; }; struct F; struct S obj;"
-               " int f(void) { enum { K = 5 }; int probe = {S8}; return probe; }"), test.expression);
+            S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
+               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = {S8}; return probe; }"), test.expression);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
         CParseResult parse = c_parse(temporary.arena, preprocess);
@@ -16408,17 +16427,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         BUSTER_TEST(arguments, start < end && scope.value < parse.scope_count);
         if (start < end && scope.value < parse.scope_count)
         {
-            CTypeId scalar_types[C_TYPE_COUNT];
-            memset(scalar_types, 0xff, sizeof(scalar_types));
-            parse.expression_scalar_types = scalar_types;
-            CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
-            BUSTER_TEST(arguments, query.model_unchanged);
-            BUSTER_TEST(arguments, query.machine_unchanged);
-            BUSTER_TEST(arguments, query.constant.valid == test.valid);
-            if (query.constant.valid && test.valid)
+            CParseResult checkpoint = parse;
+            for (u32 variant = 0; variant < 3; variant += 1)
             {
-                BUSTER_TEST(arguments, !query.constant.is_negative && query.constant.magnitude_high == 0);
-                BUSTER_TEST(arguments, query.constant.magnitude == test.value);
+                parse = checkpoint;
+                CTypeId scalar_types[C_TYPE_COUNT];
+                memset(scalar_types, 0xff, sizeof(scalar_types));
+                parse.expression_scalar_types = scalar_types;
+                CTokenPositionIndex positions = {0};
+                if (variant == 1)
+                {
+                    // Force any syntax probe's temporary rows to grow in the
+                    // query arena before its scratch mark is rewound.
+                    parse.type_capacity = parse.type_count;
+                    parse.array_bound_capacity = parse.array_bound_count;
+                }
+                else if (variant == 2)
+                {
+                    // Lazy delimiter indexing must publish only privately.
+                    parse.position_index = &positions;
+                }
+                CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
+                BUSTER_TEST(arguments, query.model_unchanged);
+                BUSTER_TEST(arguments, query.machine_unchanged);
+                BUSTER_TEST(arguments, query.constant.valid == test.valid);
+                if (query.constant.valid && test.valid)
+                {
+                    BUSTER_TEST(arguments, !query.constant.is_negative && query.constant.magnitude_high == 0);
+                    BUSTER_TEST(arguments, query.constant.magnitude == test.value);
+                }
             }
         }
         scratch_end(temporary);
