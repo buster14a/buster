@@ -1,0 +1,102 @@
+# Baseline top call sites (pinned main), census compiler symbolized with addr2line
+
+## symbol_intern
+calls	bytes	aux	phase	kind	site0	site1
+823496	7113621	1024170	preprocess	symbol_intern	c_symbols_intern_tokens@c_source.c:3449	c_preprocess@c_source.c:9048
+85897	419724	159829	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_symbol_or_intern@c_parse.c:2227 <- c_parse_lookup_entity_token@c_parse.c:2241	c_parse_qualified_typedef_type@c_parse.c:8412
+85802	419050	159728	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_symbol_or_intern@c_parse.c:2227 <- c_parse_lookup_typedef_name_token@c_parse.c:13597	c_parse_qualified_typedef_type@c_parse.c:8419
+12018	181600	15599	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_analyze_semantics_core@c_parse.c:22856	c_analyze_semantics_only@c_parse.c:23271 <- c_analyze_with_options@c.c:18 <- compiler_driver_execute_c_single@driver.c:3653
+7598	114562	9738	lower	symbol_intern	c_lower_to_ir_with_options@c_parse.c:13313	compiler_driver_execute_c_single@c.c:27
+4121	58813	5686	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_lookup_typedef_name_fallback@c_parse.c:13631 <- c_parse_scalar_type_core_begin@c_parse.c:11151 <- c_type_parse_core_step@c_parse.c:9742 <- c_type_parse_machine_run@c_parse.c:10450	c_parse_scalar_type_in_scope_context@c_parse.c:10504 <- c_parse_scalar_type_in_scope@c_parse.c:10515
+4121	58813	5686	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_lookup_typedef_name@c_parse.c:13591 <- c_parse_lookup_typedef_name_fallback@c_parse.c:13655 <- c_parse_scalar_type_core_begin@c_parse.c:11151 <- c_type_parse_core_step@c_parse.c:9742 <- c_type_parse_machine_run@c_parse.c:10450	c_parse_scalar_type_in_scope_context@c_parse.c:10504 <- c_parse_scalar_type_in_scope@c_parse.c:10515
+4056	33225	4133	preprocess	symbol_intern	c_symbols_intern_tokens@c_source.c:3449	c_preprocess@c_source.c:8149
+3739	48566	6078	preprocess	symbol_intern	c_macro_define@c_source.c:3776	c_preprocess_define_directive@c_source.c:7887
+1384	21798	2359	preprocess	symbol_intern	c_macro_find_token@c_source.c:3728	c_preprocess_expand@c_source.c:4756
+888	9270	1022	lower	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_lookup_entity_at@c_parse.c:13561 <- c_ir_initializer_value_is_aggregate_expression@c_gen.c:41226	c_ir_lower_dispatch_run@c_gen.c:25092
+671	7679	758	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_lookup_typedef_name_fallback@c_parse.c:13631 <- c_parse_scalar_type_core_begin@c_parse.c:11151 <- c_type_parse_core_step@c_parse.c:9742 <- c_type_parse_machine_run@c_parse.c:10450	c_parse_scalar_type_in_scope_context@c_parse.c:10504
+671	7679	758	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_lookup_typedef_name@c_parse.c:13591 <- c_parse_lookup_typedef_name_fallback@c_parse.c:13655 <- c_parse_scalar_type_core_begin@c_parse.c:11151 <- c_type_parse_core_step@c_parse.c:9742 <- c_type_parse_machine_run@c_parse.c:10450	c_parse_scalar_type_in_scope_context@c_parse.c:10504
+644	10304	763	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_symbol_or_intern@c_parse.c:2227 <- c_parse_lookup_entity_token@c_parse.c:2241	c_parse_pending_enum_member@c_parse.c:3147
+515	794	797	semantic	symbol_intern	c_parse_name_symbol@c_parse.c:13313 <- c_parse_symbol_or_intern@c_parse.c:2227 <- c_parse_lookup_typedef_name_token@c_parse.c:13597	c_parse_type_layout_core@c_parse.c:1894
+
+## hash64
+calls	bytes	aux	phase	kind	site0	site1
+48179	1103117	0	lower	hash64	c_ir_function_name_hash@c_gen.c:12633 <- c_ir_function_name_resolution@c_gen.c:12641 <- c_ir_prepare_calls_discover@c_gen.c:18274 <- c_ir_prepare_calls_step@c_gen.c:21308	c_ir_lower_expression_core_step@c_gen.c:27702
+48087	426108	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_model_emit_scope_variables@dwarf.c:1004
+25500	301964	0	codegen	hash64	buster_x86_metadata_hash_string@x86_64_metadata.c:1417 <- buster_x86_metadata_form_stable_hash@x86_64_metadata.c:1432 <- buster_x86_metadata_validate_form_record@x86_64_metadata.c:10782 <- buster_x86_metadata_form_record_valid@x86_64_metadata.c:1034	buster_x86_metadata_form@x86_64_metadata.c:11470 <- buster_x86_metadata_select_form@x86_64_metadata.c:9117
+15348	290980	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_build_model@dwarf.c:1004
+7790	86174	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_model_string@dwarf.c:1004 <- dwarf_model_emit_type@dwarf.c:1356 <- dwarf_build_model@dwarf.c:1798
+7648	76560	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_model_string@dwarf.c:1004 <- dwarf_model_emit_type@dwarf.c:1386 <- dwarf_build_model@dwarf.c:1798
+7598	211582	0	lower	hash64	c_ir_function_name_hash@c_gen.c:12633 <- c_ir_build_function_name_index@c_gen.c:12709 <- c_lower_to_ir_with_options@c_gen.c:48639	compiler_driver_execute_c_single@c.c:27
+7598	211582	0	lower	hash64	c_ir_function_name_hash@c_gen.c:12633 <- c_ir_function_name_resolution@c_gen.c:12641 <- c_lower_to_ir_with_options@c_gen.c:50437	compiler_driver_execute_c_single@c.c:27
+5205	155940	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_build_legacy@dwarf.c:749
+5205	155940	0	object	hash64	dwarf_string_intern@dwarf.c:580	dwarf_model_emit_function@dwarf.c:1004 <- dwarf_build_model@dwarf.c:1810
+4336	51013	0	link	hash64	link_elf_index_initialize@link.c:3906	link_native_executable@link.c:11843
+2718	72190	0	lower	hash64	c_ir_function_name_hash@c_gen.c:12633 <- c_ir_function_name_resolution@c_gen.c:12641 <- c_ir_find_function@c_gen.c:12798 <- c_ir_sizeof_operand_identifier_type_attempt@c_gen.c:26186	c_ir_sizeof_operand_type_attempt@c_gen.c:26830 <- c_ir_predict_nonconditional_expression_type_attempt@c_gen.c:31149 <- c_ir_predict_expression_type_attempt@c_gen.c:31968 <- c_ir_query_execute@c_gen.c:2987
+2560	24069	0	codegen	hash64	buster_x86_metadata_hash_string@x86_64_metadata.c:1417 <- buster_x86_metadata_form_stable_hash@x86_64_metadata.c:1432 <- buster_x86_metadata_validate_form_record@x86_64_metadata.c:10782 <- buster_x86_metadata_form_record_valid@x86_64_metadata.c:1034	buster_x86_metadata_form@x86_64_metadata.c:11470 <- buster_x86_metadata_lookup_form_key@x86_64_metadata.c:11511 <- buster_x86_metadata_exact_plan_prepare@x86_64_metadata.c:11605
+1520	17820	0	codegen	hash64	buster_x86_metadata_hash_string@x86_64_metadata.c:1417 <- buster_x86_metadata_form_stable_hash@x86_64_metadata.c:1432 <- buster_x86_metadata_validate_form_record@x86_64_metadata.c:10782 <- buster_x86_metadata_form_record_valid@x86_64_metadata.c:1034	buster_x86_metadata_form@x86_64_metadata.c:11470 <- buster_x86_metadata_apx_ndd_projection@x86_64_metadata.c:8959
+1075	7463	0	lower	hash64	c_ir_function_name_hash@c_gen.c:12633 <- c_ir_function_name_resolution@c_gen.c:12641 <- c_ir_find_function@c_gen.c:12798	c_ir_query_execute@c_gen.c:31624
+
+## object_name_hash
+calls	bytes	aux	phase	kind	site0	site1
+20553	446920	0	object	object_name_hash	object_symbol_name_slot@object.c:9473 <- object_symbol_name_index_add@object.c:9485 <- object_symbol_name_index_build@object.c:9523	object_from_canonical_codegen_module@object.c:10886
+15434	291379	0	object	object_name_hash	object_symbol_name_slot@object.c:9473	object_from_canonical_codegen_module@object.c:10921
+15348	290980	0	object	object_name_hash	object_symbol_name_slot@object.c:9473 <- object_append_dwarf@object.c:9687	object_from_canonical_codegen_module@object.c:10996
+95	892	0	object	object_name_hash	object_symbol_name_slot@object.c:9473 <- object_symbol_name_index_add@object.c:9485	object_from_canonical_codegen_module@object.c:10940
+6	68	0	object	object_name_hash	object_symbol_name_slot@object.c:9473 <- object_symbol_name_index_add@object.c:9485 <- object_append_dwarf@object.c:9679	object_from_canonical_codegen_module@object.c:10996
+1	5	0	object	object_name_hash	object_symbol_name_slot@object.c:9473 <- object_symbol_name_index_add@object.c:9485 <- object_append_dwarf@object.c:9668	object_from_canonical_codegen_module@object.c:10996
+
+## string_equal, semantic
+calls	bytes	aux	phase	kind	site0	site1
+1936140	223260	0	semantic	string_equal	c_parse_type_layout_core@c_parse.c:1924	c_parse_type_layout@c_parse.c:2212 <- c_parse_constant_leaf@c_parse.c:18096 <- c_parse_typed_constant@c_parse.c:18245
+1425018	2333729	166116	semantic	string_equal	c_parse_member_type@c_parse.c:2647	c_parse_direct_expression_postfix@c_parse.c:2753
+1375533	88602	0	semantic	string_equal	c_parse_validate_sizeof_operands@c_internal.h:551	c_parse_validate_lowering_constraints@c_parse.c:20149
+1290641	16784	0	semantic	string_equal	c_token_is_well_known@c_internal.h:551 <- c_parse_label_values_needed@c_parse.c:21486 <- c_parse_validate_label_values@c_parse.c:21507 <- c_parse_validate_lowering_constraints@c_parse.c:22473	c_analyze_semantics_core@c_parse.c:23257
+1175095	7116	0	semantic	string_equal	c_parse_validate_sizeof_operands@c_internal.h:551	c_parse_validate_lowering_constraints@c_parse.c:22462
+1021506	120780	0	semantic	string_equal	c_parse_type_layout_core@c_parse.c:1924	c_parse_type_layout@c_parse.c:2212 <- c_parse_constant_expression_evaluate@c_parse.c:4799
+952200	109800	0	semantic	string_equal	c_parse_type_layout_core@c_parse.c:1924	c_parse_typed_constant@c_parse.c:17891
+868609	1399538	99011	semantic	string_equal	c_parse_member_type@c_parse.c:2647	c_parse_validate_lowering_constraints@c_parse.c:19118
+643690	113661	0	semantic	string_equal	c_parse_validate_assembly@c_parse.c:21760 <- c_parse_validate_lowering_constraints@c_parse.c:22470	c_analyze_semantics_core@c_parse.c:23257
+643690	411208	2	semantic	string_equal	c_parse_validate_assembly@c_parse.c:21760 <- c_parse_validate_lowering_constraints@c_parse.c:22470	c_analyze_semantics_core@c_parse.c:23257
+643690	441805	0	semantic	string_equal	c_parse_validate_assembly@c_parse.c:21760 <- c_parse_validate_lowering_constraints@c_parse.c:22470	c_analyze_semantics_core@c_parse.c:23257
+641500	257128	0	semantic	string_equal	c_parse_validate_generic_duplicates@c_parse.c:20504	c_parse_validate_lowering_constraints@c_parse.c:22459
+637004	256376	1663	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_sizeof_operands@c_parse.c:19956	c_parse_validate_lowering_constraints@c_parse.c:22462
+635341	177705	0	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_sizeof_operands@c_parse.c:19956	c_parse_validate_lowering_constraints@c_parse.c:22462
+635341	307417	0	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_sizeof_operands@c_parse.c:19956	c_parse_validate_lowering_constraints@c_parse.c:22462
+614666	256376	1663	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_compound_literals@c_parse.c:20029	c_parse_validate_lowering_constraints@c_parse.c:22465
+613003	307417	0	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_compound_literals@c_parse.c:20029	c_parse_validate_lowering_constraints@c_parse.c:22465
+613003	177705	0	semantic	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_parse_validate_compound_literals@c_parse.c:20029	c_parse_validate_lowering_constraints@c_parse.c:22465
+603888	242680	0	semantic	string_equal	c_parse_validate_lowering_constraints@c_parse.c:19021	c_analyze_semantics_core@c_parse.c:23257
+603888	242680	0	semantic	string_equal	c_parse_validate_lowering_constraints@c_parse.c:19021	c_analyze_semantics_core@c_parse.c:23257
+380545	157064	0	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:3756
+380545	215187	0	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:3756
+380545	271260	0	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:3756
+275031	64313	977	semantic	string_equal	c_symbol_builtin_from_spelling@c_source.c:3062 <- c_parse_validate_builtin_calls@c_parse.c:21074 <- c_parse_validate_lowering_constraints@c_parse.c:22468	c_analyze_semantics_core@c_parse.c:23257
+270295	120360	0	semantic	string_equal	c_ir_sse2_immediate_shift_builtin@c_gen.c:2179 <- c_semantic_sse2_immediate_shift_builtin@c_gen.c:2189	c_parse_expression_leaf_without_cast@c_parse.c:3475
+265683	31368	0	semantic	string_equal	c_parse_skip_alignment_specifiers@c_parse.c:6886	c_parse_qualified_typedef_type@c_parse.c:8384
+247799	396792	35062	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:8985
+212737	122184	1668	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:8985
+211069	200291	0	semantic	string_equal	c_parse_expression_leaf_without_cast@c_parse.c:3444	c_type_parse_machine_run@c_parse.c:8985
+195280	3360	0	semantic	string_equal	c_parse_validate_lowering_constraints@c_parse.c:19037	c_analyze_semantics_core@c_parse.c:23257
+
+## string_equal, lower
+calls	bytes	aux	phase	kind	site0	site1
+2182610	1931418	93202	lower	string_equal	c_ir_emit_field_place_from_value@c_gen.c:8207	c_ir_lower_place_step@c_gen.c:14392
+641669	410585	2	lower	string_equal	c_lower_to_ir_with_options@c_gen.c:50632	compiler_driver_execute_c_single@c.c:27
+641669	440620	0	lower	string_equal	c_lower_to_ir_with_options@c_gen.c:50631	compiler_driver_execute_c_single@c.c:27
+641669	113073	0	lower	string_equal	c_lower_to_ir_with_options@c_gen.c:50630	compiler_driver_execute_c_single@c.c:27
+571130	120519	0	lower	string_equal	ir_call_returns_twice@ir_promote.c:81 <- ir_local_promotion_call_barrier@ir_promote.c:92 <- c_ir_ssa_classify_places@c_gen.c:5361 <- c_ir_ssa_finish@c_gen.c:5573	c_lower_to_ir_with_options@c_gen.c:50894
+441664	235007	0	lower	string_equal	c_ir_math_builtin_link_name@c_gen.c:2112 <- c_ir_sizeof_operand_identifier_type_attempt@c_gen.c:26129	c_ir_sizeof_operand_type_attempt@c_gen.c:26830 <- c_ir_predict_nonconditional_expression_type_attempt@c_gen.c:31149 <- c_ir_predict_expression_type_attempt@c_gen.c:31968 <- c_ir_query_execute@c_gen.c:2987
+180367	260268	19542	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:28093	c_ir_lower_logical_value_step@c_gen.c:30813
+180367	31644	0	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:27999	c_ir_lower_logical_value_step@c_gen.c:30813
+160825	99008	1662	lower	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_ir_lower_expression_core_step@c_gen.c:28093	c_ir_lower_logical_value_step@c_gen.c:30813
+159163	107822	0	lower	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_ir_lower_expression_core_step@c_gen.c:28093	c_ir_lower_logical_value_step@c_gen.c:30813
+159163	51935	0	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:28356	c_ir_lower_logical_value_step@c_gen.c:30813
+159163	51435	0	lower	string_equal	c_parse_alignof_word@c_parse.c:877 <- c_ir_lower_expression_core_step@c_gen.c:28093	c_ir_lower_logical_value_step@c_gen.c:30813
+158093	85712	265	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:28462	c_ir_lower_logical_value_step@c_gen.c:30813
+157828	25251	0	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:28463	c_ir_lower_logical_value_step@c_gen.c:30813
+157828	56940	0	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:28462	c_ir_lower_logical_value_step@c_gen.c:30813
+153544	47190	0	lower	string_equal	c_ir_lower_expression_core_step@c_gen.c:27555	c_ir_lower_logical_value_step@c_gen.c:30813
+145767	150617	6779	lower	string_equal	c_ir_promoted_member_path@c_gen.c:25833	c_ir_sizeof_operand_postfix_chain_attempt@c_gen.c:26072
+128320	26506	0	lower	string_equal	c_ir_math_builtin_link_name@c_gen.c:2112 <- c_ir_sizeof_operand_identifier_type_attempt@c_gen.c:26129	c_ir_sizeof_operand_type_attempt@c_gen.c:26830 <- c_ir_sizeof_expression_attempt@c_gen.c:27165 <- c_ir_query_execute@c_gen.c:2977
+104574	226558	15742	lower	string_equal	c_ir_promoted_member_path@c_gen.c:25833	c_ir_constant_initializer_bytes@c_gen.c:42353
+98936	4692	0	lower	string_equal	c_ir_emit_math_call@c_gen.c:15775	c_ir_emit_prepared_call_step@c_gen.c:20752

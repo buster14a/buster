@@ -12,12 +12,14 @@ Record the current main commit and tree, the merged #1017 and #1058 identities,
 the authenticated administrator and the installed Actions actor policy. Confirm
 it permits exactly Repository admin, `davidgmbb`, ChatGPT Codex Connector,
 Claude and Devin.ai Integration to request the fixed workflow through manual
-dispatch. Confirm `davidgmbb` has repository admin permission and is the sole
-required `benchmark-9700x` reviewer, with self-review prevention. Edits to
-the workflow, policy and installed gateway still require review under the
-repository trust policy.
-If an administrator uses GitHub's environment bypass control, record that
-separate release action; it is not a reviewer approval receipt.
+dispatch. Confirm `davidgmbb` has repository admin permission. No one approves
+or releases the job: `benchmark-9700x` has no required reviewer or wait timer,
+and the dispatch workflow's `authorize` and `submit` jobs admit only a run
+whose actor and triggering actor are `davidgmbb` by login and numeric ID
+39247043, verified per run attempt, so re-runs by anyone else are skipped.
+The other permitted requesters may start a run, but it is skipped before the
+self-hosted runner. Edits to the workflow, policy and installed gateway still
+require review under the repository trust policy.
 
 In a trusted checkout at the recorded main commit, inspect
 `GITHUB_ADMISSION.md`, the main ruleset policy, requester policy and read-only
@@ -30,6 +32,13 @@ access:
 bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 ```
 
+Apply the settings transition in two separate steps. **Step 1:** once the
+workflow gate is on protected `main`, remove the required reviewer from
+`benchmark-9700x`, keep its one `main` deployment branch rule, add no wait
+timer, and leave `BENCH_SERVICE_DISPATCH_ENABLED=false`; then run the preflight
+above with the variable still `false`. **Step 2** follows in section 3, only
+after the host operator's readiness post.
+
 The preflight first reads back disabled dispatch and leaves the variable
 unchanged. Explicitly set it to `false` before checking if it is absent;
 do not run it during an enabled window.
@@ -40,11 +49,13 @@ group, `benchmark-9700x` environment,
 deployment branch policies and `BENCH_SERVICE_DISPATCH_ENABLED`. Its read-back
 verifier must pass with `value=false`, and no superseded benchmark branch
 ruleset may be present. The main queue must retain eight Actions-bound checks,
-non-strict status checks, 20-build/one-merge `ALLGREEN` and exactly the two
+non-strict status checks, 4-build/one-merge `ALLGREEN` and exactly the two
 reviewed standing bypass actors, Repository admin (role 5) and `davidgmbb`
-(user 39247043), both in `always` mode. The environment must require
-`davidgmbb` to approve with self-review prevention and must allow only the
-exact `main` deployment branch.
+(user 39247043), both in `always` mode. The environment must have no
+required reviewer, wait timer or other approval rule and must allow only the
+exact `main` deployment branch. The preflight must also read back live
+`main`'s dispatch workflow byte-identical to the reviewed checkout and pass
+the workflow policy test, which pins the per-attempt actor gate.
 
 Record the runner registration, its actual runner group, allowed repository
 and workflow restrictions, effective labels, account and idle state from
@@ -62,9 +73,9 @@ existing queue or replace the lease inode. Record and sign off:
 
 | Receipt | Required observation |
 | --- | --- |
-| Software | Main commit/tree, exact service, build driver, harness, gateway/export, systemd broker and helper SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
+| Software | Main commit/tree, exact service, build driver, harness, gateway/export, systemd broker, static credential gate, static broker entry gate and helper SHA-256; both gates have no ELF INTERP/DYNAMIC and no executable stack; root-owned `0444` numeric account receipt and its SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
 | Sources | Immutable reviewed commit-to-tree-to-manifest mapping; full closure, sorted inventory, file counts/bytes/hashes; source manifest over 4 KiB for the normal attempt |
-| Principals | Numeric service, candidate, runner and operator UID/GID/supplementary groups; runner can invoke only the fixed installed gateway, candidate cannot mutate queue, lease, policy or results |
+| Principals | Authenticated numeric service, candidate, runner and operator UID/GID/supplementary inventory; actual service/runner process real/effective/saved/filesystem UID/GID, Groups, Cap* and NoNewPrivs; account and authorization sources stable for the whole lease; runner can invoke only the fixed installed gateway, candidate cannot mutate queue, lease, policy or results |
 | State | Canonical queue/workspace/result/source/runtime paths, symlink/hard-link checks and permissions, filesystem identity and space; stable lease device/inode observed before and after each attempt |
 | Supervisor | Host/boot/kernel/microcode, systemd version, exact service/broker/socket/unit files, root-owned stable-lease identity, fixed system-bus authority, cgroup v2 ancestry and effective CPU/memory/swap/tasks/runtime; real UID/GID and process absence |
 | Exclusivity | Drained GitHub and Forgejo jobs, timers, cron, agents, profilers, backups, indexers and manual work from preparation through cleanup; recorded negative audit and no unresolved queue job |
@@ -80,13 +91,17 @@ install or approve it.
 
 ## 3. Protected execution, once both receipts pass
 
-After the administrator and host operator sign off the actual receipts,
-explicitly enable admission. A reviewed requester starts only
-`.github/workflows/9700x-service-dispatch.yml` on protected `main`, and the
-administrator approves or rejects the pending environment job before the
-runner executes the fixed gateway.
-Predeclare distinct idempotency keys and record workflow run/job, request
-digest, principal, job/attempt, installed inventory and boot/lease identities.
+**Step 2:** only after the host operator posts readiness matching this exact
+installation packet and the administrator has signed off the step 1 preflight
+receipts, the administrator sets `BENCH_SERVICE_DISPATCH_ENABLED=true` and
+reads it back. `davidgmbb` then starts only
+`.github/workflows/9700x-service-dispatch.yml` on protected `main`; the
+`authorize` job verifies that run attempt and `submit` runs the fixed gateway
+without a manual approval step. Re-run with **Re-run all jobs**; a partial
+re-run skips `submit`.
+Predeclare distinct idempotency keys and record workflow run/job, the
+`authorize` job and its verified attempt, request digest, principal,
+job/attempt, installed inventory and boot/lease identities.
 Do not replace the protected entrypoint with SSH or direct local submit.
 
 Preserve five separate real-systemd attempts: (1) normal completion from

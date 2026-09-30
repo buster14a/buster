@@ -1,0 +1,53 @@
+name: Native retirement automation
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Buster CI, Native retirement trusted integration, Native retirement catch-up]
+    types: [completed]
+  schedule:
+    - cron: '7,17,27,37,47,57 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: native-retirement-automation-controller
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: ${{ github.server_url == 'https://github.com' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Reconcile trusted retirement requests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      actions: write
+      statuses: read
+      checks: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out immutable trusted main only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve and persist one eligible exact request
+        id: plan
+        run: python3 tools/native_retirement_controller.py plan --repo-root . --request "$RUNNER_TEMP/native-retirement-request/request.json"
+      - name: Seal the trusted request before dispatch
+        if: ${{ steps.plan.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-retirement-automation-request-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-retirement-request/request.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Dispatch the existing single writer once
+        if: ${{ steps.plan.outputs.ready == 'true' }}
+        run: python3 tools/native_retirement_controller.py dispatch --request "$RUNNER_TEMP/native-retirement-request/request.json"

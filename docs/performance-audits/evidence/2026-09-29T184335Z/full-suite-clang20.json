@@ -1,0 +1,27 @@
+[
+  {
+    "name": "baseline",
+    "command": [
+      "/tmp/buster-1887/bin/ide-baseline",
+      "test",
+      "--verbose=1"
+    ],
+    "oracle": "Clang 20.1.2",
+    "exit": 0,
+    "wall_ns": 69189336865
+  },
+  {
+    "name": "candidate",
+    "command": [
+      "/tmp/buster-1887/bin/build",
+      "build",
+      "--config",
+      "Release",
+      "-t",
+      "test_all"
+    ],
+    "oracle": "Clang 20.1.2",
+    "exit": 0,
+    "wall_ns": 66605921198
+  }
+]
