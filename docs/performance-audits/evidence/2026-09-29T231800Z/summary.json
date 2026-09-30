@@ -1,0 +1,47 @@
+{
+  "run_id": 36644295419,
+  "job_id": 109663543985,
+  "artifact_id": 11068077273,
+  "zip_sha256": "c6ff3710735db9a1ecae10448b189957467805760645485a136ffa1d57d6fbc8",
+  "fixture_splits": {
+    "design": {
+      "fixtures": 2,
+      "quality_core_invocations": 5,
+      "eligible_invocations": 1,
+      "avoided_requested_payload_bytes": 98332,
+      "passed": true
+    },
+    "heldout": {
+      "fixtures": 5,
+      "quality_core_invocations": 6,
+      "eligible_invocations": 0,
+      "avoided_requested_payload_bytes": 0,
+      "passed": true
+    }
+  },
+  "registered_tests": {
+    "baseline": {
+      "quality_core_invocations": 16811,
+      "eligible_invocations": 2695,
+      "skipped_invocations": 0,
+      "avoided_requested_payload_bytes": 0,
+      "assertions": 919756,
+      "failed": 0,
+      "modules": 3
+    },
+    "candidate": {
+      "quality_core_invocations": 16811,
+      "eligible_invocations": 2695,
+      "skipped_invocations": 2695,
+      "avoided_requested_payload_bytes": 265519392,
+      "assertions": 919756,
+      "failed": 0,
+      "modules": 3
+    }
+  },
+  "fixed_points": {
+    "trusted_bytes": 47119456,
+    "candidate_bytes": 47124336,
+    "mode": "ordinary default FAST, assertions enabled; each source separately"
+  }
+}

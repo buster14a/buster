@@ -115,7 +115,10 @@ incomplete or unprovable provenance selects comparison conservatively with
 `reason=provenance-uncertain`. Merge groups, distinct unclassified events, and
 same-revision events outside the narrow skip policy also compare. A manual
 workflow dispatch with `analyzer_comparison=true` always selects comparison and
-records `reason=requested`.
+records `reason=requested`. Both workflow steps ask
+`tools/analyzer_reference.py materialization` whether the reference must be
+materialized; it applies the same same-revision rule as `select`, so the
+bootstrap export and the campaign's independent recomputation cannot drift.
 
 Immediately before analysis, the campaign re-resolves both revisions, regenerates
 both manifests from the retained dependency files and materialized trees, and

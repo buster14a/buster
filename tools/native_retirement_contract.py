@@ -37,6 +37,9 @@ FULL_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc73
 NEXT_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 # #1986 scheduling-test bytes only; corpus and target axes are unchanged.
 APPLE_CI_SUPPORT_CONTRACT_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210"
+# #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
+# byte/hash row updated; corpus and target axes are unchanged.
+PROPOSED_SUPPORT_CONTRACT_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -52,6 +55,11 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
 FULL_APPLICABILITY_LEDGER_SHA256 = "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa"
+# #1007 successor: the same 374 identities with only the four
+# tests/basic_c_f80_machine.c fixture_sha256 cells updated to its 7,233-byte successor.
+PROPOSED_APPLICABILITY_LEDGER_SHA256 = "31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9"
+ACCEPTED_APPLICABILITY_LEDGER_SHA256 = (FULL_APPLICABILITY_LEDGER_SHA256,
+                                        PROPOSED_APPLICABILITY_LEDGER_SHA256)
 LEGACY_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
 LEGACY_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
 LEGACY_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
@@ -506,7 +514,7 @@ def validate_applicability_ledger(directory, manifest, rows, inputs, profile, ga
     fields, records = table_with_fields(path)
     assert fields == APPLICABILITY_LEDGER_FIELDS
     if profile == FULL_CENSUS_PROFILE:
-        assert ledger_sha256 == FULL_APPLICABILITY_LEDGER_SHA256
+        assert ledger_sha256 in ACCEPTED_APPLICABILITY_LEDGER_SHA256
         assert len(records) == FULL_APPLICABILITY_LEDGER_COUNT
     if "applicability_ledger_entries" in manifest:
         assert manifest["applicability_ledger_entries"] == str(len(records))
@@ -591,7 +599,7 @@ def validate_profile(manifest, inputs, row_count):
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") in (
             FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256,
-            APPLE_CI_SUPPORT_CONTRACT_SHA256)
+            APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""

@@ -61,7 +61,7 @@ RECONSTRUCTION_MODES = frozenset(("ordinary-bound-merge-group", "trusted-integra
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 4,
+    "max_entries_to_build": 6,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,

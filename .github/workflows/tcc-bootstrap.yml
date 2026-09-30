@@ -85,7 +85,13 @@ jobs:
         env:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./build.sh bench_service self-test --sanitize
+        # Pin the common 8 MiB default so a larger runner stack cannot hide
+        # an ASan frame regression (#1980); fails if the hard limit is lower.
+        run: |
+          set -euo pipefail
+          ulimit -S -s 8192
+          echo "stack soft=$(ulimit -S -s) KiB hard=$(ulimit -H -s)"
+          ./build.sh bench_service self-test --sanitize
 
       - name: Broker and static gate component tests
         if: ${{ !cancelled() }}

@@ -31,6 +31,32 @@ it runs weekly, on demand, and for ready pull requests that change a harness
 input, so the Linux comparison never waits for a macOS runner. Hardware
 counters currently have a Linux implementation only.
 
+### Hosted workflow requests
+
+`Compiler throughput` runs on pull requests and cancels older in-progress or
+pending runs for the same PR when a newer run arrives. It also defines the
+reusable jobs for `Compiler throughput requests`. Start a manual comparison
+from the latter workflow; its weekly schedule uses the same entry. Manual and
+scheduled requests share one concurrency group across branches, so a schedule
+cannot replace an already-pending manual request (or vice versa).
+
+The request workflow runs one comparison at a time and retains at most 100
+pending runs through GitHub's `queue: max` policy. A new run when the queue is
+full is cancelled, with the existing pending requests retained. The wait order
+is based on when each run entered the concurrency group, which can differ from
+dispatch order. Neither another dispatch nor a schedule cancels an accepted
+request; cancel obsolete pending requests explicitly in Actions. The reusable
+workflow uses the unique run ID for non-PR concurrency, so it cannot replace a
+waiting caller through a second single-pending group. PR runs have a separate
+per-PR group and do not wait behind manual measurements. For reproducible
+manual comparisons, select an exact baseline commit rather than a moving ref;
+scheduled runs use the default `main` baseline.
+
+`python3 tools/compiler_throughput_workflow_test.py` checks the PR and request
+policies, including three overlapping non-PR requests, a manual/schedule
+collision, and capacity exhaustion. The ordinary hosted workflow lint checks
+the syntax separately; no live benchmark is part of the offline policy test.
+
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
 is also owned by `build.c`, including the Linux CI invocation.
@@ -39,6 +65,14 @@ is also owned by `build.c`, including the Linux CI invocation.
 integration tests, including fixed-seed corpus hashes, rejected sample paths,
 deliberately invalid result bundles and timed-out children. Their expected error
 diagnostics are not compiler failures.
+
+The fixtures write fixed paths that the tool refuses to reuse, so `build.c`
+deletes `build/throughput-tool-tests` (or `build/throughput-tool-tests-sanitized`)
+before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
+directly, pass an absent or empty directory. If a child exit-code check fails,
+it prints the exit code, signal, timeout, launch error and wall time, followed by
+the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
+test root, which the harness artifacts upload.
 
 A direct standalone build is useful when diagnosing the harness:
 
@@ -1083,6 +1117,7 @@ clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
   -fwrapv -fno-strict-aliasing -funsigned-char \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   tools/throughput/tests.c -lm -o build/throughput-tests-sanitized
+rm -rf build/throughput-tool-tests-sanitized
 ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   build/throughput-tests-sanitized build/throughput-tool-tests-sanitized
