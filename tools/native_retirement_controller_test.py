@@ -489,6 +489,118 @@ class CatchUpOpenerTests(unittest.TestCase):
         self.assertFalse([call for call in api.calls if call[0] == "POST"])
 
 
+MOVED = "e" * 40
+
+
+class SupersededAPI(CatchUpAPI):
+    """Catch-up fixture plus a push-run inventory for successor proofs (#2003)."""
+    def __init__(self):
+        super().__init__()
+        self.main = MOVED
+        self.workflow_runs = {name: [] for name in c.SUPERSEDABLE.values()}
+        self.inventory_error = None
+
+    def push_run(self, workflow, run_id, number, head):
+        self.workflow_runs[workflow].append({
+            "id": run_id, "run_number": number, "event": "push", "head_branch": "main",
+            "status": "queued", "head_sha": head})
+
+    def request(self, path, *, method="GET", body=None, **query):
+        for workflow, runs in self.workflow_runs.items():
+            if path == "actions/workflows/" + workflow + "/runs":
+                if self.inventory_error is not None:
+                    raise self.inventory_error
+                if query.get("event") != "push" or query.get("branch") != "main":
+                    raise AssertionError(query)
+                return {"workflow_runs": copy.deepcopy(runs)}
+        return super().request(path, method=method, body=body, **query)
+
+
+class SupersededPushTests(unittest.TestCase):
+    """Main-push catch-up/plan runs are green only when provably superseded."""
+
+    def run_main(self, api, command, *, event="push", raised=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            summary = Path(temporary) / "summary.md"
+            environment = {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "fixture",
+                           "GITHUB_WORKFLOW_SHA": BASE, "GITHUB_RUN_ID": "300",
+                           "GITHUB_RUN_NUMBER": "5", "GITHUB_EVENT_NAME": event,
+                           "GITHUB_STEP_SUMMARY": str(summary),
+                           "GITHUB_OUTPUT": str(Path(temporary) / "output")}
+
+            def failing(*_args):
+                if raised is not None:
+                    raise raised
+                # The production stale-main exit, not a synthetic one.
+                return a.read_policy(api, BASE)
+            argv = [command, "--repo-root", str(ROOT)]
+            if command == "plan":
+                argv += ["--request", str(Path(temporary) / "request.json")]
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch.object(i, "GitHub", return_value=api), \
+                    mock.patch.object(c, "catch_up", side_effect=failing), \
+                    mock.patch.object(c, "plan", side_effect=failing), \
+                    mock.patch("main_push_maintenance.SUCCESSOR_WAIT_SECONDS", 0), \
+                    mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                status = c.main(argv)
+            text = summary.read_text() if summary.exists() else ""
+        return status, text
+
+    def test_superseded_catch_up_and_plan_with_successor_are_green_no_ops(self):
+        for command in ("catch-up", "plan"):
+            with self.subTest(command=command):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE[command], 301, 6, MOVED)
+                status, summary = self.run_main(api, command)
+                self.assertEqual(status, 0)
+                self.assertIn('"status": "superseded"', summary)
+                self.assertIn('"current_main": "' + MOVED + '"', summary)
+                self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_failure_on_newest_main_stays_red(self):
+        api = SupersededAPI()
+        api.main = BASE
+        api.push_run(c.SUPERSEDABLE["catch-up"], 301, 6, BASE)
+        moved = a.AutomationMoved("main moved before automation authorization", 75)
+        self.assertEqual(self.run_main(api, "catch-up", raised=moved), (1, ""))
+
+    def test_moved_main_without_exact_successor_run_stays_red(self):
+        cases = {
+            "no successor": [],
+            "older run for live main": [("catch-up", 299, 4, MOVED)],
+            "successor for another sha": [("catch-up", 301, 6, "d" * 40)],
+            "successor in the other workflow": [("plan", 301, 6, MOVED)],
+        }
+        for label, runs in cases.items():
+            with self.subTest(label):
+                api = SupersededAPI()
+                for command, run_id, number, head in runs:
+                    api.push_run(c.SUPERSEDABLE[command], run_id, number, head)
+                self.assertEqual(self.run_main(api, "catch-up"), (1, ""))
+
+    def test_api_error_policy_violation_other_event_or_pr_movement_stay_red(self):
+        api = SupersededAPI()
+        api.push_run(c.SUPERSEDABLE["catch-up"], 301, 6, MOVED)
+        api.inventory_error = urllib.error.HTTPError("runs", 502, "Bad Gateway", {}, None)
+        self.assertEqual(self.run_main(api, "catch-up"), (1, ""))
+        for event in ("schedule", "workflow_dispatch", "workflow_run"):
+            with self.subTest(event=event):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE["plan"], 301, 6, MOVED)
+                self.assertEqual(self.run_main(api, "plan", event=event), (1, ""))
+        for error in (a.AutomationError("standing automation policy is disabled"),
+                      a.AutomationMoved("selected PR changed during reconciliation", 76)):
+            with self.subTest(error=str(error)):
+                api = SupersededAPI()
+                api.push_run(c.SUPERSEDABLE["plan"], 301, 6, MOVED)
+                self.assertEqual(self.run_main(api, "plan", raised=error), (1, ""))
+
+    def test_dispatch_is_never_superseded(self):
+        self.assertEqual(set(c.SUPERSEDABLE), {"catch-up", "plan"})
+        self.assertEqual(c.SUPERSEDABLE["catch-up"], Path(c.CATCH_UP_PATH).name)
+        self.assertEqual(c.SUPERSEDABLE["plan"], Path(a.CONTROLLER_PATH).name)
+
+
 class WorkflowTests(unittest.TestCase):
     def test_writer_keeps_one_privileged_publisher_and_no_dispatch_authority(self):
         text = (ROOT / a.WRITER_PATH).read_text()
