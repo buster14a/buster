@@ -115,8 +115,8 @@ def production_inputs(directory, census, baseline_binary, candidate_binary, seed
     contents = dict(contents)
     subjects = record["subjects"]
     binaries = {"baseline": Path(baseline_binary).read_bytes(), "candidate": Path(candidate_binary).read_bytes()}
-    relation_path = record["provenance"]["relation_receipt"]["path"]
-    relation = json.loads(contents[relation_path])
+    provenance = record["provenance"]
+    relation = json.loads(contents[provenance["relation_receipt"]["path"]])
     for side, data in binaries.items():
         subject = subjects[side]
         contents[subject["binary"]["path"]] = data
@@ -128,7 +128,23 @@ def production_inputs(directory, census, baseline_binary, candidate_binary, seed
             relation[side]["binary_sha256"] = digest
             relation[side]["build_receipt_sha256"] = hashlib.sha256(
                 contents[subject["build_receipt"]["path"]]).hexdigest()
-            contents[relation_path] = _json_bytes(relation)
+            contents[provenance["relation_receipt"]["path"]] = _json_bytes(relation)
+    # The #510 census and strict receipts name the candidate binary (and the
+    # census receipt the installed census's validator report), and the replay
+    # receipt binds both receipts' bytes.
+    candidate = hashlib.sha256(binaries["candidate"]).hexdigest()
+    report = hashlib.sha256((Path(census) / CENSUS_FILES["validator_report"]).read_bytes()).hexdigest()
+    replay = json.loads(contents[provenance["replay_receipt"]["path"]])
+    for name, field in (("census_receipt", "census_receipt_sha256"), ("strict_receipt", "strict_receipt_sha256")):
+        value = json.loads(contents[provenance[name]["path"]])
+        bound = {"candidate_binary_sha256": candidate}
+        if name == "census_receipt":
+            bound["validator_report_sha256"] = report
+        if any(value[key] != digest for key, digest in bound.items()):
+            value.update(bound)
+            contents[provenance[name]["path"]] = _json_bytes(value)
+            replay[field] = hashlib.sha256(contents[provenance[name]["path"]]).hexdigest()
+            contents[provenance["replay_receipt"]["path"]] = _json_bytes(replay)
     root = Path(directory)
     for path, data in contents.items():
         target = root / "evidence" / path
@@ -138,10 +154,15 @@ def production_inputs(directory, census, baseline_binary, candidate_binary, seed
     _parsed, _axes, family = binding._performance_rows((census / CENSUS_FILES["performance_rows"]).read_bytes())
     support = record["support"]
     files = {item["name"]: item["path"] for item in support["files"]}
-    path_of = lambda artifact: artifact["path"]
-    side = lambda value: {"source_commit": value["source_commit"], "source_tree": value["source_tree"],
-                          "source_snapshot": path_of(value["source_snapshot"]), "binary": path_of(value["binary"]),
-                          "build_receipt": path_of(value["build_receipt"]), "stage": value["stage"]}
+
+    def path_of(artifact):
+        return artifact["path"]
+
+    def side(value):
+        return {"source_commit": value["source_commit"], "source_tree": value["source_tree"],
+                "source_snapshot": path_of(value["source_snapshot"]), "binary": path_of(value["binary"]),
+                "build_receipt": path_of(value["build_receipt"]), "stage": value["stage"]}
+
     execution = record["execution"]
     inputs = {
         "schema": "bq-retirement-binding-context-inputs-v1",
@@ -203,16 +224,16 @@ def production_inputs(directory, census, baseline_binary, candidate_binary, seed
 
 
 def main():
-    if len(sys.argv) == 9 and sys.argv[1] == "--production-inputs":
-        directory, census, baseline, candidate, seed, pairs, resamples = sys.argv[2:]
-        production_inputs(directory, census, baseline, candidate, int(seed), int(pairs), int(resamples))
-        return 0
     if len(sys.argv) != 9:
         print(__doc__, file=sys.stderr)
         return 2
-    census, output, baseline, candidate, contract, seed, pairs, resamples = sys.argv[1:]
-    data = context(census, baseline, candidate, contract, int(seed), int(pairs), int(resamples))
-    Path(output).write_bytes(data)
+    if sys.argv[1] == "--production-inputs":
+        directory, census, baseline, candidate, seed, pairs, resamples = sys.argv[2:]
+        production_inputs(directory, census, baseline, candidate, int(seed), int(pairs), int(resamples))
+    else:
+        census, output, baseline, candidate, contract, seed, pairs, resamples = sys.argv[1:]
+        data = context(census, baseline, candidate, contract, int(seed), int(pairs), int(resamples))
+        Path(output).write_bytes(data)
     return 0
 
 

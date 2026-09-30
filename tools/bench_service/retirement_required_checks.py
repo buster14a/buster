@@ -30,7 +30,8 @@ Inputs and what is verified here:
   hosted acceptance record, consumed, never produced here. It must name the
   plan's candidate commit and tree and hold ``lane=<target> passed`` for
   every hosted check; its digest becomes ``hosted=`` and each hosted check's
-  pinned output.
+  pinned output. It is parsed as whole lines, more strictly than the
+  importer does (``hosted_record``).
 * CENSUS (optional): when given, the support and census-rows pins must be
   its ``support.tsv`` and ``rows.tsv`` digests.
 
@@ -80,6 +81,8 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 TOOL_TOKEN_RE = re.compile(r"\{\{tool:(0|[1-9][0-9]?)\}\}")
 ENVIRONMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+LANE_RE = re.compile(r"[1-9][0-9]?")
+RUN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
 class ChecksError(Exception):
@@ -197,14 +200,41 @@ def tools(directory, names):
 
 def hosted_record(data, candidate, hosted_targets):
     """The record's digest after binding it to A's candidate and every hosted
-    lane (bq_retirement_required_checks_hold_hosted)."""
-    if not data or len(data) > HOSTED_BYTES_CAP or b"\0" in data:
-        _fail("hosted acceptance record is empty, oversized or holds a NUL")
-    header = f"{HOSTED_HEADER}\ncommit={candidate['commit']}\ntree={candidate['tree']}\n".encode()
-    if not data.startswith(header):
-        _fail("hosted acceptance record does not name the candidate commit and tree")
+    lane. Stricter than the importer (bq_retirement_required_checks_hold_hosted,
+    which matches the lanes as substrings of a provisional schema): whole LF
+    lines, the header, then ``commit=`` and ``tree=`` naming the candidate,
+    then at most one ``run=<token>`` and ``lane=<target> passed|failed`` lines
+    with canonical targets 1..12. A repeated lane or run, any failed lane, a
+    second commit or tree, an unknown key, an empty line or trailing bytes
+    after the last LF are refused."""
+    if not data or len(data) > HOSTED_BYTES_CAP or b"\0" in data or not data.isascii():
+        _fail("hosted acceptance record is empty, oversized, not ASCII or holds a NUL")
+    if not data.endswith(b"\n"):
+        _fail("hosted acceptance record has bytes after its last line")
+    lines = data.decode("ascii")[:-1].split("\n")
+    if lines[:3] != [HOSTED_HEADER, f"commit={candidate['commit']}", f"tree={candidate['tree']}"]:
+        _fail("hosted acceptance record does not open with its header and the candidate commit and tree")
+    lanes, runs = {}, 0
+    for line in lines[3:]:
+        key, separator, value = line.partition("=")
+        if key == "lane" and separator:
+            target, _space, outcome = value.partition(" ")
+            if not LANE_RE.fullmatch(target) or int(target) > TARGET_MAX or outcome not in ("passed", "failed"):
+                _fail(f"hosted acceptance record lane line {line!r} is not lane=<target> passed|failed")
+            if target in lanes:
+                _fail(f"hosted acceptance record repeats lane {target}")
+            lanes[target] = outcome
+        elif key == "run" and separator and RUN_RE.fullmatch(value):
+            runs += 1
+            if runs > 1:
+                _fail("hosted acceptance record repeats run=")
+        else:
+            _fail(f"hosted acceptance record line {line!r} is not an admitted key")
+    failed = sorted(int(target) for target, outcome in lanes.items() if outcome == "failed")
+    if failed:
+        _fail(f"hosted acceptance record has failed lanes {failed}")
     for target in hosted_targets:
-        if f"\nlane={target} passed\n".encode() not in data[len(header) - 1:]:
+        if lanes.get(str(target)) != "passed":
             _fail(f"hosted acceptance record has no passed lane for target {target}")
     return hashlib.sha256(data).hexdigest()
 
@@ -299,7 +329,7 @@ def authority(plan, checks_directory, hosted_data, census=None):
     for key in ("support_sha256", "census_sha256", "population_sha256"):
         _sha(projection[key], f"plan.projection.{key}")
     _integer(projection["native_target"], 1, TARGET_MAX, "plan.projection.native_target")
-    _integer(projection["rows"], 1, 1 << 32, "plan.projection.rows")
+    _integer(projection["rows"], 1, (1 << 32) - 1, "plan.projection.rows")
     _integer(projection["object_rows"], 1, projection["rows"], "plan.projection.object_rows")
     _integer(projection["eligible_rows"], 1, projection["rows"], "plan.projection.eligible_rows")
     if census is not None:

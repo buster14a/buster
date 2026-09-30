@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -154,6 +155,30 @@ class BindingContextTests(unittest.TestCase):
                 generator.check_context("\n".join(edited).encode())
         with self.assertRaisesRegex(generator.ContextError, "sentinel"):
             generator.check_context("\n".join(lines).replace(generator.PENDING, "1" * 64, 1).encode())
+        # Canonical, first member in place, but a second copy later in execution.
+        doubled = execution[:-1] + ',"zz":{' + generator.ADMISSION_SENTINEL + '}}'
+        generator._load_json(doubled.split("=", 1)[1].encode(), "doubled")
+        with self.assertRaisesRegex(generator.ContextError, "exactly once"):
+            generator.check_context("\n".join(lines[:2] + [doubled] + lines[3:]).encode())
+
+    def test_json_the_c_reader_refuses(self):
+        lines = self.generate().decode().split("\n")
+        rules = next(index for index, line in enumerate(lines) if line.startswith("rules="))
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant), self.assertRaisesRegex(generator.ContextError, "non-finite"):
+                edited = lines[rules].replace(":1.02,", f":{constant},", 1)
+                self.assertNotEqual(edited, lines[rules])
+                generator.check_context("\n".join(lines[:rules] + [edited] + lines[rules + 1:]).encode())
+        for depth, accepted in ((255, True), (257, False)):
+            nested = '"zz":' + "[" * depth + "]" * depth
+            edited = lines[1][:-1] + "," + nested + "}"
+            data = "\n".join(lines[:1] + [edited] + lines[2:]).encode()
+            with self.subTest(depth=depth):
+                if accepted:
+                    generator.check_context(data)
+                else:
+                    with self.assertRaisesRegex(generator.ContextError, "deeper than 256"):
+                        generator.check_context(data)
 
     def test_wrong_binary_digest(self):
         other = self.record.replace(self.binaries["baseline"].encode(), sha256(b"other").encode())
@@ -165,15 +190,25 @@ class BindingContextTests(unittest.TestCase):
         same = self.record.replace(self.binaries["candidate"].encode(), self.binaries["baseline"].encode())
         self.refused("same binary", record=same)
         self.refused("canonical", record=self.record.replace(b"-V2\n", b"-V1\n"))
+        self.refused("job= is not a canonical decimal", record=self.record.replace(
+            b"\njob=82\n", b"\njob=18446744073709551616\n"))
+        self.refused("token= is not a canonical decimal", record=self.record.replace(b"\ntoken=1\n", b"\ntoken=0\n"))
 
     def test_pairs(self):
-        for pairs, pattern in ((61, "even"), (58, "60..254"), (256, "60..254"), ("60", "60..254"), (True, "60..254")):
+        for pairs, pattern in ((61, "inputs.campaign.pairs_per_round must be even"), (58, "60..254"),
+                               (256, "60..254"), ("60", "60..254"), (True, "60..254")):
             with self.subTest(pairs=pairs):
                 self.refused(pattern, inputs=self.edited(lambda inputs: inputs["campaign"].update(
                     pairs_per_round=pairs)))
         widest = generator.check_context(self.generate(inputs=self.edited(
             lambda inputs: inputs["campaign"].update(pairs_per_round=254))))
         self.assertEqual(widest["rules"]["sampling"]["pairs_per_round"], 254)
+        # The generator's own check, before any #511 rule sees the value.
+        family = generator.check_context(self.generate())["population"]["statistical_family"]
+        campaign = dict(self.inputs["campaign"], pairs_per_round=62)
+        self.assertEqual(generator.campaign_policy(campaign, family)["pairs_per_round"], 62)
+        with self.assertRaisesRegex(generator.ContextError, "^inputs.campaign.pairs_per_round must be even"):
+            generator.campaign_policy(dict(campaign, pairs_per_round=63), family)
 
     def test_campaign_values(self):
         cases = ((lambda campaign: campaign.update(seed=0), "seed"),
@@ -191,24 +226,74 @@ class BindingContextTests(unittest.TestCase):
             with self.subTest(fact=fact):
                 self.refused(f"missing fields: {fact}", inputs=self.edited(lambda inputs: inputs["host"].pop(fact)))
         self.refused("missing fields: host", inputs=self.edited(lambda inputs: inputs.pop("host")))
-        self.refused("another machine", inputs=self.edited(lambda inputs: inputs["host"].update(
+        self.refused("host profile identity differs", inputs=self.edited(lambda inputs: inputs["host"].update(
             machine_id="zen5-9700x-02")))
-        self.refused("is missing", inputs=self.edited(lambda inputs: inputs["host"].update(
+        self.refused("cannot be read", inputs=self.edited(lambda inputs: inputs["host"].update(
             qualification_receipt="execution/absent.json")))
-        self.refused("not a host-profile-v1", inputs=self.edited(lambda inputs: inputs["host"].update(
-            profile=inputs["host"]["qualification_receipt"])))
-
-    def test_host_receipts_must_agree(self):
-        evidence = self.root / "host-evidence"
+        evidence = self.root / "profile-as-qualification"
         shutil.copytree(self.evidence, evidence)
-        path = evidence / self.inputs["host"]["qualification_receipt"]
-        receipt = json.loads(path.read_bytes())
-        receipt["qualified"] = False
-        path.write_bytes(fixture._json_bytes(receipt))
-        self.refused("does not qualify", evidence=evidence)
-        receipt.update(qualified=True, profile_version="profile-v2")
-        path.write_bytes(fixture._json_bytes(receipt))
-        self.refused("another host profile", evidence=evidence)
+        shutil.copy(evidence / self.inputs["host"]["qualification_receipt"], evidence / "execution/other.json")
+        self.refused("profile_receipt", evidence=evidence, inputs=self.edited(
+            lambda inputs: inputs["host"].update(profile="execution/other.json")))
+
+    def evidence_with(self, path, edit, name):
+        """A copy of the evidence root with the JSON receipt at path edited
+        (or its bytes replaced when edit returns bytes)."""
+        evidence = self.root / name
+        shutil.copytree(self.evidence, evidence)
+        target = evidence / path
+        value = json.loads(target.read_bytes())
+        replaced = edit(value)
+        target.write_bytes(replaced if isinstance(replaced, bytes) else fixture._json_bytes(value))
+        return evidence
+
+    def test_receipt_contents_are_checked(self):
+        """The #511 evidence checks over every receipt the context names."""
+        qualification = self.inputs["host"]["qualification_receipt"]
+        profile = self.inputs["host"]["profile"]
+        cases = (
+            (qualification, lambda value: value.update(qualified=False), "qualification receipt.qualified"),
+            (qualification, lambda value: value.update(profile_version="profile-v2"),
+             "host qualification identity differs"),
+            (qualification, lambda value: value.update(whole_host_isolation=False),
+             "qualification receipt.whole_host_isolation"),
+            (profile, lambda value: value.update(whole_host_isolation=False), "profile receipt.whole_host_isolation"),
+            (qualification, lambda value: value.update(logical_cpu=value["logical_cpu"] + 1), "CPU/target differs"),
+            (qualification, lambda value: value.update(version=2), "qualification schema/version"),
+            (qualification, lambda value: value.update(extra=1), "unknown fields: extra"),
+            (self.inputs["execution"]["service"]["recipe"], lambda value: value.update(service_id="other-service"),
+             "service receipt identity differs"),
+            (self.inputs["execution"]["lease_receipt"], lambda value: value.update(candidate_can_access=True),
+             "inaccessible supervisor"),
+            (self.inputs["provenance"]["relation_receipt"],
+             lambda value: value["candidate"].update(binary_sha256=sha256(b"another binary")),
+             "relation_receipt.candidate does not match"),
+            (self.inputs["provenance"]["strict_receipt"], lambda value: b"not json\n", "not a readable JSON receipt"),
+            (self.inputs["provenance"]["census_receipt"], lambda value: value.update(success=False),
+             "census replay receipt is not successful"),
+        )
+        for index, (path, edit, pattern) in enumerate(cases):
+            with self.subTest(pattern=pattern):
+                self.refused(pattern, evidence=self.evidence_with(path, edit, f"receipt-{index}"))
+
+    def test_receipt_bytes_are_read_once(self):
+        """A receipt swapped after it was hashed is not what gets checked: the
+        non-binding bytes that were hashed are refused even though binding
+        bytes are on disk by the time the receipt checks run."""
+        path = self.inputs["subjects"]["candidate"]["build_receipt"]
+        evidence = self.evidence_with(path, lambda value: value.update(binary_sha256=sha256(b"other")), "swapped")
+        binding_bytes = (self.evidence / path).read_bytes()
+        read = generator.Evidence._read
+
+        def swap_after(reader, relative, name, cap):
+            data = read(reader, relative, name, cap)
+            if relative == path:
+                (evidence / path).write_bytes(binding_bytes)
+            return data
+
+        with mock.patch.object(generator.Evidence, "_read", swap_after):
+            self.refused("build receipt does not bind", evidence=evidence)
+        self.generate(evidence=evidence)
 
     def test_profile_pins(self):
         text = self.profile.decode()
@@ -225,15 +310,23 @@ class BindingContextTests(unittest.TestCase):
         flags = evidence / self.inputs["producer"]["build"]["flags"]
         flags.unlink()
         flags.symlink_to(evidence / self.inputs["producer"]["build"]["configuration"])
-        self.refused("symbolic link", evidence=evidence)
+        self.refused("without a symbolic link", evidence=evidence)
+        flags.unlink()
+        shutil.copy(self.evidence / self.inputs["producer"]["build"]["flags"], flags)
+        (self.root / "evidence-link").symlink_to(evidence)
+        self.refused("evidence root is not a directory reached without a symbolic link",
+                     evidence=self.root / "evidence-link")
+        (self.root / "census-link").symlink_to(self.census)
+        with self.assertRaisesRegex(generator.ContextError, "census directory is not a directory"):
+            generator.context(self.inputs, self.evidence, self.root / "census-link", self.record, self.profile)
         self.refused("normalized relative path", inputs=self.edited(
             lambda inputs: inputs["measurement"].update(harness_binary="../escape")))
+        self.refused("must name a file below", inputs=self.edited(
+            lambda inputs: inputs["measurement"].update(harness_binary=".")))
         receipt = evidence / self.inputs["subjects"]["candidate"]["build_receipt"]
         value = json.loads(receipt.read_bytes())
         value["binary_sha256"] = sha256(b"another binary")
         receipt.write_bytes(fixture._json_bytes(value))
-        flags.unlink()
-        shutil.copy(self.evidence / self.inputs["producer"]["build"]["flags"], flags)
         self.refused("build receipt does not bind", evidence=evidence)
 
     def test_cli_fails_closed(self):
@@ -410,8 +503,21 @@ class RequiredChecksTests(unittest.TestCase):
         self.refused("candidate commit", hosted=self.hosted.replace(b"commit=b", b"commit=a"))
         self.refused("candidate commit", lambda plan: plan["candidate"].update(tree="d" * 40))
         self.refused("NUL", hosted=self.hosted + b"\0")
-        # A lane named only inside another line does not count.
-        self.refused("target 4", hosted=self.hosted_record(FOREIGN[:-1]) + b"note lane=4 passed")
+        # A lane named only inside another line does not count, with or
+        # without a trailing newline.
+        self.refused("not an admitted key", hosted=self.hosted_record(FOREIGN[:-1]) + b"note lane=4 passed\n")
+        self.refused("bytes after its last line", hosted=self.hosted_record(FOREIGN[:-1]) + b"note lane=4 passed")
+        self.refused("failed lanes \\[4\\]", hosted=self.hosted_record(FOREIGN[:-1]) + b"lane=4 failed\n")
+        self.refused("repeats lane 4", hosted=self.hosted + b"lane=4 failed\n")
+        self.refused("repeats lane 4", hosted=self.hosted + b"lane=4 passed\n")
+        self.refused("bytes after its last line", hosted=self.hosted + b"junk")
+        self.refused("not an admitted key", hosted=self.hosted + b"commit=" + b"b" * 40 + b"\n")
+        self.refused("not an admitted key", hosted=self.hosted + b"tree=" + b"c" * 40 + b"\n")
+        self.refused("not an admitted key", hosted=self.hosted + b"\n")
+        self.refused("repeats run=", hosted=self.hosted + b"run=again\n")
+        self.refused("lane=<target>", hosted=self.hosted + b"lane=07 passed\n")
+        self.refused("lane=<target>", hosted=self.hosted + b"lane=13 passed\n")
+        self.refused("lane=<target>", hosted=self.hosted + b"lane=3 passed \n")
 
     def test_tool_refusals(self):
         (self.tools / "extra").write_bytes(b"\x7fELF")

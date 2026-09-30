@@ -17,39 +17,55 @@ subjects and support, then ``admission=`` (the workflow's admission record
 descriptor). ``execution`` opens with the admission-receipt sentinel the
 producer replaces.
 
-Nothing is typed into the context that the tool can compute or check:
+What the tool checks, and what it cannot:
 
 * every artifact descriptor ``{path, bytes, sha256}`` is hashed from the named
-  file under ROOT (a regular file reached without a symbolic link);
+  file under ROOT. ROOT and CENSUS are opened without following a symbolic
+  link, every component with O_NOFOLLOW, and each file is fstat-checked,
+  hashed and read once from that descriptor (``Evidence``); every later
+  check reads those held bytes;
 * the six pinned #508 support files are CENSUS's ``support.tsv``,
   ``manifest.txt``, ``inputs.tsv``, ``rows.tsv``, ``performance-rows.json`` and
   ``validator-report.json``, published as ``census/<name>``, and each must
   hash to its PROFILE pin, as must the contract source (``contract-sha256=``);
 * the population (row count, rows digest, axes, statistical family, source
   digests) is derived from the census performance rows;
-* both subject binaries must hash to the matched-build import record RECORD
-  (``BQ-RETIREMENT-BINARIES-V2``) and their build receipts must bind them;
-* the host facts (#422: machine id, qualification receipt, host profile) are
-  read from INPUTS and cross-checked against the two receipts; none is
-  defaulted;
+* both subject binaries must hash to the digests RECORD names. RECORD (the
+  matched-build import, ``BQ-RETIREMENT-BINARIES-V2``) is a consistency
+  input, not an authority: nothing here authenticates it. The authority is
+  the unit, whose binding check requires the context's digests to equal the
+  gate's held binaries;
+* the #511 validator's own evidence checks run over the held bytes
+  (``evidence_checks``): build receipts and source snapshots against the
+  subjects and producer; the service, host profile, qualification and lease
+  receipts (the #422 host facts: none is defaulted); and the relation, #510
+  census, strict and replay receipts. The A/A admission receipt cannot exist
+  before the campaign, so that part of the execution check sees a
+  placeholder and checks nothing;
 * the campaign policy (seed, pairs per round, resamples, bootstrap members)
   is range-checked, and the bootstrap member count must equal the derived
   family's.
 
-Each section then passes the #511 validator's own structural check
-(tools/native_retirement_performance_binding.py), and the emitted bytes are
-re-parsed with the layout the C importer enforces (``check_context``). Any
-missing or disagreeing input fails closed with a message and exit status 1;
-OUTPUT is created exclusively and never replaced.
+It cannot check what only the campaign or the service knows: the A/A
+admission, whether RECORD came from the unit, and the #422 facts beyond
+their receipts' self-consistency. Each section passes the #511 validator's
+structural check (tools/native_retirement_performance_binding.py), and the
+emitted bytes are re-parsed with the layout the C importer enforces
+(``check_context``: no NaN or Infinity, nesting at most 256). Any missing or
+disagreeing input fails closed with a message and exit status 1; OUTPUT is
+created exclusively and never replaced. Install it read-only and single-link
+(``chmod 0400``), owned by root or the service user, as the importer's
+installed-file read requires.
 
 One admitted context pins exactly one baseline/candidate pair: a rebuilt
 subject with other binary bytes needs a new context and a new profile pin.
 
 Map: ``INPUTS_SCHEMA`` and ``inputs_template`` (the INPUTS shape);
-``evidence_descriptor``, ``census_descriptor``; ``profile_pins``;
+``Evidence`` (descriptor reads and held bytes); ``profile_pins``;
 ``binaries_record``; ``host_facts``; ``campaign_policy``; ``approved_rules``;
-``assemble`` (the record sections); ``encode``; ``check_context`` (the
-C-layout re-parse); ``context`` (all of it); ``main``.
+``assemble`` (the record sections); ``evidence_checks`` (the #511 evidence
+checks); ``json_depth``, ``encode``; ``check_context`` (the C-layout
+re-parse); ``context`` (all of it); ``main``.
 """
 
 import argparse
@@ -61,6 +77,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_retirement_performance_binding as binding  # noqa: E402
@@ -104,6 +121,9 @@ CONTEXT_CAP = 64 * 1024 * 1024 - 4096
 # Evidence files are bounded like the #511 validator's receipts.
 EVIDENCE_CAP = 512 * 1024 * 1024
 DECIMAL_RE = re.compile(r"^(?:0|[1-9][0-9]{0,19})$")
+UINT64_MAX = (1 << 64) - 1
+# TP_COMPOSE_JSON_DEPTH: the C reader refuses deeper container nesting.
+JSON_DEPTH = 256
 SUBJECTS = {
     "baseline": ("direct-baseline", "direct-native", ("pre-cutover",)),
     "candidate": ("mir-candidate", "mir-only", ("mir-only-cutover", "post-deletion")),
@@ -132,42 +152,90 @@ def _checked(function, *arguments):
 
 def _load_json(data, name):
     try:
-        return json.loads(data.decode("utf-8"), object_pairs_hook=binding._json_object)
-    except (UnicodeDecodeError, ValueError) as error:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=binding._json_object,
+                          parse_constant=_refuse_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         _fail(f"{name} is not strict JSON: {error}")
 
 
-def _read_regular(root, relative, name, cap=EVIDENCE_CAP):
-    """The bytes of ROOT/relative: a regular file, no symbolic link on the way."""
-    _checked(binding._relative_path, relative, name)
-    cursor = Path(root)
-    for part in PurePosixPath(relative).parts:
-        cursor = cursor / part
+def _refuse_constant(name):
+    """NaN and Infinity, which the C canonical reader refuses."""
+    raise ValueError(f"non-finite number {name}")
+
+
+class Evidence:
+    """Files of one directory, each read once through a descriptor.
+
+    The directory itself is opened without following a symbolic link, every
+    path component below it with O_NOFOLLOW (directories with O_DIRECTORY),
+    and each leaf is checked with fstat, hashed and read from that same
+    descriptor. The held bytes are what every later check sees: with a
+    snapshot directory (private, made here) they are also written there, and
+    the #511 evidence checks, which read by path, run over the snapshot."""
+
+    def __init__(self, root, name, snapshot=None):
+        self.name = name
+        self.held = {}
+        self.snapshot = snapshot
         try:
-            metadata = os.lstat(cursor)
+            self.descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except OSError as error:
-            _fail(f"{name} is missing: {error}")
-        if stat.S_ISLNK(metadata.st_mode):
-            _fail(f"{name} passes through a symbolic link")
-    if not stat.S_ISREG(metadata.st_mode):
-        _fail(f"{name} is not a regular file")
-    with open(cursor, "rb") as stream:
-        data = stream.read(cap + 1)
-    if not data or len(data) > cap:
-        _fail(f"{name} is empty or exceeds {cap} bytes")
-    return data
+            _fail(f"{name} is not a directory reached without a symbolic link: {error}")
 
+    def close(self):
+        os.close(self.descriptor)
 
-def evidence_descriptor(root, relative, name):
-    """The artifact descriptor of one evidence file, hashed here."""
-    data = _read_regular(root, relative, name)
-    return {"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}, data
+    def read(self, relative, name, cap=EVIDENCE_CAP):
+        if relative not in self.held:
+            self.held[relative] = self._read(relative, name, cap)
+        return self.held[relative]
 
+    def _read(self, relative, name, cap):
+        _checked(binding._relative_path, relative, name)
+        parts = PurePosixPath(relative).parts
+        if not parts or any(part in (".", "..") for part in parts):
+            _fail(f"{name} must name a file below the {self.name}")
+        opened = []
+        chunks = []
+        try:
+            directory = self.descriptor
+            for part in parts[:-1]:
+                directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=directory)
+                opened.append(directory)
+            leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+            opened.append(leaf)
+            metadata = os.fstat(leaf)
+            if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= cap:
+                _fail(f"{name} is not a non-empty regular file of at most {cap} bytes")
+            remaining = metadata.st_size + 1
+            chunk = os.read(leaf, min(remaining, 1 << 20))
+            while chunk:
+                chunks.append(chunk)
+                remaining -= len(chunk)
+                chunk = os.read(leaf, min(remaining, 1 << 20)) if remaining > 0 else b""
+        except OSError as error:
+            _fail(f"{name} cannot be read below the {self.name} without a symbolic link: {error}")
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+        data = b"".join(chunks)
+        if len(data) != metadata.st_size:
+            _fail(f"{name} changed size while it was read")
+        if self.snapshot is not None:
+            target = self.snapshot.joinpath(*parts)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "xb") as stream:
+                    stream.write(data)
+            except OSError as error:
+                _fail(f"{name} cannot be held beside the other evidence: {error}")
+        return data
 
-def census_descriptor(census, role):
-    name = CENSUS_FILES[role]
-    data = _read_regular(census, name, f"census {name}")
-    return {"path": f"census/{name}", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}, data
+    def descriptor_of(self, relative, name, published=None):
+        """The artifact descriptor of one file, hashed from the held bytes."""
+        data = self.read(relative, name)
+        return {"path": published or relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
 def profile_pins(data):
@@ -202,8 +270,8 @@ def binaries_record(data):
             _fail(f"binaries record line {line!r} is not {key}=")
         values[key] = line[len(key) + 1:]
     for key in ("job", "token"):
-        if not DECIMAL_RE.fullmatch(values[key]) or values[key] == "0":
-            _fail(f"binaries record {key}= is not a canonical positive decimal")
+        if not DECIMAL_RE.fullmatch(values[key]) or not 0 < int(values[key]) <= UINT64_MAX:
+            _fail(f"binaries record {key}= is not a canonical decimal in 1..{UINT64_MAX}")
     for key in ("request", "preparation", "directory", "base-source", "candidate-source"):
         _checked(binding._sha, values[key], f"binaries record {key}")
     digests = []
@@ -219,38 +287,24 @@ def binaries_record(data):
     return {"baseline": digests[0], "candidate": digests[1]}
 
 
-def host_facts(root, host):
-    """execution.host and execution.profile from the #422 host facts, each
-    cross-checked against its receipt; nothing is defaulted."""
+def host_facts(evidence, host):
+    """execution.host and execution.profile from the #422 host facts. The
+    profile's id and version are read from the host profile; every receipt
+    field is then checked by the #511 execution-evidence check (``assemble``).
+    Nothing is defaulted."""
     host = _checked(binding._keys, host, ("machine_id", "qualification_receipt", "profile"), "inputs.host")
     machine = _checked(binding._token, host["machine_id"], "inputs.host.machine_id")
-    qualification, qualification_data = evidence_descriptor(root, host["qualification_receipt"],
-                                                            "inputs.host.qualification_receipt")
-    profile, profile_data = evidence_descriptor(root, host["profile"], "inputs.host.profile")
-    qualified = _load_json(qualification_data, "host qualification receipt")
-    described = _load_json(profile_data, "host profile")
-    if type(qualified) is not dict or qualified.get("schema") != binding.QUALIFICATION_SCHEMA:
-        _fail("host qualification receipt is not a host-qualification-v1 record")
-    if type(described) is not dict or described.get("schema") != binding.PROFILE_SCHEMA:
-        _fail("host profile is not a host-profile-v1 record")
-    for name, record in (("qualification receipt", qualified), ("host profile", described)):
-        if record.get("machine_id") != machine:
-            _fail(f"host {name} names another machine than inputs.host.machine_id")
-        if record.get("native_target") != binding.NATIVE_TIMED_TARGET:
-            _fail(f"host {name} is not for the pinned native target")
-        if record.get("lease_protocol") != binding.LEASE_PROTOCOL:
-            _fail(f"host {name} does not name the supervisor lease protocol")
-    if qualified.get("qualified") is not True:
-        _fail("host qualification receipt does not qualify the host")
-    if described.get("native_only") is not True:
-        _fail("host profile is not native-only")
+    qualification = evidence.descriptor_of(host["qualification_receipt"], "inputs.host.qualification_receipt")
+    profile = evidence.descriptor_of(host["profile"], "inputs.host.profile")
+    described = _load_json(evidence.read(host["profile"], "inputs.host.profile"), "host profile")
+    if type(described) is not dict:
+        _fail("host profile is not a JSON object")
     profile_id = _checked(binding._token, described.get("profile_id"), "host profile.profile_id")
     version = _checked(binding._token, described.get("profile_version"), "host profile.profile_version")
-    if (qualified.get("profile_id"), qualified.get("profile_version")) != (profile_id, version):
-        _fail("host qualification receipt qualifies another host profile")
+    logical_cpu = described.get("logical_cpu")
     return ({"machine_id": machine, "qualification_receipt": qualification},
             {"id": profile_id, "version": version, "machine_id": machine, "descriptor": profile,
-             "digest": profile["sha256"]})
+             "digest": profile["sha256"]}, logical_cpu)
 
 
 def campaign_policy(campaign, family):
@@ -323,12 +377,12 @@ def approved_rules(campaign):
     return _checked(binding._rules, rules)
 
 
-def _artifacts(root, value, keys, name):
+def _artifacts(evidence, value, keys, name):
     """Each named key of value, a path under ROOT, as its hashed descriptor."""
-    return {key: evidence_descriptor(root, value[key], f"{name}.{key}")[0] for key in keys}
+    return {key: evidence.descriptor_of(value[key], f"{name}.{key}") for key in keys}
 
 
-def assemble(inputs, root, census, binaries, pins):
+def assemble(inputs, root, census, binaries, pins, snapshot):
     """The record's pre-campaign sections and the admission descriptor."""
     inputs = _checked(binding._keys, inputs, ("schema", "contract", "support", "requested_work", "subjects",
                                               "producer", "measurement", "execution", "host", "provenance",
@@ -348,11 +402,13 @@ def assemble(inputs, root, census, binaries, pins):
     files, census_data = [], {}
     for role in binding.SUPPORT_FILE_ROLES:
         if role in CENSUS_FILES:
-            item, census_data[role] = census_descriptor(census, role)
+            census_data[role] = census.read(CENSUS_FILES[role], f"census {CENSUS_FILES[role]}")
+            item = census.descriptor_of(CENSUS_FILES[role], f"census {CENSUS_FILES[role]}",
+                                        f"census/{CENSUS_FILES[role]}")
             if item["sha256"] != pins[CENSUS_PINS[role]]:
                 _fail(f"census {CENSUS_FILES[role]} does not hash to the profile's {CENSUS_PINS[role]}= pin")
         else:
-            item = evidence_descriptor(root, evidence_files[role], f"inputs.support.files.{role}")[0]
+            item = root.descriptor_of(evidence_files[role], f"inputs.support.files.{role}")
         files.append({"name": role, **item})
     validator = _checked(binding._keys, support_in["validator"], ("source_commit", "source_tree", "source"),
                          "inputs.support.validator")
@@ -424,8 +480,6 @@ def assemble(inputs, root, census, binaries, pins):
                   **_artifacts(root, build, ("configuration", "flags"), "inputs.producer.build")},
     }
     _checked(binding._producer, producer)
-    # The build receipts bind each subject's snapshot and binary to this producer.
-    _checked(binding._check_subject_receipts, root, {"subjects": subjects, "producer": producer})
 
     measurement_in = _checked(binding._keys, inputs["measurement"], ("harness_source_commit",
                               "harness_source_tree", "harness_binary", "statistics_implementation"),
@@ -439,7 +493,7 @@ def assemble(inputs, root, census, binaries, pins):
     execution_in = _checked(binding._keys, inputs["execution"], ("service", "lease_receipt"), "inputs.execution")
     service = _checked(binding._keys, execution_in["service"], ("id", "version", "recipe"),
                        "inputs.execution.service")
-    host, profile = host_facts(root, inputs["host"])
+    host, profile, logical_cpu = host_facts(root, inputs["host"])
     host["aa_admission_receipt"] = {"path": ADMISSION_PATH, "bytes": 1, "sha256": PENDING}
     execution = {
         "service": {"id": service["id"], "version": service["version"],
@@ -447,8 +501,7 @@ def assemble(inputs, root, census, binaries, pins):
         "host": host, "profile": profile, "job_ownership": binding.LEASE_PROTOCOL,
         "lease": {"authority": binding.LEASE_AUTHORITY, "access": binding.LEASE_ACCESS,
                   "cleanup": binding.LEASE_CLEANUP,
-                  "receipt": evidence_descriptor(root, execution_in["lease_receipt"],
-                                                 "inputs.execution.lease_receipt")[0]},
+                  "receipt": root.descriptor_of(execution_in["lease_receipt"], "inputs.execution.lease_receipt")},
         "native_execution": "native-only",
     }
     _checked(binding._execution, execution)
@@ -461,7 +514,7 @@ def assemble(inputs, root, census, binaries, pins):
 
     rules = approved_rules(campaign_policy(inputs["campaign"], family))
     _checked(binding._check_sampling_family, population, rules)
-    admission = evidence_descriptor(root, inputs["admission"], "inputs.admission")[0]
+    admission = root.descriptor_of(inputs["admission"], "inputs.admission")
 
     record = {"contract": contract, "execution": execution, "measurement": measurement,
               "population": population, "producer": producer, "provenance": provenance,
@@ -479,7 +532,58 @@ def assemble(inputs, root, census, binaries, pins):
     paths.append(contract["source"]["path"])
     if len(paths) != len(set(paths)):
         _fail("binding artifact paths must be unique")
+    evidence_checks(snapshot, record, logical_cpu)
     return record, admission
+
+
+def evidence_checks(snapshot, record, logical_cpu):
+    """The #511 validator's own evidence checks over the held bytes (the
+    snapshot): the subjects' snapshots and build receipts against the
+    producer (``_check_subject_receipts``); the service, host profile,
+    qualification and lease receipts (``_check_execution_evidence``); and the
+    relation, #510 census, strict and replay receipts and the replay bundle
+    (``_check_provenance_evidence``, which needs nothing from the campaign).
+
+    The A/A admission receipt cannot exist before the campaign, so the
+    execution check reads a placeholder at the sentinel's path, derived from
+    the bound facts: that part checks nothing here. The producer's admission
+    step checks the real receipt (the post-A/A document binds its digest) and
+    lane F's #511 validation checks it inside the final binding."""
+    execution = record["execution"]
+    baseline = record["subjects"]["baseline"]
+    placeholder = {"schema": binding.AA_SCHEMA, "version": 1, "machine_id": execution["host"]["machine_id"],
+                   "profile_id": execution["profile"]["id"], "profile_version": execution["profile"]["version"],
+                   "service_id": execution["service"]["id"], "logical_cpu": logical_cpu,
+                   "native_target": binding.NATIVE_TIMED_TARGET, "admitted": True, "native_only": True,
+                   "baseline_source_commit": baseline["source_commit"],
+                   "baseline_source_tree": baseline["source_tree"], "lease_protocol": binding.LEASE_PROTOCOL,
+                   "family_sha256": record["population"]["statistical_family"]["sha256"]}
+    try:
+        with open(snapshot / ADMISSION_PATH, "xb") as stream:
+            stream.write(canonical(placeholder).encode())
+    except OSError as error:
+        _fail(f"the admission placeholder collides with the evidence: {error}")
+    _checked(binding._check_subject_receipts, snapshot, record)
+    _checked(binding._check_execution_evidence, snapshot, record)
+    _checked(binding._check_provenance_evidence, snapshot, record, record["provenance"])
+
+
+def json_depth(text):
+    """The deepest container nesting of JSON text (strings skipped), counted
+    without recursion."""
+    depth = deepest = 0
+    quoted = escaped = False
+    for character in text:
+        if quoted:
+            escaped, quoted = (False, True) if escaped else (character == "\\", character != '"')
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif character in "]}":
+            depth -= 1
+    return deepest
 
 
 def encode(record, admission):
@@ -506,6 +610,8 @@ def check_context(data):
         name, separator, value = line.partition("=")
         if name != key or not separator:
             _fail(f"context line {len(sections) + 2} must be section {key!r}")
+        if json_depth(value) > JSON_DEPTH:
+            _fail(f"context section {key} nests deeper than {JSON_DEPTH}")
         parsed = _load_json(value.encode("utf-8"), f"context section {key}")
         if type(parsed) is not dict or canonical(parsed) != value:
             _fail(f"context section {key} is not a canonical JSON object")
@@ -523,8 +629,18 @@ def check_context(data):
 
 def context(inputs, root, census, binaries_data, profile_data):
     """The verified context bytes for these inputs."""
-    record, admission = assemble(copy.deepcopy(inputs), Path(root), Path(census), binaries_record(binaries_data),
-                                 profile_pins(profile_data))
+    binaries, pins = binaries_record(binaries_data), profile_pins(profile_data)
+    with tempfile.TemporaryDirectory(prefix="retirement-context-evidence-") as held:
+        snapshot = Path(held)
+        evidence = Evidence(root, "evidence root", snapshot)
+        try:
+            census_files = Evidence(census, "census directory")
+            try:
+                record, admission = assemble(copy.deepcopy(inputs), evidence, census_files, binaries, pins, snapshot)
+            finally:
+                census_files.close()
+        finally:
+            evidence.close()
     data = encode(record, admission)
     check_context(data)
     return data
