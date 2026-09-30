@@ -8923,6 +8923,55 @@ BUSTER_C_INTERNAL IrValueId c_ir_vla_pointer_rvalue(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// A comma yields its right operand's value, not that operand's lvalue.
+// Keep dynamic array extents, but remove both the array-lvalue witness and
+// recoverable scalar-load provenance. The existing canonical identity cast
+// supplies a value boundary only when place recovery would otherwise be
+// possible; constants and computed values need no extra instruction.
+BUSTER_C_INTERNAL IrValueId c_ir_comma_result(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return value;
+    }
+    value = c_ir_vla_pointer_rvalue(builder, value, source);
+    value = c_ir_decay_array_value_if_needed(builder, value, source);
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[value.value].category == IR_VALUE_PLACE)
+    {
+        IrTypeId type = builder->function->values[value.value].canonical_type;
+        value = c_ir_emit_load_place(builder, value, type, source);
+    }
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrValue* operand = builder->function->values + value.value;
+    bool recoverable = c_ir_ssa_read_place(builder, value, false).value != IR_ID_UNDERLYING_INVALID;
+    if (operand->definition.value < builder->function->instruction_count)
+    {
+        IrInstruction* definition = builder->function->instructions + operand->definition.value;
+        IrType* type = ir_type_from_id(&builder->program->types, operand->canonical_type);
+        IrType* element = type && type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, type->element_type) : 0;
+        recoverable = recoverable || definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD ||
+                      definition->opcode == IR_OPCODE_FUNCTION ||
+                      (definition->opcode == IR_OPCODE_ADDRESS_OF && element && element->kind == IR_TYPE_VA_LIST);
+    }
+    if (recoverable)
+    {
+        CIrVlaValue shape = c_ir_vla_value(builder, value);
+        value = c_ir_emit_cast_instruction(builder, value, operand->canonical_type, IR_CONVERSION_IDENTITY, source);
+        if (shape.counts && value.value != IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_vla_value_set(builder, value, shape);
+        }
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL void c_ir_vla_conditional_shape(CIntegerIrBuilder* builder, IrValueId place, IrValueId value)
 {
     CIrVlaValue shape = c_ir_vla_value(builder, value);
@@ -13348,6 +13397,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end);
+
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                              IrSourceRange source, IrTypeId cast_type);
 
@@ -13396,6 +13447,7 @@ typedef enum CIrLowerFrameKind
 {
     C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
     C_IR_LOWER_FRAME_COMMA_COMPLETION,
+    C_IR_LOWER_FRAME_COMMA_RESULT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION,
@@ -17526,6 +17578,22 @@ BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, 
     return false;
 }
 
+// A nested ?:, && or || group in a comma operand is prepared on its own, so a
+// comma group holding one must be owned whole like one holding an assignment.
+// Over-matching a label-address `&&` only routes the group through the full
+// expression machine.
+BUSTER_C_INTERNAL bool c_ir_has_control_operator_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    for (u32 index = start; index < end && !found; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        found = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE);
+    }
+    return found;
+}
+
 // A parenthesized comma expression may carry a nested assignment in its
 // right operand.  The control-expression prepass must own that whole group:
 // lowering the nested assignment group first would run the right operand
@@ -17722,7 +17790,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // `if ((p = get()) != 0)` and for assignment arms of `?:`.
         if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
             !c_ir_has_root_assignment(builder, index + 1, close) &&
-            !(c_ir_has_top_level_comma(builder, index + 1, close) && c_ir_has_assignment_anywhere(builder, index + 1, close)))
+            !(c_ir_has_top_level_comma(builder, index + 1, close) &&
+              (c_ir_has_assignment_anywhere(builder, index + 1, close) || c_ir_has_control_operator_anywhere(builder, index + 1, close))))
         {
             continue;
         }
@@ -22782,7 +22851,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         {
             return false;
         }
-        values[*value_count - 2] = c_ir_vla_pointer_rvalue(builder, values[*value_count - 1], source);
+        values[*value_count - 2] = c_ir_comma_result(builder, values[*value_count - 1], source);
         *value_count -= 1;
         return true;
     }
@@ -27738,6 +27807,18 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
         return false;
     }
     c_ir_sizeof_statement_expression_operand(builder, &start, &end);
+    // `&(0, a)` names no lvalue (C 6.5.17p2, 6.5.3.2p1). Record the constraint
+    // so the operand is refused rather than typed by the prediction fallback.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND) &&
+        c_ir_has_root_comma(builder, start + 1, end))
+    {
+        if (!builder->sizeof_operand_constraint.length)
+        {
+            builder->sizeof_operand_constraint = S8("cannot take the address of a comma expression");
+            builder->sizeof_operand_constraint_token = start;
+        }
+        return false;
+    }
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -29517,14 +29598,15 @@ c_ir_expression_core_loop:
                 index = prepared->close_index;
                 continue;
             }
-            // A control/assignment expression can be nested as an operand
+            // A control/assignment/comma expression can be nested as an operand
             // of a comparison or bitwise operation.  If the preparation pass
             // did not record it (for example while descending from another
             // prepared group), evaluate the group through the full
             // expression machine instead of leaving a C_CONDITIONAL_OPEN
             // marker for the arithmetic reducer.
             if (close < end && (c_ir_has_root_control_operator(builder, index + 1, close) ||
-                                c_ir_has_assignment_anywhere(builder, index + 1, close)))
+                                c_ir_has_assignment_anywhere(builder, index + 1, close) ||
+                                c_ir_has_root_comma(builder, index + 1, close)))
             {
                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
                                           close + 1, expect_operand);
@@ -30213,6 +30295,49 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
     return branched;
 }
 
+// Conditions and nested operands still obey comma precedence. Only commas outside
+// delimiter groups and the middle operand of ?: belong to its root. The full
+// expression machine already owns their ordered evaluation and result type.
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, start, end) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    u32 conditional_depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            break;
+        }
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            conditional_depth += 1;
+        }
+        else if (conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            conditional_depth -= 1;
+        }
+        else if (!conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -30391,6 +30516,33 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 }
                 continue;
             }
+        }
+        if (c_ir_has_root_comma(builder, task.start, task.end))
+        {
+            // Split the sequence before ?: or &&/||. In particular, a false
+            // left operand cannot suppress the final comma operand, and a
+            // deferred right-hand call must not enter the arithmetic core.
+            // The machine carries a void result as an integer placeholder, so
+            // the scalar constraint (C 6.8.4.1, 6.8.5) is checked on the type.
+            IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, task.start, task.end));
+            if (sequence_type && sequence_type->kind == IR_TYPE_VOID)
+            {
+                builder->failure_message = S8("controlling expression must have scalar type");
+                builder->failure_token_index = task.start;
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->as.condition.leaf_true_block = task.true_block;
+            frame->as.condition.leaf_false_block = task.false_block;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression = {.start = task.start, .end = task.end},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
         }
         u32 conditional_start = 0;
         u32 conditional_question = 0;
@@ -32932,7 +33084,9 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             // core is intentionally assignment-free, so inspect the whole
             // leaf before choosing it; otherwise the call is emitted but the
             // assignment side effect is silently dropped.
-            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end);
+            // A comma arm also owns sequencing, even without an assignment.
+            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end) ||
+                                   c_ir_has_root_comma(builder, leaf_start, leaf_end);
             if (!(assignment_leaf ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                     .as.expression =
@@ -33229,8 +33383,28 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 frame->as.expression.value = value;
                 continue;
             }
+            if (task.kind == C_IR_LOWER_FRAME_COMMA_RESULT)
+            {
+                IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[task.as.range.start]);
+                IrValueId result = c_ir_comma_result(builder, value, source);
+                if (value.value != IR_ID_UNDERLYING_INVALID && result.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = result;
+                continue;
+            }
             if (task.kind == C_IR_LOWER_FRAME_COMMA_COMPLETION)
             {
+                // Resume the right operand only after the left completes, then
+                // form the same non-lvalue result as the arithmetic comma path.
+                task.kind = C_IR_LOWER_FRAME_COMMA_RESULT;
+                if (!c_ir_expression_task_push(builder, frame, task, task.as.range.start))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
                 frame->as.expression.start = task.as.range.start;
                 frame->as.expression.end = task.as.range.end;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
