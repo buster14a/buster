@@ -64,22 +64,15 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_spawn(BqRetirementRowCommand const* c
     if (process == 0)
     {
         struct rlimit memory = {(rlim_t)memory_bytes, (rlim_t)memory_bytes}, core = {0, 0};
-        int const slots[4] = {BQ_RETIREMENT_ROW_SLOT_BINARY + (int)side, BQ_RETIREMENT_ROW_SLOT_SOURCE,
-                              BQ_RETIREMENT_ROW_SLOT_SOURCE + 1, BQ_RETIREMENT_ROW_SLOT_WORK};
-        int moved[5] = {-1, -1, -1, -1, -1};
         int entry = dup(held[3]);
         bool ready = entry >= 3 && bq_retirement_build_child(log[1], -1, entry, true, 0077) &&
                      (combined || dup2(output[1], STDOUT_FILENO) == STDOUT_FILENO) &&
                      setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &memory) == 0;
         /* Out of the way first (the ruleset too), then into the canonical
-         * slots; dup2 clears close-on-exec on exactly those four. */
-        for (u32 index = 0; ready && index < 5; index += 1)
-        {
-            moved[index] = fcntl(index < 4 ? held[index] : ruleset, F_DUPFD_CLOEXEC, 64);
-            ready = moved[index] >= 64;
-        }
-        for (u32 index = 0; ready && index < 4; index += 1) ready = dup2(moved[index], slots[index]) == slots[index];
-        ready = ready && bq_retirement_sandbox_enter(moved[4]);
+         * slots (retirement_sandbox.h, as lane D's measured launches do);
+         * dup2 clears close-on-exec on exactly those four. */
+        int parked = ready ? bq_retirement_sandbox_slots(held, side, ruleset) : -1;
+        ready = parked >= 0 && bq_retirement_sandbox_enter(parked);
         if (ready) execve(command->arguments[0], command->arguments, command->environment);
         _exit(127);
     }

@@ -1,6 +1,8 @@
 /* Real child executions with deterministic fixture output, never performance
  * acceptance. The fixture checks cwd, explicit environment, stdin and descriptor
  * isolation. The ordinary native and sanitized harnesses both run this path.
+ * The layout child (test_retirement_layout_child) reports what a child in
+ * lane B's canonical layout and sandbox sees.
  * The batch child reads its inputs from the `@file` response file, requires
  * them to be exactly the frozen list, compiles every input serially, and
  * writes one object per compiled input and a per-input metrics file with its
@@ -10,6 +12,8 @@
 #include "retirement_untimed.h"
 
 #ifdef __linux__
+#include <sys/socket.h>
+#include <sys/un.h>
 #define TEST_BATCH_INPUTS 8u
 #define TEST_BATCH_METRICS_BYTES UINT64_C(1048576)
 static char const test_batch_empty_digest[] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -159,6 +163,75 @@ static int test_retirement_batch_child(int argc, char** argv)
     return result;
 }
 
+#if BUSTER_SANITIZE
+/* A fixture child inside the canonical layout's sandbox cannot read /proc.
+ * LeakSanitizer's exit-time check stops the world through /proc/<pid>/task
+ * and aborts without it, and ASan cannot read ASAN_OPTIONS there
+ * (/proc/self/environ), so the runtime asks here. Leak detection is off only
+ * for a process that holds the canonical layout's A roots and work slot
+ * (descriptors 5, 6 and 7) and cannot open /proc/self/status: a sandboxed
+ * layout child. Every other process, the test runner included, keeps the
+ * defaults; every other sanitizer check stays on in the sandboxed child, and
+ * the same child code is leak-checked when it runs outside the sandbox. Raw
+ * system calls: this runs during the sanitizer's own initialization. */
+char const* __asan_default_options(void);
+char const* __asan_default_options(void)
+{
+    int slots = 1;
+    for (long slot = BQ_RETIREMENT_ROW_SLOT_SOURCE; slots && slot <= BQ_RETIREMENT_ROW_SLOT_WORK; slot += 1)
+        slots = syscall(SYS_fcntl, slot, F_GETFD) >= 0;
+    long proc = slots ? syscall(SYS_openat, AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC) : 0;
+    if (slots && proc >= 0) syscall(SYS_close, proc);
+    char const* options = slots && proc < 0 ? "detect_leaks=0" : "";
+    return options;
+}
+#endif
+
+/* A child in the canonical layout reports what it sees: its open
+ * descriptors (0..1023), whether its cwd is slot 7, whether it may open
+ * `outside` (a file beyond its sandbox), whether it may make a socket and
+ * connect to the unix socket `socket_path`, and its address-space limit. */
+static int test_retirement_layout_child(char const* outside, char const* socket_path)
+{
+    char fds[256];
+    size_t used = 0;
+    fds[0] = 0;
+    for (int fd = 0; fd < 1024 && used + 8 < sizeof(fds); ++fd)
+        if (fcntl(fd, F_GETFD) >= 0)
+        {
+            int written = snprintf(fds + used, sizeof(fds) - used, "%s%d", used ? "," : "", fd);
+            used += written > 0 ? (size_t)written : 0;
+        }
+    struct stat here, slot;
+    int cwd = stat(".", &here) == 0 && fstat(7, &slot) == 0 && here.st_dev == slot.st_dev &&
+        here.st_ino == slot.st_ino;
+    int file = open(outside, O_RDONLY | O_CLOEXEC);
+    int opened = file >= 0, open_errno = errno;
+    if (file >= 0) close(file);
+    int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int socket_errno = errno, connected = 0;
+    if (sock >= 0)
+    {
+        struct sockaddr_un address;
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+        connected = connect(sock, (struct sockaddr*)&address, sizeof(address)) == 0;
+        close(sock);
+    }
+    struct rlimit memory;
+    char bound[32];
+    int limited = getrlimit(RLIMIT_AS, &memory) == 0;
+    if (limited && memory.rlim_cur == RLIM_INFINITY) snprintf(bound, sizeof(bound), "unlimited");
+    else if (limited) snprintf(bound, sizeof(bound), "%llu", (unsigned long long)memory.rlim_cur);
+    else snprintf(bound, sizeof(bound), "error");
+    int ok = printf("fds=%s\ncwd=%s\nopen=%s\nsocket=%s\nas=%s\n", fds, cwd ? "slot" : "other",
+        opened ? "allowed" : open_errno == EACCES ? "denied" : "error",
+        connected ? "connected" : sock >= 0 ? "made" : socket_errno == EPERM ? "denied" : "error", bound) > 0 &&
+        fflush(stdout) == 0;
+    return ok;
+}
+
 static int test_retirement_measurement_child(int argc, char** argv)
 {
     int result = 2;
@@ -173,6 +246,15 @@ static int test_retirement_measurement_child(int argc, char** argv)
             access("cwd-marker", F_OK) == 0;
         if (ok && !strcmp(argv[4], "timeout")) test_delay(5000);
         if (ok && !strcmp(argv[4], "fail")) result = 7;
+        else if (ok && !strcmp(argv[4], "noisy"))
+        {
+            /* 1.5 MiB of output, then a failure: a log past the unit's cap. */
+            static char block[65536];
+            memset(block, 'n', sizeof(block));
+            for (unsigned i = 0; ok && i < 24; ++i) ok = fwrite(block, 1, sizeof(block), stdout) == sizeof(block);
+            ok = fflush(stdout) == 0 && ok;
+            result = 7;
+        }
         else if (ok && !strcmp(argv[4], "missing")) result = 0;
         else if (ok)
         {
@@ -193,6 +275,7 @@ static int test_retirement_measurement_child(int argc, char** argv)
                 }
             }
             else if (!strcmp(argv[2], "runtime")) ok = fputs(bytes, stdout) >= 0 && fflush(stdout) == 0;
+            else if (!strcmp(argv[2], "layout")) ok = test_retirement_layout_child(argv[3], argv[4]);
             else ok = 0;
             result = ok ? 0 : 3;
         }
@@ -318,7 +401,7 @@ static void test_retirement_untimed_fixture(char const* root, int cwd, int other
         run.purpose = step % 2;
         run.command.variant = run.variant;
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
         uint64_t records_before = untimed.records;
         CHECK(log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result) &&
               result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !strcmp(result.output_sha256, output_digest) &&
@@ -365,7 +448,7 @@ static void test_retirement_untimed_fixture(char const* root, int cwd, int other
         unbounded.contract.metrics_bytes_max = TEST_BATCH_METRICS_BYTES;
         run.command.batch = failure == 2 ? &unbounded.contract : &batch.contract;
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
         int ok = log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result);
         if (failure == 0)
         {
@@ -575,7 +658,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
             test_retirement_measurement_command_file(root, "retirement-measured-command-runtime.json", &command);
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         CHECK(log >= 3);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
         TpRetirementMeasurementResult result;
         ok = tp_retirement_measurement_run(&test.samples, &command, &executable, &inputs, cwd, &result);
         CHECK(ok);
@@ -621,7 +704,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
     CHECK(tp_retirement_command_hash(&command, command_digest));
     int sparse_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     CHECK(sparse_log >= 3);
-    TpProcessInputs sparse_inputs = {binary, cwd, sparse_log, environment};
+    TpProcessInputs sparse_inputs = {binary, cwd, sparse_log, environment, 0, 0, {0, 0}, 0, 0};
     TpRetirementMeasurementResult sparse_result;
     CHECK(!tp_retirement_measurement_run(&test.samples, &command, &executable, &sparse_inputs, cwd,
                                          &sparse_result) && sparse_result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID);
@@ -685,7 +768,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
         if (failure == 9) CHECK(chmod(executable_copy, 0700) == 0);
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         CHECK(log >= 3);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
         if (failure == 10) CHECK(write(log, "stale", 5) == 5);
         if (failure == 11) inputs.environment = NULL;
         if (failure == 12) CHECK(fcntl(log, F_SETFD, 0) == 0);
@@ -837,7 +920,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
             batch_command.unit = invocation.group;
             batch_command.variant = invocation.variant;
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-            TpProcessInputs inputs = {binary, cwd, log, environment};
+            TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
             TpRetirementMeasurementResult result;
             uint64_t offset = metrics_shards.bytes;
             run_ok = log >= 3 && tp_retirement_measurement_run(&test.samples, &batch_command, &executable, &inputs,

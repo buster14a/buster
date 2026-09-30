@@ -17,6 +17,7 @@
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_H
 #include "retirement_correctness_service.h"
+#include "../throughput/retirement_sandbox.h"
 
 /* The one target the unit times and whose checks may claim native
  * execution: x86_64-unknown-linux-gnu, the A1 native-host timed target.
@@ -30,11 +31,8 @@
 #define BQ_RETIREMENT_CHECK_LOG_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_RUN_CAP 1024u
 
-/* The lowest Landlock ABI the child sandbox accepts: ABI 6 is the first that
- * also scopes signals and abstract unix sockets to the child's domain, so
- * every rule the sandbox states is enforced. An older kernel is refused
- * (BQ_CONFIGURATION_MISMATCH), never run with fewer rules. */
-#define BQ_RETIREMENT_SANDBOX_MIN_ABI 6u
+/* BQ_RETIREMENT_SANDBOX_MIN_ABI, the sandbox and the canonical child layout
+ * are shared with lane D (retirement_sandbox.h). */
 
 /* Everything one run borrows. evidence is the attempt's new check evidence
  * directory (the runner creates check-output-<i>, check-log-<i>,

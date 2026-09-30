@@ -8,6 +8,16 @@
  * wait4 page-fault and context-switch counts after the wall interval ends.
  * Their availability bits distinguish an observed zero from an unsupported
  * platform or failed wait. They are diagnostics, never PMU events or gates.
+ *
+ * tp_process_observe_inputs with a ruleset (TpProcessInputs.ruleset) launches
+ * in lane B's canonical child layout (retirement_sandbox.h): the child
+ * normalizes, places the side's held binary at 3 or 4, A's roots at 5 and 6
+ * and the work directory at 7, fchdirs to 7, enters the sandbox and only then
+ * reports over a pipe. The parent takes the start time after that report,
+ * arms the timeout and releases the child to execve argv[0] (the side's slot
+ * path), so the timer covers one pipe wake-up, the exec and the program, and
+ * none of the placement or sandbox entry. Without a ruleset the timer starts
+ * before the fork, as before.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -56,7 +66,22 @@ typedef struct TpProcess
     uint64_t diagnostics[TP_DIAGNOSTICS];
     unsigned diagnostics_available;
     int exit_code, signal_number, timed_out, launch_error;
+    /* The caller's cancellation descriptor became readable while the child
+     * ran, so the process group was killed (TpProcessInputs.cancellation). */
+    int cancelled;
+    /* A layout child refused before exec: it could not be set up, placed or
+     * sandboxed, and launch_error is the errno it reported. */
+    int refused;
 } TpProcess;
+
+#ifdef __linux__
+/* The errno of a failed step, never zero. */
+static inline int32_t tp_process_errno(void)
+{
+    int32_t error = errno ? (int32_t)errno : (int32_t)EACCES;
+    return error;
+}
+#endif
 
 static inline int tp_mkdir(char const* path)
 {
@@ -211,10 +236,12 @@ static inline TpProcess tp_process(char* const* args, char const* directory, cha
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <poll.h>
 #include <linux/close_range.h>
 #include <linux/perf_event.h>
 #include <sched.h>
 #include <sys/syscall.h>
+#include "retirement_sandbox.h"
 #endif
 
 /* Only the orchestration tool installs this handler, never the compiler.
@@ -345,7 +372,37 @@ typedef struct TpProcessInputs
 {
     int executable, directory, log;
     char* const* environment;
+    /* Optional (>= 3): a readable or hung-up descriptor, such as the
+     * worker's SIGTERM self-pipe, kills the child's process group while it
+     * runs. The wait then polls a Linux pidfd, so exit is seen at once.
+     * Zero means none, which keeps positional initializers unchanged. */
+    int cancellation;
+    /* Optional canonical child layout (retirement_sandbox.h), used when
+     * ruleset >= 3 (a bq_retirement_sandbox ruleset): the executable goes to
+     * BQ_RETIREMENT_ROW_SLOT_BINARY + side, sources (A's base and candidate
+     * roots) to 5 and 6 and directory to 7, which is the working directory;
+     * args[0] must be the binary slot's /proc/self/fd path, and the
+     * environment the command's own. The child is normalized
+     * (bq_retirement_sandbox_normalize with memory_bytes of address space),
+     * placed, enters the sandbox and only then reports ready; the parent
+     * starts the observation timer after that report, immediately before it
+     * releases the child to exec. Zero keeps the plain launch. */
+    int side;
+    int sources[2];
+    int ruleset;
+    uint64_t memory_bytes;
 } TpProcessInputs;
+
+#ifdef __linux__
+/* The binary slot path args[0] must name under a layout. */
+static inline int tp_process_layout_binary(char const* argument, int side)
+{
+    char expected[32];
+    int written = snprintf(expected, sizeof(expected), "/proc/self/fd/%d", BQ_RETIREMENT_ROW_SLOT_BINARY + side);
+    int ok = argument && written > 0 && (size_t)written < sizeof(expected) && !strcmp(argument, expected);
+    return ok;
+}
+#endif
 
 static TpProcess tp_process_observe_inputs(char* const* args, char const* directory, char const* log_path,
     unsigned timeout_seconds, int cpu, int counters, TpProcessObservation* observation,
@@ -363,14 +420,20 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         result.running_fraction[i] = NAN;
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
-    int ready[2] = {-1, -1};
-    int log = -1;
+    int ready[2] = {-1, -1}, armed[2] = {-1, -1};
+    int log = -1, layout = 0;
 #ifdef __linux__
     if (inputs)
     {
-        int descriptors[] = {inputs->executable, inputs->directory, inputs->log};
-        int valid = inputs->environment != NULL;
-        for (unsigned i = 0; valid && i < 3; ++i)
+        layout = inputs->ruleset >= 3;
+        int descriptors[] = {inputs->executable, inputs->directory, inputs->log, inputs->sources[0],
+            inputs->sources[1], inputs->ruleset};
+        unsigned checked = layout ? 6u : 3u;
+        int valid = inputs->environment != NULL &&
+            (!inputs->cancellation || (inputs->cancellation >= 3 && fcntl(inputs->cancellation, F_GETFD) >= 0)) &&
+            (!layout || ((inputs->side == 0 || inputs->side == 1) && args && tp_process_layout_binary(args[0],
+                inputs->side)));
+        for (unsigned i = 0; valid && i < checked; ++i)
         {
             int flags = descriptors[i] >= 3 ? fcntl(descriptors[i], F_GETFD) : -1;
             valid = flags >= 0 && (flags & FD_CLOEXEC);
@@ -380,8 +443,11 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     }
     else
 #endif
-    if (!inputs) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (!inputs && log_path) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     int ok = log >= 0 && pipe(ready) == 0;
+#ifdef __linux__
+    ok = ok && (!layout || pipe2(armed, O_CLOEXEC) == 0);
+#endif
 #ifndef __linux__
     if (observation) { ok = 0; errno = ENOTSUP; }
 #endif
@@ -403,7 +469,9 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     pid_t pid = -1;
     TimeDataType start = timestamp_take();
 #ifdef __linux__
-    if (ok && observation)
+    /* A layout starts the timer only after the child entered its sandbox
+     * (below); a plain launch starts it before the fork. */
+    if (ok && observation && !layout)
     {
         observation->started_ns = tp_process_monotonic_ns();
         ok = observation->started_ns > 0;
@@ -417,7 +485,26 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     if (pid == 0)
     {
         close(ready[1]);
-        int child_ok = setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 && dup2(log, STDERR_FILENO) >= 0;
+        int go = ready[0], report = -1, parked_ends = 1;
+#ifdef __linux__
+        /* Under a layout both handshake ends are parked above the slots
+         * first, so placing the slots cannot overwrite them. An end that
+         * cannot be parked stays where it is and the child places nothing:
+         * it still reports its refusal and exits. */
+        if (layout)
+        {
+            close(armed[0]);
+            go = fcntl(ready[0], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH);
+            report = go >= 0 ? fcntl(armed[1], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH) : -1;
+            parked_ends = go >= 0 && report >= 0;
+            if (go >= 0) close(ready[0]);
+            else go = ready[0];
+            if (report >= 0) close(armed[1]);
+            else report = armed[1];
+        }
+#endif
+        int child_ok = go >= 0 && parked_ends && setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 &&
+            dup2(log, STDERR_FILENO) >= 0;
         close(log);
         if (child_ok && directory)
         {
@@ -434,6 +521,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             if (cpu >= CPU_SETSIZE)
             {
                 child_ok = 0;
+                errno = EINVAL;
             }
             else
             {
@@ -444,18 +532,44 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             child_ok = 0;
 #endif
         }
+#ifdef __linux__
+        if (layout)
+        {
+            /* The canonical layout and sandbox, all before the timer: /dev/null
+             * stdin, the normalized state (bq_retirement_sandbox_normalize),
+             * the four slots (the ruleset parked), cwd the work slot, then no
+             * new privileges, Landlock and the seccomp filter. The child then
+             * reports 0, or the errno of the first step that failed, and
+             * closes its end at once, so the parent never waits on a child
+             * that stopped before reporting. */
+            int32_t failure = child_ok ? 0 : tp_process_errno();
+            int input = !failure ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+            if (!failure && !(input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO)) failure = tp_process_errno();
+            if (input >= 0) close(input);
+            if (!failure && !bq_retirement_sandbox_normalize(0077, inputs->memory_bytes)) failure = tp_process_errno();
+            int const held[4] = {inputs->executable, inputs->sources[0], inputs->sources[1], inputs->directory};
+            int parked = !failure ? bq_retirement_sandbox_slots(held, (uint32_t)inputs->side, inputs->ruleset) : -1;
+            if (!failure && parked < 0) failure = tp_process_errno();
+            if (!failure && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0) failure = tp_process_errno();
+            if (!failure && !bq_retirement_sandbox_enter(parked)) failure = tp_process_errno();
+            ssize_t written = write(report, &failure, sizeof(failure));
+            child_ok = !failure && written == (ssize_t)sizeof(failure);
+            close(report);
+        }
+#endif
         char byte;
         ssize_t received;
         do
         {
-            received = read(ready[0], &byte, 1);
+            received = read(go, &byte, 1);
         } while (received < 0 && errno == EINTR);
-        close(ready[0]);
+        close(go);
         if (child_ok && received == 1)
         {
-            sigaction(SIGPIPE, &previous_pipe, NULL);
+            if (!layout) sigaction(SIGPIPE, &previous_pipe, NULL);
 #ifdef __linux__
-            if (inputs)
+            if (layout) execve(args[0], args, inputs->environment);
+            else if (inputs)
             {
                 /* Neither a sample spool nor an unrelated supervisor handle
                  * may leak into the child. Fail closed on an older kernel. */
@@ -515,6 +629,67 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             identity_ok = tp_process_identity(pid, &observation->start_token);
         }
 #endif
+#ifdef __linux__
+        /* A layout child reports once it is placed and sandboxed; only then
+         * does the timer start, so neither the placement nor the sandbox
+         * entry is measured. The report is 0, or the errno of the step that
+         * failed: the child refused (TpProcess.refused), with that errno as
+         * the launch error. The wait also watches the cancellation
+         * descriptor and is bounded by the launch's timeout (at least one
+         * second): a cancellation is reported as such, a child that never
+         * reports as ETIMEDOUT and one that exits without a report as
+         * ECHILD. */
+        if (layout)
+        {
+            close(armed[1]);
+            armed[1] = -1;
+            int32_t reported = -1;
+            size_t received = 0;
+            int cancel_fd = inputs->cancellation >= 3 ? inputs->cancellation : -1, expired = 0, stopped = 0;
+            uint64_t bound = (uint64_t)(timeout_seconds ? timeout_seconds : 1u) * UINT64_C(1000000000);
+            uint64_t deadline = tp_process_monotonic_ns() + bound;
+            int waiting = identity_ok;
+            while (waiting)
+            {
+                uint64_t now = tp_process_monotonic_ns();
+                uint64_t left = now < deadline ? (deadline - now) / UINT64_C(1000000) + 1u : 0;
+                struct pollfd waits[2] = {{.fd = armed[0], .events = POLLIN}, {.fd = cancel_fd, .events = POLLIN}};
+                int count = left ? poll(waits, 2, left > 86400000u ? 86400000 : (int)left) : 0;
+                if (count < 0 && errno != EINTR) waiting = 0;
+                else if (count == 0)
+                {
+                    expired = 1;
+                    waiting = 0;
+                }
+                else if (count > 0 && waits[1].revents)
+                {
+                    stopped = 1;
+                    waiting = 0;
+                }
+                else if (count > 0 && waits[0].revents)
+                {
+                    ssize_t got = read(armed[0], (char*)&reported + received, sizeof(reported) - received);
+                    if (got > 0) received += (size_t)got;
+                    waiting = got > 0 ? received < sizeof(reported) : got < 0 && errno == EINTR;
+                }
+            }
+            close(armed[0]);
+            armed[0] = -1;
+            if (identity_ok && !(received == sizeof(reported) && reported == 0))
+            {
+                identity_ok = 0;
+                result.refused = received == sizeof(reported) && reported > 0;
+                result.cancelled = stopped;
+                result.launch_error = result.refused ? reported : stopped ? 0 : expired ? ETIMEDOUT : ECHILD;
+            }
+            start = timestamp_take();
+            if (identity_ok && observation)
+            {
+                observation->started_ns = tp_process_monotonic_ns();
+                identity_ok = observation->started_ns > 0;
+            }
+        }
+#endif
         tp_active_pid = (sig_atomic_t)pid;
         tp_timeout_fired = 0;
         alarm(timeout_seconds);
@@ -530,6 +705,42 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             kill(-pid, SIGKILL);
         }
+#ifdef __linux__
+        /* With a cancellation descriptor, wait on the child's pidfd and that
+         * descriptor together; without pidfd support the child is killed
+         * rather than run uncancellable, reported as launch error ENOSYS (not
+         * as a cancellation). The alarm still bounds the child. */
+        int cancellation = inputs && inputs->cancellation >= 3 && sent == 1 ? inputs->cancellation : -1;
+#ifdef SYS_pidfd_open
+        int child_fd = cancellation >= 0 ? (int)syscall(SYS_pidfd_open, pid, 0) : -1;
+#else
+        int child_fd = -1;
+#endif
+        if (cancellation >= 0 && child_fd < 0)
+        {
+            result.launch_error = ENOSYS;
+            kill(-pid, SIGKILL);
+        }
+        int watching = child_fd >= 0;
+        while (watching)
+        {
+            struct pollfd waits[2] = {{.fd = child_fd, .events = POLLIN}, {.fd = cancellation, .events = POLLIN}};
+            int ready_count = poll(waits, 2, -1);
+            if (ready_count < 0 && errno != EINTR)
+            {
+                kill(-pid, SIGKILL);
+                watching = 0;
+            }
+            else if (ready_count > 0 && waits[0].revents) watching = 0;
+            else if (ready_count > 0 && waits[1].revents)
+            {
+                result.cancelled = 1;
+                kill(-pid, SIGKILL);
+                watching = 0;
+            }
+        }
+        if (child_fd >= 0) close(child_fd);
+#endif
         int status = 0;
         struct rusage usage;
         memset(&usage, 0, sizeof(usage));
@@ -538,6 +749,12 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             waited = wait4(pid, &status, 0, &usage);
         } while (waited < 0 && errno == EINTR);
+        /* Disarm at once: an alarm after the reap must neither kill the
+         * reaped child's group nor mark a clean exit as a timeout, so the
+         * pid is forgotten first and a timeout needs a signalled child. */
+        tp_active_pid = 0;
+        alarm(0);
+        result.timed_out = tp_timeout_fired != 0 && waited == pid && WIFSIGNALED(status);
         result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
 #ifdef __linux__
         if (observation)
@@ -549,9 +766,6 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
                 result.wall_seconds = (double)(observation->finished_ns - observation->started_ns) / 1000000000.0;
         }
 #endif
-        alarm(0);
-        tp_active_pid = 0;
-        result.timed_out = tp_timeout_fired != 0;
         ok = waited == pid && sent == 1 && (!observation || observation->valid);
         if (ok)
         {
@@ -609,13 +823,17 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             }
         }
     }
-    if (!ok)
+    if (!ok && !result.launch_error)
     {
         result.launch_error = errno ? errno : EIO;
     }
     if (log >= 0)
     {
         close(log);
+    }
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (armed[i] >= 0) close(armed[i]);
     }
     if (ready[0] >= 0)
     {

@@ -39,13 +39,11 @@
 #define BQ_RETIREMENT_ROW_PLAN_BATCH (UINT32_MAX - 1u)
 
 /* The canonical child layout every row command runs in, and in which the
- * plan derives its digests: the side's held binary at 3 (baseline) or 4
- * (candidate), A's base and candidate roots at 5 and 6, and the step's work
- * directory at 7, which is also the working directory. */
-#define BQ_RETIREMENT_ROW_SLOT_BINARY 3
-#define BQ_RETIREMENT_ROW_SLOT_SOURCE 5
-#define BQ_RETIREMENT_ROW_SLOT_WORK 7
-#define BQ_RETIREMENT_ROW_WORK_PATH "/proc/self/fd/7"
+ * plan derives its digests (BQ_RETIREMENT_ROW_SLOT_BINARY + side,
+ * BQ_RETIREMENT_ROW_SLOT_SOURCE and + 1, BQ_RETIREMENT_ROW_SLOT_WORK, cwd
+ * BQ_RETIREMENT_ROW_WORK_PATH), is shared with lane D's measured launches:
+ * ../throughput/retirement_sandbox.h, which retirement_check_runner.h
+ * includes. */
 /* The native-host timed target's name in batch contracts. */
 #define BQ_RETIREMENT_ROW_BATCH_TARGET "x86_64-linux"
 

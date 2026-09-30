@@ -10,10 +10,11 @@
  * reviewed campaign budget to hash to the caller's recipe-profile pin and to
  * hold the counts, each group costed by the kind and stage the gate's rows
  * give it. (M2) Object batch groups bind only when the gate carries the #509
- * correctness authority (gate->batch_authority), which only the future #509
- * importer sets; until then bind, bind_held and the pinned service entry
- * refuse every campaign with an object group, whatever the profile pins.
- * The recipe stays blocked until #509 supplies the correctness authority.
+ * correctness authority (gate->batch_authority), which only
+ * bq_retirement_correctness_authorize sets (lane B's step 9 issuer, over the
+ * row plan's evidence and the required checks); without it bind, bind_held
+ * and the pinned service entry refuse every campaign with an object group,
+ * whatever the profile pins. The recipe stays blocked.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
@@ -36,6 +37,10 @@ typedef struct BqRetirementCampaignBinding
     TpRetirementExecutable held_executables[2];
     uint64_t job_id, attempt_token;
     char sealed_sha256[65];
+    /* Set only by the store-based unit bind (retirement_campaign_service.h):
+     * the ready record digest it authenticated. The in-unit driver attaches
+     * only a binding that carries it. */
+    char unit_ready_sha256[65];
 } BqRetirementCampaignBinding;
 
 /* (A1) The pinned native-host timed target, x86_64-unknown-linux-gnu: the

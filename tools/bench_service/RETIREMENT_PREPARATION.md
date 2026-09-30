@@ -647,7 +647,14 @@ pinned digest. stderr is its log, bounded to 16 MiB.
 
 **The child sandbox.** `bq_retirement_sandbox` builds it and
 `bq_retirement_sandbox_enter` applies it just before exec, after
-`PR_SET_NO_NEW_PRIVS`. What it covers:
+`PR_SET_NO_NEW_PRIVS`. Both live in `tools/throughput/retirement_sandbox.h`
+with the canonical slot constants and the slot placement
+(`bq_retirement_sandbox_slots`), so the row producer and lane D's measured
+launches share one implementation of each. Lane D's child normalization
+(`bq_retirement_sandbox_normalize`) sits beside them; it follows
+`bq_retirement_build_child`'s signal, mask, umask and close-on-exec policy but
+also resets `SIGALRM` and sets `RLIMIT_CORE` and `RLIMIT_AS`, which the row
+spawn sets after `bq_retirement_build_child`. What it covers:
 
 - **Kernel.** It requires Landlock ABI 6 (`BQ_RETIREMENT_SANDBOX_MIN_ABI`),
   the first ABI with the signal and abstract-socket scopes. An older kernel,
@@ -890,6 +897,67 @@ plan's model, and to record a sandbox of at least Landlock ABI 6
 rows, the observed facts, and frozen batch groups from the plan's skeleton
 with the observed diagnostics and objects. Whether each fact matches its
 derived command, oracle, status and object is the gate's to judge.
+
+### Lane D's measured launches in the same layout
+
+Lane D's campaign launches (`tp_process_observe_inputs` in
+`tools/throughput/platform.h`, driven by `retirement_unit_campaign.h`) run
+in exactly this layout, so the digest `tp_retirement_command_hash` gives each
+measured command is the one the plan derived for the same row, side and
+label:
+
+- **Commands.** `bq_retirement_campaign_plan_commands`
+  (`retirement_campaign_service.h`) resolves every campaign command from the
+  row plan the unit gate was issued on, with the plan's own resolver: argv[0]
+  is `/proc/self/fd/3` or `/4` by side, A's roots are `/proc/self/fd/5` and
+  `/6`, the directory is `BQ_RETIREMENT_ROW_WORK_PATH` and the environment is
+  the template's. Side is the variant in the A/B stage and the baseline in the
+  A/A stage, whose second variant uses `{{label}}` = `2`. Timeout and
+  address-space bound come from the template. Every label-1 command must hash
+  to the digest the gate sealed for it (its batch group's, or its row's
+  compiler or runtime command); the label-2 commands are bound by the gate's
+  A/A aggregate when the campaign binds.
+- **Child.** The launch takes the side, A's two roots (held by the store
+  import, `bq_retirement_unit_source_root`, as the gate holds them) and a
+  ruleset built by `bq_retirement_sandbox` over the side's held binary, the
+  roots and the work directory. The child takes `/dev/null` as stdin and
+  normalizes (`bq_retirement_sandbox_normalize`: default signals, an empty
+  mask, umask 0077, every descriptor from 3 marked close-on-exec, no core,
+  the template's `RLIMIT_AS`), parks the held descriptors and the ruleset
+  above 64 and `dup2`s the four into 3 + side, 5, 6 and 7
+  (`bq_retirement_sandbox_slots`), `fchdir`s to 7, then sets
+  `PR_SET_NO_NEW_PRIVS` and enters Landlock and the seccomp filter through
+  `bq_retirement_sandbox_enter`, and finally `execve`s argv[0].
+- **Parent.** Before the child the launch requires the directory to be
+  exactly `BQ_RETIREMENT_ROW_WORK_PATH` and argv[0] the side's slot, the
+  work directory's `fstat` identity to be owned by the service user and not
+  group- or world-writable, the memory bound to be the command's, and a
+  compile's output directory to be the work directory.
+- **Timer.** Everything above happens before the timer: the ruleset is built
+  before the fork, and the child reports over a pipe only once it is placed
+  and inside its sandbox. The parent then reads that report, takes the start
+  time, arms the timeout and writes the go byte; the child reads it and calls
+  `execve`. The measured interval is that one pipe wake-up, the exec and the
+  program.
+- **Refusal.** The report is 0, or the errno of the first child step that
+  failed (affinity, process group, log, stdin, normalization, parking or
+  placing a slot, `fchdir`, no new privileges, Landlock or seccomp); the child
+  closes its end right after writing it. The parent waits for the report
+  together with the cancellation descriptor, bounded by the launch's timeout,
+  so a child that fails before reporting never blocks it: the launch returns
+  as refused (`TpProcess.refused`) with that errno as its launch error, and
+  the driver records it as `REFUSED`. A cancellation during the wait is a
+  cancellation, a child that exits without a report is `ECHILD` and one that
+  never reports is `ETIMEDOUT`.
+
+The preparation runner's campaign fixture issues the gate over a row plan
+that follows the validator's timed partition and checks, for a timed batch
+group and a timed singleton with a runtime row, per side and for the A/A
+second label, that D's digests equal B's. The throughput fixture has a child
+report what it sees: exactly descriptors 0, 1, 2, its side's slot, 5, 6
+and 7, cwd `/proc/self/fd/7`, a file outside the sandbox denied and a
+connection to a listening unix socket outside it denied; a command naming
+the other side's slot is refused before any child.
 
 ### The issuer
 

@@ -45,6 +45,10 @@ typedef struct TpRetirementMeasuredCommand
     char const* command_sha256;
     char const* output_sha256;
     int exit_status;
+    /* The child's address-space limit in MiB under the canonical layout
+     * (the row plan template's bound); 0 leaves it unlimited. Not part of
+     * the command digest, but frozen with the command. */
+    unsigned memory_mib;
 } TpRetirementMeasuredCommand;
 
 typedef enum TpRetirementMeasurementStatus
@@ -364,6 +368,25 @@ typedef struct TpRetirementLaunch
     unsigned group_kind;
 } TpRetirementLaunch;
 
+/* The canonical layout's launch (inputs->ruleset >= 3, retirement_sandbox.h):
+ * the child cannot resolve a caller path, so the command's directory must be
+ * exactly BQ_RETIREMENT_ROW_WORK_PATH and its args[0] the binary slot of the
+ * side, and the descriptor that becomes slot 7 (fstat `cwd`) must be a
+ * private directory of this user; a compiler launch's output directory must
+ * be that same directory (the artifact is read where the child wrote it). */
+static int tp_retirement_launch_layout(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs,
+    struct stat const* cwd, int output_directory)
+{
+    struct stat output;
+    int ok = command->directory && !strcmp(command->directory, BQ_RETIREMENT_ROW_WORK_PATH) && command->arguments &&
+        tp_process_layout_binary(command->arguments[0], inputs->side) && cwd->st_uid == geteuid() &&
+        inputs->memory_bytes == (uint64_t)command->memory_mib << 20 &&
+        !(cwd->st_mode & 0022) &&
+        (command->kind || (output_directory >= 3 && fstat(output_directory, &output) == 0 &&
+                           output.st_dev == cwd->st_dev && output.st_ino == cwd->st_ino));
+    return ok;
+}
+
 static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMemberSample* members,
     unsigned member_capacity, TpRetirementMeasurementResult* result, char command_digest[65])
 {
@@ -386,8 +409,9 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
         !strcmp(command_digest, command->command_sha256) &&
         fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity) &&
         fstat(inputs->directory, &cwd) == 0 && S_ISDIR(cwd.st_mode) &&
-        lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
-        cwd.st_dev == named_cwd.st_dev && cwd.st_ino == named_cwd.st_ino &&
+        (inputs->ruleset >= 3 ? tp_retirement_launch_layout(command, inputs, &cwd, output_directory) :
+         lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
+         cwd.st_dev == named_cwd.st_dev && cwd.st_ino == named_cwd.st_ino) &&
         fstat(inputs->log, &log) == 0 && S_ISREG(log.st_mode) && log.st_nlink == 1 && !log.st_size &&
         lseek(inputs->log, 0, SEEK_CUR) == 0 && (fcntl(inputs->log, F_GETFL) & O_ACCMODE) == O_RDWR;
     if (ok && !command->kind)
