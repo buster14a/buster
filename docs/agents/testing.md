@@ -301,6 +301,14 @@ the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
 
+`compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
+with the PATH `clang` at `x86-64`, `haswell` and `znver5`. Each row runs only
+when the host CPU can execute it. The Zen 5 row also requires that Clang accept
+`-march=znver5`, which Clang supports from version 19. A single probe compile
+checks this, and an older Clang (Ubuntu 24.04 ships 18) prints
+`PADDED_VECTOR_ZNVER5_ROW status=not-run` with its version line. The row is then
+not run and is not counted as passed.
+
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
 GCC requests preserving existing configurations. The GCC row selects Homebrew
@@ -509,6 +517,8 @@ stderr message. This harness regression changes neither assertion totals nor
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
+
+The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. After the oracle returns, it queues `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` on stdout. From Node's `exit` event, which fires only once the event loop has drained, it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors

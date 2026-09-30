@@ -48,6 +48,18 @@ bootstrap #1086 admitted both exact digests before this separate policy
 transition updated the fixture, its ledger rows, the producer pin, and the
 benchmark-service support pin.
 
+The #1808 support decision updates only the byte/hash identity of
+`tests/ci_tools_test.py`, whose workflow-policy assertions now cover the
+main-push reuse decision (642 aggregate cases). Its role and compilation
+obligation are unchanged, and so are the 559 inputs, 411 subjects and 78,912
+row identities. The exact successor declaration digest is
+`434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61`: the #1007
+declaration with only this row changed to 80,307 bytes and
+`05a30118d2fef4bd069e92541ea723d9efa5123f4011203c89d5a435334be08c`. Trusted-reader
+bootstrap #2069 admitted it before this policy transition updated the test, its
+row and the benchmark-service support pin. Earlier digests remain accepted for
+historical evidence.
+
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,
 411 subjects, 19,728 groups and 78,912 rows: 405 supported-object

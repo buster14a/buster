@@ -49,7 +49,16 @@ full commit and tree and check active service PRs before changing the inventory.
   per-attempt workflow gate without manual approval, and
   fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
   performs no checkout and invokes only literal installed `gateway
-  capabilities`, `gateway submit` and `gateway result` commands. Keep it
+  capabilities`, `gateway submit-recipe` and `gateway result` commands. Its
+  `recipe` input is a choice from the reviewed allowlist
+  (`validate-buster-v1`, `zen5-calibration-v1`); the job refuses any other
+  value and any recipe the installed service does not list in
+  `service-recipes`. The result wait is the recipe's reviewed runtime budget
+  (the broker's fixed 3,600-second `RuntimeMaxSec` for `validate-buster-v1`;
+  the 2,700 seconds that the held `zen5-calibration-v1` recipe enforces itself)
+  plus a 600-second finalization allowance, and admission stops early enough
+  that this wait fits inside the 120-minute job timeout. The workflow needs a service installed
+  from a main revision that has `gateway submit-recipe`. Keep it
   disabled until the repository controls and host verifier in
   `GITHUB_ADMISSION.md` are complete. It does not invoke `gateway export` or
   publish result bytes; use only a separately reviewed fixed operator path for
