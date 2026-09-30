@@ -4398,10 +4398,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
     // Baseline observes SysV memory arguments and three-part results, Haswell
     // observes the 32-byte native register, and Zen 5 additionally observes
     // the 64-byte native register. Wider values stay memory/sret in every row.
+    // The Clang half of the Zen 5 row uses x86-64-v4 (AVX-512 F/BW/CD/DQ/VL):
+    // its 64-byte vector ABI matches znver5, and Clang before 19 rejects
+    // -march=znver5. Buster itself still compiles its half for znver5.
     {
         String8 padded_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                                   S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-        String8 host_cpus[] = {S8("-march=x86-64"), S8("-march=haswell"), S8("-march=znver5")};
+        String8 host_cpus[] = {S8("-march=x86-64"), S8("-march=haswell"), S8("-march=x86-64-v4")};
         String8 half_defines[] = {S8("-DNON_POWER_VECTOR_PROVIDER_ONLY=1"), S8("-DNON_POWER_VECTOR_CONSUMER_ONLY=1")};
         for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
         {
