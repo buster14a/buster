@@ -1,0 +1,25 @@
+name: Analyzer 2032 Bash 3.2 portability
+on:
+  push:
+    branches: [codex/2032-bash-array-portability]
+permissions:
+  contents: read
+jobs:
+  portability:
+    name: Analyzer workflow regressions under macOS Bash 3.2
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Execute actual workflow fixtures with Bash 3.2
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          /bin/bash --version
+          mkdir -p "$RUNNER_TEMP/bash-3.2"
+          ln -s /bin/bash "$RUNNER_TEMP/bash-3.2/bash"
+          export PATH="$RUNNER_TEMP/bash-3.2:$PATH"
+          bash --version
+          python3 tools/analyzer_selection_test.py -v
