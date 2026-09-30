@@ -1759,18 +1759,63 @@ seam is left to the integration; `bq_worker_result_binding_validate` accepts
 a retirement result only through its complete-profile seam, and its public
 entry still refuses one.
 
-**Still open.** These are inputs for the `bq_worker_recover` classification:
+**Recovery classification (L2).** A handoff can stop after
+`tp_retirement_store_authority_handoff` has copied or journalled the
+authority but before `worker-phase-4` exists (the record is written only
+after the handoff completes, then the acknowledgement). Before admitting a
+recovered retirement job to `bq_worker_finish`, `bq_worker_recover` calls
+`bq_worker_retirement_recover_hold`, which classifies the handoff with
+`bq_retirement_coordinator_handoff_class` from the queue's `worker-phase-4`
+record and `tp_retirement_store_authority_state`:
 
-- A handoff that times out after `tp_retirement_store_authority_handoff`
-  has already copied and journalled the authority leaves the copy and the
-  journal in the queue-private root, with no `worker-phase-4` and no
-  acknowledgement. Recovery must classify such attempts with
-  `tp_retirement_store_authority_state` (`COMPLETE` without a MEASURED
-  record, or `INCOMPLETE`) and poison them.
-- Before this change, MEASURED's `worker-phase-4` record was written before
-  the handoff. It is now written only after the handoff completes, so a
-  record without a `COMPLETE` handoff can only come from tampering or an
-  older build. Recovery should still check the two together.
+| `worker-phase-4` | Queue-private copy, journal or `.pending` | Store state | Class |
+|---|---|---|---|
+| present | the copy it names | `COMPLETE` | complete |
+| absent | none | `ABSENT` | absent |
+| absent | any | not `COMPLETE` | incomplete |
+| present | any or none | not `COMPLETE` | inconsistent |
+| absent | copy and journal | `COMPLETE` | inconsistent |
+
+With the record, the state is taken over the copy its digest names; without
+it, over the copy the handoff left (its own digest), so a sealed but
+unacknowledged handoff is still classified. A queue-private root that cannot
+be opened for any reason but its absence counts as something left. A
+`COMPLETE` state without the record is either the crash window between the
+handoff and the record or forged records; recovery cannot tell them apart.
+
+Complete and absent handoffs proceed as before. Incomplete and inconsistent
+ones, and any job that already has one, are poisoned and held:
+
+- an immutable queue record `retirement-poison-<id>`
+  (`BQ-RETIREMENT-POISON-V1`: job, token, class, whether `worker-phase-4`
+  existed, the observed state) is written once. Any record under that name
+  poisons the job, and `bq_worker_retirement_finalize` refuses a poisoned job,
+  so the partial samples can never finalize as a complete experiment;
+- a job without a durable outcome that was not cancelled gets its failure
+  record: the recovery's interrupted reason for an incomplete handoff,
+  `worker-mismatch` for an inconsistent one;
+- nothing is advanced, published or removed: the attempt workspace, the result
+  root and the queue-private copy and journal stay as evidence;
+- `bq_worker_recover` returns `BQ_RECONCILIATION_REQUIRED` with the queue still
+  needing reconciliation, so `bq_reserve` admits no further job. Every later
+  recovery finds the poison record and holds again. Only an operator's cleanup
+  proof (`bq_workspace_reconcile`) releases the queue; it finishes a job
+  without a durable outcome interrupted (or cancelled), never succeeded.
+
+A durable success (FINALIZING or later) that is poisoned is held the same way
+and never rewritten; its finalization refuses while the poison record exists.
+
+`bq_prep_worker_unit_recovery` covers this over job 82's composed attempt
+with the real `bq_worker_recover`. A handoff that timed out after the copy
+(no journal, no `worker-phase-4`), a `COMPLETE` handoff without
+`worker-phase-4` and a `worker-phase-4` over an `INCOMPLETE` handoff each hold
+twice, never succeed, keep their evidence and refuse the next reservation.
+The poison outlives the restored records. The intact handoff (complete) and an
+emptied one (absent) are not held.
+
+The live run's own failure paths are unchanged: a handoff that fails during
+`bq_worker_phase_join` finishes the job failed through `bq_worker_finish`
+without this classification.
 
 ## Capacity derivation
 

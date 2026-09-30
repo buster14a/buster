@@ -448,7 +448,11 @@ are separate translation units linked into the service. The service order is:
    restart as complete, incomplete (a crash prefix, including a `.pending`
    temporary beside a final name), damaged (both records present but no longer
    reopening) or absent; incomplete and damaged attempts are poisoned with
-   their evidence kept.
+   their evidence kept. The coordinator's restart recovery does this
+   (`bq_worker_retirement_recover_hold`): it also requires the MEASURED
+   `worker-phase-4` record to agree with a complete state, and holds the queue
+   for reconciliation otherwise (RETIREMENT_PREPARATION.md, "Recovery
+   classification (L2)").
 
 The composer consumes, per timed row, its census id, batch group, runtime
 eligibility and the six frozen dimension values (target, cpu, allocator,

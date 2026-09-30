@@ -91,7 +91,16 @@
  * bq_prep_worker_unit_forged), and the binding writer's refusals
  * (bq_prep_worker_unit_binding_refusals); a tampered manifest or bundle digest
  * and a missing context chain (bq_prep_worker_unit_result_refusals). Each
- * section's wall time is printed (bq_prep_test_timing). */
+ * section's wall time is printed (bq_prep_test_timing).
+ *
+ * #881 recovery L2 (bq_prep_worker_unit_recovery): job 82 recovered by the
+ * real bq_worker_recover after a reboot. A handoff that timed out after the
+ * copy, a COMPLETE handoff without worker-phase-4 and a worker-phase-4 over an
+ * INCOMPLETE handoff are classified (bq_retirement_coordinator_handoff_class),
+ * poisoned and held twice: never succeeded, the next reservation refused, the
+ * evidence kept, and the poison refusing a durable success after the records
+ * are restored. The intact handoff (complete) and an emptied one (absent)
+ * are not held. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 
@@ -2067,6 +2076,157 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_bound(BqPrepOracleFixture* fixture,
     BQ_PREP_CHECK(bq_worker_result_binding_validate_pinned(&other, directory, seams) == BQ_CONFIGURATION_MISMATCH);
 }
 
+/* One entry of the queue directory or its retirement-authority/ moved aside
+ * (hide) or back. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_aside(int directory, char const* name, bool hide)
+{
+    char aside[80];
+    int length = snprintf(aside, sizeof(aside), "aside-%s", name);
+    bool ok = length > 0 && (size_t)length < sizeof(aside) &&
+              (hide ? renameat(directory, name, directory, aside) : renameat(directory, aside, directory, name)) == 0;
+    return ok;
+}
+
+/* The records one recovery case leaves (the poison and failure records),
+ * removed so the next case starts from the composed attempt. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_recovery_reset(BqQueue* queue, u64 job)
+{
+    char poison[48], failure[48];
+    bool ok = bq_record_name(poison, BQ_WORKER_RETIREMENT_POISON, job) && bq_record_name(failure, "failure", job) &&
+              unlinkat(queue->directory_fd, poison, 0) == 0 && unlinkat(queue->directory_fd, failure, 0) == 0;
+    return ok;
+}
+
+/* One recovery case: which of worker-phase-4 and the journal stay in place,
+ * the class and store state expected, and the failure record's reason. */
+typedef struct BqPrepRecoveryCase
+{
+    bool measured, journalled;
+    BqRetirementHandoffClass handoff;
+    TpRetirementAuthorityState state;
+    BqError reason;
+} BqPrepRecoveryCase;
+
+/* #881 recovery L2 over job 82's composed attempt: the queue's own MEASURING
+ * job, recovered after a reboot (another boot id, so no unit to stop) by
+ * bq_worker_recover itself. A handoff that timed out after the copy (no
+ * journal, no worker-phase-4), a COMPLETE handoff whose worker-phase-4 is
+ * missing and a worker-phase-4 over an INCOMPLETE handoff are each classified
+ * (bq_retirement_coordinator_handoff_class), poisoned and held: recovery
+ * returns BQ_RECONCILIATION_REQUIRED with the job still MEASURING and never
+ * succeeded, its failure record written, the queue needing reconciliation and
+ * refusing the next reservation, and the attempt workspace and queue-private
+ * copy kept. A second recovery holds again, and the poison outlives the
+ * restored records: the finalization then refuses a durable success until
+ * the record is removed. The intact handoff classifies COMPLETE and the
+ * handoff with nothing left ABSENT; neither is held. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_recovery(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, BqPrepWorkerUnitComposed const* composed)
+{
+    BqQueue* queue = &fixture->queue;
+    u64 id = attempt->job.id, token = attempt->job.token;
+    BqJob* job = bq_job(&queue->state, id);
+    char measured[48], worker[48], unit[BQ_WORKER_UNIT_CAP], workspace[64];
+    char copy[TP_RETIREMENT_STORE_PATH_BYTES + 1], journal[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    char const* digest = composed->finalization.retirement_authority_sha256;
+    snprintf(copy, sizeof(copy), "authority-job-%" PRIu64 "-%" PRIu64 ".txt", (uint64_t)id, (uint64_t)token);
+    snprintf(journal, sizeof(journal), "authority-job-%" PRIu64 "-%" PRIu64 ".journal", (uint64_t)id, (uint64_t)token);
+    int authority = openat(queue->directory_fd, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = job && job->phase == BQ_MEASURING && authority >= 0 &&
+              bq_record_name(measured, "worker-phase-4", id) && bq_record_name(worker, "worker", id) &&
+              bq_worker_unit_name(unit, id, token) &&
+              bq_workspace_name(workspace, id, token) &&
+              bq_worker_record_write(queue, job, "00000000-0000-4000-8000-000000000001", unit) == BQ_OK;
+    BQ_PREP_CHECK(ok);
+    BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
+    BqWorkerConfig config = {.workspace_root = string_from_pointer(fixture->workspaces), .backend = &clock};
+    bq_prep_worker_unit_clock_mode = 0;
+    BqPrepRecoveryCase const cases[] = {
+        {false, false, BQ_RETIREMENT_HANDOFF_INCOMPLETE, TP_RETIREMENT_AUTHORITY_INCOMPLETE, BQ_BOOT_INTERRUPTED},
+        {false, true, BQ_RETIREMENT_HANDOFF_INCONSISTENT, TP_RETIREMENT_AUTHORITY_COMPLETE, BQ_WORKER_MISMATCH},
+        {true, false, BQ_RETIREMENT_HANDOFF_INCONSISTENT, TP_RETIREMENT_AUTHORITY_INCOMPLETE, BQ_WORKER_MISMATCH},
+    };
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        BqPrepRecoveryCase const* current = cases + index;
+        ok = (current->measured || bq_prep_worker_unit_aside(queue->directory_fd, measured, true)) &&
+             (current->journalled || bq_prep_worker_unit_aside(authority, journal, true));
+        BQ_PREP_CHECK(ok);
+        TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_ABSENT;
+        BQ_PREP_CHECK(bq_retirement_coordinator_handoff_class(composed->result_directory, queue->directory_fd, id,
+                          token, current->measured, current->measured ? digest : "", &state) == current->handoff &&
+                      state == current->state);
+        /* Recovery twice: the second finds the poison record. */
+        for (u32 pass = 0; ok && pass < 2; pass += 1)
+        {
+            BqWorkerLease lease = {.descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC)};
+            BqWorkerFinalization recovered = {.config = &config, .result_directory = dup(composed->result_directory),
+                                              .retirement = seams};
+            queue->needs_reconciliation = true;
+            BqError error = bq_worker_recover(queue, &config, &clock, "/nonexistent/host.lock",
+                                              "00000000-0000-4000-8000-000000000002", job, &lease, &recovered);
+            job = bq_job(&queue->state, id);
+            u64 next = 0, next_token = 0;
+            struct stat info = {0};
+            BQ_PREP_CHECK(error == BQ_RECONCILIATION_REQUIRED && job && job->phase == BQ_MEASURING &&
+                          job->outcome == BQ_NO_OUTCOME && queue->state.active_id == id &&
+                          queue->needs_reconciliation && bq_failure_evidence(queue, job) == current->reason &&
+                          bq_worker_retirement_poisoned(queue, job));
+            BQ_PREP_CHECK(bq_reserve(queue, &next, &next_token) == BQ_RECONCILIATION_REQUIRED && !next &&
+                          fstatat(fixture->workspaces_fd, workspace, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                          fstatat(authority, copy, &info, AT_SYMLINK_NOFOLLOW) == 0);
+            if (lease.descriptor >= 0) close(lease.descriptor);
+            if (recovered.result_directory >= 0) close(recovered.result_directory);
+            ok = job != NULL;
+        }
+        ok = ok && (current->measured || bq_prep_worker_unit_aside(queue->directory_fd, measured, false)) &&
+             (current->journalled || bq_prep_worker_unit_aside(authority, journal, false));
+        BQ_PREP_CHECK(ok);
+        /* The records are whole again, but the poison stays: no durable
+         * success can finalize until the record is gone. */
+        BqJob durable = job ? *job : attempt->job;
+        durable.phase = BQ_FINALIZING;
+        durable.outcome = BQ_SUCCEEDED;
+        BqWorkerFinalization restarted = {.config = &config, .result_directory = composed->result_directory,
+                                          .retirement = seams};
+        BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &durable, &restarted) == BQ_WORKER_MISMATCH);
+        ok = ok && bq_prep_worker_unit_recovery_reset(queue, id);
+        BQ_PREP_CHECK(ok);
+        /* Once (each replays): without the record the same success finalizes. */
+        BqWorkerFinalization clean = {.config = &config, .result_directory = composed->result_directory,
+                                      .retirement = seams};
+        if (!index) BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &durable, &clean) == BQ_OK);
+    }
+    /* The intact handoff, then one that left nothing: neither is held, and
+     * nothing is written. */
+    for (u32 index = 0; ok && index < 2; index += 1)
+    {
+        bool emptied = index == 1;
+        ok = !emptied || (bq_prep_worker_unit_aside(queue->directory_fd, measured, true) &&
+                          bq_prep_worker_unit_aside(authority, journal, true) &&
+                          bq_prep_worker_unit_aside(authority, copy, true));
+        TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
+        BqWorkerFinalization recovered = {.config = &config, .result_directory = composed->result_directory,
+                                          .retirement = seams};
+        bool held = true;
+        BQ_PREP_CHECK(ok && bq_retirement_coordinator_handoff_class(composed->result_directory, queue->directory_fd,
+                          id, token, !emptied, emptied ? "" : digest, &state) ==
+                      (emptied ? BQ_RETIREMENT_HANDOFF_ABSENT : BQ_RETIREMENT_HANDOFF_COMPLETE) &&
+                      state == (emptied ? TP_RETIREMENT_AUTHORITY_ABSENT : TP_RETIREMENT_AUTHORITY_COMPLETE));
+        BQ_PREP_CHECK(bq_worker_retirement_recover_hold(queue, job, &recovered, BQ_BOOT_INTERRUPTED, &held) == BQ_OK &&
+                      !held && !bq_worker_retirement_poisoned(queue, job) &&
+                      bq_failure_evidence(queue, job) == BQ_NOT_FOUND);
+        ok = ok && (!emptied || (bq_prep_worker_unit_aside(queue->directory_fd, measured, false) &&
+                                 bq_prep_worker_unit_aside(authority, journal, false) &&
+                                 bq_prep_worker_unit_aside(authority, copy, false)));
+        BQ_PREP_CHECK(ok);
+    }
+    queue->needs_reconciliation = false;
+    BQ_PREP_CHECK(unlinkat(queue->directory_fd, worker, 0) == 0);
+    if (authority >= 0) close(authority);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
@@ -2239,6 +2399,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
              * carried. */
             bq_prep_worker_unit_coordinator(fixture, attempt, &seams, composed);
             bq_prep_test_timing("job-82-coordinator");
+            /* Recovery L2: incomplete and inconsistent handoffs held. */
+            bq_prep_worker_unit_recovery(fixture, attempt, &seams, composed);
+            bq_prep_test_timing("job-82-recovery");
         }
         if (composed) bq_prep_worker_unit_composed_close(fixture, composed);
         free(composed);

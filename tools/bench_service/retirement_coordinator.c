@@ -36,6 +36,19 @@
  *                                        journalled authority and the
  *                                        derivation of its plan and context
  *                                        (#881 PR 3, review item M1 of #1961)
+ *   bq_retirement_coordinator_handoff_class
+ *                                        at recovery (L2): the MEASURED
+ *                                        handoff classified complete,
+ *                                        absent, incomplete or inconsistent
+ *                                        from the worker-phase-4 record and
+ *                                        tp_retirement_store_authority_state
+ *                                        over the queue-private entries;
+ *                                        read-only
+ *
+ * Recovery map: bq_retirement_coordinator_handoff_entries finds the copy,
+ * the journal and their `.pending` temporaries by the store's names, and
+ * bq_retirement_coordinator_copy_digest hashes a copy left without its
+ * worker-phase-4 record so that copy can be classified too.
  *
  * Map: bq_retirement_coordinator_authority_read parses the producer's
  * canonical BQ-RETIREMENT-AUTHORITY-V3 record from
@@ -353,6 +366,117 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_replay(BqRetirementWorkerU
     if (installed >= 0 && close(installed) != 0 && result == BQ_OK) result = BQ_IO;
     if (workspaces >= 0 && close(workspaces) != 0 && result == BQ_OK) result = BQ_IO;
     return result;
+}
+
+/* --------------------------------------------------------- recovery (L2) */
+
+/* How recovery classifies one attempt's MEASURED handoff from the
+ * worker-phase-4 record and tp_retirement_store_authority_state. COMPLETE
+ * needs both; ABSENT needs neither and nothing in the queue-private root;
+ * INCOMPLETE is a copy, a journal or a `.pending` temporary without the record
+ * (a handoff interrupted before it finished); INCONSISTENT is the record
+ * without a COMPLETE state, or a COMPLETE state without the record. The record
+ * is written only after the handoff completes, so recovery cannot tell a crash
+ * between the two from forged records: both are never acknowledged, and
+ * bq_worker_retirement_recover_hold poisons and holds INCOMPLETE and
+ * INCONSISTENT alike. */
+typedef enum BqRetirementHandoffClass
+{
+    BQ_RETIREMENT_HANDOFF_ABSENT,
+    BQ_RETIREMENT_HANDOFF_COMPLETE,
+    BQ_RETIREMENT_HANDOFF_INCOMPLETE,
+    BQ_RETIREMENT_HANDOFF_INCONSISTENT,
+} BqRetirementHandoffClass;
+
+/* The queue-private entries one attempt's handoff can leave, named as
+ * tp_retirement_store_authority_handoff names them: the copy, the journal and
+ * each one's `.pending` temporary. *present is any of them, or a lookup that
+ * failed other than ENOENT (fail closed); *copied is the copy's final name. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_coordinator_handoff_entries(int queue_root, u64 job_id, u64 attempt_token,
+                                                                    bool* present, bool* copied)
+{
+    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY], name[TP_RETIREMENT_STORE_PATH_BYTES + 16];
+    char const* const suffixes[] = {".txt", ".journal", ".txt.pending", ".journal.pending"};
+    bool labelled = tp_retirement_store_job_label(label, job_id) && attempt_token;
+    *present = !labelled;
+    *copied = false;
+    for (u32 index = 0; labelled && index < BUSTER_ARRAY_LENGTH(suffixes); index += 1)
+    {
+        int named = snprintf(name, sizeof(name), "authority-%s-%" PRIu64 "%s", label, (uint64_t)attempt_token,
+                             suffixes[index]);
+        struct stat info = {0};
+        errno = 0;
+        bool found = named > 0 && (size_t)named < sizeof(name) &&
+                     fstatat(queue_root, name, &info, AT_SYMLINK_NOFOLLOW) == 0;
+        bool missing = !found && named > 0 && (size_t)named < sizeof(name) && errno == ENOENT;
+        if (!missing) *present = true;
+        if (found && index == 0) *copied = true;
+    }
+}
+
+/* The digest of the queue-private copy's bytes, under the bounds
+ * bq_retirement_coordinator_authority_read applies. Recovery uses it only
+ * without a worker-phase-4 record, to classify the copy the handoff left. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_copy_digest(int queue_root, u64 job_id, u64 attempt_token,
+                                                               char digest[SHA256_HEX_CAPACITY])
+{
+    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY], name[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    char body[BQ_RETIREMENT_COORDINATOR_AUTHORITY_CAP];
+    bool ok = tp_retirement_store_job_label(label, job_id) && attempt_token;
+    int named = ok ? snprintf(name, sizeof(name), "authority-%s-%" PRIu64 ".txt", label, (uint64_t)attempt_token) : -1;
+    int file = named > 0 && (size_t)named < sizeof(name) ?
+               openat(queue_root, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    u32 length = 0;
+    ok = file >= 0 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
+         (u64)info.st_size <= BQ_RETIREMENT_COORDINATOR_AUTHORITY_CAP &&
+         bq_read_file(file, (u8*)body, (u32)info.st_size, &length) && length == (u32)info.st_size;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (ok) bq_digest(body, length, (char8*)digest);
+    digest[ok ? 64 : 0] = 0;
+    return ok;
+}
+
+/* Recovery's classification of job/attempt's handoff (the L2 input of
+ * bq_worker_recover). measured says whether the queue's worker-phase-4 record
+ * exists and authority_sha256 is its digest (empty when malformed). With the
+ * record, the copy it names is classified; without it, the copy the handoff
+ * left (bq_retirement_coordinator_copy_digest), if any. result_directory is the
+ * attempt's result root (the store the copy must reopen against). *state
+ * receives what tp_retirement_store_authority_state reported, or INVALID when
+ * no copy could be read under a digest (ABSENT when nothing exists). Nothing is
+ * created or changed. */
+BUSTER_GLOBAL_LOCAL BqRetirementHandoffClass bq_retirement_coordinator_handoff_class(int result_directory,
+    int queue_directory, u64 job_id, u64 attempt_token, bool measured,
+    char const authority_sha256[SHA256_HEX_CAPACITY], TpRetirementAuthorityState* state)
+{
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    TpRetirementReceiptAuthority copied = {0};
+    errno = 0;
+    int queue_root = queue_directory >= 0 ? openat(queue_directory, BQ_RETIREMENT_COORDINATOR_QUEUE_AUTHORITY,
+                                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    /* A root that cannot be opened for any reason but its absence proves
+     * nothing absent. */
+    bool present = queue_root < 0 && (queue_directory < 0 || errno != ENOENT);
+    bool copy = false;
+    if (queue_root >= 0) bq_retirement_coordinator_handoff_entries(queue_root, job_id, attempt_token, &present, &copy);
+    if (measured && authority_sha256 && bq_retirement_hex(string_from_pointer(authority_sha256), 64))
+        memcpy(digest, authority_sha256, SHA256_HEX_CAPACITY);
+    else if (!measured && copy) bq_retirement_coordinator_copy_digest(queue_root, job_id, attempt_token, digest);
+    bool parsed = queue_root >= 0 && digest[0] &&
+                  bq_retirement_coordinator_authority_read(queue_root, job_id, attempt_token, digest, &copied);
+    TpRetirementAuthorityState observed = parsed ?
+        tp_retirement_store_authority_state(result_directory, queue_root, job_id, attempt_token, copied.plan_sha256,
+                                            copied.context_sha256, &copied) :
+        present ? TP_RETIREMENT_AUTHORITY_INVALID : TP_RETIREMENT_AUTHORITY_ABSENT;
+    if (queue_root >= 0 && close(queue_root) != 0) observed = TP_RETIREMENT_AUTHORITY_INVALID;
+    bool complete = observed == TP_RETIREMENT_AUTHORITY_COMPLETE;
+    BqRetirementHandoffClass handoff = measured ? (complete ? BQ_RETIREMENT_HANDOFF_COMPLETE :
+                                                   BQ_RETIREMENT_HANDOFF_INCONSISTENT) :
+                                       complete ? BQ_RETIREMENT_HANDOFF_INCONSISTENT :
+                                       present ? BQ_RETIREMENT_HANDOFF_INCOMPLETE : BQ_RETIREMENT_HANDOFF_ABSENT;
+    if (state) *state = observed;
+    return handoff;
 }
 
 /* ------------------------------------------------------------ derivation */
