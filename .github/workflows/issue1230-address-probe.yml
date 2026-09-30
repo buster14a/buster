@@ -1,0 +1,53 @@
+name: Issue 1230 isolated address oracle
+on:
+  push:
+    branches: [codex/1230-static-pointer-address-probe]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: probe
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 1be6fd8a0a5c138c1d0db87bc216c9a21bf04617
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 5e3093a74f56076807ecbf7e637681fa77552bc3
+          path: candidate
+          persist-credentials: false
+      - name: Build pinned trusted compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          for tree in baseline candidate; do
+            (
+              cd "$tree"
+              git rev-parse HEAD
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue1230-$tree-driver"
+              "$RUNNER_TEMP/issue1230-$tree-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_DEBUG_INFO=OFF
+              "$RUNNER_TEMP/issue1230-$tree-driver" build --config Release -t ide
+            )
+          done
+      - name: Compare witnesses, independent oracles and ELF addends
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 probe/tools/issue1230_probe.py "$GITHUB_WORKSPACE/baseline" "$GITHUB_WORKSPACE/candidate" "$RUNNER_TEMP/issue1230" | tee "$RUNNER_TEMP/issue1230.log"
+      - name: Retain reproduction output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1230-address-oracle
+          path: |
+            ${{ runner.temp }}/issue1230.log
+            ${{ runner.temp }}/issue1230/
+          if-no-files-found: warn
