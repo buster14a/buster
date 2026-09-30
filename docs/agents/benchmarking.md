@@ -22,6 +22,10 @@ effects. Its schema and execution boundary are in the
 [dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
 These offline checks cannot authenticate the capture or prove that the family
 was frozen before sampling; the admitted service receipt must bind both facts.
+The [#426 A/A eligibility proposal](../zen5-aa-eligibility-proposal.md) records
+the independent policy choices still awaiting qualified physical pilots and
+review. Its offline phase verifier remains descriptive and cannot authorize
+the #1022 A/B launch.
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
