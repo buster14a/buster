@@ -27,6 +27,34 @@ BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 defi
 BUSTER_F_DECL u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
+// A single file-scope expression-type query, reported field by field; see
+// c_test_expression_type_query in c_parse.c. `machine_only` forces the type
+// machine even for a lone literal token, as the differential oracle.
+typedef struct CTestExpressionQuery CTestExpressionQuery;
+struct CTestExpressionQuery
+{
+    CTypeId type;
+    CTypeId published_type;
+    CTypeId result_type;
+    CTypeKind kind;
+    u64 scratch_delta;
+    u32 type_count_delta;
+    u32 diagnostic_delta;
+    u32 result_index;
+    u32 frame_count;
+    u32 mutation_count;
+    u32 mutation_type_limit;
+    u32 expression_task_count;
+    u32 published_end;
+    u32 published_flags;
+    bool valid;
+    bool result_valid;
+    bool failed;
+};
+BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 start,
+                                                                u32 end, bool checked, bool nested, CTypeId cached, bool scalars,
+                                                                bool machine_only);
+BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
