@@ -16,8 +16,11 @@
  * reports over a pipe. The parent takes the start time after that report,
  * arms the timeout and releases the child to execve argv[0] (the side's slot
  * path), so the timer covers one pipe wake-up, the exec and the program, and
- * none of the placement or sandbox entry. Without a ruleset the timer starts
- * before the fork, as before.
+ * none of the placement or sandbox entry. A runtime launch
+ * (TpProcessInputs.program, lane B's `./{{output}}` shape) instead executes
+ * the program the caller placed in slot 7, as "./<leaf>" from that cwd, after the
+ * child rechecked that file's identity (tp_process_program_same). Without a
+ * ruleset the timer starts before the fork, as before.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -287,6 +290,129 @@ static void tp_cancel_handler(int signal_number)
 }
 
 #ifdef __linux__
+#include <dirent.h>
+/* This process's children from each of its threads' /proc children lists
+ * (/proc/self/task/<tid>/children, CONFIG_PROC_CHILDREN), which the kernel
+ * builds from the thread's own child list: zombies included, and a
+ * reparented orphan is on the list of the thread that adopted it. One small
+ * read per thread instead of a /proc/<pid>/stat read per process on the
+ * host, which the per-launch check below cannot afford. Returns the count
+ * of children other than `allowed` (up to capacity pids go to found), or
+ * UINT32_MAX when the main thread's list cannot be read (a kernel without
+ * it). A thread that exits during the walk hands its children to another
+ * thread; the campaign producer is single-threaded. */
+static inline uint32_t tp_process_children_listed(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    char path[64];
+    int length = snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    int probe = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    DIR* tasks = probe >= 0 ? opendir("/proc/self/task") : NULL;
+    if (probe >= 0) close(probe);
+    uint32_t count = tasks ? 0 : UINT32_MAX;
+    for (struct dirent* entry = tasks ? readdir(tasks) : NULL; entry && count != UINT32_MAX; entry = readdir(tasks))
+    {
+        char listed[288];
+        length = entry->d_name[0] >= '1' && entry->d_name[0] <= '9' ?
+            snprintf(listed, sizeof(listed), "/proc/self/task/%s/children", entry->d_name) : -1;
+        int file = length > 0 && (size_t)length < sizeof(listed) ? open(listed, O_RDONLY | O_CLOEXEC) : -1;
+        /* Space-separated decimal pids; a number may span two reads. */
+        char text[4096];
+        long pid = 0;
+        ssize_t read_bytes = file >= 0 ? read(file, text, sizeof(text)) : 0;
+        while (read_bytes > 0)
+        {
+            for (ssize_t at = 0; at < read_bytes; ++at)
+            {
+                int digit = text[at] >= '0' && text[at] <= '9';
+                if (digit) pid = pid * 10 + (text[at] - '0');
+                if (!digit && pid > 0 && (pid_t)pid != allowed)
+                {
+                    if (count < capacity) found[count] = (pid_t)pid;
+                    count += 1;
+                }
+                if (!digit) pid = 0;
+            }
+            read_bytes = read(file, text, sizeof(text));
+        }
+        if (pid > 0 && (pid_t)pid != allowed)
+        {
+            if (count < capacity) found[count] = (pid_t)pid;
+            count += 1;
+        }
+        if (file >= 0) close(file);
+        if (read_bytes < 0) count = UINT32_MAX;
+    }
+    if (tasks) closedir(tasks);
+    return count;
+}
+
+/* The same answer from every /proc/<pid>/stat on the host (its parent
+ * field), for a kernel without the thread lists. */
+static inline uint32_t tp_process_children_scanned(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    DIR* listing = opendir("/proc");
+    uint32_t count = listing ? 0 : UINT32_MAX;
+    long self = (long)getpid();
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        char path[288], text[512];
+        int length = entry->d_name[0] >= '1' && entry->d_name[0] <= '9' ?
+            snprintf(path, sizeof(path), "/proc/%s/stat", entry->d_name) : -1;
+        int file = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        ssize_t read_bytes = file >= 0 ? read(file, text, sizeof(text) - 1u) : -1;
+        if (file >= 0) close(file);
+        text[read_bytes > 0 ? read_bytes : 0] = 0;
+        /* pid (comm) state ppid ...; comm may hold spaces and parens. */
+        char const* close_paren = read_bytes > 0 ? strrchr(text, ')') : NULL;
+        long parent = close_paren && close_paren[1] == ' ' && close_paren[2] && close_paren[3] == ' ' ?
+            strtol(close_paren + 4, NULL, 10) : 0;
+        pid_t pid = (pid_t)strtol(entry->d_name, NULL, 10);
+        if (parent == self && pid != allowed)
+        {
+            if (count < capacity) found[count] = pid;
+            count += 1;
+        }
+    }
+    if (listing) closedir(listing);
+    return count;
+}
+
+/* This process's children through /proc, other than `allowed` (0: none). A
+ * child subreaper's escaped descendants (a `setsid` grandchild of a launch)
+ * are among them once their parents exit; zombies count. Up to capacity pids
+ * go to found. Returns the count, or UINT32_MAX when /proc cannot be read:
+ * the thread lists when the kernel has them, else the host scan. */
+static inline uint32_t tp_process_children(pid_t allowed, pid_t* found, uint32_t capacity)
+{
+    uint32_t count = tp_process_children_listed(allowed, found, capacity);
+    if (count == UINT32_MAX) count = tp_process_children_scanned(allowed, found, capacity);
+    return count;
+}
+
+/* Kills and reaps every such child until none remain, for a bounded number
+ * of rounds (each round reaps what it found, so a descendant reparented by a
+ * reaped parent is found in the next). Returns whether none remain. */
+#define TP_PROCESS_SWEEP_ROUNDS 256u
+static inline int tp_process_children_sweep(pid_t allowed)
+{
+    int clean = 0, scanned = 1;
+    for (unsigned round = 0; !clean && scanned && round < TP_PROCESS_SWEEP_ROUNDS; ++round)
+    {
+        pid_t found[64];
+        uint32_t count = tp_process_children(allowed, found, 64u);
+        scanned = count != UINT32_MAX;
+        clean = scanned && count == 0;
+        for (uint32_t index = 0; scanned && index < count && index < 64u; ++index)
+        {
+            kill(found[index], SIGKILL);
+            while (waitpid(found[index], NULL, 0) < 0 && errno == EINTR) { }
+        }
+    }
+    return clean;
+}
+#endif
+
+#ifdef __linux__
 /* /proc/PID/stat field 2 may contain spaces and ')' characters. The final
  * ')' closes comm; fields 3 through 21 precede the unsigned starttime token.
  * Parse a bounded byte slice, never a truncated NUL-terminated prefix. */
@@ -368,6 +494,25 @@ static uint64_t tp_process_monotonic_ns(void)
  * environment. Ordinary throughput keeps its existing path-based launch.
  * These descriptors must be private, >= 3 and close-on-exec; the caller owns
  * their lifetime. This is process plumbing, not the service sandbox or lease. */
+
+/* A layout launch's program (lane B's runtime shape, `./{{output}}`): the
+ * leaf the caller placed in the work directory (slot 7) and that file's
+ * identity, as the caller observed it by fstat of the descriptor it wrote
+ * and hashed, with that SHA-256 (lowercase hex). The change time alone cannot
+ * reveal an in-place rewrite that keeps the size: file timestamps advance by
+ * the kernel's clock tick, so a rewrite in the tick of the observation leaves
+ * it unchanged; the launch re-hashes (tp_retirement_launch_program). The
+ * child's own recheck compares the identity (tp_process_program_same). */
+typedef struct TpProcessProgram
+{
+    char const* leaf;
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    struct timespec changed;
+    char sha256[65];
+} TpProcessProgram;
+
 typedef struct TpProcessInputs
 {
     int executable, directory, log;
@@ -375,6 +520,9 @@ typedef struct TpProcessInputs
     /* Optional (>= 3): a readable or hung-up descriptor, such as the
      * worker's SIGTERM self-pipe, kills the child's process group while it
      * runs. The wait then polls a Linux pidfd, so exit is seen at once.
+     * The caller then owns SIGINT and SIGTERM: the launch installs no
+     * handler of its own for them (without one it installs one that kills
+     * the child's group and exits the caller).
      * Zero means none, which keeps positional initializers unchanged. */
     int cancellation;
     /* Optional canonical child layout (retirement_sandbox.h), used when
@@ -391,6 +539,15 @@ typedef struct TpProcessInputs
     int sources[2];
     int ruleset;
     uint64_t memory_bytes;
+    /* Optional, layout only: a runtime launch executes `program` instead of
+     * the binary slot (the slot stays placed, as in lane B's row producer).
+     * args[0] must then be exactly "./" and its leaf, and the child, after
+     * entering the sandbox, requires the leaf in slot 7 to be the same
+     * regular file (no symbolic link; device, inode, size and change time)
+     * and executes "./<leaf>" from its cwd, slot 7 (execveat with AT_FDCWD
+     * and AT_SYMLINK_NOFOLLOW, so AT_EXECFN and the start-up stack are
+     * lane B's execve("./<leaf>")). */
+    TpProcessProgram const* program;
 } TpProcessInputs;
 
 #ifdef __linux__
@@ -400,6 +557,31 @@ static inline int tp_process_layout_binary(char const* argument, int side)
     char expected[32];
     int written = snprintf(expected, sizeof(expected), "/proc/self/fd/%d", BQ_RETIREMENT_ROW_SLOT_BINARY + side);
     int ok = argument && written > 0 && (size_t)written < sizeof(expected) && !strcmp(argument, expected);
+    return ok;
+}
+
+/* The runtime shape args[0] must have under a layout with a program: exactly
+ * "./" and the program's leaf, a single path component other than `.` and
+ * `..`. */
+static inline int tp_process_layout_program(char const* argument, TpProcessProgram const* program)
+{
+    char const* leaf = program ? program->leaf : NULL;
+    size_t length = leaf ? strnlen(leaf, 256) : 0;
+    int ok = argument && leaf && length && length < 256 && !memchr(leaf, '/', length) && strcmp(leaf, ".") &&
+             strcmp(leaf, "..") && argument[0] == '.' && argument[1] == '/' && !strcmp(argument + 2, leaf);
+    return ok;
+}
+
+/* In the layout child, after it entered its sandbox: the program leaf in
+ * slot 7 is still the observed regular file. */
+static inline int tp_process_program_same(TpProcessProgram const* program)
+{
+    struct stat info;
+    int found = fstatat(BQ_RETIREMENT_ROW_SLOT_WORK, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0;
+    int ok = found && S_ISREG(info.st_mode) && info.st_dev == program->device && info.st_ino == program->inode &&
+             info.st_size == program->size && info.st_ctim.tv_sec == program->changed.tv_sec &&
+             info.st_ctim.tv_nsec == program->changed.tv_nsec;
+    if (found && !ok) errno = ESTALE;
     return ok;
 }
 #endif
@@ -431,8 +613,10 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         unsigned checked = layout ? 6u : 3u;
         int valid = inputs->environment != NULL &&
             (!inputs->cancellation || (inputs->cancellation >= 3 && fcntl(inputs->cancellation, F_GETFD) >= 0)) &&
-            (!layout || ((inputs->side == 0 || inputs->side == 1) && args && tp_process_layout_binary(args[0],
-                inputs->side)));
+            (layout || !inputs->program) &&
+            (!layout || ((inputs->side == 0 || inputs->side == 1) && args &&
+                         (inputs->program ? tp_process_layout_program(args[0], inputs->program) :
+                                            tp_process_layout_binary(args[0], inputs->side))));
         for (unsigned i = 0; valid && i < checked; ++i)
         {
             int flags = descriptors[i] >= 3 ? fcntl(descriptors[i], F_GETFD) : -1;
@@ -455,8 +639,16 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     memset(&cancel, 0, sizeof(cancel));
     cancel.sa_handler = tp_cancel_handler;
     sigemptyset(&cancel.sa_mask);
-    int int_set = sigaction(SIGINT, &cancel, &previous_int) == 0;
-    int term_set = sigaction(SIGTERM, &cancel, &previous_term) == 0;
+    /* A caller that supplies a cancellation descriptor owns SIGINT/SIGTERM
+     * (typically a self-pipe feeding that descriptor): the wait below kills
+     * the child's group when it becomes readable and reports
+     * TP_PROCESS_CANCELLED, so the caller can retain its failure state.
+     * Installing tp_cancel_handler there would _exit the caller instead. */
+    int own_signals = !(inputs && inputs->cancellation >= 3);
+    int int_owned = own_signals && sigaction(SIGINT, &cancel, &previous_int) == 0;
+    int term_owned = own_signals && sigaction(SIGTERM, &cancel, &previous_term) == 0;
+    int int_set = !own_signals || int_owned;
+    int term_set = !own_signals || term_owned;
     memset(&ignore_pipe, 0, sizeof(ignore_pipe));
     ignore_pipe.sa_handler = SIG_IGN;
     sigemptyset(&ignore_pipe.sa_mask);
@@ -552,6 +744,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             if (!failure && parked < 0) failure = tp_process_errno();
             if (!failure && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0) failure = tp_process_errno();
             if (!failure && !bq_retirement_sandbox_enter(parked)) failure = tp_process_errno();
+            if (!failure && inputs->program && !tp_process_program_same(inputs->program)) failure = tp_process_errno();
             ssize_t written = write(report, &failure, sizeof(failure));
             child_ok = !failure && written == (ssize_t)sizeof(failure);
             close(report);
@@ -568,7 +761,9 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             if (!layout) sigaction(SIGPIPE, &previous_pipe, NULL);
 #ifdef __linux__
-            if (layout) execve(args[0], args, inputs->environment);
+            if (layout && inputs->program)
+                syscall(SYS_execveat, AT_FDCWD, args[0], args, inputs->environment, AT_SYMLINK_NOFOLLOW);
+            else if (layout) execve(args[0], args, inputs->environment);
             else if (inputs)
             {
                 /* Neither a sample spool nor an unrelated supervisor handle
@@ -843,8 +1038,8 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     {
         close(ready[1]);
     }
-    if (int_set) sigaction(SIGINT, &previous_int, NULL);
-    if (term_set) sigaction(SIGTERM, &previous_term, NULL);
+    if (int_owned) sigaction(SIGINT, &previous_int, NULL);
+    if (term_owned) sigaction(SIGTERM, &previous_term, NULL);
     if (pipe_handler_set)
     {
         sigaction(SIGPIPE, &previous_pipe, NULL);

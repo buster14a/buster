@@ -1233,8 +1233,9 @@ honesty. The fixture shows both limits:
 ## Worker-unit producer (#881)
 
 `retirement_worker_unit.c` wires the steps above into `bq_worker_unit`
-(PR 1 of 4 of the #881 worker-unit wiring). It is compiled only into the
-service translation unit, after `retirement_unit.c`.
+(PR 1 of 4 of the #881 worker-unit wiring), and `retirement_worker_campaign.c`
+adds the in-unit campaign through lane D's READY (PR 2). Both are compiled
+only into the service translation unit, after `retirement_unit.c`.
 
 The steps cannot run in the recipe executable, because that binary is also
 the pinned matched-build driver. They cannot run in the unit process either:
@@ -1245,8 +1246,11 @@ and forks a producer.
 **Admission.** `bq_worker_unit_pinned` admits the retirement recipe only when
 `bq_retirement_profile_complete` accepts the profile. That requires every
 integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
-reference-policy, nine census, required-checks, row-plan and campaign-budget
-digests) and exactly one status line, which must be exactly
+reference-policy, nine census, required-checks, row-plan, campaign-budget and
+untimed-commands digests), lane D's frozen campaign values
+(`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
+`campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
+status line, which must be exactly
 `status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`). A missing line, a
 second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
 return each refuse. `bq_worker_unit` passes the compiled
@@ -1289,7 +1293,8 @@ mapped status:
 - An exit status between 1 and `BQ_EXPORT_TIMEOUT` is the producer's
   `BqError`.
 - Exit 0 cannot be a success before MEASURED is wired, so it returns
-  `BQ_WORKER_FAILED`.
+  `BQ_WORKER_FAILED`. (`BQ_OK` is never an exit status: the producer's
+  success is `BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED`, below.)
 - A producer killed by a signal, or at the bound, never proved its
   descendants absent, so it returns `BQ_CLEANUP_FAILED`.
 
@@ -1318,17 +1323,147 @@ A failure before the
 ready record sends no phase message after PREPARING. Its partial evidence
 stays in the attempt, and the ready record is never written.
 
-**Not wired yet.** After RETIREMENT_READY, the producer stops with
-`BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED` (`BQ_UNSUPPORTED`). It does not send
-SETTLING or MEASURED, so the job fails closed. No `ready-sha256=`
-failure-bundle line is written: the digest reaches the coordinator only in
-the phase packet (decision 1), never through files.
+**The campaign (PR 2).** After RETIREMENT_READY is acknowledged,
+`bq_retirement_worker_campaign_run` (`retirement_worker_campaign.c`) builds
+lane D's caller data from pinned and sealed inputs only and sequences lane
+D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
+`code`, `streams` and `scratch` directories):
 
-The remaining work is split across PRs:
+1. **SETTLING.** `bq_retirement_unit_campaign_begin`, the store-based import
+   (second holds on both binaries), the row plan re-imported, the reviewed
+   budget record (`native-retirement-performance-v1.campaign-budget`, pinned
+   by `campaign-budget-sha256=`), and the untimed batches. Lane B's row plan
+   compiles untimed object rows singly, so the batch commands of the
+   validator's untimed object groups come from a new pinned authority, the
+   untimed-command contract
+   (`native-retirement-performance-v1.untimed-commands`, pinned by
+   `untimed-commands-sha256=`, `BQ-RETIREMENT-UNTIMED-COMMANDS-V1`: one
+   `group=` line per untimed object group and one `input=` line per member).
+   Untimed singletons use their row-plan compile template, whose digest must
+   be the gate's. `bq_retirement_unit_campaign_untimed` runs them.
+2. **MEASURING.** `bq_retirement_unit_campaign_measuring`, the plan's
+   commands, both stages' arena storage (capped by lane D's limits), the
+   store-based bind, then the documents' exact sizes without writing
+   anything (`bq_retirement_unit_campaign_documents_measure`; the post-A/A
+   binding is sized over a fixed-width placeholder admission digest). Lane
+   E's store plan follows (`bq_retirement_worker_store_plan`): the retained
+   declaration (A/A transcript, sample, batch and metrics shard groups,
+   reserved, plus lane D's two constant entries
+   `bq_retirement_unit_handoff_declared`), D's five documents as prior
+   entries at their measured sizes, and the result root's worker-written
+   entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
+   three control files and the five `BQPHASE2` `worker-phase-N` receipts,
+   `worker-phase-5` included), so store files plus those entries stay within
+   `BQ_WORKER_BUNDLE_ENTRY_CAP`. The untimed streams are published, then
+   attach, the documents (their written sizes must equal the measured ones,
+   else `BQ_CORRUPT`), A/A, admission, the post-A/A document, freeze, A/B and
+   READY on the post-sample record.
 
-- **PR 2:** the in-unit campaign through READY. It must start SETTLING only
-  after RETIREMENT_READY (`bq_retirement_unit_campaign_begin` requires
-  SETTLING to be the channel's next phase).
+The store admits one pending file at a time, so every stream is a private
+staged file under `streams/`, named by its store path (zero-padded indexes)
+and published in index order once complete. At handoff,
+`bq_retirement_unit_handoff_retained_matches` requires lane D's retained
+entries to equal the declared ones field for field.
+
+A failure maps lane D's retained stop to the producer's `BqError`
+(cancelled `BQ_WORKER_CANCEL_SIGNAL`, deadline `BQ_WORKER_TIMEOUT`, channel
+`BQ_WORKER_MISMATCH`, launch `BQ_WORKER_FAILED`, refused step
+`BQ_RECIPE_MISMATCH`) and, once the campaign began, is retained as
+`campaign-failure.txt` (`BQ-RETIREMENT-UNIT-CAMPAIGN-FAILURE-V1`, one key per
+line). Orphans of a killed launch are swept first. Launches take the
+producer's self-pipe as their cancellation descriptor, and `tp_process` then
+leaves SIGINT and SIGTERM to its caller instead of installing its own
+`_exit` handler, so a SIGTERM during A/A ends as a retained cancellation.
+Everything is released in reverse and the store is aborted: an unfinished
+campaign never composes.
+
+Production A/A admission has no authority (#426, #1021) and stays compiled
+out (`BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED`); only the preparation
+fixture compiles the driver's fixture admission and supplies a receipt
+stand-in.
+
+**Not composed yet.** A READY campaign stops with
+`BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED` (`BQ_UNSUPPORTED`) and sends no
+MEASURED, so the job fails closed. No `ready-sha256=` failure-bundle line is
+written: the digest reaches the coordinator only in the RETIREMENT_READY
+packet (decision 1), never through files.
+
+**The runtime rule.** Lane B's runtime template is `./{{output}}`
+(`retirement_row_plan.c`): the step executes the program its compile step
+just wrote in the same step directory, with the side's binary slot still
+placed and the same sandbox (`bq_retirement_row_compile`). Lane D's layout
+launch accepts exactly two argv shapes (`tp_retirement_launch_layout`): a
+compiler or batch command runs the side's binary slot and names no program,
+and a runtime command runs `./<leaf>` where the launch carries the program
+(`TpProcessInputs.program`: its leaf, the device, inode, size and change
+time the service took by `fstat` of the descriptor it wrote and hashed, and
+that SHA-256). The launch requires the step's work directory (slot 7) to
+hold that leaf and nothing else, and the leaf to be, without following a
+link, that same single-link, owner-executable regular file of the service
+user, not group- or world-writable, whose bytes it re-hashes through a
+descriptor it opens without following a link (`tp_retirement_launch_program`).
+The re-hash is needed: file timestamps advance only at the kernel's clock
+tick, so an in-place rewrite that keeps the size within the tick of the
+observation leaves the change time as observed. The child rechecks the
+identity after it entered the sandbox (`tp_process_program_same`, `ESTALE`
+otherwise) and executes `./<leaf>` from its cwd, slot 7 (`execveat` with
+`AT_FDCWD` and `AT_SYMLINK_NOFOLLOW`, so `AT_EXECFN` and the start-up stack
+are lane B's `execve("./<leaf>")`). Anything else is refused before any
+child.
+
+**Where the program comes from.** The #619 schedule runs each stage's
+runtime campaign after its compiler campaign, and those compiler launches
+already compile every runtime row on each side the stage uses. So the first
+successful compile of each runtime row per side in a stage is retained
+(`bq_retirement_unit_campaign_retain`): after the launch and its descendant
+check, the artifact is opened without following a link, identified by
+`fstat` and hashed through that same descriptor, must be the gate's sealed
+artifact digest for the row and side, and moves (link, then unlink) to the
+code directory as `program-<stage>-<row>-<side>`, mode 0500. The code
+directory is service-private and no launch's sandbox covers it. Before each
+runtime launch, outside the timer, the service copies that program into a
+fresh step directory `runtime-<stage>-<sequence>` in the work directory
+(`O_CREAT | O_EXCL`, mode 0700), re-verifies the digest from the new
+descriptor and takes the launch's identity by `fstat` of it
+(`bq_retirement_unit_campaign_program`). The copy is not fsynced: the rehash
+and the exec read the page cache, and the step directory is retired after its
+launch with no later step or attempt reading it, so a flush of the file and
+the directory on every runtime launch would buy nothing. A label-1 runtime
+command must also
+be the gate's sealed runtime command for its side (the A/A second label's is
+not sealed, like its compiler command). A successful launch retires every
+file of its step directory and the directory; a subdirectory left there fails
+the retirement, stricter than lane B, whose check runner sweeps step
+directories. A failure keeps the directory and is recorded with purpose
+`BQ_RETIREMENT_UNIT_CAMPAIGN_PURPOSE_PROGRAM` (the copy) or as the runtime
+launch itself. The runtime commands are lane B's resolution of each row's
+runtime template for its side (`bq_retirement_campaign_plan_commands`, whose
+digests must be the gate's sealed ones), and the campaign's frozen commands
+are compared before every launch.
+
+**Budget (M2).** Retaining the program adds no process: the reviewed budget
+record's derivation (`retirement_budget.h`, `TP_RETIREMENT_BUDGET_DERIVATION`)
+already counts every compiler process of both stages and every runtime
+process, and the copy is service work outside timing, like the code
+observation. Neither the derivation nor the contract's process counts
+change.
+
+**Descendants.** Each launch kills only its own process group, so a child
+that left it (`setsid`) would survive with its sandbox's rights over the work
+directory. The producer is a child subreaper, so such a child becomes its own
+as its parents exit. After every launch (untimed batch, timed compile, timed
+runtime), outside the timer and before any output of it is kept, the driver
+requires the producer to have no child (`bq_retirement_unit_campaign_alone`,
+`tp_process_children`, which reads the producer's own thread child lists,
+`/proc/self/task/<tid>/children`, and falls back to reading every
+`/proc/<pid>/stat` only on a kernel without them: a whole-host scan per
+launch cost milliseconds each); a survivor is killed and reaped
+(`tp_process_children_sweep`) and the launch fails with `after`
+`BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_DESCENDANTS`, retained like any failure.
+The final sweep in `bq_retirement_worker_campaign_run` stays.
+
+The remaining work:
+
 - **PR 3:** composition, the authority and MEASURED. It must, in order:
   1. publish the receipt authority into
      `job-<id>-attempt-<token>/retirement-authority/`, with the attempt's
@@ -1348,7 +1483,37 @@ The remaining work is split across PRs:
   the chain does not prove" below).
 - **PR 4:** the coordinator side below.
 
-A/A admission stays compiled out (#426, #1021).
+**Fixture.** `retirement_worker_unit_tests.h` drives real launches through
+stand-in compilers (`retirement_stand_in_compiler.h`, dash scripts the
+matched-build fixture freezes as the census subjects' compilers). The
+runtime rows compile a host program (`tests/unit.c.program`) that prints the
+reference oracle's output. Job 82 runs SETTLING, MEASURING, A/A, the
+fixture admission, the post-A/A document, the freeze, A/B and READY; all
+five documents are written at exactly the sizes the campaign retained before
+timing (`documents-sized.txt`), and the post-sample record and every stream
+kind of both stages are published. Job 85 retains a failing untimed launch,
+job 86 a SIGTERM during A/A, job 87 the deadline expiring during A/A, and
+job 88 a detached (`setsid`) sleeper left by its first second-label compile,
+found and killed right after that launch; each with the keeper stopped and
+nothing left running.
+
+Job 82 is the one full campaign and its launch count is fixed: the census
+fixture's 145 untimed object groups give 580 untimed batches, and each stage
+runs 2 × (2 rounds × 60 pairs + 2 warm-ups) = 244 launches for each of its 20
+timed units (18 groups and 2 runtime rows), 4,880 per stage, 10,340 in all;
+60 pairs is the contract's minimum. The failure jobs stop early. Job 85 stops
+at its first untimed launch. Job 86 is terminated as soon as its first A/A
+second-label launch leaves the stand-in's marker, and job 88 fails right after
+that launch. Only job 87 must spend its deadline margin in A/A. Per launch,
+the descendant check reads the producer's own child lists, and the stand-in
+forks one `cat` per file it writes.
+
+`bq_prep_test_worker_store_plan` covers the declaration, the retained-entry
+equality and the control-entry reservation at the exact store boundary, and
+`bq_prep_campaign_documents` checks sized bytes against written bytes. The
+throughput driver fixture's link row compiles its program too, and
+`test_unit_campaign_runtime_rule` checks the runtime shape at the launch
+boundary.
 
 ### Coordinator side (#881 PR 4)
 

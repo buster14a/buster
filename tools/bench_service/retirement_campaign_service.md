@@ -148,8 +148,9 @@ side and label (`bq_retirement_row_command_digest`):
 - The slots are the campaign's: each frozen object group at its first member,
   each timed singleton at its row, then the runtime rows.
 - Side is the variant in the A/B stage and the baseline in the A/A stage;
-  `{{label}}` is `2` only for the A/A second variant. argv[0] is
-  `/proc/self/fd/3` or `/4`, A's roots are `/proc/self/fd/5` and `/6` and the
+  `{{label}}` is `2` only for the A/A second variant. A compiler command's
+  argv[0] is `/proc/self/fd/3` or `/4` and a runtime command's `./<leaf>`
+  (lane B's `./{{output}}`), A's roots are `/proc/self/fd/5` and `/6` and the
   directory is `BQ_RETIREMENT_ROW_WORK_PATH` (`/proc/self/fd/7`).
 - An object command carries its side's frozen contract and expects its exit
   status and output digest; a singleton writes `row-<row>.out` and expects its
@@ -308,10 +309,16 @@ the attempt:
    launch returns as refused (`TpProcess.refused`, the errno as its launch
    error) and the driver records it as `REFUSED`, as it does a ruleset the
    kernel cannot build before any child starts. The launch requires
-   the command's directory to be exactly `BQ_RETIREMENT_ROW_WORK_PATH`, its
-   argv[0] the side's slot, the work directory owned by the service user and
-   not group- or world-writable, and a compile's output directory to be the
-   work directory.
+   the command's directory to be exactly `BQ_RETIREMENT_ROW_WORK_PATH`, the
+   work directory owned by the service user and not group- or
+   world-writable, and exactly one of two argv shapes: a compiler command's
+   argv[0] is the side's slot (and its output directory the work directory);
+   a runtime command's is `./<leaf>`, the program the service retained from
+   the stage's own compile and copied alone into the runtime launch's fresh
+   step directory, which the launch and then the child recheck by identity
+   before executing it from slot 7 (see RETIREMENT_PREPARATION.md, "The
+   runtime rule"). After every launch the producer must have no child left
+   (a `setsid` escapee), or the launch fails.
 
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
 4. The store bind (above), then lane E's `tp_retirement_compose_plan` over

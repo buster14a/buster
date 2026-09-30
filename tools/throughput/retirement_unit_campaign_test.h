@@ -75,6 +75,10 @@ typedef struct TestUnitCampaign
     char other_path[TP_PATH_CAP], code_path[TP_PATH_CAP];
     char list_leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP], list_argument[TP_RETIREMENT_INPUT_LIST_LEAF_CAP + 1];
     char leak_text[32], binary_sha[65], artifact_sha[65], code_sha[65], runtime_sha[65];
+    /* The link row's program: the fixture child's own bytes (program.bin in
+     * A's base root stand-in), its compile's output digest and code facts. */
+    char program_path[TP_PATH_CAP], program_output[65];
+    TpRetirementCodeSide program_side;
     char batch_output[65], object_output[65], budget_sha[65], profile[1024], documents_path[TP_PATH_CAP];
     /* The #437 A/A admission receipt stand-in and its digest. */
     char aa_receipt[1024], aa_receipt_sha[65];
@@ -168,6 +172,30 @@ static void test_unit_campaign_scrub(int cwd, int code)
     static char const* const codes[] = {"code-3-0.o", "code-3-1.o"};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(leaves); ++i) unlinkat(cwd, leaves[i], 0);
     for (unsigned i = 0; code >= 3 && i < BUSTER_ARRAY_LENGTH(codes); ++i) unlinkat(code, codes[i], 0);
+    /* Each stage's retained runtime programs. */
+    static char const* const programs[] = {"program-0-6-0", "program-1-6-0", "program-1-6-1"};
+    for (unsigned i = 0; code >= 3 && i < BUSTER_ARRAY_LENGTH(programs); ++i) unlinkat(code, programs[i], 0);
+    /* A failed runtime launch keeps its program's step directory. */
+    int listed = fcntl(cwd, F_DUPFD_CLOEXEC, 3);
+    DIR* listing = listed >= 0 ? fdopendir(listed) : NULL;
+    if (!listing && listed >= 0) close(listed);
+    /* The duplicate shares the directory offset: start from the first entry. */
+    if (listing) rewinddir(listing);
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        int step = !strncmp(entry->d_name, "runtime-", 8) ?
+            openat(cwd, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        DIR* inner = step >= 0 ? fdopendir(step) : NULL;
+        if (!inner && step >= 0) close(step);
+        for (struct dirent* file = inner ? readdir(inner) : NULL; file; file = readdir(inner))
+            if (strcmp(file->d_name, ".") && strcmp(file->d_name, "..")) unlinkat(dirfd(inner), file->d_name, 0);
+        if (inner)
+        {
+            closedir(inner);
+            unlinkat(cwd, entry->d_name, AT_REMOVEDIR);
+        }
+    }
+    if (listing) closedir(listing);
 }
 
 /* The pinned rows in memory: rows 0-2 never compiled, row 3 a cross-target
@@ -263,7 +291,9 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         tp_path(fixture->sources_path[0], fixture->directory, "unit-campaign-base") &&
         tp_mkdirs(fixture->sources_path[0]) &&
         tp_path(fixture->sources_path[1], fixture->directory, "unit-campaign-candidate") &&
-        tp_mkdirs(fixture->sources_path[1]);
+        tp_mkdirs(fixture->sources_path[1]) &&
+        tp_path(fixture->program_path, fixture->sources_path[0], "program.bin") &&
+        tp_copy_file(executable_path, fixture->program_path) && chmod(fixture->program_path, 0500) == 0;
     for (unsigned side = 0; ok && side < 2; ++side)
     {
         fixture->sources[side] = open(fixture->sources_path[side], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -304,6 +334,12 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     sha256_init(&hash); sha256_add(&hash, "fixture-code\n", 13); sha256_finish_hex(&hash, fixture->code_sha);
     memcpy(fixture->runtime_sha, fixture->code_sha, 65);
     char const* objects[] = {fixture->artifact_sha};
+    /* The link row's compile writes the program the runtime step runs: the
+     * fixture child itself (the same bytes as the held binary). */
+    char const* program_objects[] = {fixture->binary_sha};
+    ok = ok && tp_retirement_code_observe(fixture->binary, fixture->binary, &fixture->program_side) &&
+        !strcmp(fixture->program_side.artifact_sha256, fixture->binary_sha) &&
+        tp_retirement_batch_output_digest(program_objects, 1, fixture->program_output);
     fixture->budget = test_retirement_budget();
     ok = ok && tp_retirement_batch_output_digest(objects, 1, fixture->batch_output) &&
         tp_retirement_budget_digest(&fixture->budget, fixture->budget_sha);
@@ -337,15 +373,18 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
 #endif
     /* Per stage: [object group baseline, candidate, link group baseline,
      * candidate, runtime row baseline, candidate]; G = 2, U = 1. Every
-     * command is in lane B's canonical layout: the side's binary slot (both
-     * A/A labels run the baseline, slot 3), cwd the work slot. */
+     * command is in lane B's canonical layout, cwd the work slot: a compiler
+     * command runs the side's binary slot (both A/A labels run the baseline,
+     * slot 3), the link compile writing the program (`program`), and a
+     * runtime command is lane B's `./{{output}}` shape over that artifact. */
+    static char const* const programs[2] = {"./artifact-left.bin", "./artifact-right.bin"};
     for (unsigned stage = 0; ok && stage < 2; ++stage)
         for (unsigned slot = 0; ok && slot < 3; ++slot)
             for (unsigned variant = 0; ok && variant < 2; ++variant)
             {
                 unsigned index = slot * 2 + variant;
                 char** argv = fixture->arguments[stage][index];
-                argv[0] = stage && variant ? "/proc/self/fd/4" : "/proc/self/fd/3";
+                argv[0] = slot == 2 ? (char*)programs[variant] : stage && variant ? "/proc/self/fd/4" : "/proc/self/fd/3";
                 argv[1] = "retirement-child";
                 unsigned count = 6;
                 if (!slot)
@@ -359,7 +398,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
                 {
                     argv[2] = slot == 2 ? "runtime" : "compiler";
                     argv[3] = variant ? "artifact-right.bin" : "artifact-left.bin";
-                    argv[4] = "ok";
+                    argv[4] = slot == 1 ? "program" : "ok";
                     argv[5] = fixture->leak_text;
                 }
                 fixture->commands[stage][index] = (TpRetirementMeasuredCommand){.unit = slot == 2 ? 6 : slot,
@@ -368,7 +407,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
                     .environment_count = !stage && variant ? 3 : 2, .directory = BQ_RETIREMENT_ROW_WORK_PATH,
                     .artifact = slot == 1 ? argv[3] : NULL, .batch = slot ? NULL : &fixture->batch.contract,
                     .timeout_seconds = 30, .command_sha256 = fixture->command_sha[stage][index],
-                    .output_sha256 = slot == 2 ? fixture->runtime_sha : slot ? fixture->batch_output :
+                    .output_sha256 = slot == 2 ? fixture->runtime_sha : slot ? fixture->program_output :
                                                                               fixture->object_output,
                     .exit_status = slot ? 0 : 1, .memory_mib = memory_mib};
                 ok = tp_retirement_command_hash(&fixture->commands[stage][index], fixture->command_sha[stage][index]);
@@ -486,11 +525,12 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         BqRetirementObservedSide* side = &fixture->facts[6].side[variant];
         memcpy(side->compiler_command_sha256, fixture->command_sha[1][2 + variant], 65);
         memcpy(fixture->trusted[6].compiler_command_sha256[variant], fixture->command_sha[1][2 + variant], 65);
-        memcpy(side->artifact_sha256, fixture->artifact_sha, 65);
-        memcpy(side->code_sha256, fixture->code_side.code_sha256, 65);
+        memcpy(side->artifact_sha256, fixture->program_side.artifact_sha256, 65);
+        memcpy(side->code_sha256, fixture->program_side.code_sha256, 65);
         memcpy(side->runtime_command_sha256, fixture->command_sha[1][4 + variant], 65);
+        memcpy(fixture->trusted[6].runtime_command_sha256[variant], fixture->command_sha[1][4 + variant], 65);
         memcpy(side->runtime_output_sha256, fixture->runtime_sha, 65);
-        side->code_bytes = fixture->code_side.code_bytes;
+        side->code_bytes = fixture->program_side.code_bytes;
     }
     fixture->frozen = (BqRetirementBatchGroup){{fixture->batch.contract, fixture->batch.contract}, {{0}}};
     memcpy(fixture->frozen.command_sha256[0], fixture->command_sha[1][0], 65);
@@ -554,6 +594,7 @@ static void test_unit_campaign_teardown(TestUnitCampaign* fixture)
         CHECK(close(fixture->cwd) == 0);
     }
     if (fixture->code >= 3) CHECK(close(fixture->code) == 0);
+    if (fixture->program_path[0]) unlink(fixture->program_path);
     for (unsigned side = 0; side < 2; ++side)
     {
         if (fixture->sources[side] >= 3) CHECK(close(fixture->sources[side]) == 0);
@@ -1031,7 +1072,7 @@ static void test_unit_campaign_compose_handoff(TestUnitCampaign* fixture, BqReti
               request.partition_counts[0] == 1 && request.partition_counts[1] == 1 &&
               !strcmp(request.partitions[0][0].identity, "rows-0000") && request.partitions[1][0].records == 120u &&
               request.code == code && request.code_count == 4 && code[3].row == 6 &&
-              !strcmp(code[3].sides[1].code_sha256, fixture->code_side.code_sha256) &&
+              !strcmp(code[3].sides[1].code_sha256, fixture->program_side.code_sha256) &&
               !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN].name, "workflow.execution_plan") &&
               !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].name, "workflow.phases.post_aa_binding") &&
               !strcmp(handoff->prior[BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA].path, "retirement-post-aa-binding.json") &&
@@ -1078,6 +1119,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     uint64_t deadline = bq_phase_clock() + (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_DEADLINE ? UINT64_C(1500000000) :
                                                                                                UINT64_C(600000000000));
     BqRetirementUnitCampaign driver = {0};
+    /* The phase peer is this process's child, not a launch. */
+    driver.allowed_child = peer;
     CHECK(bq_retirement_unit_campaign_begin(&driver, &phases, cancel[0], deadline, fixture->cwd, fixture->cwd) &&
           phases.sequence == BQ_PHASE_SETTLING);
     FILE* records = tmpfile();
@@ -1350,7 +1393,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         int ruleset = bq_retirement_sandbox(&executable, 1, fixture->sources, fixture->cwd, NULL);
         TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, (int)first.variant,
             {fixture->sources[0], fixture->sources[1]}, ruleset,
-            (uint64_t)fixture->commands[1][index].memory_mib << 20};
+            (uint64_t)fixture->commands[1][index].memory_mib << 20, NULL};
         TpRetirementMeasurementResult measured;
         CHECK(log >= 3 && bq_retirement_campaign_run(&binding, &fixture->commands[1][index], &inputs, fixture->cwd,
                                                      &measured) && stages.ab.execution.sequence == 1);
@@ -1390,8 +1433,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               !strcmp(result.post_context_sha256, driver.post_context_sha256) && result.code_count == 4 &&
               result.codes[0].row == 3 && result.codes[1].row == 4 && result.codes[2].row == 5 &&
               result.codes[3].row == 6 &&
-              !strcmp(result.codes[3].sides[1].code_sha256, fixture->code_side.code_sha256) &&
-              result.codes[3].sides[0].code_bytes == fixture->code_side.code_bytes &&
+              !strcmp(result.codes[3].sides[1].code_sha256, fixture->program_side.code_sha256) &&
+              result.codes[3].sides[0].code_bytes == fixture->program_side.code_bytes &&
               result.codes == fixture->codes && result.untimed_records.records == 4 && result.launches[0] == 4 &&
               result.launches[1] == 732 && result.launches[2] == 732 &&
               tp_retirement_digest(result.log_chain_sha256[0]) && tp_retirement_digest(result.log_chain_sha256[1]) &&
@@ -1528,7 +1571,7 @@ static void test_unit_campaign_layout_refusal(TestUnitCampaign* fixture, unsigne
         capped = setrlimit(RLIMIT_NOFILE, &floor) == 0;
     }
     TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, 0,
-        {fixture->sources[0], fixture->sources[1]}, ruleset, 0};
+        {fixture->sources[0], fixture->sources[1]}, ruleset, 0, NULL};
     TpProcessObservation observed = {0};
     uint64_t begun = tp_process_monotonic_ns();
     TpProcess process = log >= 3 && ruleset >= 3 && usable && (mode != 3 || capped) ?
@@ -1585,7 +1628,7 @@ static void test_unit_campaign_layout(TestUnitCampaign* fixture)
         uint64_t memory = UINT64_C(8192) << 20;
 #endif
         TpProcessInputs inputs = {executable, fixture->cwd, log, fixture->environment, 0, (int)side,
-            {fixture->sources[0], fixture->sources[1]}, ruleset, memory};
+            {fixture->sources[0], fixture->sources[1]}, ruleset, memory, NULL};
         TpProcessObservation observed;
         TpProcess process = log >= 3 && ruleset >= 3 ?
             tp_process_observe_inputs(argv, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
@@ -1614,6 +1657,288 @@ static void test_unit_campaign_layout(TestUnitCampaign* fixture)
     for (unsigned mode = 0; mode < 4; ++mode) test_unit_campaign_layout_refusal(fixture, mode);
 }
 
+/* A copy of the fixture child as `leaf` in `directory`, owner-executable. */
+static int test_unit_campaign_program_file(TestUnitCampaign const* fixture, int directory, char const* leaf)
+{
+    int input = open(fixture->program_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int output = input >= 0 ? openat(directory, leaf, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0700) : -1;
+    int ok = output >= 0;
+    char block[65536];
+    ssize_t count = 1;
+    while (ok && count > 0)
+    {
+        count = read(input, block, sizeof(block));
+        ok = count >= 0 && (count == 0 || write(output, block, (size_t)count) == count);
+    }
+    if (output >= 0 && close(output) != 0) ok = 0;
+    if (input >= 0) close(input);
+    return ok;
+}
+
+/* The file's current identity (fstatat, not following a link); the digest
+ * program already holds is kept. */
+static int test_unit_campaign_program_identity(int directory, char const* leaf, TpProcessProgram* program)
+{
+    struct stat info;
+    int ok = fstatat(directory, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0;
+    if (ok)
+    {
+        program->leaf = leaf;
+        program->device = info.st_dev;
+        program->inode = info.st_ino;
+        program->size = info.st_size;
+        program->changed = info.st_ctim;
+    }
+    return ok;
+}
+
+/* The identity and SHA-256 of a single-link file, both from one descriptor
+ * (as the service takes them from the copy it wrote). */
+static int test_unit_campaign_program_hashed(int directory, char const* leaf, TpProcessProgram* program)
+{
+    int file = openat(directory, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat info;
+    uint64_t bytes = 0;
+    int ok = file >= 0 && fstat(file, &info) == 0 && tp_retirement_file_hash(file, program->sha256, &bytes) &&
+        bytes == (uint64_t)info.st_size;
+    if (ok)
+    {
+        program->leaf = leaf;
+        program->device = info.st_dev;
+        program->inode = info.st_ino;
+        program->size = info.st_size;
+        program->changed = info.st_ctim;
+    }
+    if (file >= 0) close(file);
+    return ok;
+}
+
+/* How many 1 ms waits an in-place rewrite of the same bytes may take to
+ * reach the file system's next timestamp tick (a coarse tick is at most
+ * 10 ms; the bound leaves room for a loaded host). */
+#define TEST_UNIT_CAMPAIGN_TICK_WAITS 2000u
+
+/* One runtime launch of `command` in step directory `step` with `program`
+ * through the launch boundary (tp_retirement_launch), on a fresh log. */
+static TpRetirementMeasurementResult test_unit_campaign_runtime_launch(TestUnitCampaign* fixture,
+    TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable, int step,
+    TpProcessProgram const* program)
+{
+    TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
+        .process = {.exit_code = -1}};
+    int binary = fixture->binary;
+    int log = openat(fixture->cwd, "runtime-rule.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int ruleset = log >= 3 ? bq_retirement_sandbox(&binary, 1, fixture->sources, step, NULL) : -1;
+    TpProcessInputs inputs = {binary, step, log, command->environment, 0, 0, {fixture->sources[0], fixture->sources[1]},
+        ruleset, (uint64_t)command->memory_mib << 20, program};
+    TpRetirementLaunch launch = {command, executable, &inputs, NULL, step, fixture->cpu, TP_RETIREMENT_GROUP_SINGLETON};
+    char digest[65];
+    if (ruleset >= 3) tp_retirement_launch(&launch, NULL, 0, &result, digest);
+    if (ruleset >= 0) CHECK(close(ruleset) == 0);
+    if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "runtime-rule.log", 0) == 0);
+    return result;
+}
+
+/* A small text file `name` in directory. */
+static int test_text_at(int directory, char const* name)
+{
+    int file = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int ok = file >= 0 && write(file, "extra\n", 6) == 6;
+    if (file >= 0 && close(file) != 0) ok = 0;
+    return ok;
+}
+
+/* The runtime launch of command in directory with identity is refused
+ * before any child. */
+static void test_unit_campaign_runtime_refused(TestUnitCampaign* fixture, TpRetirementMeasuredCommand const* command,
+    TpRetirementExecutable const* executable, int directory, TpProcessProgram const* identity, char const* what)
+{
+    TpRetirementMeasurementResult result = test_unit_campaign_runtime_launch(fixture, command, executable, directory,
+                                                                             identity);
+    if (result.status != TP_RETIREMENT_MEASUREMENT_PLAN_INVALID || result.observed.valid)
+        fprintf(stderr, "unit campaign runtime rule: %s launched (status %d)\n", what, (int)result.status);
+    CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+}
+
+/* A fresh step directory `name` in the fixture's work directory holding one
+ * copy of the fixture child as `leaf` (none when leaf is NULL). */
+static int test_unit_campaign_step(TestUnitCampaign const* fixture, char const* name, char const* leaf)
+{
+    int made = mkdirat(fixture->cwd, name, 0700) == 0;
+    int step = made ? openat(fixture->cwd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (step >= 0 && leaf && !test_unit_campaign_program_file(fixture, step, leaf))
+    {
+        close(step);
+        step = -1;
+    }
+    return step;
+}
+
+/* Removes step directory `name` (its files, then itself). */
+static void test_unit_campaign_step_remove(TestUnitCampaign const* fixture, int step, char const* name)
+{
+    static char const* const leaves[] = {"prog.bin", "prog.new", "other.bin", "link.bin", "extra.txt"};
+    for (unsigned index = 0; step >= 0 && index < BUSTER_ARRAY_LENGTH(leaves); ++index) unlinkat(step, leaves[index], 0);
+    if (step >= 0) close(step);
+    unlinkat(fixture->cwd, name, AT_REMOVEDIR);
+}
+
+/* The runtime shape at the launch boundary: lane B's `./<leaf>` command
+ * runs the observed program in its step directory (slot 7), which holds
+ * only that program, and its output is checked. Each of these is refused
+ * before any child: another argv[0] (another file, the binary slot, no
+ * `./`, a longer path), no program, a symbolic link carrying its target's
+ * identity, another step's file and directory, a compiler command naming a
+ * program, a replaced (planted) file, a file rewritten in place (same inode
+ * and size) with the same bytes (the change time, after waiting out the
+ * timestamp tick) and with other bytes (the content digest alone), a second
+ * link to the program, a group- or world-writable mode, no owner execute bit
+ * and an extra entry in the step directory. A program changed after the
+ * launch checked it is refused by the child (ESTALE). Each case differs from
+ * the observed identity by construction, never by timing. */
+static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
+{
+    int step = test_unit_campaign_step(fixture, "runtime-rule-a", "prog.bin");
+    int other = test_unit_campaign_step(fixture, "runtime-rule-b", "prog.bin");
+    int linking = test_unit_campaign_step(fixture, "runtime-rule-l", NULL);
+    TpRetirementExecutable executable;
+    TpProcessProgram program = {0}, foreign = {0}, linked = {0};
+    int ok = step >= 3 && other >= 3 && linking >= 3 &&
+        tp_retirement_executable_init(&executable, fixture->binary, fixture->binary_sha) &&
+        symlinkat("../runtime-rule-a/prog.bin", linking, "link.bin") == 0 &&
+        test_unit_campaign_program_hashed(step, "prog.bin", &program) &&
+        test_unit_campaign_program_hashed(other, "prog.bin", &foreign);
+    /* The link carries its target's identity: only not following it tells
+     * them apart. */
+    linked = program;
+    linked.leaf = "link.bin";
+    CHECK(ok);
+    char* argv[] = {"./prog.bin", "retirement-child", "runtime", "prog.bin", "ok", fixture->leak_text, NULL};
+    char command_sha[65];
+    TpRetirementMeasuredCommand command = {.unit = 6, .kind = 1, .variant = 0, .arguments = argv, .argument_count = 6,
+        .environment = fixture->environment, .environment_count = 2, .directory = BQ_RETIREMENT_ROW_WORK_PATH,
+        .timeout_seconds = 30, .command_sha256 = command_sha, .output_sha256 = fixture->runtime_sha,
+        .memory_mib = fixture->commands[0][4].memory_mib};
+    ok = ok && tp_retirement_command_hash(&command, command_sha);
+    /* The runtime shape runs and its output is the oracle's. */
+    TpRetirementMeasurementResult result = ok ? test_unit_campaign_runtime_launch(fixture, &command, &executable, step,
+        &program) : (TpRetirementMeasurementResult){0};
+    if (result.status != TP_RETIREMENT_MEASUREMENT_COMPLETE)
+        fprintf(stderr, "unit campaign runtime rule: status %d exit %d error %d\n", (int)result.status,
+                result.process.exit_code, result.process.launch_error);
+    CHECK(ok && result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !strcmp(result.output_sha256, fixture->runtime_sha));
+    char* const shapes[] = {"./other.bin", "/proc/self/fd/3", "prog.bin", "././prog.bin"};
+    for (unsigned index = 0; ok && index < BUSTER_ARRAY_LENGTH(shapes); ++index)
+    {
+        argv[0] = shapes[index];
+        ok = tp_retirement_command_hash(&command, command_sha);
+        test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, shapes[index]);
+    }
+    argv[0] = "./link.bin";
+    ok = ok && tp_retirement_command_hash(&command, command_sha);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, linking, &linked, "a symbolic link");
+    argv[0] = "./prog.bin";
+    ok = ok && tp_retirement_command_hash(&command, command_sha);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, NULL, "no program");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &foreign, "another step's file");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, other, &program, "another step's directory");
+    TpRetirementMeasuredCommand compiler = fixture->commands[0][2];
+    result = test_unit_campaign_runtime_launch(fixture, &compiler, &executable, step, &program);
+    CHECK(result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID && !result.observed.valid);
+    /* An extra entry beside the program. */
+    ok = ok && test_text_at(step, "extra.txt");
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "an extra entry");
+    ok = ok && unlinkat(step, "extra.txt", 0) == 0;
+    /* A second link to the program, its identity taken after linking (so
+     * only the link count differs). */
+    TpProcessProgram relinked = program;
+    ok = ok && linkat(step, "prog.bin", fixture->cwd, "runtime-rule-hard.bin", 0) == 0 &&
+        test_unit_campaign_program_identity(step, "prog.bin", &relinked);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &relinked, "a second link");
+    ok = ok && unlinkat(fixture->cwd, "runtime-rule-hard.bin", 0) == 0;
+    /* Modes: group/world-writable and not owner-executable, each observed
+     * after the change. */
+    static mode_t const modes[] = {0722, 0600};
+    for (unsigned index = 0; ok && index < BUSTER_ARRAY_LENGTH(modes); ++index)
+    {
+        TpProcessProgram moded = program;
+        ok = fchmodat(step, "prog.bin", modes[index], 0) == 0 &&
+            test_unit_campaign_program_identity(step, "prog.bin", &moded);
+        test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &moded, index ? "no owner execute bit" : "a writable mode");
+    }
+    ok = ok && fchmodat(step, "prog.bin", 0700, 0) == 0 && test_unit_campaign_program_identity(step, "prog.bin", &program);
+    /* Rewritten in place after it was observed (the same inode and size), in
+     * a fresh step directory whose copy no launch has run. step's program was
+     * just executed, and the kernel refuses to open a file for writing while
+     * any address space still maps it as its executable (ETXTBSY); the
+     * rewrite must not depend on how soon the exited child's is torn down. */
+    int rewriting = test_unit_campaign_step(fixture, "runtime-rule-w", "prog.bin");
+    TpProcessProgram observed_copy = {0};
+    ok = ok && rewriting >= 3 && test_unit_campaign_program_hashed(rewriting, "prog.bin", &observed_copy);
+    int rewrite = ok ? openat(rewriting, "prog.bin", O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
+    unsigned char first = 0;
+    ok = rewrite >= 3 && pread(rewrite, &first, 1, 0) == 1;
+    /* The same bytes: only the change time can tell, and it moves only at
+     * the file system's timestamp tick, so the rewrite repeats (1 ms apart,
+     * bounded) until it has. */
+    struct stat rewritten;
+    memset(&rewritten, 0, sizeof(rewritten));
+    int moved = 0;
+    for (unsigned wait = 0; ok && !moved && wait < TEST_UNIT_CAMPAIGN_TICK_WAITS; ++wait)
+    {
+        ok = pwrite(rewrite, &first, 1, 0) == 1 && fstat(rewrite, &rewritten) == 0;
+        moved = ok && (rewritten.st_ctim.tv_sec != observed_copy.changed.tv_sec ||
+                       rewritten.st_ctim.tv_nsec != observed_copy.changed.tv_nsec);
+        if (ok && !moved) test_delay(1);
+    }
+    ok = ok && moved && rewritten.st_ino == observed_copy.inode && rewritten.st_size == observed_copy.size;
+    if (!ok) fprintf(stderr, "unit campaign runtime rule: in-place rewrite not made (errno %d)\n", errno);
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, rewriting, &observed_copy,
+                                       "a file rewritten in place with the same bytes");
+    /* Other bytes, with the identity the rewrite left (so the change time
+     * matches whatever tick it landed in): only the content digest can
+     * tell. */
+    TpProcessProgram flipped = observed_copy;
+    unsigned char other_byte = (unsigned char)(first ^ 0xffu);
+    ok = ok && pwrite(rewrite, &other_byte, 1, 0) == 1 &&
+        test_unit_campaign_program_identity(rewriting, "prog.bin", &flipped);
+    if (rewrite >= 0) close(rewrite);
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, rewriting, &flipped,
+                                       "a file rewritten in place with other bytes");
+    test_unit_campaign_step_remove(fixture, rewriting, "runtime-rule-w");
+    /* A program replaced after its placement: a planted copy renamed over
+     * it. The copy is made while the original still exists, so it cannot
+     * reuse the original's inode number, as a file created after the unlink
+     * may. */
+    struct stat replaced;
+    ok = ok && test_unit_campaign_program_identity(step, "prog.bin", &program) &&
+        test_unit_campaign_program_file(fixture, step, "prog.new") && renameat(step, "prog.new", step, "prog.bin") == 0 &&
+        fstatat(step, "prog.bin", &replaced, AT_SYMLINK_NOFOLLOW) == 0 && replaced.st_ino != program.inode;
+    CHECK(ok);
+    test_unit_campaign_runtime_refused(fixture, &command, &executable, step, &program, "a replaced file");
+    /* The child's own recheck: an identity the parent never compared
+     * (straight through tp_process_observe_inputs) is refused in the child. */
+    TpProcessProgram stale = program;
+    ok = ok && test_unit_campaign_program_identity(step, "prog.bin", &stale);
+    stale.size += 1;
+    int binary = fixture->binary;
+    int log = ok ? openat(fixture->cwd, "runtime-rule.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    int ruleset = log >= 3 ? bq_retirement_sandbox(&binary, 1, fixture->sources, step, NULL) : -1;
+    TpProcessInputs inputs = {binary, step, log, command.environment, 0, 0, {fixture->sources[0], fixture->sources[1]},
+        ruleset, (uint64_t)command.memory_mib << 20, &stale};
+    TpProcessObservation observed = {0};
+    TpProcess process = ruleset >= 3 ?
+        tp_process_observe_inputs(command.arguments, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
+    CHECK(ruleset >= 3 && process.refused && process.launch_error == ESTALE && !observed.valid);
+    if (ruleset >= 0) CHECK(close(ruleset) == 0);
+    if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "runtime-rule.log", 0) == 0);
+    test_unit_campaign_step_remove(fixture, step, "runtime-rule-a");
+    test_unit_campaign_step_remove(fixture, other, "runtime-rule-b");
+    test_unit_campaign_step_remove(fixture, linking, "runtime-rule-l");
+}
+
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)
 {
     TestUnitCampaign* fixture = (TestUnitCampaign*)calloc(1, sizeof(*fixture));
@@ -1623,6 +1948,7 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
     {
         test_unit_campaign_plan(fixture);
         test_unit_campaign_layout(fixture);
+        test_unit_campaign_runtime_rule(fixture);
         /* A driver that has not begun runs no step and touches nothing. */
         BqRetirementUnitCampaign idle = {0};
         BqRetirementUnitCampaignStreams none = {0};

@@ -2,8 +2,9 @@
  * It accepts the fixed generate/build argv, runs in the supplied source cwd,
  * and compiles a small executable into the same configured build path. A
  * subject whose src/main.c carries the census-fixture marker instead freezes
- * the schema-2 census fixture's literal compiler bytes (#1020 unit oracle).
- * This test driver is not the trusted Clang production build driver. */
+ * the stand-in compiler the census fixture names (#1020 unit oracle, #881
+ * worker-unit campaign: retirement_stand_in_compiler.h). This test driver is
+ * not the trusted Clang production build driver. */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <stdbool.h>
@@ -17,6 +18,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "retirement_stand_in_compiler.h"
 
 /* Stand-in for the systemd broker CLI (#1020): installed beside the fixture
  * driver as fixture-broker, it records each typed request in broker-launches.
@@ -238,11 +240,11 @@ int main(int argc, char** argv)
                                                         "int main(void) { return 2; }\n";
             ok = ok && source_fd >= 0 && write(source_fd, code, strlen(code)) == (ssize_t)strlen(code);
             if (source_fd >= 0 && close(source_fd) != 0) ok = false;
-            /* The unit oracle fixture's census manifest names the schema-2
-             * fixture's literal compiler bytes; a census-fixture subject
-             * freezes exactly those instead of compiling. */
+            /* The unit oracle fixture's census manifest names the stand-in
+             * compilers (retirement_stand_in_compiler.h); a census-fixture
+             * subject freezes exactly those bytes instead of compiling. */
             char const* census = !strstr(data, "census-fixture") ? NULL :
-                                 baseline ? "direct baseline\n" : "candidate compiler\n";
+                                 baseline ? BQ_RETIREMENT_STAND_IN_BASE : BQ_RETIREMENT_STAND_IN_CANDIDATE;
             if (ok && census)
             {
                 int output_fd = open(output, O_WRONLY | O_CREAT | O_EXCL, 0700);

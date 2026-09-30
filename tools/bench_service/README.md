@@ -705,8 +705,12 @@ oracle/reference-producer caller, correctness gate and ready record in
 `retirement_unit.c` are reached only through the forked worker-unit producer
 in `retirement_worker_unit.c`, which `worker-unit` admits only with a complete
 profile (`bq_retirement_profile_complete`); the compiled blocked profile is
-refused before the lease handoff, and a producer that writes its ready record
-still fails the job because the in-unit campaign is not wired (see
+refused before the lease handoff. After the ready record the producer runs the
+in-unit campaign (`retirement_worker_campaign.c`) through lane D's READY
+(runtime rows run lane B's `./{{output}}` program, retained from the stage's
+own compile and copied into a fresh step directory), but the job still fails
+closed because
+composition and MEASURED are not wired (see
 [the producer](RETIREMENT_PREPARATION.md#worker-unit-producer-881)). The runner
 sends both subjects' build stages through typed broker `start-stage`
 requests. The broker

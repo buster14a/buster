@@ -2712,6 +2712,43 @@ static void test_process_observations(char const* executable, char const* root)
     result = tp_process_observe(args, NULL, log, 1, -1, 0, &second);
     CHECK(second.valid && result.timed_out && result.signal_number != 0 && result.wall_seconds < 4.0);
 }
+
+/* The per-launch descendant check reads this process's thread child lists
+ * (tp_process_children_listed); they must agree with the host scan
+ * (tp_process_children_scanned) on a paused child and an exited, unreaped
+ * one (waitid WNOWAIT), with and without the paused one allowed. With no
+ * other child, the sweep then reaps the zombie and spares the allowed one. */
+static void test_process_children(void)
+{
+    pid_t found[4] = {0};
+    uint32_t base = tp_process_children_scanned(0, NULL, 0);
+    CHECK(base != UINT32_MAX && tp_process_children_listed(0, NULL, 0) == base);
+    pid_t allowed = fork();
+    if (allowed == 0)
+    {
+        pause();
+        _exit(0);
+    }
+    pid_t zombie = allowed > 0 ? fork() : -1;
+    if (zombie == 0) _exit(0);
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    CHECK(allowed > 0 && zombie > 0 && waitid(P_PID, (id_t)zombie, &info, WEXITED | WNOWAIT) == 0);
+    uint32_t listed = tp_process_children_listed(allowed, found, 4);
+    CHECK(listed == base + 1 && tp_process_children_scanned(allowed, NULL, 0) == listed &&
+          tp_process_children_listed(0, NULL, 0) == base + 2 && tp_process_children(0, NULL, 0) == base + 2);
+    if (!base)
+    {
+        CHECK(found[0] == zombie && tp_process_children_sweep(allowed) &&
+              tp_process_children(allowed, NULL, 0) == 0 && kill(allowed, 0) == 0);
+    }
+    else if (zombie > 0) CHECK(waitpid(zombie, NULL, 0) == zombie);
+    if (allowed > 0)
+    {
+        kill(allowed, SIGKILL);
+        CHECK(waitpid(allowed, NULL, 0) == allowed);
+    }
+}
 #endif
 
 #include "qualification_test.h"
@@ -2804,6 +2841,7 @@ int main(int argc, char** argv)
         test_retirement_shards(root);
 #ifdef __linux__
         test_process_observations(executable, root);
+        test_process_children();
 #endif
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,

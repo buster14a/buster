@@ -368,18 +368,76 @@ typedef struct TpRetirementLaunch
     unsigned group_kind;
 } TpRetirementLaunch;
 
+/* Whether `directory` holds exactly one entry, `leaf`. */
+static int tp_retirement_directory_only(int directory, char const* leaf)
+{
+    int listed = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* listing = listed >= 0 ? fdopendir(listed) : NULL;
+    if (!listing && listed >= 0) close(listed);
+    /* The duplicate shares the directory offset: start from the first entry. */
+    if (listing) rewinddir(listing);
+    unsigned entries = 0, found = 0;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        int dots = !strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..");
+        entries += !dots;
+        found += !dots && !strcmp(entry->d_name, leaf);
+    }
+    if (listing) closedir(listing);
+    return listing && entries == 1 && found == 1;
+}
+
+/* A runtime launch's program in the work directory (the descriptor that
+ * becomes slot 7): args[0] is exactly "./" and the program's leaf (lane B's
+ * runtime template, `./{{output}}`), the directory holds that leaf and
+ * nothing else, and it is, without following a link, the single-link,
+ * owner-executable regular file of this user, not group- or world-writable,
+ * that the caller observed by fstat of the descriptor it wrote and hashed
+ * (device, inode, size and change time), and its bytes still have that
+ * SHA-256: it is opened (never following a link, non-blocking, so a planted
+ * FIFO cannot stall the launch), must be that same file, and is re-hashed.
+ * The re-hash is what catches an in-place rewrite that keeps the size within
+ * one timestamp tick, which leaves the change time as observed. A link, a
+ * second link, a replaced, rewritten or pre-planted file, a file from another
+ * step's directory, a bad mode or an extra entry is refused. */
+static int tp_retirement_launch_program(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs)
+{
+    TpProcessProgram const* program = inputs->program;
+    struct stat info, opened;
+    int ok = program && tp_retirement_artifact_leaf(program->leaf) && tp_retirement_digest(program->sha256) &&
+        tp_process_layout_program(command->arguments[0], program) &&
+        fstatat(inputs->directory, program->leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
+        info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 0022) && (info.st_mode & S_IXUSR) &&
+        info.st_dev == program->device && info.st_ino == program->inode && info.st_size == program->size &&
+        info.st_ctim.tv_sec == program->changed.tv_sec && info.st_ctim.tv_nsec == program->changed.tv_nsec &&
+        tp_retirement_directory_only(inputs->directory, program->leaf);
+    int file = ok ? openat(inputs->directory, program->leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    char digest[65];
+    uint64_t bytes = 0;
+    ok = file >= 0 && fstat(file, &opened) == 0 && tp_retirement_file_same(&info, &opened) &&
+        tp_retirement_file_hash(file, digest, &bytes) && bytes == (uint64_t)program->size &&
+        !strcmp(digest, program->sha256);
+    if (file >= 0 && close(file) != 0) ok = 0;
+    return ok;
+}
+
 /* The canonical layout's launch (inputs->ruleset >= 3, retirement_sandbox.h):
  * the child cannot resolve a caller path, so the command's directory must be
- * exactly BQ_RETIREMENT_ROW_WORK_PATH and its args[0] the binary slot of the
- * side, and the descriptor that becomes slot 7 (fstat `cwd`) must be a
- * private directory of this user; a compiler launch's output directory must
- * be that same directory (the artifact is read where the child wrote it). */
+ * exactly BQ_RETIREMENT_ROW_WORK_PATH, and the descriptor that becomes slot 7
+ * (fstat `cwd`) must be a private directory of this user. Exactly two argv
+ * shapes launch: a compiler command (kind 0) runs the binary slot of the
+ * side and names no program, and its output directory must be slot 7 (the
+ * artifact is read where the child wrote it); a runtime command (kind 1)
+ * runs the program its compile step wrote in slot 7
+ * (tp_retirement_launch_program). */
 static int tp_retirement_launch_layout(TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs,
     struct stat const* cwd, int output_directory)
 {
     struct stat output;
     int ok = command->directory && !strcmp(command->directory, BQ_RETIREMENT_ROW_WORK_PATH) && command->arguments &&
-        tp_process_layout_binary(command->arguments[0], inputs->side) && cwd->st_uid == geteuid() &&
+        (command->kind == 1 ? tp_retirement_launch_program(command, inputs) :
+         !inputs->program && tp_process_layout_binary(command->arguments[0], inputs->side)) &&
+        cwd->st_uid == geteuid() &&
         inputs->memory_bytes == (uint64_t)command->memory_mib << 20 &&
         !(cwd->st_mode & 0022) &&
         (command->kind || (output_directory >= 3 && fstat(output_directory, &output) == 0 &&
@@ -410,7 +468,7 @@ static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMe
         fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity) &&
         fstat(inputs->directory, &cwd) == 0 && S_ISDIR(cwd.st_mode) &&
         (inputs->ruleset >= 3 ? tp_retirement_launch_layout(command, inputs, &cwd, output_directory) :
-         lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
+         !inputs->program && lstat(command->directory, &named_cwd) == 0 && S_ISDIR(named_cwd.st_mode) &&
          cwd.st_dev == named_cwd.st_dev && cwd.st_ino == named_cwd.st_ino) &&
         fstat(inputs->log, &log) == 0 && S_ISREG(log.st_mode) && log.st_nlink == 1 && !log.st_size &&
         lseek(inputs->log, 0, SEEK_CUR) == 0 && (fcntl(inputs->log, F_GETFL) & O_ACCMODE) == O_RDWR;

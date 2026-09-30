@@ -1072,7 +1072,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         {
             unsigned index = (invocation.kind ? 2 : invocation.group) * 2 + invocation.variant;
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-            TpProcessInputs inputs = {held.descriptors[stage && invocation.variant], cwd, log, environment, 0, 0, {0, 0}, 0, 0};
+            TpProcessInputs inputs = {held.descriptors[stage && invocation.variant], cwd, log, environment, 0, 0, {0, 0}, 0, 0, NULL};
             TpRetirementMeasurementResult measured;
             ok = log >= 3 && bq_retirement_campaign_run(&binding, &commands[stage][index],
                 &inputs, cwd, &measured);
@@ -1146,7 +1146,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     char held_binary_digit = held.verified.binary_sha256[1][0];
     held.verified.binary_sha256[1][0] = held_binary_digit == 'e' ? 'f' : 'e';
     int held_guard_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    TpProcessInputs held_guard_inputs = {binary, cwd, held_guard_log, environment, 0, 0, {0, 0}, 0, 0};
+    TpProcessInputs held_guard_inputs = {binary, cwd, held_guard_log, environment, 0, 0, {0, 0}, 0, 0, NULL};
     TpRetirementMeasurementResult held_guard_result;
     struct stat held_guard_stat;
     CHECK(held_guard_log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
@@ -1173,7 +1173,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         CHECK(tp_retirement_execution_peek(&aa->execution, &first) == TP_RETIREMENT_NEXT_READY);
         unsigned index = (first.kind ? 2 : first.group) * 2 + first.variant;
         int recount_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs recount_inputs = {binary, cwd, recount_log, environment, 0, 0, {0, 0}, 0, 0};
+        TpProcessInputs recount_inputs = {binary, cwd, recount_log, environment, 0, 0, {0, 0}, 0, 0, NULL};
         TpRetirementMeasurementResult recount_result;
         CHECK(recount_log >= 3 && bq_retirement_campaign_run(&binding, &commands[0][index],
             &recount_inputs, cwd, &recount_result) && aa->execution.sequence == 1);
@@ -1202,7 +1202,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa->samples, &ab->samples,
         &frozen, &frozen, commands[0], commands[1], snapshots, 12, identities, 3, &review, budget_pin, identity, identity));
     int unheld_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    TpProcessInputs unheld_inputs = {binary, cwd, unheld_log, environment, 0, 0, {0, 0}, 0, 0};
+    TpProcessInputs unheld_inputs = {binary, cwd, unheld_log, environment, 0, 0, {0, 0}, 0, 0, NULL};
     TpRetirementMeasurementResult unheld_result;
     struct stat unheld_stat;
     CHECK(unheld_log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
@@ -1250,7 +1250,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         CHECK(scenario ? bq_retirement_correctness_ready(&gate) :
                          !bq_retirement_correctness_ready(&gate));
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0, NULL};
         TpRetirementMeasurementResult measured;
         struct stat unchanged;
         CHECK(log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
@@ -1272,7 +1272,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     campaign = (TpRetirementCampaign){0};
     CHECK(TEST_CAMPAIGN_FREEZE());
     int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0};
+    TpProcessInputs inputs = {binary, cwd, log, environment, 0, 0, {0, 0}, 0, 0, NULL};
     TpRetirementMeasurementResult measured;
     commands[0][0].output_sha256 = identity;
     CHECK(!tp_retirement_campaign_run(&campaign, &commands[0][0], &inputs, cwd, &measured) &&

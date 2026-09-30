@@ -1,4 +1,4 @@
-/* Retirement producer of the service worker-unit (#881, PR 1 of 4).
+/* Retirement producer of the service worker-unit (#881, PRs 1 and 2 of 4).
  *
  * Ownership: orchestration of the in-unit retirement steps for
  * bq_worker_unit (worker_linux.c). It cannot run in the recipe executable,
@@ -30,17 +30,20 @@
  * bq_retirement_worker_unit_child sets up the producer process and
  * bq_retirement_worker_unit_produce runs, in order, store open, prepare,
  * build (which sends PREPARING), project, oracle, gate and ready, sends
- * RETIREMENT_READY carrying the record's digest (BQPHASE2), and
- * releases everything in reverse on every path, sweeping any surviving
+ * RETIREMENT_READY carrying the record's digest (BQPHASE2), then runs the
+ * in-unit campaign through lane D's READY (bq_retirement_worker_campaign_run
+ * in retirement_worker_campaign.c: SETTLING, MEASURING, A/A, admission, A/B),
+ * and releases everything in reverse on every path, sweeping any surviving
  * descendant (bq_retirement_check_sweep). bq_retirement_worker_unit_wait
  * waits for the producer under the execution deadline plus the stop budget
  * without reaping it; bq_retirement_worker_unit_run then disarms the
  * forwarder, reaps, and consumes a SIGTERM held in that teardown window.
  *
- * PR 1 stops after the ready record: the in-unit campaign, composition and
- * MEASURED are not wired yet, so a producer that wrote its record exits with
- * BQ_UNSUPPORTED (BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED) and sends no phase
- * message after RETIREMENT_READY; the job fails closed. Nothing here is a
+ * PR 2 stops after READY: composition, the authority and MEASURED are not
+ * wired yet (PR 3), so a READY producer exits with BQ_UNSUPPORTED
+ * (BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED) and sends no MEASURED message; the
+ * job fails closed. Production A/A admission has no authority and stays
+ * compiled out, so production cannot reach A/B either. Nothing here is a
  * timing fact.
  */
 #include <poll.h>
@@ -52,9 +55,9 @@
 
 /* The operator-installed read-only tree (bq_worker_run's canonical root). */
 #define BQ_RETIREMENT_WORKER_UNIT_INSTALLED_ROOT "/opt/buster-bench/installed"
-/* The producer's result once the ready record exists: the in-unit campaign
- * (#881 PR 2), composition and MEASURED (PR 3) are not wired yet. */
-#define BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED BQ_UNSUPPORTED
+/* The producer's result once lane D's campaign is READY: composition, the
+ * authority and MEASURED (#881 PR 3) are not wired yet. */
+#define BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED BQ_UNSUPPORTED
 /* A candidate UID asking the producer to resolve buster-bench-candidate, as
  * bq_retirement_unit_build does. */
 #define BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP ((uid_t)-1)
@@ -79,26 +82,31 @@ typedef struct BqRetirementWorkerUnitSeams
     BqRetirementRowObserved const* supplied;
 } BqRetirementWorkerUnitSeams;
 
-/* Every pin a retirement job needs through the ready record, plus the
- * reviewed campaign budget; PR 2 and PR 4 add the adapter and
- * untimed-command pins. */
+/* Every digest pin a retirement job needs through READY: the ready record's
+ * inputs, the reviewed campaign budget and the untimed-command contract
+ * (retirement_worker_campaign.c); PR 4 adds the adapter pin. */
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "contract-sha256=", "support-declaration-sha256=", "inventory-sha256=", "toolchain-manifest-sha256=",
     "build-driver-sha256=", "reference-template-sha256=", "reference-inventory-sha256=",
     "validator-source-applicability-sha256=", "census-inputs-sha256=", "census-rows-sha256=",
     "census-manifest-sha256=", "validator-report-sha256=", "validator-applicability-sha256=",
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
-    "campaign-budget-sha256="};
+    "campaign-budget-sha256=", "untimed-commands-sha256="};
 
 /* The only admitting status line; the compiled profile says status=blocked. */
 #define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "status=admitted"
 
+/* Every digest pin, lane D's frozen campaign values (seed, pairs, resamples
+ * and bootstrap members, each canonical and in range:
+ * bq_retirement_unit_campaign_pins) and exactly one status=admitted line. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
 {
     char pin[SHA256_HEX_CAPACITY];
+    BqRetirementUnitCampaignPins pins;
     bool complete = profile.pointer && profile.length > 0;
     for (u32 index = 0; complete && index < BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins); index += 1)
         complete = bq_retirement_profile_sha(profile, string_from_pointer(bq_retirement_worker_unit_pins[index]), pin);
+    complete = complete && bq_retirement_unit_campaign_pins(profile, &pins);
     /* Exactly one status line, and it must be the admitting value byte for
      * byte: blocked, a blocked- prefix, a trailing space or carriage return,
      * a second line or no line at all refuses. */
@@ -159,13 +167,14 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_worker_unit_cancel(int signal_number)
     errno = saved;
 }
 
-/* Design steps 1 to 10 in the producer. Each step checks the cancellation
- * descriptor and the deadline itself; the stop reason is also rechecked
- * between steps. Everything is released in reverse on every path. The build
- * sends PREPARING, and the written record's digest goes out in
- * RETIREMENT_READY. */
+/* Design steps 1 to 10 in the producer, then the in-unit campaign through
+ * READY with the result root as lane E's store root. Each step checks the
+ * cancellation descriptor and the deadline itself; the stop reason is also
+ * rechecked between steps. Everything is released in reverse on every path.
+ * The build sends PREPARING, the written record's digest goes out in
+ * RETIREMENT_READY, and the campaign sends SETTLING and MEASURING. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
-    u64 attempt_token, char const* workspace_root, int phase_descriptor, int cancellation_fd,
+    u64 attempt_token, char const* workspace_root, char const* result_root, int phase_descriptor, int cancellation_fd,
     char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns, char ready_sha256[SHA256_HEX_CAPACITY])
 {
     BqPhaseChannel phases = {.descriptor = -1, .failed = 1};
@@ -184,8 +193,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
     }
     int workspaces = bq_open_absolute_directory(root);
     int installed = bq_open_absolute_directory(string_from_pointer(seams->installed_root));
-    BqError result = workspaces >= 0 && installed >= 0 && candidate != BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP ?
-                     BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int results = result_root ? bq_open_absolute_directory(string_from_pointer(result_root)) : -1;
+    BqError result = workspaces >= 0 && installed >= 0 && results >= 0 &&
+                     candidate != BQ_RETIREMENT_WORKER_UNIT_CANDIDATE_LOOKUP ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     /* The keeper is the unit process's child, never this one's. */
     if (result == BQ_OK && !bq_retirement_check_descendants_absent()) result = BQ_WORKER_MISMATCH;
     /* The retirement channel is BQPHASE2 (phase_channel.h), so it can carry
@@ -224,13 +234,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
     if (result == BQ_OK)
         result = bq_phase_exchange_digest_until(&phases, BQ_PHASE_RETIREMENT_READY, ready_sha256, deadline_ns) ?
                  BQ_OK : BQ_WORKER_MISMATCH;
-    if (result == BQ_OK) result = BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED;
+    if (result == BQ_OK) result = bq_retirement_unit_stop_reason(cancellation_fd, deadline_ns, BQ_OK);
+    BqRetirementCampaignUnitStore unit = {store, workspaces, installed, root, seams->profile, seams->census_profile,
+                                          seams->driver, seams->toolchain_root, seams->broker, seams->broker_workspaces};
+    if (result == BQ_OK)
+        result = bq_retirement_worker_campaign_run(&unit, &phases, cancellation_fd, deadline_ns, results, &prepared.job,
+                                                   &projection, &gate, preparation_sha256, ready_sha256);
+    if (result == BQ_OK) result = BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED;
     if (!bq_retirement_unit_gate_release(&gate) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_oracle_release(&oracle) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_projection_release(&projection) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_built_release(&built) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_release(&prepared) && result == BQ_OK) result = BQ_IO;
     if (store.directory >= 0 && close(store.directory) != 0 && result == BQ_OK) result = BQ_IO;
+    if (results >= 0 && close(results) != 0 && result == BQ_OK) result = BQ_IO;
     if (installed >= 0 && close(installed) != 0 && result == BQ_OK) result = BQ_IO;
     if (workspaces >= 0 && close(workspaces) != 0 && result == BQ_OK) result = BQ_IO;
     /* Every step proves its own children gone. A survivor (a subreaped
@@ -247,10 +264,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
 
 /* The producer process: it drops the lease reference (the unit process keeps
  * the lease), stops with the unit process, becomes a child subreaper and
- * installs the SIGTERM self-pipe before it unblocks SIGTERM. Returns the exit
- * status. */
+ * installs the SIGTERM (and SIGINT) self-pipe before it unblocks SIGTERM.
+ * Returns the exit status. */
 BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
-    u64 attempt_token, char const* workspace_root, int lease_descriptor, int phase_descriptor,
+    u64 attempt_token, char const* workspace_root, char const* result_root, int lease_descriptor, int phase_descriptor,
     char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns, pid_t parent, sigset_t const* unblocked)
 {
     int self_pipe[2] = {-1, -1};
@@ -267,15 +284,18 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_worker_unit_child(BqRetirementWorkerUnitSe
     struct sigaction cancel = {0};
     cancel.sa_handler = bq_retirement_worker_unit_cancel;
     cancel.sa_flags = SA_RESTART;
+    /* SIGINT too: a launch given the cancellation descriptor leaves both to
+     * the caller (tp_process_observe_inputs), so neither may end the producer
+     * without its failure retention. */
     ok = ok && sigemptyset(&cancel.sa_mask) == 0 && sigaction(SIGTERM, &cancel, NULL) == 0 &&
-         sigprocmask(SIG_SETMASK, unblocked, NULL) == 0;
+         sigaction(SIGINT, &cancel, NULL) == 0 && sigprocmask(SIG_SETMASK, unblocked, NULL) == 0;
     char ready_sha256[SHA256_HEX_CAPACITY] = {0};
-    BqError result = ok ? bq_retirement_worker_unit_produce(seams, job_id, attempt_token, workspace_root,
+    BqError result = ok ? bq_retirement_worker_unit_produce(seams, job_id, attempt_token, workspace_root, result_root,
                                                             phase_descriptor, self_pipe[0], preparation_sha256,
                                                             deadline_ns, ready_sha256) : BQ_IO;
-    if (result == BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED)
-        fprintf(stderr, "retirement worker-unit: ready record %s written; the in-unit campaign is not wired yet\n",
-                ready_sha256);
+    if (ready_sha256[0])
+        fprintf(stderr, "retirement worker-unit: ready record %s; campaign result %d%s\n", ready_sha256, (int)result,
+                result == BQ_RETIREMENT_WORKER_UNIT_UNCOMPOSED ? " (READY; composition is not wired yet)" : "");
     close(phase_descriptor);
     for (u32 side = 0; side < 2; side += 1)
         if (self_pipe[side] >= 0) close(self_pipe[side]);
@@ -322,8 +342,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_unit_wait(pid_t producer, u64 boun
  * MEASURED is wired (BQ_WORKER_FAILED), and a producer killed by a signal or
  * at the bound never proved its descendants absent (BQ_CLEANUP_FAILED). */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
-    u64 attempt_token, char const* workspace_root, int lease_descriptor, int* phase_descriptor,
-    char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns)
+    u64 attempt_token, char const* workspace_root, char const* result_root, int lease_descriptor,
+    int* phase_descriptor, char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns)
 {
     sigset_t blocked, prior;
     struct sigaction forward = {0}, previous = {0};
@@ -333,15 +353,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnit
                   sigprocmask(SIG_BLOCK, &blocked, &prior) == 0;
     bool handled = masked && sigemptyset(&forward.sa_mask) == 0 && sigaction(SIGTERM, &forward, &previous) == 0;
     sigset_t pending;
-    BqError result = handled && seams && workspace_root && phase_descriptor && *phase_descriptor >= 3 &&
+    BqError result = handled && seams && workspace_root && result_root && phase_descriptor && *phase_descriptor >= 3 &&
                      sigemptyset(&pending) == 0 && sigpending(&pending) == 0 ? BQ_OK : BQ_IO;
     if (result == BQ_OK && sigismember(&pending, SIGTERM) == 1) result = BQ_WORKER_CANCEL_SIGNAL;
     if (result == BQ_OK && bq_phase_clock() >= deadline_ns) result = BQ_WORKER_TIMEOUT;
     pid_t parent = getpid();
     pid_t producer = result == BQ_OK ? fork() : -1;
     if (producer == 0)
-        _exit(bq_retirement_worker_unit_child(seams, job_id, attempt_token, workspace_root, lease_descriptor,
-                                              *phase_descriptor, preparation_sha256, deadline_ns, parent, &prior));
+        _exit(bq_retirement_worker_unit_child(seams, job_id, attempt_token, workspace_root, result_root,
+                                              lease_descriptor, *phase_descriptor, preparation_sha256, deadline_ns,
+                                              parent, &prior));
     if (result == BQ_OK && producer < 0) result = BQ_IO;
     if (producer > 0)
     {
