@@ -7202,7 +7202,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
         .deadline_microseconds = deadline_microseconds,
         .attempts = 1,
         .readiness_files_ok = true,
-        .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")),
+        .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")) ||
+                              string_equal(oracle, S8("bit-field-aggregate")),
     };
     SliceString8 keys = {0};
     SliceString8 values = {0};
@@ -10628,6 +10629,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// #1612: LLVM, Wasm64 and eBPF each build brace-initialized bit-field structs
+// from the canonical aggregate value. Independent consumers (Clang, Node, the
+// eBPF test VM) prove every member reads back from its packed storage bits.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "unsigned long long probe(unsigned long long x, unsigned long long y)\n{\n"
+        "    struct Flag { void* pointer; unsigned long long flag : 1; };\n"
+        "    struct Bits { unsigned char tag; unsigned long long low : 3; unsigned long long middle : 13;"
+        " unsigned long long high : 40; short tail; };\n"
+        "    struct __attribute__((packed)) Packed { unsigned char tag; unsigned int low : 20; unsigned int high : 12; };\n"
+        "    struct Flag empty = {0};\n"
+        "    struct Flag flag = {0, x};\n"
+        "    struct Bits bits = {(unsigned char)y, x, x >> 3, x >> 16, (short)(y >> 8)};\n"
+        "    struct Bits zero = {0};\n"
+        "    struct Packed packed = {(unsigned char)(y >> 32), (unsigned int)y, (unsigned int)(y >> 20)};\n"
+        "    unsigned long long value = bits.low | (unsigned long long)bits.middle << 3 | (unsigned long long)bits.high << 16;\n"
+        "    unsigned long long check = empty.flag | (flag.flag ^ (x & 1)) | (unsigned long long)(bits.tag ^ (unsigned char)y) |\n"
+        "        (unsigned long long)((unsigned short)bits.tail ^ (unsigned short)(y >> 8)) |\n"
+        "        (unsigned long long)(packed.tag ^ (unsigned char)(y >> 32)) |\n"
+        "        ((packed.low | (unsigned long long)packed.high << 20) ^ (y & 0xffffffffu)) |\n"
+        "        zero.tag | zero.low | zero.middle | zero.high | (unsigned long long)zero.tail;\n"
+        "    return check ? ~0ull : value;\n}\n");
+    String8 consumer = S8(
+        "unsigned long long probe(unsigned long long x, unsigned long long y);\n"
+        "int main(void)\n{\n"
+        "    unsigned long long v[] = {0, 1, 127, 128, ~0ull, 1ull << 63, (1ull << 63) - 1, 0x0123456789abcdefull};\n"
+        "    int failures = 0;\n"
+        "    for (int i = 0; i < 8; i += 1) for (int j = 0; j < 8; j += 1) failures += probe(v[i], v[j]) != (v[i] & 0x00ffffffffffffffull);\n"
+        "    return failures;\n}\n");
+    String8 script = S8(
+        "\"use strict\";\n"
+        "const fs = require(\"fs\");\n"
+        "fs.writeSync(process.stdout.fd, `WASM_NODE_READY startup_ms=${Date.now()}\\n`);\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "const probe = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.probe;\n"
+        "const values = [0n, 1n, 127n, 128n, -1n, -9223372036854775808n, 9223372036854775807n, 0x0123456789abcdefn];\n"
+        "let checks = 0;\n"
+        "for (const x of values) for (const y of values) {\n"
+        "    if (probe(x, y) !== BigInt.asIntN(64, BigInt.asUintN(56, x))) throw new Error(`probe(${x}, ${y})`);\n"
+        "    checks++;\n"
+        "}\n"
+        "console.log(checks + \" independent Wasm bit-field aggregate executions passed\");\n");
+    u64 values[] = {0, 1, 127, 128, UINT64_MAX, UINT64_C(1) << 63, (UINT64_C(1) << 63) - 1, UINT64_C(0x0123456789abcdef)};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    BUSTER_UNUSED(consumer);
+    BUSTER_UNUSED(clang);
+    for (u32 configuration = 0; configuration < BUSTER_ARRAY_LENGTH(forms) * BUSTER_ARRAY_LENGTH(targets); configuration += 1)
+    {
+        u32 form = configuration / BUSTER_ARRAY_LENGTH(targets);
+        u32 target = configuration % BUSTER_ARRAY_LENGTH(targets);
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), target == 0 ? S8(".bc") : S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), forms[form], S8("-target"), targets[target], S8("-o"), output, input};
+            u32 skipped = target != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && target == 0)
+            {
+                BUSTER_TEST(arguments, compiled.has_llvm_bitcode && compiled.llvm_bitcode.success);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID
+                if (clang.length)
+                {
+                    String8 main_input = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate-main"), S8(".c"));
+                    String8 executable = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), S8(""));
+                    String8 link[] = {clang, S8("-w"), output, main_input, S8("-o"), executable};
+                    String8 run[] = {executable};
+                    ProcessResult linked = PROCESS_RESULT_NOT_EXISTENT;
+                    ProcessResult ran = PROCESS_RESULT_NOT_EXISTENT;
+                    if (BUSTER_REQUIRE(arguments, file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(consumer))))
+                    {
+                        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        linked = spawned.handle ? os_process_wait_sync(arena, spawned).result : PROCESS_RESULT_NOT_EXISTENT;
+                    }
+                    if (linked == PROCESS_RESULT_SUCCESS)
+                    {
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        ran = child.handle ? os_process_wait_sync(arena, child).result : PROCESS_RESULT_NOT_EXISTENT;
+                    }
+                    BUSTER_TEST_RAW(arguments, linked == PROCESS_RESULT_SUCCESS && ran == PROCESS_RESULT_SUCCESS, forms[form]);
+                }
+                else
+                {
+                    arguments->show(arguments, S8("LLVM bit-field aggregate execution skipped: clang is unavailable on PATH\n"));
+                }
+#endif
+            }
+            else if (compiled.error == COMPILER_DRIVER_ERROR_NONE && target == 1)
+            {
+                BUSTER_TEST(arguments, compiled.has_wasm64);
+                String8 script_path = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), S8(".js"));
+                if (node.length && BUSTER_REQUIRE(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script))))
+                {
+                    String8 node_arguments[] = {node, script_path, output};
+                    CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
+                        arguments, arena, S8("bit-field-aggregate"), forms[form], forms[form], (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                        S8("64 independent Wasm bit-field aggregate executions passed"), compiler_driver_test_wasm_node_deadline_microseconds());
+                    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+                }
+                else if (!node.length)
+                {
+                    arguments->show(arguments, S8("Wasm64 bit-field aggregate execution skipped: Node is not installed\n"));
+                }
+            }
+            else if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiled.has_ebpf);
+                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                for (u32 left = 0; left < BUSTER_ARRAY_LENGTH(values); left += 1)
+                {
+                    for (u32 right = 0; right < BUSTER_ARRAY_LENGTH(values); right += 1)
+                    {
+                        u64 observed = 0;
+                        bool ran = codegen_test_ebpf_execute(bytes, values[left], values[right], &observed);
+                        BUSTER_TEST(arguments, ran && observed == (values[left] & UINT64_C(0x00ffffffffffffff)));
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Issue 1613: an unreferenced declaration or unneeded definition still
 // reached non-native output. LLVM bitcode carried `declare internal`, which
 // the verifier rejects, and the eBPF object wrote an undefined symbol for it.
@@ -11672,6 +11808,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_aggregate_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
