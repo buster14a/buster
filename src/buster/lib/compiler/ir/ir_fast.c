@@ -98,21 +98,18 @@ bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruct
     return result;
 }
 
+// Folding stays within one immediate limb: a folded row is a
+// CONSTANT_INTEGER with a single u64, so wider, atomic and volatile values
+// are never candidates. The arithmetic itself is ir_integer_* (ir_integer.c).
 BUSTER_GLOBAL_LOCAL u32 ir_fast_width(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     u32 result = 0;
     if (type && (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN) && !type->is_atomic && !type->is_volatile)
     {
-        result = type->kind == IR_TYPE_BOOLEAN ? 1 : type->bit_width;
+        result = ir_integer_type_width(type);
         if (result > 64) result = 0;
     }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL u64 ir_fast_mask(u32 width)
-{
-    u64 result = width == 64 ? UINT64_MAX : ((u64)1 << width) - 1;
     return result;
 }
 
@@ -123,63 +120,36 @@ BUSTER_GLOBAL_LOCAL bool ir_fast_constant(IrProgram* program, IrFunction* functi
     if (slot->definition.value < function->instruction_count)
     {
         IrInstruction* row = function->instructions + slot->definition.value;
-        if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1)
+        IrInteger decoded = {0};
+        u32 width = ir_fast_width(program, slot->canonical_type);
+        if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1 && width && ir_integer_constant_decode(row, width, &decoded))
         {
-            u32 width = ir_fast_width(program, slot->canonical_type);
-            if (width)
-            {
-                *bits = (row->immediate_is_negative ? (u64)0 - row->immediates[0] : row->immediates[0]) & ir_fast_mask(width);
-                result = true;
-            }
+            *bits = decoded.low;
+            result = true;
         }
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_fast_binary(u32 operation, u64 left, u64 right, u32 width, u64* bits)
+// The faults after which a row is left for run time: the FAST contract folds
+// no division or remainder at all, and an out-of-range shift count or a
+// non-integer operation has no canonical value to fold to. Wrapping integer
+// arithmetic is canonical and folds.
+enum
 {
-    bool result = true;
-    u64 sign = (u64)1 << (width - 1);
-    switch (operation)
+    IR_FAST_UNFOLDABLE_FAULTS = IR_INTEGER_FAULT_SHIFT_COUNT | IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_ZERO_COUNT |
+                                IR_INTEGER_FAULT_UNSUPPORTED,
+};
+
+BUSTER_GLOBAL_LOCAL bool ir_fast_binary(u32 operation, u64 left, u64 right, u32 width, u32 right_width, u64* bits)
+{
+    bool result = operation != IR_BINARY_SIGNED_DIVIDE && operation != IR_BINARY_UNSIGNED_DIVIDE && operation != IR_BINARY_SIGNED_REMAINDER &&
+                  operation != IR_BINARY_UNSIGNED_REMAINDER;
+    if (result)
     {
-    case IR_BINARY_INTEGER_ADD: *bits = left + right; break;
-    case IR_BINARY_INTEGER_SUBTRACT: *bits = left - right; break;
-    case IR_BINARY_INTEGER_MULTIPLY: *bits = left * right; break;
-    case IR_BINARY_INTEGER_BITWISE_AND: *bits = left & right; break;
-    case IR_BINARY_INTEGER_BITWISE_OR: *bits = left | right; break;
-    case IR_BINARY_INTEGER_BITWISE_XOR: *bits = left ^ right; break;
-    case IR_BINARY_BOOLEAN_AND: *bits = left && right; break;
-    case IR_BINARY_BOOLEAN_OR: *bits = left || right; break;
-    case IR_BINARY_INTEGER_EQUAL:
-    case IR_BINARY_BOOLEAN_EQUAL: *bits = left == right; break;
-    case IR_BINARY_INTEGER_NOT_EQUAL:
-    case IR_BINARY_BOOLEAN_NOT_EQUAL: *bits = left != right; break;
-    case IR_BINARY_UNSIGNED_LESS: *bits = left < right; break;
-    case IR_BINARY_UNSIGNED_LESS_EQUAL: *bits = left <= right; break;
-    case IR_BINARY_UNSIGNED_GREATER: *bits = left > right; break;
-    case IR_BINARY_UNSIGNED_GREATER_EQUAL: *bits = left >= right; break;
-    case IR_BINARY_SIGNED_LESS: *bits = (left ^ sign) < (right ^ sign); break;
-    case IR_BINARY_SIGNED_LESS_EQUAL: *bits = (left ^ sign) <= (right ^ sign); break;
-    case IR_BINARY_SIGNED_GREATER: *bits = (left ^ sign) > (right ^ sign); break;
-    case IR_BINARY_SIGNED_GREATER_EQUAL: *bits = (left ^ sign) >= (right ^ sign); break;
-    case IR_BINARY_SHIFT_LEFT:
-        result = right < width;
-        if (result) *bits = left << right;
-        break;
-    case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
-        result = right < width;
-        if (result) *bits = left >> right;
-        break;
-    case IR_BINARY_SIGNED_SHIFT_RIGHT:
-        result = right < width;
-        if (result)
-        {
-            u64 extended = left | ((left & sign) ? ~ir_fast_mask(width) : 0);
-            *bits = extended >> right;
-            if (right && (left & sign)) *bits |= UINT64_MAX << (64 - right);
-        }
-        break;
-    default: result = false; break;
+        IrIntegerResult folded = ir_integer_binary((IrBinaryOperation)operation, (IrInteger){.low = left}, (IrInteger){.low = right}, width, right_width);
+        result = !(folded.faults & IR_FAST_UNFOLDABLE_FAULTS);
+        *bits = folded.bits.low;
     }
     return result;
 }
@@ -231,36 +201,42 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
             else if (width && left_constant)
             {
                 u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
-                if (row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
+                if (row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                    row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                    row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE ||
+                    row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET)
                 {
-                    bits = left | ((left & ((u64)1 << (source_width - 1))) ? ~ir_fast_mask(source_width) : 0);
-                    constant = true;
-                }
-                else if (row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
-                         row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE ||
-                         row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET)
-                {
-                    bits = left;
-                    constant = true;
+                    IrIntegerResult converted = ir_integer_convert((IrConversionOperation)row->conversion_operation, (IrInteger){.low = left},
+                                                                   source_width, width);
+                    constant = source_width && !(converted.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+                    bits = converted.bits.low;
+                    IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+                    IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
                 }
             }
         }
         else if (width && row->opcode == IR_OPCODE_UNARY && left_constant)
         {
-            switch (row->unary_operation)
+            u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
+            if (source_width && (row->unary_operation == IR_UNARY_INTEGER_NEGATE || row->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
+                                 row->unary_operation == IR_UNARY_BOOLEAN_NOT))
             {
-            case IR_UNARY_INTEGER_NEGATE: bits = (u64)0 - left; constant = true; break;
-            case IR_UNARY_INTEGER_BITWISE_NOT: bits = ~left; constant = true; break;
-            case IR_UNARY_BOOLEAN_NOT: bits = !left; constant = true; break;
-            default: break;
+                IrIntegerResult folded = ir_integer_unary((IrUnaryOperation)row->unary_operation, (IrInteger){.low = left}, source_width);
+                constant = !(folded.faults & IR_FAST_UNFOLDABLE_FAULTS);
+                bits = folded.bits.low;
+                IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+                IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
             }
         }
         else if (width && row->opcode == IR_OPCODE_BINARY && second != IR_PROMOTE_NONE)
         {
             u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
-            if (source_width && left_constant && right_constant)
+            u32 right_width = ir_fast_width(program, function->values[second].canonical_type);
+            if (source_width && right_width && left_constant && right_constant)
             {
-                constant = ir_fast_binary(row->binary_operation, left, right, source_width, &bits);
+                constant = ir_fast_binary(row->binary_operation, left, right, source_width, right_width, &bits);
+                IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+                IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
             }
             if (!constant && right_constant)
             {
@@ -269,7 +245,8 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
                                      row->binary_operation == IR_BINARY_SHIFT_LEFT || row->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
                                      row->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
                 if ((right == 0 && zero_identity) || (right == 1 && row->binary_operation == IR_BINARY_INTEGER_MULTIPLY) ||
-                    (right == ir_fast_mask(width) && row->binary_operation == IR_BINARY_INTEGER_BITWISE_AND)) replacement = first;
+                    (right == ir_integer_mask((IrInteger){.low = UINT64_MAX}, width).low && row->binary_operation == IR_BINARY_INTEGER_BITWISE_AND))
+                    replacement = first;
             }
             if (!constant && left_constant && ((left == 0 && (row->binary_operation == IR_BINARY_INTEGER_ADD ||
                  row->binary_operation == IR_BINARY_INTEGER_BITWISE_OR || row->binary_operation == IR_BINARY_INTEGER_BITWISE_XOR)) ||
@@ -289,11 +266,12 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
         }
         else if (constant)
         {
+            IR_SEMANTIC_RECORD(FAST_FOLD_ACCEPTED, 1);
             row->opcode = IR_OPCODE_CONSTANT_INTEGER;
             row->operands = 0;
             row->operand_count = 0;
             row->immediates = arena_allocate(program->arena, u64, 1);
-            row->immediates[0] = bits & ir_fast_mask(width);
+            row->immediates[0] = ir_integer_from_u64(bits, width).low;
             row->immediate_count = 1;
             row->immediate_is_negative = false;
             statistics->changes += 1;
