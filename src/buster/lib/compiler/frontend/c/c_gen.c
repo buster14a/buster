@@ -347,6 +347,52 @@ BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessRe
     return (String8){0};
 }
 
+// The section an entity's declarations of `kind` request: the definition's
+// own when it names one, and otherwise the first declaration's that does,
+// because GNU C merges the attribute across the declarations of one entity --
+// a prototype carrying it places the definition that follows (issue 1276).
+BUSTER_C_INTERNAL String8 c_entity_section_name(Arena* arena, CPreprocessResult preprocess, CAnalysisResult* parse, u32 entity_index,
+                                                CDeclaration* definition, CDeclarationKind kind)
+{
+    String8 result = definition ? c_declaration_section_name(arena, preprocess, *definition) : (String8){0};
+    u32 bucket_end = parse->declarations_by_entity_offsets[entity_index + 1];
+    for (u32 bucket_index = parse->declarations_by_entity_offsets[entity_index]; bucket_index < bucket_end && !result.length; bucket_index += 1)
+    {
+        CDeclaration* declaration = parse->declarations + parse->declarations_by_entity[bucket_index];
+        if (declaration->kind == kind && declaration != definition)
+        {
+            result = c_declaration_section_name(arena, preprocess, *declaration);
+        }
+    }
+
+    return result;
+}
+
+// The native output a `section` attribute cannot be honoured in, named for
+// the refusal, or empty where it can (issue 1276): ELF objects place it, and
+// the COFF and Mach-O writers, which have one section per kind and nowhere to
+// put a named one, refuse it rather than drop it. The non-native emitters
+// answer for themselves: eBPF's program sections are the attribute's own
+// spelling, and Wasm is not decided here.
+BUSTER_C_INTERNAL String8 c_section_attribute_unsupported_output(Target target)
+{
+    String8 result = {0};
+    if (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64)
+    {
+        result = (String8){0};
+    }
+    else if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+    {
+        result = S8("COFF");
+    }
+    else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+    {
+        result = S8("Mach-O");
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL String8 c_declaration_link_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
@@ -6388,6 +6434,34 @@ BUSTER_C_INTERNAL String8 c_ir_static_local_link_name(CIntegerIrBuilder* builder
     CEntity* entity_value = builder->parse.entities + entity.value;
     String8 function_name = builder->function ? builder->function->name : S8("anonymous");
     return string_format(builder->arena, S8(".L.{S8}.{S8}.{u32}"), function_name, entity_value->name, entity.value);
+}
+
+// The section a block-scope static's declaration tokens [start, end) request
+// (issue 1276). Its storage is placed like a file-scope object's, so it is
+// refused on the same outputs and for thread-local storage; false leaves the
+// refusal in failure_message.
+BUSTER_C_INTERNAL bool c_ir_static_local_section_name(CIntegerIrBuilder* builder, CToken name, u32 start, u32 end, bool is_thread_local,
+                                                      String8* section_name)
+{
+    *section_name = c_declaration_section_name(builder->arena, builder->preprocess,
+                                               (CDeclaration){
+                                                   .token_start = start,
+                                                   .token_count = end - start,
+                                               });
+    String8 unsupported_output = c_section_attribute_unsupported_output(builder->target);
+    bool result = !section_name->length || (!unsupported_output.length && !(is_thread_local && c_attribute_native_binding_target(builder->target)));
+    if (!result)
+    {
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, name);
+        builder->failure_message =
+            unsupported_output.length
+                ? string_format(builder->arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"), spelling,
+                                *section_name, unsupported_output)
+                : string_format(builder->arena, S8("thread-local '{S8}' is declared __attribute__((section(\"{S8}\"))), which cannot be placed"), spelling,
+                                *section_name);
+    }
+
+    return result;
 }
 
 // A block-scope function declarator binds a local entity that designates the
@@ -35285,6 +35359,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             builder->failure_message = string_format(builder->arena, S8("could not allocate static local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
             return false;
         }
+        String8 local_section_name = {0};
+        if (!c_ir_static_local_section_name(builder, name, start, end, local_thread_local, &local_section_name))
+        {
+            return false;
+        }
+        ir_symbol_from_id(&builder->program->symbols, symbol)->section_name = local_section_name;
         IrGlobal global = {
             .symbol = symbol,
             .initializer_symbol = IR_SYMBOL_ID_INVALID,
@@ -39447,9 +39527,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     String8 symbol_name = c_ir_static_local_link_name(builder, entity);
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
+                    String8 local_section_name = {0};
+                    if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
+                    {
+                        return false;
+                    }
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
                                                                                     .name = symbol_name,
                                                                                     .link_name = symbol_name,
+                                                                                    .section_name = local_section_name,
                                                                                     .source = local_source,
                                                                                     .type = local_type,
                                                                                     .kind = IR_SYMBOL_DATA,
@@ -49342,12 +49428,14 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // also what keeps it out of the per-type budget the aggregate and alias
     // reports share, and a third per declaration for a `constructor`/
     // `destructor` on a target with no initializer array, which is reported
-    // after every body is lowered and so shares neither of the first two.
+    // after every body is lowered and so shares neither of the first two, and
+    // a fourth per declaration and a second per entity for a `section`
+    // attribute the output cannot place (issue 1276).
     // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        3 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                        4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
                                             parse.array_bound_count + 2);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
@@ -50012,22 +50100,22 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     continue;
                 }
-                // The layout runs in bits, which is what the System V rule for
-                // bit-fields is written in: a bit-field takes the next
+                // Members are placed by c_record_layout_place, under the
+                // target's record-layout rule (CRecordLayoutRule): the System
+                // V rule on Itanium targets, where a bit-field takes the next
                 // available bits and only moves on to the next storage unit of
-                // its declared type when it would otherwise straddle one. A
-                // per-declared-type unit model instead started a fresh unit
-                // whenever the declared type changed, so
-                // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
-                // where every other C compiler on the target measures 4.
-                u64 bit_position = 0;
-                u32 alignment = 1;
+                // its declared type when it would otherwise straddle one; the
+                // AAPCS64 variant; and the Microsoft rule, where a change of
+                // declared type size does start a fresh unit. The sizeof
+                // folding in c_parse.c places members through the same call,
+                // so a folded size cannot contradict the object it sizes; the
+                // two agreeing is not evidence the rule is the target's, which
+                // is what record_layout_tests checks (#1439).
+                //
                 // `__attribute__((packed))` on the definition and `#pragma
                 // pack(N)` around it ask the same question: the ceiling a
                 // member's alignment is clamped to. Packed is that ceiling at
-                // one byte. c_parse_type_layout folds sizeof through the same
-                // two inputs, and the two must agree or a folded size
-                // contradicts the object it sizes.
+                // one byte.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
                 u32 pack_alignment = c_type->definition_start < preprocess.token_count
                                          ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
@@ -50036,7 +50124,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     pack_alignment = 1;
                 }
-                bool packed_fields = false;
+                CRecordLayoutCursor record = c_record_layout_begin(target, c_type->kind == C_TYPE_UNION, pack_alignment);
                 bool fields_resolved = true;
                 // One report per aggregate, whatever the definition got wrong:
                 // the diagnostic budget allows one diagnostic per type, and the
@@ -50098,7 +50186,6 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     {
                         field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
                     }
-                    packed_fields |= packed_field;
                     // A rejected specifier still hands back the alignment the
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
@@ -50159,122 +50246,28 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection_member = field_index;
                         definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
                     }
-                    u64 offset = 0;
-                    u32 bit_offset = 0;
-                    if (member->is_bit_field)
+                    if (member->is_bit_field && (!field_type->layout.size || member_bit_width > field_type->layout.size * 8))
                     {
-                        u64 unit_bits = field_type->layout.size * 8;
-                        u64 alignment_bits = (u64)field_alignment * 8;
-                        if (!unit_bits || member_bit_width > unit_bits)
-                        {
-                            fields_resolved = false;
-                            break;
-                        }
-                        // An unnamed bit-field's declared type does not raise
-                        // the aggregate's alignment; a named one's does, and
-                        // neither does a GNU `aligned` on an unnamed one.
-                        if (member->name.length)
-                        {
-                            alignment = BUSTER_MAX(alignment, field_alignment);
-                        }
-                        // GNU `aligned(N)` on a bit-field starts it at the next
-                        // multiple of N bytes -- unconditionally, not only when
-                        // it would straddle its storage unit there, and against
-                        // the operand rather than the alignment the declared
-                        // type raises it to. `unsigned a : 20; unsigned b : 5
-                        // __attribute__((aligned(1)));` puts b at bit 24 where
-                        // the straddle rule alone puts it at 20, so this is the
-                        // one request that moves a bit-field *down*. Measured
-                        // against clang and gcc 2026-08-30; the sizeof folding
-                        // in c_parse.c spells the same rule.
-                        if (c_type->kind != C_TYPE_UNION && field_alignment_request)
-                        {
-                            u64 request_bits = (u64)field_alignment_request * 8;
-                            u64 request_remainder = bit_position % request_bits;
-                            if (request_remainder)
-                            {
-                                bit_position += request_bits - request_remainder;
-                            }
-                        }
-                        if (c_type->kind == C_TYPE_UNION)
-                        {
-                            if (member_bit_width)
-                            {
-                                // Every union member starts at bit zero, so the
-                                // size candidate is the bits this one occupies
-                                // rather than its declared type's width: a
-                                // packed `union { char c; int b : 5; }` is one
-                                // byte under Clang and GCC. The rounding to the
-                                // aggregate's alignment below is what gives the
-                                // unpacked spelling its declared type's size
-                                // back, so one arm answers both.
-                                bit_position = BUSTER_MAX(bit_position, (u64)member_bit_width);
-                            }
-                        }
-                        else if (!member_bit_width)
-                        {
-                            // A zero-width bit-field places nothing and only
-                            // moves the next member to its type's boundary.
-                            // Packing does not move it: GCC and Clang keep
-                            // aligning it to the declared type even inside a
-                            // packed aggregate.
-                            u64 zero_width_bits = (u64)natural_alignment * 8;
-                            u64 remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
-                            if (remainder)
-                            {
-                                bit_position += zero_width_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                        }
-                        else if (packed_field)
-                        {
-                            // A packed bit-field takes the next bit and has no
-                            // storage unit to straddle. The unit it is read
-                            // through is chosen once the aggregate's size is
-                            // known, below; the byte-granular pair recorded
-                            // here carries the absolute bit position until
-                            // then.
-                            offset = bit_position / 8;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
-                        else
-                        {
-                            if (bit_position % alignment_bits + member_bit_width > unit_bits)
-                            {
-                                u64 remainder = bit_position % alignment_bits;
-                                if (remainder)
-                                {
-                                    bit_position += alignment_bits - remainder;
-                                }
-                            }
-                            // The field is read as a whole storage unit of its
-                            // declared type, so the offset names the unit that
-                            // contains it and bit_offset the position inside.
-                            offset = bit_position / unit_bits * field_type->layout.size;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
+                        fields_resolved = false;
+                        break;
                     }
-                    else
-                    {
-                        alignment = BUSTER_MAX(alignment, field_alignment);
-                        if (c_type->kind == C_TYPE_STRUCT)
-                        {
-                            u64 alignment_bits = (u64)field_alignment * 8;
-                            u64 remainder = bit_position % alignment_bits;
-                            if (remainder)
-                            {
-                                bit_position += alignment_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                            bit_position += field_type->layout.size * 8;
-                        }
-                        else
-                        {
-                            bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
-                        }
-                    }
+                    CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
+                                                                                          .size = field_type->layout.size,
+                                                                                          .natural_alignment = natural_alignment,
+                                                                                          .alignment = field_alignment,
+                                                                                          .alignment_request = field_alignment_request,
+                                                                                          .bit_width = member_bit_width,
+                                                                                          .is_bit_field = member->is_bit_field,
+                                                                                          .is_named = member->name.length != 0,
+                                                                                          .is_packed = packed_field,
+                                                                                      });
+                    // A bit-field is read as a whole storage unit of its
+                    // declared type, so the offset names that unit and
+                    // bit_offset the position inside it. A field placed at the
+                    // next bit has its unit fitted below, once the size is
+                    // known.
+                    u64 offset = placement.unit_offset;
+                    u32 bit_offset = member->is_bit_field ? (u32)(placement.bit_position - offset * 8) : 0;
                     aggregate_type->fields[field_index] = (IrField){
                         .name = member->name,
                         .source = c_ir_source_range(member->location, member->name.length),
@@ -50291,6 +50284,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 }
                 // The definition's own `aligned(N)` raises the aggregate above
                 // what its members ask for, and the size rounds up to it.
+                u32 alignment = record.alignment;
                 String8 aggregate_rejection = {0};
                 CIrAlignmentStatus aggregate_status = c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start,
                                                                               aggregate_attributes.alignment_count, alignment, &alignment, 0, &aggregate_rejection);
@@ -50314,13 +50308,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         .kind = definition_rejection_kind,
                     };
                 }
-                u64 size = (bit_position + 7) / 8;
-                u64 remainder = size % alignment;
-                if (remainder)
-                {
-                    size += alignment - remainder;
-                }
-                // Packing can leave a bit-field's storage unit hanging off the
+                u64 size = c_record_layout_size(&record, alignment);
+                // Packing -- the attribute, or `#pragma pack` of any value,
+                // under which an Itanium bit-field takes the next bit (#1318)
+                // -- can leave a bit-field's storage unit hanging off the
                 // end of the aggregate -- `struct __attribute__((packed)) { int
                 // a : 3; int : 0; int b : 3; }` is five bytes with `b` in the
                 // fifth -- and a read-modify-write through that unit would
@@ -50332,7 +50323,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 // is three bytes, so `b` is read through the byte at offset
                 // one. A field whose bits cross every unit that fits takes the
                 // bytes they occupy instead, which is more than one access.
-                for (u32 field_index = 0; packed_fields && field_index < c_type->member_count; field_index += 1)
+                for (u32 field_index = 0; record.needs_unit_fitting && field_index < c_type->member_count; field_index += 1)
                 {
                     IrField* field = aggregate_type->fields + field_index;
                     IrType* field_type = ir_type_from_id(&program->types, field->type);
@@ -50843,7 +50834,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_OBJECT),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_DATA,
@@ -50854,6 +50846,23 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
                                                                       });
+        // A placement only a definition makes (issue 1276): refused where the
+        // output has nowhere to put it, and for thread-local storage, whose
+        // one TLS block per object the native writers do not split.
+        String8 section_name = definition ? ir_symbol_from_id(&program->symbols, entity_symbols[entity_index])->section_name : (String8){0};
+        String8 unsupported_output = c_section_attribute_unsupported_output(target);
+        if (section_name.length && (unsupported_output.length || (is_thread_local && c_attribute_native_binding_target(target))))
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = unsupported_output.length
+                               ? string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
+                                               entity->name, section_name, unsupported_output)
+                               : string_format(arena, S8("thread-local '{S8}' is declared __attribute__((section(\"{S8}\"))), which cannot be placed"),
+                                               entity->name, section_name),
+                .location = definition->location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+        }
     }
     // One slot per preprocessed token, holding the owning definition's index
     // plus one so the absent value is zero.  The array is a fresh allocation
@@ -51000,7 +51009,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_FUNCTION),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -51048,7 +51058,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
-                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+                                                                          .section_name = c_entity_section_name(arena, preprocess, &parse, entity_index, definition,
+                                                                                                                C_DECLARATION_FUNCTION),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -52093,6 +52104,26 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                           .priority = entity_destructor_priority[declaration.entity.value],
                                           .is_destructor = true,
                                       });
+        }
+    }
+    // A function's requested section is refused on the same outputs as an
+    // object's, above (issue 1276); only a kept definition places anything.
+    String8 section_unsupported_output = c_section_attribute_unsupported_output(target);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count && section_unsupported_output.length; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        IrFunction* function = declaration_functions[declaration_index];
+        IrSymbol* symbol = function && declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition && function->state == IR_FUNCTION_LOWERED
+                               ? ir_symbol_from_id(&program->symbols, function->symbol)
+                               : 0;
+        if (symbol && symbol->section_name.length)
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = string_format(arena, S8("'{S8}' is declared __attribute__((section(\"{S8}\"))), which {S8} output cannot place"),
+                                         declaration.name, symbol->section_name, section_unsupported_output),
+                .location = declaration.location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
         }
     }
     // The array-type-name resolver's own report, made after every declaration

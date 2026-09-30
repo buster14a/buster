@@ -10603,6 +10603,292 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
     return result;
 }
 
+// The type and flags of the ELF section spelled `name`, read straight off the
+// section header table so a placement check does not go through the object
+// reader under test.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_header(ByteSlice image, String8 name, u32* type, u64* flags)
+{
+    enum
+    {
+        ELF_HEADER_SIZE = 64,
+        ELF_SECTION_HEADER_SIZE = 64,
+    };
+    bool result = false;
+    u64 section_table = 0;
+    u16 section_count = 0;
+    u16 string_index = 0;
+    if (image.length >= ELF_HEADER_SIZE && memcmp(image.pointer, "\x7f" "ELF", 4) == 0)
+    {
+        memcpy(&section_table, image.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, image.pointer + 60, sizeof(section_count));
+        memcpy(&string_index, image.pointer + 62, sizeof(string_index));
+    }
+    if (section_count && string_index < section_count && section_table <= image.length &&
+        (u64)section_count * ELF_SECTION_HEADER_SIZE <= image.length - section_table)
+    {
+        u64 string_header = section_table + (u64)string_index * ELF_SECTION_HEADER_SIZE;
+        u64 string_offset = 0;
+        u64 string_size = 0;
+        memcpy(&string_offset, image.pointer + string_header + 24, sizeof(string_offset));
+        memcpy(&string_size, image.pointer + string_header + 32, sizeof(string_size));
+        for (u16 section_index = 0; section_index < section_count && !result && string_offset <= image.length &&
+                                    string_size <= image.length - string_offset;
+             section_index += 1)
+        {
+            u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+            u32 name_offset = 0;
+            memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
+            result = name_offset < string_size && string_size - name_offset > name.length &&
+                     memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) == 0 &&
+                     image.pointer[string_offset + name_offset + name.length] == 0;
+            if (result)
+            {
+                memcpy(type, image.pointer + header + 4, sizeof(*type));
+                memcpy(flags, image.pointer + header + 8, sizeof(*flags));
+            }
+        }
+    }
+
+    return result;
+}
+
+// `__attribute__((section("...")))` (issue 1276). Every native output either
+// places the definition in the named section or refuses it naming the
+// declaration: COFF and Mach-O refuse, as does thread-local storage. On a
+// Linux host the ELF placement is checked through an independent read of the
+// section headers, and one program exercises what placement is for -- a
+// hand-registered `.init_array` and `.preinit_array` entry that must run and
+// a linker set spanning two translation units, bounded by `__start_`/
+// `__stop_` references strong in one unit and weak in the other, and a set
+// of mixed alignments whose `__start_` must name its first member -- linked by
+// this linker, by the host linker, and with the weak-reference unit compiled
+// by the host compiler, including a -fPIC -g build.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    struct
+    {
+        String8 target;
+        String8 source;
+        String8 expected;
+    } refusals[] = {
+        {S8("x86_64-pc-windows-msvc"), S8("int refused_data __attribute__((section(\"buster_refused\"))) = 1;\n"),
+         S8("'refused_data' is declared __attribute__((section(\"buster_refused\"))), which COFF output cannot place")},
+        {S8("x86_64-macos"), S8("__attribute__((section(\"__TEXT,__buster\"))) int refused_function(void) { return 2; }\n"),
+         S8("'refused_function' is declared __attribute__((section(\"__TEXT,__buster\"))), which Mach-O output cannot place")},
+        {S8("aarch64-windows"), S8("int get(void) { static int refused_local __attribute__((section(\"buster_refused\"))) = 3; return refused_local; }\n"),
+         S8("'refused_local' is declared __attribute__((section(\"buster_refused\"))), which COFF output cannot place")},
+        {S8("x86_64-unknown-linux-gnu"), S8("__thread int refused_thread __attribute__((section(\"buster_thread\")));\n"),
+         S8("thread-local 'refused_thread' is declared __attribute__((section(\"buster_thread\"))), which cannot be placed")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refusals); index += 1)
+    {
+        String8 input = buster_test_temporary_path(arena, S8("buster-section-refused"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-section-refused"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(refusals[index].source))))
+        {
+            String8 command[] = {S8("-c"), S8("-nostdinc"), S8("-target"), refusals[index].target, input, S8("-o"), output};
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments,
+                            compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object &&
+                                string_first_sequence(compiled.diagnostic, refusals[index].expected) < compiled.diagnostic.length,
+                            compiled.diagnostic);
+        }
+    }
+#if BUSTER_LINUX && !BUSTER_ANDROID && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 main_source = S8("void placed_function(void) __attribute__((section(\"buster_funcs\")));\n"
+                             "void placed_function(void) {}\n"
+                             "__attribute__((section(\".text.buster_hooks\"))) int hooked(int value) { return value + 1; }\n"
+                             "int placed_data __attribute__((section(\"buster_data\"))) = 5;\n"
+                             "const int placed_constant __attribute__((section(\"buster_constants\"))) = 6;\n"
+                             "int placed_zero __attribute__((section(\"buster_zero\")));\n"
+                             "static int ran;\n"
+                             "static int preinit_saw;\n"
+                             "static void early(void) { ran += 1; }\n"
+                             "static void earliest(void) { preinit_saw = ran + 1; }\n"
+                             "__attribute__((section(\".init_array\"), used)) static void (*early_entry)(void) = early;\n"
+                             "__attribute__((section(\".preinit_array\"), used)) static void (*earliest_entry)(void) = earliest;\n"
+                             "__attribute__((section(\"buster_set\"), used)) static int first_member = 3;\n"
+                             "int ordinary_between = 100;\n"
+                             "__attribute__((section(\"buster_set\"), used)) static int second_member = 4;\n"
+                             "__attribute__((section(\"buster_odd\"), used)) static char odd_member = 1;\n"
+                             "__attribute__((section(\"buster_mixed\"), used)) static char mixed_first = 7;\n"
+                             "__attribute__((section(\"buster_mixed\"), used)) static double mixed_second = 2.0;\n"
+                             "extern char __start_buster_mixed[];\n"
+                             "extern int __start_buster_set[];\n"
+                             "extern int __stop_buster_set[];\n"
+                             "extern int __start_buster_absent[] __attribute__((weak));\n"
+                             "int buster_set_count(void);\n"
+                             "int block_scope(void) { static int block_member __attribute__((section(\"buster_set\"), used)); return block_member; }\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    int sum = 0;\n"
+                             "    for (int* member = __start_buster_set; member < __stop_buster_set; member += 1) { sum += *member; }\n"
+                             "    placed_function();\n"
+                             "    return ran == 1 && preinit_saw == 1 && sum == 17 && buster_set_count() == 4 && hooked(placed_data) == 6 &&\n"
+                             "           placed_constant == 6 && placed_zero == 0 && !__start_buster_absent && block_scope() == 0 && ordinary_between == 100 &&\n"
+                             "           __start_buster_mixed == &mixed_first && __start_buster_mixed[0] == 7 && mixed_second == 2.0 && odd_member == 1 ? 0 : 1;\n"
+                             "}\n");
+    String8 member_source = S8("#ifndef BUSTER_SET_BOUND\n"
+                               "#define BUSTER_SET_BOUND __attribute__((weak))\n"
+                               "#endif\n"
+                               "__attribute__((section(\"buster_set\"), used)) static int third_member = 10;\n"
+                               "extern int __start_buster_set[] BUSTER_SET_BOUND;\n"
+                               "extern int __stop_buster_set[] BUSTER_SET_BOUND;\n"
+                               "int buster_set_count(void) { return (int)(__stop_buster_set - __start_buster_set); }\n");
+    String8 main_input = buster_test_temporary_path(arena, S8("buster-section-main"), S8(".c"));
+    String8 member_input = buster_test_temporary_path(arena, S8("buster-section-member"), S8(".c"));
+    bool written = BUSTER_REQUIRE(arguments, file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(main_source)) &&
+                                                 file_write(member_input, BUSTER_SLICE_TO_BYTE_SLICE(member_source)));
+    // Placement, read off the section headers of a -c object.
+    String8 main_object = buster_test_temporary_path(arena, S8("buster-section-main"), S8(".o"));
+    String8 member_object = buster_test_temporary_path(arena, S8("buster-section-member"), S8(".o"));
+    String8 pic_object = buster_test_temporary_path(arena, S8("buster-section-main-pic"), S8(".o"));
+    String8 host_member_object = buster_test_temporary_path(arena, S8("buster-section-member-host"), S8(".o"));
+    bool objects_ready = written;
+    String8 buster_compiles[3][8] = {
+        {S8("-c"), main_input, S8("-o"), main_object},
+        {S8("-c"), member_input, S8("-o"), member_object},
+        {S8("-c"), S8("-fPIC"), S8("-g"), main_input, S8("-o"), pic_object},
+    };
+    u32 buster_compile_counts[3] = {4, 4, 6};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(buster_compiles) && objects_ready; index += 1)
+    {
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = buster_compiles[index], .length = buster_compile_counts[index]}));
+        objects_ready = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+        BUSTER_TEST_RAW(arguments, objects_ready, compiled.diagnostic);
+    }
+    if (objects_ready)
+    {
+        struct
+        {
+            String8 name;
+            u32 type;
+            u64 flags;
+        } placements[] = {
+            {S8("buster_funcs"), 1, 0x6},
+            {S8(".text.buster_hooks"), 1, 0x6},
+            {S8("buster_data"), 1, 0x3},
+            {S8("buster_constants"), 1, 0x2},
+            {S8("buster_zero"), 1, 0x3},
+            {S8("buster_set"), 1, 0x3},
+            {S8(".init_array"), 14, 0x3},
+            {S8(".preinit_array"), 16, 0x3},
+        };
+        String8 placed_objects[] = {main_object, pic_object};
+        for (u32 object = 0; object < BUSTER_ARRAY_LENGTH(placed_objects); object += 1)
+        {
+            ByteSlice image = file_read(arena, placed_objects[object], (FileReadOptions){0});
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(placements); index += 1)
+            {
+                u32 type = 0;
+                u64 flags = 0;
+                bool found = compiler_driver_test_elf_section_header(image, placements[index].name, &type, &flags);
+                BUSTER_TEST_RAW(arguments, found && type == placements[index].type && (flags & 0x7) == placements[index].flags,
+                                string_format(arena, S8("section {S8} in {S8}: found={u32} type={u32} flags={u64:x}"), placements[index].name,
+                                              placed_objects[object], (u32)found, type, flags));
+            }
+        }
+        // The printed assembly states the same placement.
+        String8 assembly = buster_test_temporary_path(arena, S8("buster-section-main"), S8(".s"));
+        String8 assembly_command[] = {S8("-S"), main_input, S8("-o"), assembly};
+        CompilerDriverResult printed =
+            compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_command)));
+        ByteSlice printed_bytes = file_read(arena, assembly, (FileReadOptions){0});
+        String8 printed_text = {.pointer = (char8*)printed_bytes.pointer, .length = printed_bytes.length};
+        BUSTER_TEST_RAW(arguments,
+                        printed.error == COMPILER_DRIVER_ERROR_NONE &&
+                            string_first_sequence(printed_text, S8("\t.section buster_set,\"aw\",@progbits\n")) < printed_text.length &&
+                            string_first_sequence(printed_text, S8("\t.section .preinit_array,\"aw\",@preinit_array\n")) < printed_text.length,
+                        printed.diagnostic);
+        // The host compiler's unit refers to the set's bounds weakly, the
+        // shape that used to read as an empty set. An AArch64 compiler reaches
+        // an extern-weak symbol through the GOT whatever the code model, and
+        // this reader does not take AArch64 GOT relocations (issue 1719), so
+        // there the unit names the bounds strongly and without -fPIC.
+        String8 host_command[10];
+        u32 host_count = 0;
+        host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+        {
+            host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+        }
+#if BUSTER_CPU_ARCH_AARCH64
+        host_command[host_count++] = S8("-fno-pic");
+        host_command[host_count++] = S8("-DBUSTER_SET_BOUND=");
+#endif
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = member_input;
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_member_object;
+        ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count}, (SliceString8){0},
+                                                         (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        bool host_compiled = host_spawn.handle && os_process_wait_deadline(arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_compiled);
+        // This linker, from sources, from Buster objects, and with the host's
+        // weak-reference unit.
+        String8 buster_links[3][4] = {
+            {main_input, member_input},
+            {main_object, member_object},
+            {main_object, host_member_object},
+        };
+        for (u32 link = 0; link < BUSTER_ARRAY_LENGTH(buster_links); link += 1)
+        {
+            if (link == 2 && !host_compiled)
+            {
+                continue;
+            }
+            String8 executable = buster_test_temporary_path(arena, S8("buster-section-program"), string_format(arena, S8("-{u32}"), link));
+            String8 link_command[] = {buster_links[link][0], buster_links[link][1], S8("-o"), executable};
+            CompilerDriverResult linked =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_process_success(arena, executable),
+                            string_format(arena, S8("section program {u32} built by this linker"), link));
+        }
+        // The host linker, over the non-PIC objects and over the -fPIC -g
+        // one as a position-independent executable.
+        String8 host_links[3][2] = {
+            {main_object, member_object},
+            {main_object, host_member_object},
+            {pic_object, host_member_object},
+        };
+        for (u32 link = 0; link < BUSTER_ARRAY_LENGTH(host_links); link += 1)
+        {
+            if (link && !host_compiled)
+            {
+                continue;
+            }
+            String8 executable = buster_test_temporary_path(arena, S8("buster-section-host-program"), string_format(arena, S8("-{u32}"), link));
+            String8 link_command[8];
+            u32 link_count = 0;
+            link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+            {
+                link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            }
+            link_command[link_count++] = link == 2 ? S8("-pie") : S8("-no-pie");
+            link_command[link_count++] = host_links[link][0];
+            link_command[link_count++] = host_links[link][1];
+            link_command[link_count++] = S8("-o");
+            link_command[link_count++] = executable;
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count}, (SliceString8){0},
+                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool host_linked = spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST_RAW(arguments, host_linked && compiler_driver_test_process_success(arena, executable),
+                            string_format(arena, S8("section program {u32} built by the host linker"), link));
+        }
+    }
+#endif
+    scratch_end(temporary);
+
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10628,6 +10914,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -20644,6 +20931,164 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "}\n"
     );
     bool macro_fusion_written = file_write(macro_fusion_source_path, BUSTER_SLICE_TO_BYTE_SLICE(macro_fusion_source));
+    // tests/basic_c_bit_field_layout.c pins System V sizes, which are the
+    // platform compiler's only on Itanium targets. Run on the Windows and
+    // AArch64 Linux lanes it made Buster's own wrong answer the expectation
+    // (#1439), so the suite runs this copy, whose sizes per target are Clang's.
+    String8 bit_field_layout_source_path = buster_test_temporary_path(arguments->arena, S8("buster-bit-field-layout-source"), S8(".c"));
+    String8 bit_field_layout_source = S8(
+        "#if defined(_WIN32)\n"
+        "#define CLOSURE_VAR_SIZE 8\n"
+        "#define CROSSING_SIZE 12\n"
+        "#define THREE_UNITS_SIZE 6\n"
+        "#define ZERO_WIDTH_SIZE 2\n"
+        "#define ZERO_WIDTH_ALIGNMENT 1\n"
+        "#elif defined(__aarch64__) && !defined(__APPLE__)\n"
+        "#define CLOSURE_VAR_SIZE 4\n"
+        "#define CROSSING_SIZE 8\n"
+        "#define THREE_UNITS_SIZE 4\n"
+        "#define ZERO_WIDTH_SIZE 16\n"
+        "#define ZERO_WIDTH_ALIGNMENT 8\n"
+        "#else\n"
+        "#define CLOSURE_VAR_SIZE 4\n"
+        "#define CROSSING_SIZE 8\n"
+        "#define THREE_UNITS_SIZE 4\n"
+        "#define ZERO_WIDTH_SIZE 9\n"
+        "#define ZERO_WIDTH_ALIGNMENT 1\n"
+        "#endif\n"
+        "// QuickJS's JSClosureVar packs an enum-typed bit-field against three\n"
+        "// `uint8_t` ones:\n"
+        "//\n"
+        "//   JSClosureTypeEnum closure_type : 3;\n"
+        "//   uint8_t is_lexical : 1;\n"
+        "//   uint8_t is_const : 1;\n"
+        "//   uint8_t var_kind : 4;\n"
+        "//   uint16_t var_idx;\n"
+        "//\n"
+        "// Two contracts meet in that declaration.  Bit-fields are placed in bits, and\n"
+        "// a declared type only decides when a field must move on to the next storage\n"
+        "// unit of its own type -- not that a differently typed neighbour starts a new\n"
+        "// one.  And a bit-field of enumerated type is read with the enum's underlying\n"
+        "// signedness, which is unsigned when no enumerator is negative: read as a\n"
+        "// signed 3-bit field, the enumerator 5 answers -3 and the interpreter's\n"
+        "// switch falls to `default: abort()`.\n"
+        "typedef enum\n"
+        "{\n"
+        "    CLOSURE_LOCAL,\n"
+        "    CLOSURE_ARG,\n"
+        "    CLOSURE_REF,\n"
+        "    CLOSURE_GLOBAL_REF,\n"
+        "    CLOSURE_GLOBAL_DECL,\n"
+        "    CLOSURE_GLOBAL,\n"
+        "    CLOSURE_MODULE_DECL,\n"
+        "    CLOSURE_MODULE_IMPORT,\n"
+        "} ClosureTypeEnum;\n"
+        "\n"
+        "typedef enum\n"
+        "{\n"
+        "    SIGNED_LOW = -2,\n"
+        "    SIGNED_HIGH = 1,\n"
+        "} SignedEnum;\n"
+        "\n"
+        "struct closure_var\n"
+        "{\n"
+        "    ClosureTypeEnum closure_type : 3;\n"
+        "    unsigned char is_lexical : 1;\n"
+        "    unsigned char is_const : 1;\n"
+        "    unsigned char var_kind : 4;\n"
+        "    unsigned short var_idx;\n"
+        "};\n"
+        "\n"
+        "struct mixed\n"
+        "{\n"
+        "    int wide : 30;\n"
+        "    unsigned char narrow : 5;\n"
+        "};\n"
+        "\n"
+        "struct crossing\n"
+        "{\n"
+        "    char lead[5];\n"
+        "    int trailing : 3;\n"
+        "};\n"
+        "\n"
+        "struct three_units\n"
+        "{\n"
+        "    short first : 9;\n"
+        "    char second : 7;\n"
+        "    short third : 9;\n"
+        "};\n"
+        "\n"
+        "struct zero_width\n"
+        "{\n"
+        "    char before;\n"
+        "    long long : 0;\n"
+        "    char after;\n"
+        "};\n"
+        "\n"
+        "struct signed_fields\n"
+        "{\n"
+        "    short narrow : 9;\n"
+        "    SignedEnum negative : 3;\n"
+        "};\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    // Every size below is what Clang computes for the same declaration on\n"
+        "    // the target: the Microsoft rule opens a unit per declared-type size, and\n"
+        "    // AAPCS64 aligns the record to an unnamed zero-width container.\n"
+        "    if (sizeof(struct closure_var) != CLOSURE_VAR_SIZE) return 1;\n"
+        "    if (sizeof(struct mixed) != 8) return 2;\n"
+        "    if (sizeof(struct crossing) != CROSSING_SIZE) return 3;\n"
+        "    if (sizeof(struct three_units) != THREE_UNITS_SIZE) return 4;\n"
+        "    if (sizeof(struct zero_width) != ZERO_WIDTH_SIZE || _Alignof(struct zero_width) != ZERO_WIDTH_ALIGNMENT) return 5;\n"
+        "\n"
+        "    struct closure_var closure;\n"
+        "    closure.closure_type = CLOSURE_GLOBAL;\n"
+        "    closure.is_lexical = 1;\n"
+        "    closure.is_const = 0;\n"
+        "    closure.var_kind = 9;\n"
+        "    closure.var_idx = 0xbeef;\n"
+        "    if (closure.closure_type != CLOSURE_GLOBAL) return 6;\n"
+        "    if ((int)closure.closure_type != 5) return 7;\n"
+        "    if (closure.is_lexical != 1 || closure.is_const != 0) return 8;\n"
+        "    if (closure.var_kind != 9) return 9;\n"
+        "    if (closure.var_idx != 0xbeef) return 10;\n"
+        "    switch (closure.closure_type)\n"
+        "    {\n"
+        "    case CLOSURE_GLOBAL: break;\n"
+        "    default: return 11;\n"
+        "    }\n"
+        "\n"
+        "    struct three_units units;\n"
+        "    units.first = -200;\n"
+        "    units.second = 60;\n"
+        "    units.third = 255;\n"
+        "    if (units.first != -200) return 12;\n"
+        "    if (units.second != 60) return 13;\n"
+        "    if (units.third != 255) return 14;\n"
+        "\n"
+        "    struct signed_fields fields;\n"
+        "    fields.narrow = -200;\n"
+        "    fields.negative = SIGNED_LOW;\n"
+        "    if (fields.narrow != -200) return 15;\n"
+        "    if (fields.negative != SIGNED_LOW) return 16;\n"
+        "\n"
+        "    struct mixed mixed_fields;\n"
+        "    mixed_fields.wide = -3;\n"
+        "    mixed_fields.narrow = 17;\n"
+        "    if (mixed_fields.wide != -3) return 17;\n"
+        "    if (mixed_fields.narrow != 17) return 18;\n"
+        "\n"
+        "    struct crossing crossing_fields;\n"
+        "    crossing_fields.lead[4] = 5;\n"
+        "    crossing_fields.trailing = -2;\n"
+        "    if (crossing_fields.trailing != -2) return 19;\n"
+        "    if (crossing_fields.lead[4] != 5) return 20;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    bool bit_field_layout_written = file_write(bit_field_layout_source_path, BUSTER_SLICE_TO_BYTE_SLICE(bit_field_layout_source));
+    BUSTER_TEST(arguments, bit_field_layout_written);
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_integer_literals.c"),
@@ -20655,7 +21100,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_constant_float_builtins.c"),
         S8("tests/basic_c_frame_alloca_signbit.c"),
         S8("tests/basic_c_macro_task_batches.c"),
-        S8("tests/basic_c_bit_field_layout.c"),
+        bit_field_layout_source_path,
         S8("tests/basic_c_shift_operand_types.c"),
         S8("tests/basic_c_narrow_argument_abi.c"),
         S8("tests/basic_c_bit_field_promotion.c"),
@@ -20716,6 +21161,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 scratch_end(quickjs_temporary);
             }
         }
+    }
+    if (bit_field_layout_written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(bit_field_layout_source_path));
     }
     if (macro_fusion_written)
     {
