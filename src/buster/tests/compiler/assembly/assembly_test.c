@@ -602,7 +602,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* 
             {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 512,
              .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
                         .source_width = 512, .has_displacement = true, .displacement = displacements[displacement_index],
-                        .has_symbol = displacement_index == 6, .symbol = S8("external_disp")}},
+                        .has_symbol = displacement_index == 6, .symbol = displacement_index == 6 ? S8("external_disp") : (String8){0}}},
         };
         String8 features[] = {S8("*")};
         UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
