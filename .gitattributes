@@ -28,3 +28,7 @@ docs/native-retirement-support-v1.tsv text eol=lf
 tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf
 # Byte-pinned non-executable retirement admission declaration.
 tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf
+
+# Preserve byte-exact hosted Windows evidence and its recorded archive identity.
+docs/performance-audits/evidence/2026-09-30T201055Z/windows-arm64-comparison.json -text
+docs/performance-audits/evidence/2026-09-30T201055Z/windows-x64-comparison.json -text

@@ -1,20 +1,39 @@
 # Bootstrap wrapper CI
 
-The controlled suite `python3 tests/bootstrap_wrapper_test.py -v` runs once
-on each of the six desktop lanes. On Windows use `python` instead of `python3`.
-It exercises the real Bash/PowerShell wrappers with fake TCC and driver inputs;
-it is not a real TCC build, compiler benchmark, or self-host acceptance run.
+Each of the five desktop Release lanes owns the controlled behavior suite.
+The checks shard retains the required `bootstrap_wrappers` lifecycle step and
+reports `owned-by-release-shard` without executing the suite again.
 
-## Independent required gate
+```sh
+# Bash platforms; use python rather than python3 on Windows.
+python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
+# Windows CI runs the same behavior methods through two-case scheduling.
+python tools/bootstrap_wrapper_cases.py --jobs 2
+# Serial control with identical instrumentation and assertions.
+python tools/bootstrap_wrapper_cases.py --jobs 1
+# Lifecycle/admission controls, executed by workflow_tools in Release.
+python3 tools/bootstrap_wrapper_cases_test.py -v
+```
 
-`Bootstrap wrapper regression tests` (`bootstrap_wrappers`) has its own
-bounded step, independent of the preceding `workflow_tools` result. It runs
-after a successful checkout even if a policy test failed, but not after job
-cancellation. Both Windows and Unix desktop summaries explicitly require
-`workflow_tools`, `bootstrap_wrappers`, Zig setup, and their combination matrix.
-A missing, skipped, cancelled, timed-out, or failed wrapper suite cannot be
-replaced by a successful compiler matrix. `CI complete` still requires every
-desktop lane. No test, runner, or existing compiler gate is removed.
+Fake TCC/driver inputs exercise the real Bash/PowerShell wrappers. This is not
+a real TCC bootstrap, compiler benchmark or self-host acceptance run. The old
+full-suite workflow assertions remain under [#1835](https://github.com/buster14a/buster/issues/1835);
+the selected behavior command above describes current CI accurately.
+
+## Required gate and budgets
+
+The wrapper step runs after successful checkout and Zig cache policy, even if
+`workflow_tools` failed; cancellation stops it. Required desktop summaries
+retain both gates. A missing, skipped, cancelled, timed-out or failed wrapper
+owner cannot be replaced by a passing compiler matrix. `CI complete` still
+requires the desktop inventory. Platform and combination coverage is preserved.
+
+The wrapper step retains twenty-minute Windows and two-minute Unix hang
+ceilings. Workflow-tools suites retain five-minute Windows/macOS and two-minute
+Linux ceilings. These are hang bounds, not expected runtime or performance
+thresholds. #701/#702 established the separate budgets; #2034 changes admission.
+
+## Workflow-tool suite scheduling (#2021)
 
 The workflow-tool suites share a five-minute Windows and macOS budget and
 retain the two-minute Linux budget.
@@ -44,71 +63,70 @@ of the 300 s budget. `ci_vs_dev_shell_test.py` took about 50 s,
 suites is what restores headroom; see #2021 for the before/after step
 durations.
 
-In run `35733354799`, Windows AArch64 job
-`106764232727` reached the final passing suite before the two-minute step
-deadline cancelled it. The bounded Windows allowance covers native fixture
-compilation and process startup without removing suites or suppressing errors.
-The wrapper step has a separate two-minute Unix budget and a twenty-minute
-Windows budget. This is a conservative hang-detection ceiling, not an expected
-runtime or an accepted performance limit. It does not switch Windows coverage
-from `powershell.exe` to `pwsh.exe` to avoid exercising the existing wrapper.
+## Bounded independent cases (#2034)
 
-The Windows allowance addresses [#701](https://github.com/buster14a/buster/issues/701):
-job `104876561077` in run `35120438676` used almost its entire two-minute
-shared budget on the preceding policy suites and two passing wrapper tests.
-The recorded wrapper-test intervals were approximately 47 and 48 seconds.
-There are sixteen serial wrapper invocations plus six concurrent publishers
-in the original behavior suite. Applying roughly 48 seconds to each serial
-invocation and one concurrent batch gives about fourteen minutes; twenty
-minutes leaves headroom without an unbounded wait. This is a conservative
-budget-sizing extrapolation, **not a measured full Windows suite duration**
-or a diagnosis of the underlying shell/runner delay. Retain exact-head Windows
-AArch64 and x86-64 durations when validating or tightening this ceiling.
+Windows admits two independent behavior cases through one persistent worker
+gang. Each original test instance owns a temporary repository, cache, environment
+dictionary, fake compiler log, outputs and child owners. Cold/warm, invalidation,
+corrupt/incomplete-entry and failure sequences stay ordered inside their method.
+Assertions and shell selection stay in the unchanged, ledger-pinned test module.
 
-## Child deadlines, cleanup, and diagnostics
+The deliberate publication case runs exclusively after the other cases finish.
+It retains all six competing writers and every immutable-output assertion.
+The existing six-wrapper peak therefore remains the maximum. `--jobs 1` runs
+the same method inventory and ordering with identical ownership and clocks.
+Other budgets, empty/duplicate inventories and skipped cases fail closed.
 
-Every child has a launch-relative deadline: 120 seconds on Windows, 20 seconds
-on Unix. Concurrent publishers keep their own launch deadlines rather than
-receiving another full allowance when their results are collected. An expired
-child produces an assertion failure with its argv and captured output.
+Results occupy slots indexed by the original test inventory, and the final
+failure/status report follows that order. Timeline records follow actual
+execution; a line writer keeps concurrent JSON records intact. Assertion
+failures do not suppress other admitted cases. Exceptions, cancellation,
+incomplete cases and cleanup errors never become successful results.
 
-Each child is registered for cleanup immediately. Early assertion or launch
-failure therefore also cleans previously launched publishers before the
-fixture directory is removed. Timed-out Windows children use the system
-`taskkill /T /F`; Unix children use an isolated process group. Direct children
-are reaped with a ten-second cleanup deadline, and cleanup errors propagate.
-Output is captured in temporary files instead of pipes, avoiding pipe-capacity
-or inherited-pipe-handle waits while collecting another publisher. These are
-controlled test processes, not a sandbox for arbitrary detached programs.
+## Child ownership and diagnostics
 
-The retained `bootstrap-wrapper.log` contains `BOOTSTRAP_ENVIRONMENT`,
-`BOOTSTRAP_TEST`, and `BOOTSTRAP_PROCESS` JSON records. They identify Python,
-OS/architecture, selected shell, test ID, argv, PID, deadline, observed elapsed
-time, exit code, and timeouts without dumping the environment. Test durations
-include setup, teardown, and cleanup. A concurrent child's observed elapsed
-interval includes any delay before collection; it is not precise child CPU
-time or an attribution to PowerShell startup.
+Every child retains its launch-relative deadline: 120 seconds Windows, 20
+seconds Unix. Publication collection does not restart the allowance. File-backed
+stdout/stderr avoids pipe-capacity and inherited-handle waits. Each child registers
+cleanup immediately, before another launch or assertion, and cleanup precedes
+fixture removal.
 
-## Validation
+The scheduler adds a cancellation registry. Registration and cancellation share
+a lock, and each child's cleanup is serialized against normal collection. Windows
+uses the original system `taskkill /T /F`; Unix uses isolated process groups.
+Direct children retain the ten-second cleanup deadline. Workers finish before
+module state is restored; the registry releases native handles between runs.
+These are controlled fixture trees, not containment for detached programs.
 
-Run the whole suite on both Windows architectures, not only the test that was
-interrupted in the original job. The original ten tests remain, including the
-build-graph check and all six concurrent publishers. Added controls cover
-nonzero status and both output streams, timeout failure and child reaping,
-launch-relative deadlines, early-failure cleanup, independent suite scheduling,
-and fail-closed required-step lists using the production summary assessor.
+The retained log includes environment, test and child JSON, plus
+`BOOTSTRAP_LAUNCH`, `BOOTSTRAP_COLLECTION` and ordered `BOOTSTRAP_CASE_SUMMARY`
+records. It identifies Python/architecture, image, actual shell, child inventory,
+peak live wrapper children and unreaped children without dumping the environment.
+Windows still prefers `powershell.exe`; the CI launcher remains Bash.
 
-For a narrow timeout/CI-contract check without compiling Buster:
+Test time includes setup/teardown/cleanup. Launch observes constructor work;
+collection includes scripted work, waiting, capture and cleanup, with cleanup
+also clocked separately. Concurrent lifetime can include collection delay;
+Windows clock resolution can round short intervals to zero. These observations
+do not measure CPU or isolate PowerShell startup, Defender, storage or emulation.
+
+## Repeated comparison
+
+In an idle disposable hosted checkout:
 
 ```sh
-python3 tests/bootstrap_wrapper_test.py BootstrapProcessTests BootstrapWorkflowTests -v
+python tools/bootstrap_wrapper_compare.py --output wrapper-comparison
 ```
 
-For the existing wrapper behavior without the separate build-graph check:
+The tool executes three serial/two-case pairs in order `1,2 / 2,1 / 1,2`,
+with fresh fixtures and no assertion retries. It retains every attempt, requires
+identical test identities and 22 launched/reaped children per successful arm,
+and checks the six-child peak. Cancellation stops subsequent samples. This
+multi-run experiment is outside routine CI.
 
-```sh
-python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
-```
-
-Native Windows results and final-head workflow lint remain required. A Linux
-pass does not reproduce or explain the Windows slowdown.
+Native ARM64 and x64 comparisons qualify scheduling changes. Report phase
+latency separately from whole-job latency, queue delay and runner occupancy.
+CPU and simultaneous process-tree RSS remain unavailable unless independently
+measured. Experiment occupancy includes all six samples and is not production
+runner-work savings. The [#2034 audit](performance-audits/2026-09-30T201055Z.md)
+preserves exact revisions, observations, the failed setup attempt and limits.
