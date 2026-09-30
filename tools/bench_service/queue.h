@@ -160,6 +160,7 @@ BUSTER_F_DECL void bq_put32(u8* bytes, u32 value);
 BUSTER_F_DECL void bq_put64(u8* bytes, u64 value);
 BUSTER_F_DECL String8 bq_field(BqRequest const* request, u32 index);
 BUSTER_F_DECL bool bq_request_valid(BqRequest const* request);
+BUSTER_F_DECL bool bq_request_valid_admitting(BqRequest const* request, bool retirement_complete);
 BUSTER_F_DECL BqError bq_request_make(String8 const fields[BQ_FIELD_COUNT], BqRequest* request);
 BUSTER_F_DECL BqJob* bq_job(BqState* state, u64 id);
 BUSTER_F_DECL u32 bq_pending(BqState const* state);

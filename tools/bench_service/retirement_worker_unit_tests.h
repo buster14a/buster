@@ -32,9 +32,23 @@
  * (bq_retirement_worker_unit_test_late_term), consumed and reported as
  * cancelled instead of ending the unit before its keeper stops. Jobs 30, 63,
  * 64, 67 and 73 select those driver behaviours in
- * retirement_matched_build_fixture.c. */
+ * retirement_matched_build_fixture.c.
+ *
+ * #881 PR 4: the channel is BQPHASE2, and the successful unit sends
+ * RETIREMENT_READY with exactly the published record's digest.
+ * bq_prep_worker_unit_coordinator then checks the coordinator's side:
+ * bq_retirement_coordinator_replay accepts that digest and refuses another,
+ * a flipped record byte and the compiled profile; bq_worker_retirement_finalize
+ * (bq_worker_finish's hook) needs the digests, the replay and the journalled
+ * authority, stops at the deadline, reloads the digests in recovery and holds
+ * a durable success, and passes the smoke recipe;
+ * and bq_retirement_request_valid_pinned, bq_worker_finalization_recipe and
+ * bq_worker_recipe_launchable admit the recipe only through the complete
+ * seams. bq_prep_worker_unit_campaign_order checks that the campaign's
+ * SETTLING follows RETIREMENT_READY on a BQPHASE2 channel. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_WORKER_UNIT_TESTS_H
+#include "retirement_coordinator_fixture.h"
 
 #define BQ_PREP_WORKER_UNIT_REFERENCE 81u
 #define BQ_PREP_WORKER_UNIT_SUCCESS 82u
@@ -58,7 +72,9 @@ typedef enum BqPrepWorkerUnitMode
 typedef struct BqPrepWorkerUnitRun
 {
     int status;
-    u32 messages, preparing;
+    u32 messages, preparing, ready;
+    /* The digest the RETIREMENT_READY packet carried (#881 PR 4). */
+    char ready_sha256[SHA256_HEX_CAPACITY];
     bool eof;
     /* The hanging generate's driver and the broker CLI above it. */
     pid_t driver, broker;
@@ -150,21 +166,28 @@ BUSTER_GLOBAL_LOCAL BqPrepWorkerUnitRun bq_prep_worker_unit_drive(BqPrepOracleFi
         if (!waited) poll(NULL, 0, 5);
     }
     ok = ok && waited == unit && WIFSTOPPED(status) && kill(unit, SIGCONT) == 0;
-    /* The supervisor side: acknowledge every phase message until EOF. */
+    /* The supervisor side: acknowledge every BQPHASE2 message until EOF,
+     * keeping the ready digest. */
     bool acted = mode == BQ_PREP_WORKER_UNIT_RUN, open_channel = ok;
     while (open_channel && bq_worker_monotonic_milliseconds() < deadline)
     {
         struct pollfd waiting = {phase, POLLIN, 0};
         if (poll(&waiting, 1, 50) > 0)
         {
-            unsigned char message[BQ_PHASE_MESSAGE_BYTES] = {0};
+            unsigned char message[BQ_PHASE_MESSAGE_CAP + 1] = {0};
             ssize_t count = recv(phase, message, sizeof(message), 0);
-            open_channel = count == BQ_PHASE_MESSAGE_BYTES;
+            open_channel = count == BQ_PHASE_V2_MESSAGE_BYTES && !memcmp(message, "BQPHASE2", 8);
             run.eof = count == 0;
             run.messages += open_channel;
             run.preparing += open_channel && bq_phase_get(message + 24) == BQ_PHASE_PREPARING;
+            if (open_channel && bq_phase_get(message + 24) == BQ_PHASE_RETIREMENT_READY)
+            {
+                run.ready += 1;
+                bq_phase_digest_format(message + BQ_PHASE_DIGEST_OFFSET, run.ready_sha256);
+            }
             bq_phase_put(message + 40, 1u);
-            if (open_channel) open_channel = send(phase, message, sizeof(message), MSG_NOSIGNAL) == BQ_PHASE_MESSAGE_BYTES;
+            if (open_channel)
+                open_channel = send(phase, message, BQ_PHASE_V2_MESSAGE_BYTES, MSG_NOSIGNAL) == BQ_PHASE_V2_MESSAGE_BYTES;
         }
         pid_t driver = acted ? 0 : bq_prep_worker_unit_driver(fixture, &attempt->job);
         pid_t broker = driver > 0 ? bq_prep_worker_unit_parent(driver) : 0;
@@ -292,6 +315,237 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_refused(BqPrepOracleFixture* fixtur
                   errno == ENOENT && bq_prep_test_live_children() == 0);
 }
 
+/* The coordinator's backend clock in the finalization checks: mode 0 is
+ * always before the 1000 ms test deadline, mode 1 always past it, and mode 2
+ * before it on the first reading and past it afterwards. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_worker_unit_clock_mode, bq_prep_worker_unit_clock_calls;
+
+BUSTER_GLOBAL_LOCAL u64 bq_prep_worker_unit_clock(BqWorkerBackend* backend)
+{
+    (void)backend;
+    bq_prep_worker_unit_clock_calls += 1;
+    u64 now = bq_prep_worker_unit_clock_mode == 1 || (bq_prep_worker_unit_clock_mode == 2 &&
+              bq_prep_worker_unit_clock_calls > 1) ? 5000u : 0u;
+    return now;
+}
+
+/* A durable queue record of a BQPHASE2 phase carrying digest, as
+ * bq_worker_phase_accept writes it. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_record(BqQueue* queue, BqJob const* job, unsigned phase,
+                                                    char const digest[SHA256_HEX_CAPACITY])
+{
+    char name[48], record[48], body[512];
+    snprintf(name, sizeof(name), "worker-phase-%u", phase);
+    int length = snprintf(body, sizeof(body),
+        "schema=1\nprotocol=BQPHASE2\njob-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\nrequest-sha256=%s\nphase=%u"
+        "\nrecipe-request-monotonic-ns=1\nsupervisor-observed-monotonic-ns=2\ndigest-sha256=%s\n",
+        (uint64_t)job->id, (uint64_t)job->token, job->digest, phase, digest);
+    bool ok = length > 0 && (size_t)length < sizeof(body) && bq_record_name(record, name, job->id) &&
+              bq_record_write(queue, record, (u8 const*)body, (u32)length, false) == BQ_OK;
+    return ok;
+}
+
+/* #881 PR 4, the coordinator's side over the attempt the producer just ran.
+ * The replay at finalization accepts the digest the channel carried and
+ * refuses another digest and a changed record. bq_worker_retirement_finalize
+ * (bq_worker_finish's hook) requires the ready digest, the replay and the
+ * journalled authority the packet named, stops at the execution deadline
+ * before or after the replay, reloads every digest from the durable queue
+ * records in recovery, and a durable success whose READY record was tampered
+ * with is held, never rewritten. The request, finalization and launch gates
+ * refuse the recipe under the compiled or no profile and admit it only
+ * through the complete seams. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fixture, BqPrepUnitAttempt const* attempt,
+    BqRetirementWorkerUnitSeams const* seams, char const channel_digest[SHA256_HEX_CAPACITY])
+{
+    String8 workspaces = string_from_pointer(fixture->workspaces);
+    u64 job = attempt->job.id, token = attempt->job.token;
+    char tampered[SHA256_HEX_CAPACITY], record[80];
+    memcpy(tampered, channel_digest, SHA256_HEX_CAPACITY);
+    tampered[0] = tampered[0] == '0' ? '1' : '0';
+    snprintf(record, sizeof(record), "ready-%s", channel_digest);
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) ==
+                  BQ_OK);
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, tampered) != BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) !=
+                      BQ_OK &&
+                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_retirement_coordinator_replay(seams, workspaces, job, token, attempt->digest, channel_digest) ==
+                      BQ_OK);
+    /* The compiled profile cannot replay even the true record. */
+    BqRetirementWorkerUnitSeams installed = bq_retirement_worker_unit_installed();
+    installed.installed_root = seams->installed_root;
+    installed.broker_workspaces = seams->broker_workspaces;
+    BQ_PREP_CHECK(bq_retirement_coordinator_replay(&installed, workspaces, job, token, attempt->digest,
+                                                   channel_digest) != BQ_OK);
+    /* The finish hook over a real handoff: a result directory holding a
+     * receipt, the producer's authority and its chain bound to this attempt's
+     * A digest and the channel's ready digest, copied and journalled into the
+     * queue-private root. */
+    char result_root[] = "/tmp/bq-worker-unit-result-XXXXXX", row_plan[SHA256_HEX_CAPACITY] = {0};
+    char authority[SHA256_HEX_CAPACITY] = {0}, other_authority[SHA256_HEX_CAPACITY];
+    bool made = mkdtemp(result_root) != NULL;
+    int result = made ? open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BqQueue* queue = &fixture->queue;
+    BQ_PREP_CHECK(result >= 0 && bq_retirement_profile_sha(seams->profile, S8("row-plan-sha256="), row_plan) &&
+                  bq_coordinator_fixture_authority(result, attempt->attempt, job, token, attempt->digest,
+                                                   channel_digest, row_plan, true, authority) &&
+                  bq_retirement_coordinator_handoff(result, workspaces, queue->directory_fd, job, token,
+                      seams->profile, attempt->digest, channel_digest, authority) == BQ_OK);
+    memcpy(other_authority, authority, SHA256_HEX_CAPACITY);
+    other_authority[0] = other_authority[0] == '0' ? '1' : '0';
+    BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
+    BqWorkerConfig config = {.workspace_root = workspaces, .backend = &clock};
+    BqWorkerFinalization finalization = {.config = &config, .result_directory = result, .retirement = seams};
+    memcpy(finalization.retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
+    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_clock_mode = 0;
+    /* No durable READY record yet, so the missing digest cannot be reloaded. */
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_MISMATCH);
+    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) != BQ_OK);
+    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_OK);
+    /* A changed record fails the replay even with every digest and the
+     * authority intact. */
+    BQ_PREP_CHECK(bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_worker_retirement_finalize(queue, &attempt->job, &finalization) != BQ_OK &&
+                  bq_prep_test_flip_sealed(attempt->attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, record, 0500, 0400) &&
+                  bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_OK);
+    /* The authority the packet named must be the journalled one. */
+    memcpy(finalization.retirement_authority_sha256, other_authority, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_MISMATCH);
+    memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
+    /* The execution deadline (backend clock) before the replay, which then
+     * never runs (a tampered digest would fail it), and after it. */
+    finalization.execution_deadline = 1000;
+    bq_prep_worker_unit_clock_mode = 1;
+    memcpy(finalization.retirement_ready_sha256, tampered, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_TIMEOUT);
+    bq_prep_worker_unit_clock_mode = 2;
+    bq_prep_worker_unit_clock_calls = 0;
+    memcpy(finalization.retirement_ready_sha256, channel_digest, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &finalization) == BQ_WORKER_TIMEOUT);
+    finalization.execution_deadline = 0;
+    bq_prep_worker_unit_clock_mode = 0;
+    BqJob smoke = attempt->job;
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("coordinator"), S8("validate-buster-v1"),
+                                      bq_field(&attempt->job.request, 3), bq_field(&attempt->job.request, 4)};
+    BQ_PREP_CHECK(bq_request_make(fields, &smoke.request) == BQ_OK);
+    BqWorkerFinalization plain_smoke = {.config = &config, .result_directory = -1, .retirement = seams};
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &smoke, &plain_smoke) == BQ_OK);
+    /* Recovery: a fresh finalization reloads every digest from the durable
+     * queue records and replays. */
+    BQ_PREP_CHECK(bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_RETIREMENT_READY, channel_digest) &&
+                  bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_MEASURED, authority));
+    BqWorkerFinalization recovered = {.config = &config, .result_directory = result, .retirement = seams};
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, &attempt->job, &recovered) == BQ_OK &&
+                  !strcmp(recovered.retirement_preparation_sha256, attempt->digest) &&
+                  !strcmp(recovered.retirement_ready_sha256, channel_digest) &&
+                  !strcmp(recovered.retirement_authority_sha256, authority));
+    /* A tampered durable READY record: a success that was already durable is
+     * held for reconciliation, never rewritten as a failure. */
+    char name[48];
+    BQ_PREP_CHECK(bq_record_name(name, "worker-phase-5", job) && unlinkat(queue->directory_fd, name, 0) == 0 &&
+                  bq_prep_worker_unit_record(queue, &attempt->job, BQ_PHASE_RETIREMENT_READY, tampered));
+    BqJob durable = attempt->job;
+    durable.phase = BQ_FINALIZING;
+    durable.outcome = BQ_SUCCEEDED;
+    BqWorkerConfig production = config;
+    production.production_path = true;
+    BqWorkerFinalization restarted = {.config = &production, .result_directory = result, .retirement = seams};
+    snprintf(restarted.result_root, sizeof(restarted.result_root), "%s", result_root);
+    queue->needs_reconciliation = false;
+    BQ_PREP_CHECK(bq_worker_finish(queue, &production, &durable, BQ_SUCCEEDED, BQ_NOT_FOUND, &restarted) != BQ_OK &&
+                  bq_failure_evidence(queue, &durable) == BQ_NOT_FOUND && durable.outcome == BQ_SUCCEEDED &&
+                  durable.phase == BQ_FINALIZING && queue->needs_reconciliation);
+    queue->needs_reconciliation = false;
+    if (result >= 0) close(result);
+    if (made) bq_prep_test_cleanup(result_root);
+    /* The gates: the compiled profile, a missing seam and a blocked status
+     * refuse; the complete seams admit; the queue's own gate never does. */
+    char blocked[4096];
+    BQ_PREP_CHECK(bq_prep_worker_unit_status(fixture->profile, "status=blocked\n", blocked, sizeof(blocked)));
+    BqRetirementWorkerUnitSeams refused = *seams;
+    refused.profile = string_from_pointer(blocked);
+    BqRequest const* request = &attempt->job.request;
+    BQ_PREP_CHECK(!bq_request_valid(request) && !bq_retirement_request_valid_pinned(request, installed.profile) &&
+                  !bq_retirement_request_valid_pinned(request, refused.profile) &&
+                  bq_retirement_request_valid_pinned(request, seams->profile) &&
+                  bq_retirement_request_valid_pinned(&smoke.request, installed.profile));
+    BqRequest malformed = *request;
+    malformed.size -= 1;
+    BQ_PREP_CHECK(!bq_retirement_request_valid_pinned(&malformed, seams->profile));
+    BqRetirementWorkerUnitSeams const* const gated[] = {NULL, &installed, &refused, seams};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(gated); index += 1)
+    {
+        BqWorkerFinalization gate = {.result_directory = -1, .retirement = gated[index]};
+        bool admitted = bq_worker_finalization_recipe(&attempt->job, &gate);
+        /* The launch gate on a bound retirement recipe decides by itself. */
+        BqWorkerFinalization launch = {.result_directory = -1, .retirement = gated[index]};
+        BQ_PREP_CHECK(bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &launch.recipe));
+        BQ_PREP_CHECK(admitted == (index == 3) && bq_worker_recipe_launchable(&launch) == (index == 3) &&
+                      (index != 3 || !strcmp(gate.recipe.name, "native-retirement-performance-v1")));
+        BqWorkerFinalization plain = {.result_directory = -1, .retirement = gated[index]};
+        BQ_PREP_CHECK(bq_worker_finalization_recipe(&smoke, &plain) && bq_worker_recipe_launchable(&plain));
+    }
+}
+
+/* #881 PR 4: on the worker-unit's BQPHASE2 channel the in-unit campaign
+ * (PR 2) starts SETTLING only after RETIREMENT_READY carried the digest; a
+ * begin right after PREPARING is refused without touching the channel. */
+BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_campaign_order(void)
+{
+    int pair[2] = {-1, -1}, cancel[2] = {-1, -1};
+    char root[] = "/tmp/bq-worker-unit-order-XXXXXX";
+    bool ok = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0 &&
+              pipe2(cancel, O_CLOEXEC | O_NONBLOCK) == 0 && mkdtemp(root) != NULL;
+    pid_t peer = ok ? fork() : -1;
+    if (peer == 0)
+    {
+        close(pair[0]);
+        bool answered = true;
+        for (u32 index = 0; answered && index < 3; index += 1)
+        {
+            unsigned char message[BQ_PHASE_MESSAGE_CAP] = {0};
+            answered = recv(pair[1], message, sizeof(message), 0) == BQ_PHASE_V2_MESSAGE_BYTES;
+            bq_phase_put(message + 40, 1u);
+            answered = answered && send(pair[1], message, BQ_PHASE_V2_MESSAGE_BYTES, MSG_NOSIGNAL) ==
+                                   BQ_PHASE_V2_MESSAGE_BYTES;
+        }
+        close(pair[1]);
+        _exit(answered ? 0 : 1);
+    }
+    if (pair[1] >= 0) close(pair[1]);
+    int work = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int logs = work >= 3 && mkdirat(work, "logs", 0700) == 0 ?
+               openat(work, "logs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BqPhaseChannel phases = {.descriptor = -1, .failed = 1};
+    u64 deadline = bq_phase_clock() + 60000000000ull;
+    ok = ok && peer > 0 && logs >= 3 && bq_phase_init_version(&phases, pair[0], 1, 2, BQ_PHASE_VERSION_2) &&
+         bq_phase_exchange(&phases, BQ_PHASE_PREPARING);
+    BqRetirementUnitCampaign early = {0}, driver = {0};
+    BQ_PREP_CHECK(ok && !bq_retirement_unit_campaign_begin(&early, &phases, cancel[0], deadline, work, logs) &&
+                  phases.sequence == BQ_PHASE_PREPARING && !phases.failed);
+    BQ_PREP_CHECK(bq_phase_exchange_digest_until(&phases, BQ_PHASE_RETIREMENT_READY,
+                      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", deadline) &&
+                  bq_retirement_unit_campaign_begin(&driver, &phases, cancel[0], deadline, work, logs) &&
+                  phases.sequence == BQ_PHASE_SETTLING && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING);
+    int status = 0;
+    if (pair[0] >= 0) close(pair[0]);
+    if (peer > 0) BQ_PREP_CHECK(waitpid(peer, &status, 0) == peer && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (logs >= 0) close(logs);
+    if (work >= 0)
+    {
+        unlinkat(work, "logs", AT_REMOVEDIR);
+        close(work);
+        rmdir(root);
+    }
+    for (u32 side = 0; side < 2; side += 1)
+        if (cancel[side] >= 0) close(cancel[side]);
+}
+
 /* bq_retirement_profile_complete over the fixture's complete profile: every
  * one of its digest pins (the fixture pins exactly the integration keys) is
  * required, and a pin that is not a digest is not a pin. */
@@ -333,6 +587,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_profiles(char const* complete)
 BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
+    bq_prep_worker_unit_campaign_order();
     BqPrepOracleFixture* fixture = calloc(1, sizeof(*fixture));
     BqPrepOracleAttempt* reference = calloc(1, sizeof(*reference));
     BqPrepUnitAttempt* attempt = calloc(1, sizeof(*attempt));
@@ -413,13 +668,15 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         if (run.status != BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED)
             fprintf(stderr, "RETIREMENT_PREP worker-unit success exited %d after %u messages\n", run.status,
                     run.messages);
-        BQ_PREP_CHECK(run.status == BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED && run.messages == 1 && run.preparing == 1 &&
-                      run.eof && bq_prep_worker_unit_keeper_gone(fixture, &attempt->job));
-        BQ_PREP_CHECK(bq_prep_worker_unit_ready(attempt->attempt, digest) &&
+        BQ_PREP_CHECK(run.status == BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED && run.messages == 2 && run.preparing == 1 &&
+                      run.ready == 1 && run.eof && bq_prep_worker_unit_keeper_gone(fixture, &attempt->job));
+        /* The channel carried exactly the published record's digest. */
+        BQ_PREP_CHECK(bq_prep_worker_unit_ready(attempt->attempt, digest) && !strcmp(digest, run.ready_sha256) &&
                       bq_retirement_unit_replay_pinned(attempt->store, fixture->workspaces_fd, fixture->installed_fd,
                           attempt->job.id, attempt->job.token, string_from_pointer(fixture->workspaces), seams.profile,
                           S8("self-test"), fixture->driver, fixture->toolchain_root, fixture->broker,
                           fixture->workspaces, attempt->digest, digest) == BQ_OK);
+        bq_prep_worker_unit_coordinator(fixture, attempt, &seams, run.ready_sha256);
         BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
     }
 

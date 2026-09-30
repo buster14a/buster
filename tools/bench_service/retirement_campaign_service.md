@@ -364,8 +364,10 @@ the attempt:
     composed sealed result and the producer authority handoff, the MEASURED
     acknowledgement, recording both confirmed digests and a measured digest
     over them, the post-sample digest and the record. A failed or incomplete
-    campaign never sends it. The fixed 48-byte phase message carries no
-    digest (`phase_channel.h`), so the record is what makes the post-sample
+    campaign never sends it. The smoke recipe's 48-byte `BQPHASE1` message
+    carries no digest (`phase_channel.h`). On the worker-unit's `BQPHASE2`
+    channel, MEASURED must carry the authority digest (#881 PR 3), so this
+    digest-less send is refused there. The record is what makes the post-sample
     digest, and with it the A/B log chain, durable: the service publishes it
     as a retained store file, and lane E's retained manifest, which the
     producer authority binds, seals its digest.

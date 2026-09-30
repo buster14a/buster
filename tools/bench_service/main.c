@@ -25,7 +25,10 @@
  * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY. bq_worker_unit reaches the worker-unit
  * B steps only through the forked producer in retirement_worker_unit.c (#881),
  * which it admits only with a complete profile; the compiled profile is
- * blocked, so the job is still rejected before any directory or child. */
+ * blocked, so the job is still rejected before any directory or child. The
+ * coordinator's side (retirement_coordinator.c: request gate, budget loader,
+ * authority handoff before MEASURED, replay at finalization) is refused the
+ * same way. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
@@ -39,6 +42,7 @@
 #include "retirement_row_producer.c"
 #include "retirement_unit.c"
 #include "retirement_worker_unit.c"
+#include "retirement_coordinator.c"
 #endif
 #include "worker_linux.c"
 #include "export.c"

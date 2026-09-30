@@ -3,7 +3,8 @@
  * bq_test_worker_group_reaping retains live and zombie group members explicitly;
  * no verdict depends on how promptly PID 1 reaps an orphaned shell descendant.
  * bq_test_worker_retirement_runtime pins the budget -> limit -> deadline ->
- * argv path (#881-C); bq_test_worker_lease_keeper races a contending
+ * argv path (#881-C) and bq_test_worker_retirement_budget_load the installed
+ * record's loader (#881 PR 4); bq_test_worker_lease_keeper races a contending
  * coordinator against the reverse lease handoff, and bq_test_worker_keeper_unit
  * is the stand-in unit tests.c's recovery fixture reuses.
  */
@@ -805,11 +806,62 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_keeper(void)
     if (ready) BQ_CHECK(rmdir(root) == 0);
 }
 
+/* #881 PR 4: the installed campaign-budget record reaches the runtime only
+ * through bq_retirement_coordinator_budget_load. It is accepted when its bytes
+ * hash to the profile's pin, and refused when missing, pinned to another
+ * record, unpinned (the compiled blocked profile), writable, in a writable
+ * directory or a symlink. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_budget_load(void)
+{
+    BqTestWorkerBudget budget = bq_test_worker_retirement_budget(), other = budget;
+    other.values[12] += 1;
+    char record[BQ_WORKER_BUDGET_BYTES], profile[128], other_record[BQ_WORKER_BUDGET_BYTES], other_profile[128];
+    u64 size = 0, other_size = 0, runtime = 0;
+    char root[BQ_PATH_CAP + 1] = "/tmp/buster-budget-XXXXXX", recipes[BQ_PATH_CAP + 16], path[BQ_PATH_CAP + 80];
+    char aside[BQ_PATH_CAP + 80];
+    bool ok = bq_test_worker_retirement_record(&budget, record, &size, profile) &&
+              bq_test_worker_retirement_record(&other, other_record, &other_size, other_profile) &&
+              bq_test_mkdtemp_physical(root, sizeof(root));
+    snprintf(recipes, sizeof(recipes), "%s/recipes", root);
+    snprintf(path, sizeof(path), "%s/%s", recipes, BQ_RETIREMENT_COORDINATOR_BUDGET_NAME);
+    snprintf(aside, sizeof(aside), "%s/budget-aside", recipes);
+    ok = ok && mkdir(recipes, 0500) == 0;
+    BQ_CHECK(ok);
+    String8 installed = string_from_pointer(root), pinned = string_from_pointer(profile);
+    char bytes[BQ_WORKER_BUDGET_BYTES];
+    String8 loaded = {0};
+    BQ_CHECK(bq_retirement_coordinator_budget_load(installed, pinned, bytes, &loaded) == BQ_CONFIGURATION_MISMATCH &&
+             loaded.length == 0);
+    ok = ok && chmod(recipes, 0700) == 0 && bq_test_write_path(path, record, 0444) && chmod(recipes, 0500) == 0;
+    BQ_CHECK(ok && bq_retirement_coordinator_budget_load(installed, pinned, bytes, &loaded) == BQ_OK &&
+             loaded.length == size && !memcmp(loaded.pointer, record, (size_t)size) &&
+             bq_worker_retirement_runtime(pinned, loaded, &runtime) == BQ_OK && runtime == UINT64_C(8640000000));
+    BQ_CHECK(bq_retirement_coordinator_budget_load(installed, string_from_pointer(other_profile), bytes, &loaded) ==
+             BQ_RECIPE_MISMATCH && loaded.length == 0);
+    BQ_CHECK(bq_retirement_coordinator_budget_load(installed, bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED),
+                                                   bytes, &loaded) == BQ_RECIPE_MISMATCH && loaded.length == 0);
+    BQ_CHECK(bq_retirement_coordinator_budget_load(S8("relative/root"), pinned, bytes, &loaded) == BQ_BAD_REQUEST);
+    /* A writable directory, a writable record, then a symlink to the record. */
+    BQ_CHECK(chmod(recipes, 0700) == 0 &&
+             bq_retirement_coordinator_budget_load(installed, pinned, bytes, &loaded) == BQ_CONFIGURATION_MISMATCH);
+    BQ_CHECK(chmod(path, 0644) == 0 && chmod(recipes, 0500) == 0 &&
+             bq_retirement_coordinator_budget_load(installed, pinned, bytes, &loaded) == BQ_CONFIGURATION_MISMATCH);
+    BQ_CHECK(chmod(recipes, 0700) == 0 && chmod(path, 0444) == 0 && rename(path, aside) == 0 &&
+             symlink("budget-aside", path) == 0 && chmod(recipes, 0500) == 0 &&
+             bq_retirement_coordinator_budget_load(installed, pinned, bytes, &loaded) == BQ_CONFIGURATION_MISMATCH);
+    chmod(recipes, 0700);
+    unlink(path);
+    unlink(aside);
+    rmdir(recipes);
+    BQ_CHECK(rmdir(root) == 0);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
     bq_test_worker_pending_cancel_delivery();
     bq_test_worker_coordinator_lease_continuity();
     bq_test_worker_retirement_runtime();
+    bq_test_worker_retirement_budget_load();
     bq_test_worker_lease_keeper();
     u64 absolute = 0, absolute_nanoseconds = 0;
     BQ_CHECK(!bq_worker_execution_deadline(1, 0, &absolute));

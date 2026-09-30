@@ -227,16 +227,31 @@ bool bq_recipe_real(BqRequest const* request)
     return result;
 }
 
-bool bq_request_valid(BqRequest const* request)
+/* retirement_complete is the verdict of the Linux coordinator's completeness
+ * gate (bq_retirement_profile_complete, retirement_worker_unit.c) on the
+ * retirement profile; only bq_retirement_request_valid_pinned passes it. */
+bool bq_request_valid_admitting(BqRequest const* request, bool retirement_complete)
 {
     String8 principal = bq_field(request, 0);
     String8 key = bq_field(request, 1);
     String8 recipe = bq_field(request, 2);
     String8 base = bq_field(request, 3);
     String8 candidate = bq_field(request, 4);
-    bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
+    BqRecipe selected = bq_recipe_from_name(recipe);
+    bool ok = bq_name(principal, 32) && bq_name(key, 64) &&
+              (bq_recipe_admitted(selected) || (retirement_complete && selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
+    return ok;
+}
+
+/* Submission, journal replay, transport and exclusive admission. This
+ * portable queue (also built without the Linux retirement units, e.g. by
+ * exclusive_admission_test.c) cannot evaluate the completeness gate, so it
+ * never admits the retirement recipe. */
+bool bq_request_valid(BqRequest const* request)
+{
+    bool ok = bq_request_valid_admitting(request, false);
     return ok;
 }
 

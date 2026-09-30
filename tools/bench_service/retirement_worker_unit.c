@@ -29,7 +29,8 @@
  * self-pipe whose read end is every step's cancellation descriptor.
  * bq_retirement_worker_unit_child sets up the producer process and
  * bq_retirement_worker_unit_produce runs, in order, store open, prepare,
- * build (which sends PREPARING), project, oracle, gate and ready, and
+ * build (which sends PREPARING), project, oracle, gate and ready, sends
+ * RETIREMENT_READY carrying the record's digest (BQPHASE2), and
  * releases everything in reverse on every path, sweeping any surviving
  * descendant (bq_retirement_check_sweep). bq_retirement_worker_unit_wait
  * waits for the producer under the execution deadline plus the stop budget
@@ -38,8 +39,9 @@
  *
  * PR 1 stops after the ready record: the in-unit campaign, composition and
  * MEASURED are not wired yet, so a producer that wrote its record exits with
- * BQ_UNSUPPORTED (BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED) and sends no further
- * phase message; the job fails closed. Nothing here is a timing fact.
+ * BQ_UNSUPPORTED (BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED) and sends no phase
+ * message after RETIREMENT_READY; the job fails closed. Nothing here is a
+ * timing fact.
  */
 #include <poll.h>
 #include <pwd.h>
@@ -159,8 +161,9 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_worker_unit_cancel(int signal_number)
 
 /* Design steps 1 to 10 in the producer. Each step checks the cancellation
  * descriptor and the deadline itself; the stop reason is also rechecked
- * between steps. Everything is released in reverse on every path, and only
- * the build sends a phase message (PREPARING). */
+ * between steps. Everything is released in reverse on every path. The build
+ * sends PREPARING, and the written record's digest goes out in
+ * RETIREMENT_READY. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorkerUnitSeams const* seams, u64 job_id,
     u64 attempt_token, char const* workspace_root, int phase_descriptor, int cancellation_fd,
     char const preparation_sha256[SHA256_HEX_CAPACITY], u64 deadline_ns, char ready_sha256[SHA256_HEX_CAPACITY])
@@ -185,7 +188,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
                      BQ_OK : BQ_CONFIGURATION_MISMATCH;
     /* The keeper is the unit process's child, never this one's. */
     if (result == BQ_OK && !bq_retirement_check_descendants_absent()) result = BQ_WORKER_MISMATCH;
-    if (result == BQ_OK && !bq_phase_init(&phases, phase_descriptor, job_id, attempt_token)) result = BQ_WORKER_MISMATCH;
+    /* The retirement channel is BQPHASE2 (phase_channel.h), so it can carry
+     * the ready and authority digests to the coordinator. */
+    if (result == BQ_OK && !bq_phase_init_version(&phases, phase_descriptor, job_id, attempt_token, BQ_PHASE_VERSION_2))
+        result = BQ_WORKER_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_unit_stop_reason(cancellation_fd, deadline_ns, BQ_OK);
     if (result == BQ_OK) result = bq_retirement_unit_store_open(workspaces, job_id, attempt_token, &store);
     if (result == BQ_OK)
@@ -213,6 +219,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
     if (result == BQ_OK)
         result = bq_retirement_unit_ready_pinned(&prepared, &built, &projection, &oracle, &gate, workspaces,
                                                  seams->profile, ready_sha256);
+    /* #881 PR 4: the record's digest reaches the coordinator's replay only
+     * through the acknowledged RETIREMENT_READY packet. */
+    if (result == BQ_OK)
+        result = bq_phase_exchange_digest_until(&phases, BQ_PHASE_RETIREMENT_READY, ready_sha256, deadline_ns) ?
+                 BQ_OK : BQ_WORKER_MISMATCH;
     if (result == BQ_OK) result = BQ_RETIREMENT_WORKER_UNIT_NOT_WIRED;
     if (!bq_retirement_unit_gate_release(&gate) && result == BQ_OK) result = BQ_IO;
     if (!bq_retirement_unit_oracle_release(&oracle) && result == BQ_OK) result = BQ_IO;
