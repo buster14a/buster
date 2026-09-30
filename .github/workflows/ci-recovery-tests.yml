@@ -6,6 +6,8 @@ on:
       - '.github/workflows/ci-recovery.yml'
       - '.github/workflows/ci-merge-group-watch.yml'
       - '.github/workflows/ci-recovery-tests.yml'
+      # The watcher's step-deadline budgets mirror a ci.yml step timeout.
+      - '.github/workflows/ci.yml'
       - '.github/scripts/recover-ci.py'
       - '.github/scripts/test_merge_queue_fail_fast.py'
       - 'tests/ci_recovery_test.py'
@@ -16,6 +18,7 @@ on:
       - '.github/workflows/ci-recovery.yml'
       - '.github/workflows/ci-merge-group-watch.yml'
       - '.github/workflows/ci-recovery-tests.yml'
+      - '.github/workflows/ci.yml'
       - '.github/scripts/recover-ci.py'
       - '.github/scripts/test_merge_queue_fail_fast.py'
       - 'tests/ci_recovery_test.py'

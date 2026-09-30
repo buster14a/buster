@@ -2327,6 +2327,8 @@ void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
     total->verified_ir_module_count += unit->verified_ir_module_count;
     total->verified_mir_function_count += unit->verified_mir_function_count;
     total->verified_scheduled_function_count += unit->verified_scheduled_function_count;
+    total->machine_code_bytes_in_place += unit->machine_code_bytes_in_place;
+    total->machine_code_bytes_copied += unit->machine_code_bytes_copied;
     for (u32 index = 0; index < IR_OPCODE_COUNT + 1; index += 1)
     {
         total->fallback_opcode_counts[index] += unit->fallback_opcode_counts[index];
@@ -9484,6 +9486,59 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_is_read_only(IrGlobal* global)
     return global->is_read_only && !global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
 }
 
+// The placement group a requested section puts a definition in (issue 1276):
+// zero for none, otherwise one plus the position of the section name's first
+// appearance in `names`, which is appended to when the name is new. Every
+// member of one group is laid out after all of its image's ordinary contents
+// and beside the rest of its group, so object_from_canonical_codegen_module
+// splits each group off the tail of the text or data image as one named
+// section without moving anything else. Modules name few sections, and one
+// that names none never calls this.
+BUSTER_GLOBAL_LOCAL u32 codegen_section_group(String8 section_name, String8* names, u32* name_count)
+{
+    u32 result = 0;
+    if (section_name.length)
+    {
+        for (u32 index = 0; index < *name_count && !result; index += 1)
+        {
+            result = string_equal(names[index], section_name) ? index + 1 : 0;
+        }
+        if (!result)
+        {
+            names[*name_count] = section_name;
+            *name_count += 1;
+            result = *name_count;
+        }
+    }
+
+    return result;
+}
+
+// Whether a writable, zero-initialized global may be left to the zero-fill
+// image. A named section is written with its bytes, as GCC does, unless its
+// name is a `.bss` one, which ELF gives no bytes either.
+BUSTER_GLOBAL_LOCAL bool codegen_section_allows_zero_fill(String8 section_name)
+{
+    return !section_name.length || string_starts_with_sequence(section_name, S8(".bss"));
+}
+
+// The alignment a global of `group` is laid out to in one image, whose
+// last-placed group is `*image_group`. The first member of a named group in an
+// image takes the group's largest member alignment, so the section the object
+// writer cuts starts exactly at it and `__start_NAME` names that member, as
+// under GNU ld; later members keep their own. Group zero is unnamed.
+BUSTER_GLOBAL_LOCAL u32 codegen_section_group_alignment(u32 alignment, u32 group, u32* image_group, u32 const* group_alignments)
+{
+    u32 result = alignment;
+    if (group && group != *image_group)
+    {
+        result = BUSTER_MAX(alignment, group_alignments[group - 1]);
+    }
+    *image_group = group;
+
+    return result;
+}
+
 // What one canonical value of a type costs the frame, read by the capacity
 // estimate's walk over every value of every function in place of the type
 // record itself: the record is ~152 bytes and the walk wants 13 of them, so
@@ -11285,6 +11340,49 @@ bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* re
 }
 #endif
 
+// Module-level assembly, emitted as one run of entries at the current end of
+// the code buffer, and the descriptors that run takes: every entry the blocks
+// added past the last descriptor, each up to the next entry or the end of the
+// buffer. False leaves the failure in `result`.
+BUSTER_GLOBAL_LOCAL bool codegen_emit_module_assembly(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options,
+                                                      CodegenBuffer* buffer, CodegenModule* result, u32 relocation_capacity,
+                                                      bool* x64_metadata_cache_tried)
+{
+    bool valid = true;
+    if (target.cpu_arch == CPU_ARCH_X86_64 && module->assembly_count)
+    {
+        codegen_buffer_ensure_x64_metadata_cache(buffer, x64_metadata_cache_tried, arena, module->function_count);
+    }
+    u32 assembly_function_begin = result->function_count;
+    for (u32 assembly_index = 0; assembly_index < module->assembly_count && valid; assembly_index += 1)
+    {
+        u32 failed_line = 0;
+        if (!codegen_emit_global_assembly(arena, program, module->assemblies[assembly_index], target, options, buffer, result, relocation_capacity,
+                                          &failed_line))
+        {
+            result->error = buffer->error != CODEGEN_ERROR_NONE ? buffer->error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            result->failed_in_assembly = true;
+            result->failed_assembly = assembly_index;
+            result->failed_assembly_line = failed_line;
+            valid = false;
+        }
+    }
+    while (valid && result->function_count < result->entry_count)
+    {
+        u32 function_index = result->function_count;
+        CodegenModuleEntry* entry = result->entries + function_index;
+        u32 end = function_index + 1 < result->entry_count ? result->entries[function_index + 1].offset : (u32)buffer->count;
+        result->functions[result->function_count++] = (CodegenFunctionDescriptor){
+            .symbol = entry->symbol,
+            .code_offset = entry->offset,
+            .code_size = end - entry->offset,
+        };
+    }
+    result->assembly_function_count = valid ? result->function_count - assembly_function_begin : 0;
+
+    return valid;
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -11314,13 +11412,75 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
     result.position_independent = position_independent;
     result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
+    // Requested sections (issue 1276): each global's placement group
+    // (codegen_section_group), and the order every layout loop below walks --
+    // group zero first, then each named group, declaration order within a
+    // group, by a stable counting sort. A module that names no section keeps
+    // null arrays and the declaration-order layout it always had; the
+    // capacities are walked in the same order because padding depends on it.
+    u32* global_groups = 0;
+    String8* global_section_names = 0;
+    u32 global_section_count = 0;
+    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    {
+        IrGlobal* global = module->globals + global_index;
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+        String8 section_name = symbol && !global->is_thread_local ? symbol->section_name : (String8){0};
+        if (section_name.length && !global_groups)
+        {
+            global_groups = arena_allocate(arena, u32, module->global_count);
+            memset(global_groups, 0, sizeof(*global_groups) * module->global_count);
+            global_section_names = arena_allocate(arena, String8, module->global_count);
+        }
+        if (global_groups)
+        {
+            global_groups[global_index] = codegen_section_group(section_name, global_section_names, &global_section_count);
+        }
+    }
+    u32* global_order = 0;
+    u32* group_alignments = 0;
+    if (global_section_count)
+    {
+        group_alignments = arena_allocate(arena, u32, global_section_count);
+        memset(group_alignments, 0, sizeof(*group_alignments) * global_section_count);
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrType* type = ir_type_from_id(&program->types, global->type);
+            u32 group = global_groups[global_index];
+            if (group && type)
+            {
+                u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
+                group_alignments[group - 1] = BUSTER_MAX(group_alignments[group - 1], global_alignment);
+            }
+        }
+        u32* group_starts = arena_allocate(arena, u32, global_section_count + 2);
+        memset(group_starts, 0, sizeof(*group_starts) * (global_section_count + 2));
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            group_starts[global_groups[global_index] + 1] += 1;
+        }
+        for (u32 group = 1; group < global_section_count + 2; group += 1)
+        {
+            group_starts[group] += group_starts[group - 1];
+        }
+        global_order = arena_allocate(arena, u32, module->global_count);
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            global_order[group_starts[global_groups[global_index]]++] = global_index;
+        }
+    }
     u64 read_only_capacity = 0;
     u64 writable_capacity = 0;
     u64 thread_local_capacity = 0;
     u64 zero_fill_capacity = 0;
     u64 thread_local_zero_capacity = 0;
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    u32 read_only_group = 0;
+    u32 writable_group = 0;
+    u32 zero_fill_group = 0;
+    for (u32 position = 0; position < module->global_count; position += 1)
     {
+        u32 global_index = global_order ? global_order[position] : position;
         IrGlobal* global = module->globals + global_index;
         IrType* type = ir_type_from_id(&program->types, global->type);
         if (!type || !type->layout.resolved || !type->layout.alignment || type->layout.size > UINT32_MAX)
@@ -11335,16 +11495,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
         bool read_only = codegen_global_is_read_only(global);
-        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        u32 group = global_groups ? global_groups[global_index] : 0;
+        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
+                         (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
         u64* capacity = zero_fill && global->is_thread_local ? &thread_local_zero_capacity
                         : zero_fill                           ? &zero_fill_capacity
                         : global->is_thread_local ? &thread_local_capacity
                         : read_only               ? &read_only_capacity
                                                   : &writable_capacity;
-        u64 remainder = *capacity % global_alignment;
+        u32* image_group = zero_fill ? &zero_fill_group : read_only ? &read_only_group : &writable_group;
+        u32 layout_alignment =
+            global->is_thread_local ? global_alignment : codegen_section_group_alignment(global_alignment, group, image_group, group_alignments);
+        u64 remainder = *capacity % layout_alignment;
         if (remainder)
         {
-            *capacity += global_alignment - remainder;
+            *capacity += layout_alignment - remainder;
         }
         *capacity += type->layout.size;
     }
@@ -11364,24 +11529,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // Zero-fill offsets are planned ahead of the assignment loop below because
     // they are not taken in declaration order: globals under
     // CODEGEN_LARGE_ZERO_FILL_THRESHOLD come first and the large ones follow,
-    // each group in declaration order so the layout stays deterministic.
+    // each group in declaration order so the layout stays deterministic. A
+    // third pass lays out the members of named `.bss` sections after both.
     u64* zero_fill_offsets = arena_allocate(arena, u64, module->global_count ? module->global_count : 1);
     u64 zero_fill_count = 0;
-    for (u32 layout_pass = 0; layout_pass < 2; layout_pass += 1)
+    zero_fill_group = 0;
+    for (u32 layout_pass = 0; layout_pass < (global_section_count ? 3u : 2u); layout_pass += 1)
     {
-        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        for (u32 position = 0; position < module->global_count; position += 1)
         {
+            u32 global_index = global_order ? global_order[position] : position;
             IrGlobal* global = module->globals + global_index;
             IrType* type = ir_type_from_id(&program->types, global->type);
-            bool zero_fill = !codegen_global_is_read_only(global) && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+            u32 group = global_groups ? global_groups[global_index] : 0;
+            bool zero_fill = !codegen_global_is_read_only(global) && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
+                             (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
             bool large = type->layout.size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD;
-            if (zero_fill && !global->is_thread_local && large == (layout_pass == 1))
+            bool in_pass = group ? layout_pass == 2 : layout_pass == (large ? 1u : 0u);
+            if (zero_fill && !global->is_thread_local && in_pass)
             {
                 u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
-                u64 remainder = zero_fill_count % global_alignment;
+                u32 layout_alignment = codegen_section_group_alignment(global_alignment, group, &zero_fill_group, group_alignments);
+                u64 remainder = zero_fill_count % layout_alignment;
                 if (remainder)
                 {
-                    zero_fill_count += global_alignment - remainder;
+                    zero_fill_count += layout_alignment - remainder;
                 }
                 zero_fill_offsets[global_index] = zero_fill_count;
                 zero_fill_count += type->layout.size;
@@ -11392,13 +11564,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     u64 writable_count = 0;
     u64 thread_local_count = 0;
     u64 thread_local_zero_count = 0;
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    read_only_group = 0;
+    writable_group = 0;
+    for (u32 position = 0; position < module->global_count; position += 1)
     {
+        u32 global_index = global_order ? global_order[position] : position;
         IrGlobal* global = module->globals + global_index;
         IrType* type = ir_type_from_id(&program->types, global->type);
         u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
         bool read_only = codegen_global_is_read_only(global);
-        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        u32 group = global_groups ? global_groups[global_index] : 0;
+        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO &&
+                         (!group || codegen_section_allows_zero_fill(global_section_names[group - 1]));
         u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : read_only ? read_only_bytes : writable_bytes;
         u32 offset;
         if (zero_fill && !global->is_thread_local)
@@ -11411,15 +11588,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                          : global->is_thread_local ? &thread_local_count
                          : read_only               ? &read_only_count
                                                    : &writable_count;
-            u64 remainder = *count % global_alignment;
+            u32 layout_alignment = global->is_thread_local
+                                       ? global_alignment
+                                       : codegen_section_group_alignment(global_alignment, group, read_only ? &read_only_group : &writable_group,
+                                                                         group_alignments);
+            u64 remainder = *count % layout_alignment;
             if (remainder)
             {
-                *count += global_alignment - remainder;
+                *count += layout_alignment - remainder;
             }
             offset = (u32)*count;
             *count += type->layout.size;
         }
-        result.globals[result.global_count++] = (CodegenModuleGlobal){
+        // Indexed by the IR global, whatever order the layout took.
+        result.globals[global_index] = (CodegenModuleGlobal){
             .symbol = global->symbol,
             .offset = offset,
             .size = (u32)type->layout.size,
@@ -11448,6 +11630,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
     }
+    result.global_count = module->global_count;
     result.read_only_data = (ByteSlice){
         .pointer = read_only_bytes,
         .length = read_only_count,
@@ -11687,8 +11870,62 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     {
         result.fallback_records = arena_allocate(arena, CodegenFallbackRecord, module->function_count);
     }
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    // Requested sections of functions (issue 1276), grouped the way the
+    // globals' are above: every function that names one is emitted after the
+    // module-level assembly, beside the rest of its group, so the named text
+    // is the tail of the code image and nothing ahead of it moves. Null when
+    // no function names a section, which keeps declaration order and the
+    // assembly after the last function.
+    u32* function_order = 0;
+    u32 function_ordinary_count = module->function_count;
     {
+        u32* function_groups = 0;
+        String8* function_section_names = 0;
+        u32 function_section_count = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            IrSymbol* symbol = function->state == IR_FUNCTION_LOWERED ? ir_symbol_from_id(&program->symbols, function->symbol) : 0;
+            String8 section_name = symbol ? symbol->section_name : (String8){0};
+            if (section_name.length && !function_groups)
+            {
+                function_groups = arena_allocate(arena, u32, module->function_count);
+                memset(function_groups, 0, sizeof(*function_groups) * module->function_count);
+                function_section_names = arena_allocate(arena, String8, module->function_count);
+            }
+            if (function_groups)
+            {
+                function_groups[function_index] = codegen_section_group(section_name, function_section_names, &function_section_count);
+            }
+        }
+        if (function_section_count)
+        {
+            u32* group_starts = arena_allocate(arena, u32, function_section_count + 2);
+            memset(group_starts, 0, sizeof(*group_starts) * (function_section_count + 2));
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                group_starts[function_groups[function_index] + 1] += 1;
+            }
+            function_ordinary_count = group_starts[1];
+            for (u32 group = 1; group < function_section_count + 2; group += 1)
+            {
+                group_starts[group] += group_starts[group - 1];
+            }
+            function_order = arena_allocate(arena, u32, module->function_count);
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                function_order[group_starts[function_groups[function_index]]++] = function_index;
+            }
+        }
+    }
+    for (u32 emission = 0; emission < module->function_count; emission += 1)
+    {
+        u32 function_index = function_order ? function_order[emission] : emission;
+        if (emission == function_ordinary_count &&
+            !codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity, &x64_metadata_cache_tried))
+        {
+            return result;
+        }
         IrFunction* function = module->functions + function_index;
         result.failed_function = (IrFunctionId){
             .value = function_index,
@@ -12363,10 +12600,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     MachineEncodeResult encoded;
 
+                    // The encoder writes where the function will live when
+                    // its worst-case budget fits what the code buffer has
+                    // left, which leaves nothing to copy below; a failed or
+                    // abandoned encoding there is overwritten by whatever
+                    // this position receives instead.
+                    u8* code_destination = buffer.bytes + buffer.count;
+                    u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
                     switch (target.cpu_arch)
                     {
-                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement);
-                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_scratch.arena, &selected.function, &placement,
+                                                                                           code_destination, code_remaining);
+                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_scratch.arena, &selected.function, &placement,
+                                                                                         code_destination, code_remaining);
                         break; default: BUSTER_TODO();
                     }
 
@@ -12542,7 +12788,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            bool machine_code_in_place = encoded.bytes == code_destination;
+                            if (!machine_code_in_place)
+                            {
+                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
+                            }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -12623,6 +12873,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 buffer.count += encoded.byte_count;
+                                result.statistics.machine_code_bytes_in_place += machine_code_in_place ? encoded.byte_count : 0;
+                                result.statistics.machine_code_bytes_copied += machine_code_in_place ? 0 : encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
@@ -12721,7 +12973,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            bool machine_code_in_place = encoded.bytes == code_destination;
+                            if (!machine_code_in_place)
+                            {
+                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
+                            }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -12812,6 +13068,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 buffer.count += encoded.byte_count;
+                                result.statistics.machine_code_bytes_in_place += machine_code_in_place ? encoded.byte_count : 0;
+                                result.statistics.machine_code_bytes_copied += machine_code_in_place ? 0 : encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
@@ -23730,36 +23988,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
     }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && module->assembly_count)
+    // A module whose functions name no section places its assembly here,
+    // after every function; otherwise the assembly already went in before
+    // the first function that does.
+    if (!function_order && !codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity,
+                                                         &x64_metadata_cache_tried))
     {
-        codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
+        return result;
     }
-    u32 assembly_function_begin = result.function_count;
-    for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
-    {
-        u32 failed_line = 0;
-        if (!codegen_emit_global_assembly(arena, program, module->assemblies[assembly_index], target, options, &buffer, &result, relocation_capacity,
-                                           &failed_line))
-        {
-            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-            result.failed_in_assembly = true;
-            result.failed_assembly = assembly_index;
-            result.failed_assembly_line = failed_line;
-            return result;
-        }
-    }
-    while (result.function_count < result.entry_count)
-    {
-        u32 function_index = result.function_count;
-        CodegenModuleEntry* entry = result.entries + function_index;
-        u32 end = function_index + 1 < result.entry_count ? result.entries[function_index + 1].offset : (u32)buffer.count;
-        result.functions[result.function_count++] = (CodegenFunctionDescriptor){
-            .symbol = entry->symbol,
-            .code_offset = entry->offset,
-            .code_size = end - entry->offset,
-        };
-    }
-    result.assembly_function_count = result.function_count - assembly_function_begin;
     result.code = (ByteSlice){
         .pointer = buffer.bytes,
         .length = buffer.count,
