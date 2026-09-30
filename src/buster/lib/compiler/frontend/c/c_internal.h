@@ -12,11 +12,24 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+// Diagnostic rows reserved before any diagnostic exists, by the stage that
+// reserves them (LEX, PREPROCESS, SEMANTIC, EVALUATION, LOWERING), for the
+// allocation diagnostic build's census; normal builds evaluate nothing.
+#define C_DIAGNOSTIC_RESERVATION_CENSUS(stage, rows)                                                 \
+    do                                                                                               \
+    {                                                                                                \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_RESERVATIONS, 1);                                   \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_ROWS_RESERVED, (rows));                             \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_BYTES_RESERVED, (u64)(rows) * sizeof(CDiagnostic)); \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_##stage##_ROWS, (rows));                            \
+    } while (0)
 
 #if BUSTER_SIMD_512 && !defined(__BUSTER__)
 #define BUSTER_C_LEX_COMPACT 1
@@ -293,7 +306,7 @@ BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
 #define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
 #endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
-                                             CParseResult checkpoint, u32 mutation_mark);
+                                             CParseResult const* checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
 BUSTER_C_EXTERN bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end);
 BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess,
@@ -432,6 +445,7 @@ BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
+BUSTER_C_EXTERN CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,
                                                                      IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
@@ -857,8 +871,13 @@ struct CParseExpressionTypeTask
 struct CTypeParseFrame
 {
     CParseResult* result;
-    CParseResult checkpoint;
-    CPreprocessResult preprocess;
+    // The token stream of the root query that pushed this frame, shared by
+    // every frame of one machine run: the root outlives the run, which pops
+    // its frames before returning or failing, so no frame holds a copy. A
+    // frame that saves a rollback snapshot keeps it in the machine's
+    // frame_checkpoints row of the same slot, not in the frame, because few
+    // frames ever take one and every push copies the whole row.
+    CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
     CType qualifiers;
@@ -981,6 +1000,11 @@ struct CTypeParseMachine
     u32 expression_query_start;
     u32 expression_query_end;
     CTypeParseFrame* frames;
+    // One rollback snapshot per frame slot, written only by the frame kinds
+    // that can abandon a partial parse (aggregate segments and typeof/_Atomic
+    // operands) and read back only by that frame; see
+    // c_type_parse_frame_checkpoint.
+    CParseResult* frame_checkpoints;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
     CTypeId* incomplete_array_chain;
