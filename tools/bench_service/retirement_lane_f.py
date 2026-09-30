@@ -52,7 +52,8 @@ Map: ``evidence_name`` and ``evidence_layout`` (flat evidence names),
 ``composed_state`` (composed record, sealed closure), ``write_bundle`` and
 ``bundle_digest`` (the deterministic archive), ``adapter_replay``,
 ``rename_noreplace``, ``bind``, ``copy_result``, ``profile_validator_pin``,
-``validator_closure``, ``install_validator``, ``replay_lane_f``, ``main``.
+``validator_closure``, ``install_validator``, ``validator_environment``,
+``replay_lane_f``, ``main``.
 """
 
 import argparse
@@ -238,6 +239,8 @@ def evidence_layout(result, record):
             claimed[flat] = path
             entries.append({"evidence": flat, "path": path, "bytes": size, "sha256": sha256})
         elif direct and path.startswith(EVIDENCE_PREFIX):
+            if path in claimed:
+                fail(f"evidence {path} is named by both {claimed[path]} and {path}")
             claimed[path] = path
     unmapped = sorted(name for name in names if name.startswith(EVIDENCE_PREFIX) and name not in claimed)
     if unmapped:
@@ -732,6 +735,17 @@ def normalise(text, replacements):
     return text
 
 
+def validator_environment(prefix):
+    """The validator's minimal environment. ``-I`` covers only the validator
+    itself; the #508 validator it runs as ``[sys.executable, script]``
+    inherits this environment, so it disables the user site (no
+    ``usercustomize`` or user ``.pth`` file) and bytecode writes there too.
+    PYTHONSAFEPATH is not set: that subprocess imports its siblings from its
+    own (installed, verified) directory."""
+    return {"PATH": os.environ.get("PATH", ""), "LANG": "C", "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(prefix)}
+
+
 def replay_lane_f(result, lane_f, clean, repository_root, trusted_sha256, validator, validator_sha256,
                   closure_sha256, verdict_path):
     """Run the pinned validator closure over RESULT and lane F's directory in
@@ -782,8 +796,7 @@ def replay_lane_f(result, lane_f, clean, repository_root, trusted_sha256, valida
              "--evidence-root", str(evidence), "--repository-root", str(repository),
              "--trusted-execution-receipt-sha256", trusted_sha256],
             check=False, capture_output=True, text=True, cwd=evidence, timeout=REPLAY_TIMEOUT,
-            env={"PATH": os.environ.get("PATH", ""), "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1",
-                 "PYTHONPYCACHEPREFIX": str(prefix)})
+            env=validator_environment(prefix))
         if process.returncode == 0:
             try:
                 output = json.loads(process.stdout)

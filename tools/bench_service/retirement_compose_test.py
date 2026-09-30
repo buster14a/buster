@@ -1085,7 +1085,11 @@ class LaneFWriterEndToEndTests(unittest.TestCase):
     (`lane_f_import`, `final_binding_check`); the unchanged validator then
     accepts the final binding with bundle_checked on both series shard sizes,
     and every tamper case of test_composed_sealed_result_validates still
-    fails."""
+    fails. It runs through _compose_and_validate with that fixture's own
+    doubles: _check_support_output and _population are replaced (the fixture
+    census is not the approved #508 declaration) and no repository_root is
+    given, so the proof is evidence-and-receipts-checked-without-independent-git,
+    not a complete independent replay."""
 
     @staticmethod
     def _writer(record, evidence, composed, calls):

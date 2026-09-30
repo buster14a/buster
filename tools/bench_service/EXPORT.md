@@ -222,8 +222,9 @@ python3 tools/bench_service/retirement_lane_f.py replay /private/new-result /pri
   `P` with each `/` written `--` (`evidence_name`), and `replay` moves it
   back to `P` in its clean copy for the validator (`evidence_layout`). The
   mapping is derived from the record's `{path, bytes, sha256}` descriptors
-  only. A path present both at `P` and flat, two paths with one flat name, or
-  a `retirement-evidence-*` entry that no descriptor names is refused. A
+  only. A path present both at `P` and flat, two paths with one flat name
+  (including a descriptor naming the flat file itself beside `P`), or a
+  `retirement-evidence-*` entry that no descriptor names is refused. A
   descriptor with neither is left for the validator to refuse.
 - `bundle` checks every file the sealed result's seal enumerates against its
   descriptor and the seal root, then writes the independent-replay archive:
@@ -279,8 +280,10 @@ python3 tools/bench_service/retirement_lane_f.py replay /private/new-result /pri
   - The verified bytes are written into a private directory with no bytecode
     cache. The validator runs from there with `python -I -B`, an empty
     private `-X pycache_prefix`, `PYTHONDONTWRITEBYTECODE` and a minimal
-    environment. An edited sibling module or a planted `__pycache__` file in
-    the checkout therefore cannot run.
+    environment. The environment also sets `PYTHONNOUSERSITE`, because the
+    #508 validator subprocess inherits it without `-I`; no user-site
+    `usercustomize` or `.pth` file runs there. An edited sibling module or a
+    planted `__pycache__` file in the checkout therefore cannot run.
   - `replay` then copies the result into a new clean directory (links and
     special files are refused), imports the lane F directory there
     (`lane_f_import`), checks the final binding, lays out the flat evidence

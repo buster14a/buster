@@ -788,6 +788,18 @@ class LaneFWriterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "named by both"):
             lane_f.evidence_layout(self.result, colliding)
         (self.result / "retirement-evidence-docs--x--y.md").unlink()
+        # One flat file named both flat and by its path, in either sort order.
+        for path in ("docs/contract.md", "z/contract.md"):
+            flat = lane_f.evidence_name(path)
+            both = json.loads(json.dumps(self.composed))
+            both["support"] = {"path_form": dict(source, path=path), "flat_form": dict(source, path=flat)}
+            if path != "docs/contract.md":
+                (self.result / flat).write_bytes(b"contract\n")
+            self.assertEqual(sorted([path, flat])[0] == path, path == "docs/contract.md")
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "named by both"):
+                lane_f.evidence_layout(self.result, both)
+            if path != "docs/contract.md":
+                (self.result / flat).unlink()
         # One path with different bytes, and a path present both ways.
         conflict = json.loads(json.dumps(self.composed))
         conflict["other"] = dict(self.composed["contract"]["source"], sha256="0" * 64)
@@ -887,6 +899,15 @@ class LaneFWriterTest(unittest.TestCase):
         self.assertNotIn(str(self.root), verdict["refusal"])
         self.assertEqual(list((self.root / "clean").rglob("__pycache__")), [])
 
+    def test_validator_environment_disables_the_user_site(self):
+        """The #508 validator subprocess inherits this environment without
+        -I: it must not load a user site (usercustomize or .pth files)."""
+        probe = subprocess.run([sys.executable, "-c", "import site, sys; print(site.ENABLE_USER_SITE, "
+                                "sys.flags.no_user_site, sys.dont_write_bytecode)"],
+                               env=lane_f.validator_environment(self.root / "bytecode"),
+                               check=True, capture_output=True, text=True)
+        self.assertEqual(probe.stdout.split(), ["False", "1", "True"])
+
     def test_replay_records_lane_f_refusals_and_lays_out_evidence(self):
         self.bind("lane-f")
         pins = self.pins(self.fake_repository())
@@ -895,6 +916,7 @@ class LaneFWriterTest(unittest.TestCase):
         runner.assert_called_once()
         command = runner.call_args.args[0]
         self.assertEqual(command[1:3], ["-I", "-B"])
+        self.assertEqual(runner.call_args.kwargs["env"]["PYTHONNOUSERSITE"], "1")
         self.assertEqual(verdict["refusal"], "ValueError: stub validator refusal")
         self.assertEqual(verdict["evidence_layout"]["entries"], 1)
         evidence = self.root / "laid-out" / "result"
