@@ -11745,6 +11745,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTest
                                 BUSTER_TEST(arguments, !anchor.global && !anchor.weak && anchor.value == 0);
                                 BUSTER_TEST(arguments, anchor.section < compiled.object.section_count &&
                                                            compiled.object.sections[anchor.section].kind == OBJECT_SECTION_TEXT);
+                                if (BUSTER_REQUIRE(arguments, cfi_count < 3))
+                                {
+                                    ObjectSymbol function = compiled.object.symbols[cfi_count];
+                                    BUSTER_TEST(arguments, anchor.section == function.section && relocation.addend == (s64)function.value);
+                                }
                                 named_anchor |= string_equal(anchor.name, S8("buster_unwind_text"));
                                 cfi_count += 1;
                             }
@@ -11758,11 +11763,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTest
                             String8 host_object = buster_test_temporary_path(row_arena, S8("buster-weak-unwind-host"), S8(".o"));
                             String8 host_body = string_format(row_arena,
                                                               S8("extern int backtrace(void**, int);\nextern int run_hook(void);\nvolatile int observed;\n"
-                                                                 "void hook(void) { void* frames[32]; int count = backtrace(frames, 32);\n"
+                                                                 "void hook(void) {{ void* frames[32]; int count = backtrace(frames, 32);\n"
                                                                  "  unsigned long begin = (unsigned long)&run_hook;\n"
-                                                                 "  for (int i = 0; i < count; i++) { unsigned long pc = (unsigned long)frames[i];\n"
+                                                                 "  for (int i = 0; i < count; i++) {{ unsigned long pc = (unsigned long)frames[i];\n"
                                                                  "    if (pc > begin && pc - begin < {u64}) observed = 1; }\n}\n"
-                                                                 "int main(void) { return run_hook() == 13 && observed ? 0 : 1; }\n"),
+                                                                 "int main(void) {{ return run_hook() == 13 && observed ? 0 : 1; }\n"),
                                                               caller_size);
                             String8 host_command[12];
                             u32 host_count = 0;

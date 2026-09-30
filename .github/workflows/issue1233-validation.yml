@@ -2,6 +2,9 @@ name: Issue 1233 hosted correctness
 on:
   push:
     branches: [codex/1233-unwind-validation]
+concurrency:
+  group: issue-1233-hosted-correctness
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -17,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ed7a4336f12da29a47e93208ad1598b4c1b44ef4
+          ref: 725dd41ba79b08e7bfc4e1a80a830cdfbce37494
           fetch-depth: 0
       - name: Independent linker
         run: |
