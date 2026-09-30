@@ -1401,20 +1401,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
         run: python3 -B tools/main_ci_reuse.py finish --expected-digest "$SOURCE_RECEIPT_DIGEST" --output "$RUNNER_TEMP/main-ci-reuse-finish.json"
-      - name: Retain queue-to-main reuse receipt
-        if: ${{ always() && needs.reuse.outputs.reuse == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/main-ci-reuse-finish.json
-          if-no-files-found: ignore
-          retention-days: 7
       - name: Retain desktop partition inventory
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/desktop-partitions.json
+          # A reused main run retains its queue-to-main receipt here instead.
+          path: |
+            ${{ runner.temp }}/desktop-partitions.json
+            ${{ runner.temp }}/main-ci-reuse-finish.json
           if-no-files-found: ignore
           retention-days: 7
       - name: Require every shard

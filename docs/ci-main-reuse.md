@@ -54,7 +54,8 @@ rechecks the source evidence and receipt digest, validates the retained main
 jobs and their steps, and requires the three skipped job groups. A source
 rerun or missing proof at this point fails `CI complete`; it never converts
 missing execution into green. The receipt is retained as
-`main-ci-reuse-<run>-<attempt>` with source run/job/artifact IDs and the
+`main-ci-reuse-finish.json` inside `desktop-partitions-<run>-<attempt>`,
+with source run/job/artifact IDs and the
 current main job inventory. No candidate-controlled code has publication
 authority, no cross-event cancellation key is shared, and no check is forged.
 
