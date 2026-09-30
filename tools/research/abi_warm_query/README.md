@@ -33,6 +33,10 @@ python3 candidate/tools/research/abi_warm_query/compare_service.py \
 The runner pins itself and its children to one permitted CPU, alternates order
 for 12 pairs per trace, and retains all 48 rows. This reduces migration noise;
 it does not isolate a shared hosted VM or establish a Zen 5 result.
+The historical replay leaves `BUSTER_OPTIMIZE=0` at its default even with
+host `-O3`; its inline hints therefore differ from normal Release builds.
+Keep this macro identical between service subjects. The whole-compiler
+comparison below uses normal Release configuration in both checkouts.
 For ASan/UBSan use `-O1 -fsanitize=address,undefined
 -fno-omit-frame-pointer` instead of `-O3 -march=native`, then run both traces.
 
@@ -48,7 +52,9 @@ python3 candidate/tools/research/abi_warm_query/compare_compiler.py \
 It performs one warmup pair and six alternating measured pairs on the baseline
 unity source and its generated headers, records exact argv, binary/output
 hashes, fresh-process wall/user time and peak RSS, and requires identical object
-bytes. It keeps failed attempts and diagnostics. It does not compare compilation
+bytes. It keeps failed attempts and diagnostics. Both subjects use `-march=native`;
+`-march=baseline` cannot compile this unity input while
+[#1487](https://github.com/buster14a/buster/issues/1487) remains unresolved. It does not compare compilation
 of each version's own changed source. `/usr/bin/time` has 0.01-second elapsed
 resolution. Service ns/query and complete compilation seconds have different
 denominators; never infer the latter from the former.
