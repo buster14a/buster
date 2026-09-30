@@ -45566,12 +45566,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
             {
                 continue;
             }
-            if (!is_constexpr && !global->is_read_only)
-            {
-                return false;
-            }
             IrType* type = ir_type_from_id(&builder->program->types, global->type);
-            if (!type || type->is_volatile || type->is_atomic)
+            if ((!is_constexpr && !global->is_read_only) || !type || type->is_volatile || type->is_atomic)
             {
                 return false;
             }
@@ -46946,7 +46942,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         }
         if (left_known)
         {
-            if ((operation == C_CONDITIONAL_LOGICAL_AND && left_truth == C_IR_CONSTANT_TRUTH_FALSE) || (operation == C_CONDITIONAL_LOGICAL_OR && left_truth == C_IR_CONSTANT_TRUTH_TRUE))
+            if ((operation == C_CONDITIONAL_LOGICAL_AND && left_truth == C_IR_CONSTANT_TRUTH_FALSE) ||
+                (operation == C_CONDITIONAL_LOGICAL_OR && left_truth == C_IR_CONSTANT_TRUTH_TRUE))
             {
                 *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_LOGICAL_OR);
                 return true;
@@ -46954,7 +46951,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         }
         if (right_known)
         {
-            if ((operation == C_CONDITIONAL_LOGICAL_AND && right_truth == C_IR_CONSTANT_TRUTH_FALSE) || (operation == C_CONDITIONAL_LOGICAL_OR && right_truth == C_IR_CONSTANT_TRUTH_TRUE))
+            if ((operation == C_CONDITIONAL_LOGICAL_AND && right_truth == C_IR_CONSTANT_TRUTH_FALSE) ||
+                (operation == C_CONDITIONAL_LOGICAL_OR && right_truth == C_IR_CONSTANT_TRUTH_TRUE))
             {
                 *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_LOGICAL_OR);
                 return true;
