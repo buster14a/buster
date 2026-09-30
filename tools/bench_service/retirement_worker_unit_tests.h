@@ -1960,6 +1960,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         .broker_workspaces = fixture ? fixture->workspaces : NULL, .candidate_uid = geteuid(),
         .adapter = bq_prep_worker_unit_self, .supplied = &observed};
     if (ok) bq_prep_worker_unit_profiles(fixture->profile);
+    bq_prep_test_timing("worker-unit-setup");
 
     /* (b) and (a): refused with the compiled profile, then, through the real
      * coordinator path, the ready record, SETTLING, MEASURING, A/A (every
@@ -1980,6 +1981,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
         BqPrepWorkerUnitComposed* composed = calloc(1, sizeof(*composed));
         u64 started = bq_worker_monotonic_milliseconds();
         if (composed) bq_prep_worker_unit_coordinate(fixture, attempt, &seams, BQ_PREP_WORKER_UNIT_MILLISECONDS, composed);
+        bq_prep_test_timing("job-82-measured");
         BqPrepWorkerUnitFailure failure = bq_prep_worker_unit_failure(attempt->attempt);
         if (failure.present)
             fprintf(stderr, "RETIREMENT_PREP worker-unit campaign stopped at stage %lld step %lld sequence %lld "
@@ -2008,6 +2010,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
          * derivation (M1). */
         BQ_PREP_CHECK(measured && bq_worker_retirement_finalize(&fixture->queue, queued, &composed->finalization) ==
                                   BQ_OK);
+        bq_prep_test_timing("job-82-finalized");
         /* The result root: all five documents at exactly the sizes retained
          * before timing, the post-sample record and every stream kind of
          * both stages published unchanged, every composer output, the
@@ -2051,17 +2054,22 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
              * binding writer's refusals and the result's refusals. */
             bq_prep_worker_unit_bound(fixture, attempt, &seams, composed);
             BQ_PREP_CHECK(bq_prep_worker_unit_export(fixture, composed, &attempt->job));
+            bq_prep_test_timing("job-82-bound-exported");
             bq_prep_worker_unit_derivation(fixture, attempt, &seams, composed);
+            bq_prep_test_timing("job-82-derivation");
             BqRetirementUnitReplayed replayed = {0};
             BQ_PREP_CHECK(bq_retirement_coordinator_replay(&seams, string_from_pointer(fixture->workspaces),
                               attempt->job.id, attempt->job.token, attempt->digest,
                               composed->finalization.retirement_ready_sha256, &replayed) == BQ_OK);
             if (replayed.kept) bq_prep_worker_unit_binding_refusals(fixture, &seams, &replayed);
             BQ_PREP_CHECK(bq_retirement_unit_replayed_release(&replayed));
+            bq_prep_test_timing("job-82-binding-refusals");
             bq_prep_worker_unit_result_refusals(fixture, attempt, composed);
+            bq_prep_test_timing("job-82-result-refusals");
             /* #881 PR 4: the coordinator's side over the digests the channel
              * carried. */
             bq_prep_worker_unit_coordinator(fixture, attempt, &seams, composed);
+            bq_prep_test_timing("job-82-coordinator");
         }
         if (composed) bq_prep_worker_unit_composed_close(fixture, composed);
         free(composed);
@@ -2126,6 +2134,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                           failure.sequence < (long long)compile_launches && gone);
         }
         if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
+        char section[32];
+        snprintf(section, sizeof(section), "job-%" PRIu64, (uint64_t)campaign_jobs[index]);
+        bq_prep_test_timing(section);
     }
 
     /* (c) and (d): SIGTERM to the unit, a failing stage and a killed
@@ -2177,6 +2188,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
             if (escaped > 1 && !gone) kill(escaped, SIGKILL);
         }
         if (started) BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(attempt));
+        char section[32];
+        snprintf(section, sizeof(section), "job-%" PRIu64, (uint64_t)jobs[index]);
+        bq_prep_test_timing(section);
     }
     bq_retirement_row_observed_release(&observed);
     if (row_plan.owned) BQ_PREP_CHECK(bq_retirement_row_plan_release(&row_plan));

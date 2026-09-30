@@ -31,6 +31,20 @@ BUSTER_GLOBAL_LOCAL u32 bq_retirement_failures;
     bq_retirement_failures += 1; fprintf(stderr, "RETIREMENT_PREP failure line=%d: %s\n", __LINE__, #expr); \
 } } while (0)
 
+/* The wall time of each fixture section, for CI's time budget: the section's
+ * milliseconds since the previous mark and since the first. */
+BUSTER_GLOBAL_LOCAL u64 bq_prep_timing_first, bq_prep_timing_last;
+BUSTER_GLOBAL_LOCAL void bq_prep_test_timing(char const* section)
+{
+    struct timespec now = {0};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    u64 ms = (u64)now.tv_sec * 1000u + (u64)now.tv_nsec / 1000000u;
+    if (!bq_prep_timing_first) bq_prep_timing_first = bq_prep_timing_last = ms;
+    fprintf(stderr, "RETIREMENT_PREP_TIMING %s ms=%" PRIu64 " total_ms=%" PRIu64 "\n", section,
+            (uint64_t)(ms - bq_prep_timing_last), (uint64_t)(ms - bq_prep_timing_first));
+    bq_prep_timing_last = ms;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_write(char const* path, char const* text)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
@@ -3285,15 +3299,22 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 /* Every fixture of this runner (the default mode). */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_suite(void)
 {
+    bq_prep_test_timing("start");
     bq_test_worker_budget_crosscheck();
     bq_check_test_runner();
+    bq_prep_test_timing("check-runner");
     bq_row_test_runner();
+    bq_prep_test_timing("row-runner");
     bq_prep_test_support_population();
     bq_prep_test_raw_census_boundary();
+    bq_prep_test_timing("population");
     bq_prep_test_unit_oracle();
+    bq_prep_test_timing("unit-oracle");
     bq_prep_test_unit_campaign();
+    bq_prep_test_timing("unit-campaign");
     bq_prep_test_worker_store_plan();
     bq_prep_test_worker_unit();
+    bq_prep_test_timing("worker-unit");
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};
     BqRequest request = {0};
@@ -3481,7 +3502,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_suite(void)
         bq_prep_test_cleanup(workspaces);
         bq_prep_test_cleanup(installed);
     }
+    bq_prep_test_timing("preflight");
     bq_prep_test_large_manifest();
+    bq_prep_test_timing("large-manifest");
 }
 
 /* Modes: no argument runs every fixture; `worker-unit` runs only the
