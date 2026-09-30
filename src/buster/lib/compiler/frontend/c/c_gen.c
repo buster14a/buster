@@ -12933,32 +12933,47 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* buil
     return result;
 }
 
+// __func__ and its GNU forms: an ordinary narrow literal holding the
+// function's name. The lexer admits no backslash in an identifier, and the
+// narrow decoder copies every other byte through unchanged, so a
+// backslash-free name already is the decoded contents: describe it in place
+// and let c_ir_emit_string_contents_typed copy it into the owned global, with
+// no quoted copy and no decode buffer. A name that does hold a backslash
+// keeps the quoted round-trip and its escape grammar.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, CToken token)
 {
-    // The quoted name lives outside the spelling space, so decode it through
-    // a detached one-token view; the original token keeps carrying the
-    // source range.
-    String8 quoted = string_format(builder->arena, S8("\"{S8}\""), builder->function->name);
-    CToken quoted_token = {
-        .length = c_token_length_field(quoted.length),
-        .kind = C_TOKEN_STRING_LITERAL,
+    String8 name = builder->function->name;
+    CIrDecodedString decoded = {
+        .bytes =
+            {
+                .pointer = (u8*)name.pointer,
+                .length = name.length,
+            },
+        .element_count = name.length,
+        .element_width = 1,
+        .element_kind = C_TYPE_CHAR,
+        .encoding = C_IR_STRING_ENCODING_ORDINARY,
     };
-    CPreprocessResult quoted_preprocess = {
-        .tokens = &quoted_token,
-        .spelling_base = quoted.pointer,
-        .token_count = 1,
-        .dialect = builder->preprocess.dialect,
-    };
-    CIrDecodedString decoded = {0};
-    IrValueId result;
-    if (!c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, &decoded))
+    bool described = true;
+    if (string_first_code_unit(name, '\\') != BUSTER_STRING_NO_MATCH)
     {
-        result = IR_VALUE_ID_INVALID;
+        // The quoted name lives outside the spelling space, so decode it
+        // through a detached one-token view; the original token keeps
+        // carrying the source range.
+        String8 quoted = string_format(builder->arena, S8("\"{S8}\""), name);
+        CToken quoted_token = {
+            .length = c_token_length_field(quoted.length),
+            .kind = C_TOKEN_STRING_LITERAL,
+        };
+        CPreprocessResult quoted_preprocess = {
+            .tokens = &quoted_token,
+            .spelling_base = quoted.pointer,
+            .token_count = 1,
+            .dialect = builder->preprocess.dialect,
+        };
+        described = c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, &decoded);
     }
-    else
-    {
-        result = c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID);
-    }
+    IrValueId result = described ? c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID) : IR_VALUE_ID_INVALID;
 
     return result;
 }
