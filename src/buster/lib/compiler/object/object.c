@@ -79,6 +79,10 @@
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
 //                                                  in ObjectWriteStatistics
+//   object_write_borrowing,                        the -c form: the planned
+//   object_artifact_slices                         ELF image names large
+//                                                  payloads in place instead
+//                                                  of copying them
 
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/object/object_internal.h>
@@ -740,6 +744,7 @@ void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatis
     total->image_bytes_zeroed += unit->image_bytes_zeroed;
     total->image_bytes_patched += unit->image_bytes_patched;
     total->payload_bytes_copied += unit->payload_bytes_copied;
+    total->payload_bytes_borrowed += unit->payload_bytes_borrowed;
     total->scratch_bytes += unit->scratch_bytes;
     total->retained_bytes += unit->retained_bytes;
     total->output_bytes += unit->output_bytes;
@@ -12044,6 +12049,22 @@ BUSTER_GLOBAL_LOCAL void object_image_zero_to(ObjectImageRange* range, u64 offse
     }
 }
 
+// A payload the image names in place instead of storing: the range stays
+// reserved but unwritten, so its pages are never touched, and the file writer
+// takes the section's own bytes for it (object_artifact_slices).
+BUSTER_GLOBAL_LOCAL void object_image_borrow(ObjectImageRange* range, u64 size)
+{
+    if (range->valid && size > range->end - range->position)
+    {
+        range->valid = false;
+    }
+    else if (range->valid)
+    {
+        range->position += size;
+        range->statistics->payload_bytes_borrowed += size;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void object_image_u8(ObjectImageRange* range, u8 value)
 {
     object_image_store(range, &value, sizeof(value));
@@ -12325,8 +12346,20 @@ BUSTER_GLOBAL_LOCAL void object_elf64_section_header(ObjectImageRange* range, u3
 // ELF index for the relocations, and `relocation_ranges` holds one cursor per
 // input section; both are scratch sized by the plan. Each relocation is
 // placed by `moves` as it is written, as the plan placed it when counting.
+// A payload this large costs more to copy and fault into the image than to
+// hand to the file writer as one more write.
+#define OBJECT_BORROWED_PAYLOAD_MINIMUM 4096
+
+BUSTER_GLOBAL_LOCAL bool object_elf64_payload_borrowable(ObjectSection const* section)
+{
+    return !object_section_kind_is_zero_fill(section->kind) && section->data.length >= OBJECT_BORROWED_PAYLOAD_MINIMUM;
+}
+
+// `borrowed` is null unless the caller borrows payloads; it then has room for
+// every borrowable payload, which the emitter records in file order.
 BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
-                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectWriteStatistics* statistics)
+                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectBorrowedPayload* borrowed,
+                                           u32* borrowed_count, ObjectWriteStatistics* statistics)
 {
     u32 input_count = object->section_count;
     u64 symbol_table = plan->offsets[plan->symbol_section];
@@ -12372,7 +12405,15 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
         object_image_zero_to(&payloads, plan->offsets[section + 1]);
-        if (!object_section_kind_is_zero_fill(source->kind))
+        if (borrowed && object_elf64_payload_borrowable(source))
+        {
+            borrowed[(*borrowed_count)++] = (ObjectBorrowedPayload){
+                .offset = payloads.position,
+                .bytes = source->data,
+            };
+            object_image_borrow(&payloads, source->data.length);
+        }
+        else if (!object_section_kind_is_zero_fill(source->kind))
         {
             object_image_store(&payloads, source->data.pointer, source->data.length);
             statistics->payload_bytes_copied += source->data.length;
@@ -12513,13 +12554,19 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+// With `borrow_payloads`, each payload of at least
+// OBJECT_BORROWED_PAYLOAD_MINIMUM bytes is named in place (object_image_borrow)
+// rather than copied. The split's payloads are ranges of `object`'s own, so
+// they outlive this call's scratch arena; the borrowed table lives in `arena`
+// with the image, and only when some payload qualifies.
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, bool borrow_payloads, ObjectWriteStatistics* statistics)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
     // The plan, its tables and the priority split live only as long as this
-    // call; the image is the one allocation the caller's arena keeps.
+    // call; the caller's arena keeps the image and, when payloads are
+    // borrowed, their table.
     Arena* conflicts[] = {
         arena,
     };
@@ -12545,17 +12592,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         result.error =
             symbol_indices && relocation_ranges && object_reader_arena_can_allocate_bytes(arena, plan.size, 1) ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
+    u32 borrowable_count = 0;
+    for (u32 section = 0; borrow_payloads && result.error == OBJECT_ERROR_NONE && section < split_object.section_count; section += 1)
+    {
+        statistics->section_visits += 1;
+        borrowable_count += object_elf64_payload_borrowable(split_object.sections + section);
+    }
+    if (borrowable_count && !object_reader_arena_can_allocate_bytes(arena, (u64)borrowable_count * sizeof(ObjectBorrowedPayload) + plan.size,
+                                                                     BUSTER_ALIGN_OF(ObjectBorrowedPayload)))
+    {
+        result.error = OBJECT_ERROR_CAPACITY;
+    }
     if (result.error == OBJECT_ERROR_NONE)
     {
         u64 image_position = arena->position;
+        ObjectBorrowedPayload* borrowed = borrowable_count ? arena_allocate(arena, ObjectBorrowedPayload, borrowable_count) : 0;
+        u32 borrowed_count = 0;
         u8* image = arena_allocate(arena, u8, plan.size);
         statistics->image_bytes_reserved += plan.size;
-        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, statistics))
+        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, borrowed, &borrowed_count, statistics) &&
+            borrowed_count == borrowable_count)
         {
             result.bytes = (ByteSlice){
                 .pointer = image,
                 .length = plan.size,
             };
+            result.borrowed_payloads = borrowed;
+            result.borrowed_payload_count = borrowed_count;
         }
         else
         {
@@ -13773,8 +13836,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 }
 
 // Validates the object for `format` and dispatches to its writer. `reference`
-// selects the pre-plan ELF64 writer, which exists only in test builds.
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference)
+// selects the pre-plan ELF64 writer, which exists only in test builds;
+// `borrow_payloads` lets the planned ELF64 writer name large payloads in
+// place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference, bool borrow_payloads)
 {
     ObjectArtifact result = {
         .format = format,
@@ -14003,7 +14068,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 #endif
     if (format == OBJECT_FORMAT_ELF64)
     {
-        result = object_write_elf64(arena, object, &statistics);
+        result = object_write_elf64(arena, object, borrow_payloads, &statistics);
     }
     else if (format == OBJECT_FORMAT_COFF)
     {
@@ -14014,7 +14079,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         result = object_write_mach_o64(arena, object, &statistics);
     }
     // Whatever the writer took from the caller's arena beyond the image it
-    // reserved is scratch left behind; the planned writer takes none.
+    // reserved is scratch left behind; the planned writer takes none except
+    // a borrowing write's table of borrowed payloads.
     statistics.retained_bytes = arena->position - arena_start;
     statistics.scratch_bytes += statistics.retained_bytes - statistics.image_bytes_reserved;
     statistics.output_bytes = result.error == OBJECT_ERROR_NONE ? result.bytes.length : 0;
@@ -14024,13 +14090,48 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false);
+    return object_write_core(arena, object, format, false, false);
+}
+
+// The file-output form of object_write. Only an ELF image currently borrows
+// its section payloads; COFF and Mach-O images stay contiguous, so their
+// artifacts carry no borrowed ranges and yield one slice.
+ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format)
+{
+    return object_write_core(arena, object, format, false, true);
+}
+
+// The artifact's file in order: the image's own ranges interleaved with the
+// borrowed payloads, which ascend by offset because the writer placed them.
+// Empty image ranges are omitted; a contiguous artifact is one slice.
+ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out)
+{
+    u32 capacity = artifact.borrowed_payload_count * 2 + 1;
+    ByteSlice* slices = arena_allocate(arena, ByteSlice, capacity);
+    u32 count = 0;
+    u64 cursor = 0;
+    for (u32 index = 0; index < artifact.borrowed_payload_count; index += 1)
+    {
+        ObjectBorrowedPayload payload = artifact.borrowed_payloads[index];
+        if (payload.offset > cursor)
+        {
+            slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = payload.offset - cursor};
+        }
+        slices[count++] = payload.bytes;
+        cursor = payload.offset + payload.bytes.length;
+    }
+    if (artifact.bytes.length > cursor)
+    {
+        slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = artifact.bytes.length - cursor};
+    }
+    *slice_count_out = count;
+    return slices;
 }
 
 #if BUSTER_INCLUDE_TESTS
 ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* object)
 {
-    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true);
+    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true, false);
 }
 
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
