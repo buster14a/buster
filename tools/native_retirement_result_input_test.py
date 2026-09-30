@@ -384,6 +384,94 @@ class ResultInputTests(unittest.TestCase):
                 evidence.rename(self.root)
                 parent.rmdir()
 
+    def test_unrelated_ancestor_activity_during_verification_is_accepted(self):
+        # #2085: unrelated processes create and remove entries in shared
+        # ancestors such as /tmp, and may chmod or chown them in place, while
+        # verification holds them. None of that renames or replaces one. The
+        # activity runs at every record and after each shard, and leaves a net
+        # link-count change in both ancestors.
+        parent = self.root.parent / (self.root.name + "-ancestor")
+        parent.mkdir(mode=0o700)
+        evidence = parent / "evidence"
+        self.root.rename(evidence)
+        live = []
+        calls = []
+
+        def unrelated_activity(*_):
+            calls.append(None)
+            stale = list(live)
+            live.clear()
+            for ancestor in (parent, parent.parent):
+                directory = ancestor / f"{self.root.name}-unrelated-{len(calls)}"
+                directory.mkdir()
+                live.append(directory)
+                file = ancestor / f"{self.root.name}-unrelated-file"
+                file.touch()
+                file.unlink()
+            for directory in stale:
+                directory.rmdir()
+            parent.chmod(0o750 if len(calls) % 2 else 0o700)
+            if os.geteuid() == 0:
+                os.chown(parent, len(calls), len(calls))
+
+        try:
+            receipt = result_input.verify(evidence, "manifest.json", self.limits,
+                                          unrelated_activity, _after_stream=unrelated_activity)
+        finally:
+            for directory in live:
+                directory.rmdir()
+            evidence.rename(self.root)
+            parent.rmdir()
+        self.assertEqual(receipt["records"], 3)
+        # Three records and two shards each ran the activity.
+        self.assertEqual(len(calls), 5)
+
+    def test_ancestor_replacement_with_identical_metadata_is_refused(self):
+        # The ancestor identity is only device, inode, and file type, so a
+        # replacement that copies every other field must still be refused.
+        for kind in ("directory", "symlink"):
+            with self.subTest(kind=kind):
+                parent = self.root.parent / (self.root.name + "-ancestor")
+                moved = parent.with_name(parent.name + "-old")
+                parent.mkdir(mode=0o700)
+                evidence = parent / "evidence"
+                self.root.rename(evidence)
+                replaced = []
+
+                def replace_parent(identity, _path):
+                    if identity == "shard-b":
+                        original_status = os.stat(parent)
+                        parent.rename(moved)
+                        if kind == "directory":
+                            parent.mkdir(mode=0o700)
+                            (moved / "evidence").rename(evidence)
+                        else:
+                            parent.symlink_to(moved, target_is_directory=True)
+                        replaced.append((original_status, os.lstat(parent)))
+
+                try:
+                    with self.assertRaisesRegex(result_input.IntegrityError,
+                                                "ancestor was replaced|is not a directory"):
+                        self.verify(root=evidence, after_stream=replace_parent)
+                finally:
+                    if parent.is_symlink():
+                        parent.unlink()
+                    original = evidence if evidence.exists() else moved / "evidence"
+                    original.rename(self.root)
+                    for directory in (parent, moved):
+                        if directory.exists():
+                            directory.rmdir()
+                (original_status, replacement_status), = replaced
+                if kind == "directory":
+                    self.assertEqual(
+                        [getattr(replacement_status, field) for field in
+                         ("st_dev", "st_mode", "st_nlink", "st_uid", "st_gid")],
+                        [getattr(original_status, field) for field in
+                         ("st_dev", "st_mode", "st_nlink", "st_uid", "st_gid")])
+                    self.assertNotEqual(replacement_status.st_ino, original_status.st_ino)
+                else:
+                    self.assertTrue(stat.S_ISLNK(replacement_status.st_mode))
+
     def test_directory_created_inside_evidence_root_is_rejected(self):
         def add_directory(identity, _path):
             if identity == "shard-b":
