@@ -2702,6 +2702,8 @@ struct CIrVlaArrayType
     CIrVlaArrayType* next;
     IrTypeId type;
     CArrayBound bound;
+    u32 typeof_start;
+    u32 typeof_end;
     CIrVlaValue cast_shape;
 };
 
@@ -13549,6 +13551,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_SIZE,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_CAST,
+    C_IR_LOWER_STAGE_VLA_TYPEOF_OPERAND,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS,
     C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE,
@@ -13684,7 +13687,7 @@ struct CIrLowerVlaLayoutState
     // spelling leaves out.
     bool pointer;
     bool named_type;
-    u8 reserved;
+    bool typeof_previous_preparing_calls;
 };
 
 typedef struct CIrBodyTask CIrBodyTask;
@@ -24143,6 +24146,22 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type(CIntegerIrBuilder* builder, CTypeId t
     return result;
 }
 
+BUSTER_C_INTERNAL IrTypeId c_ir_vla_typeof_array(CIntegerIrBuilder* builder, IrTypeId type, u32 start, u32 end)
+{
+    CIrVlaArrayType* array = c_ir_vla_array_type(builder, type);
+    IrTypeId result = type;
+    if (array && !builder->queries->has_request)
+    {
+        IrType value = *ir_type_from_id(&builder->program->types, type);
+        result = ir_program_add_type(builder->program, value);
+        CIrVlaArrayType* copy = arena_allocate(builder->arena, CIrVlaArrayType, 1);
+        *copy = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = array->bound,
+            .typeof_start = start, .typeof_end = end};
+        builder->vla_array_types = copy;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32 start, u32 end, u32* index_out, CType* qualifiers_out)
 {
     if (start >= end)
@@ -24223,9 +24242,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         }
         else if (close < end && index + 2 < close)
         {
+            bool operand_is_type_name = false;
             if (builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
             {
                 CEntityId operand_entity = c_ir_identifier_entity(builder, index + 2);
+                operand_is_type_name = operand_entity.value < builder->parse.entity_count &&
+                                       builder->parse.entities[operand_entity.value].kind == C_ENTITY_TYPEDEF;
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
                 if (!local && operand_entity.value == C_ID_UNDERLYING_INVALID)
                 {
@@ -24309,10 +24331,15 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             if (type.value == IR_ID_UNDERLYING_INVALID)
             {
                 type = c_ir_group_type_name(builder, index + 1, close);
+                operand_is_type_name = type.value != IR_ID_UNDERLYING_INVALID;
             }
             if (type.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
+            }
+            if (!operand_is_type_name)
+            {
+                type = c_ir_vla_typeof_array(builder, type, index + 2, close);
             }
             index = close + 1;
         }
@@ -31107,6 +31134,26 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
         state->source = c_ir_token_source_range(builder, state->token);
         state->dimension = 0;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+        CIrVlaArrayType* array = state->named_type ? c_ir_vla_array_type(builder, state->type_name) : 0;
+        if (array && array->typeof_start < array->typeof_end)
+        {
+            state->typeof_previous_preparing_calls = builder->preparing_calls;
+            builder->preparing_calls = false;
+            frame->stage = C_IR_LOWER_STAGE_VLA_TYPEOF_OPERAND;
+            c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
+                .as.expression = {.start = array->typeof_start, .end = array->typeof_end}});
+            return;
+        }
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_VLA_TYPEOF_OPERAND)
+    {
+        builder->preparing_calls = state->typeof_previous_preparing_calls;
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)

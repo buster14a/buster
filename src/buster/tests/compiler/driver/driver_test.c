@@ -5885,6 +5885,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    calls = 0;\n"
         "    fail |= sizeof(*(pv + one())) != 12 || calls != 1;\n"
         "    fail |= sizeof(*&v) != 12;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(__typeof__(*(pv + one()))) != 12 || calls != 1;\n"
         "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
         "    n = 7;\n"
         "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
