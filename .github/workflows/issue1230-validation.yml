@@ -1,0 +1,54 @@
+name: Issue 1230 exact candidate validation
+on:
+  push:
+    branches: [codex/1230-static-pointer-validation]
+permissions:
+  contents: read
+jobs:
+  validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fc803dce4ddbd04ce0abff3c242a1836409370bc
+          persist-credentials: false
+      - name: Bootstrap hosted build driver and configure Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          clang --version
+          mkdir -p "$RUNNER_TEMP/issue1230-validation"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue1230-driver"
+          "$RUNNER_TEMP/issue1230-driver" generate --cc clang --config Release --ci --linker DEFAULT
+      - name: Full Release suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/issue1230-driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/issue1230-validation/release.log"
+      - name: Self-host fixed point
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/issue1230-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/issue1230-validation/self-host.log"
+      - name: Configure sanitized tree after preceding launches stop
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/issue1230-driver" generate --cc clang --sanitize --ci --linker DEFAULT
+      - name: Full sanitized suite
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/issue1230-driver" build -t test_all 2>&1 | tee "$RUNNER_TEMP/issue1230-validation/sanitize.log"
+      - name: Retain validation logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1230-exact-candidate-validation
+          path: ${{ runner.temp }}/issue1230-validation/
+          if-no-files-found: warn
