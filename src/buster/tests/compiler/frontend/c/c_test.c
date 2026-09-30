@@ -27977,6 +27977,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestLogicalConstantPredicateCase
+    {
+        String8 expression;
+        u64 expected;
+    } CTestLogicalConstantPredicateCase;
+    CTestLogicalConstantPredicateCase cases[] = {
+        {S8("input && 0"), 0},
+        {S8("input || 1"), 0},
+        {S8("effect() && 0"), 0},
+        {S8("effect() || 1"), 0},
+        {S8("(effect(), 7) && 0"), 0},
+        {S8("(effect(), 0) || 1"), 0},
+        {S8("effect()"), 0},
+        {S8("(effect(), 7)"), 0},
+        {S8("input"), 0},
+        {S8("0 && effect()"), 1},
+        {S8("1 || effect()"), 1},
+        {S8("1 && 7"), 1},
+        {S8("0 || 7"), 1},
+    };
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Target target = targets[target_index];
+                String8 source = string_format(temporary.arena,
+                    S8("static volatile int input; extern int effect(void);"
+                       " int query(void) {{ return __builtin_constant_p({S8}); }}"), cases[case_index].expression);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("logical-constant-predicate.c"), tokens, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 effects = 0;
+                        u32 returns = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            effects += instruction->opcode == IR_OPCODE_CALL || instruction->volatile_access;
+                            if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                            {
+                                returns += 1;
+                                IrValueId value = instruction->operands[0];
+                                if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                {
+                                    IrInstructionId definition = function->values[value.value].definition;
+                                    if (BUSTER_REQUIRE(arguments, definition.value < function->instruction_count))
+                                    {
+                                        IrInstruction* constant = function->instructions + definition.value;
+                                        BUSTER_TEST_RAW(arguments,
+                                            constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count == 1 &&
+                                                constant->immediates[0] == cases[case_index].expected,
+                                            cases[case_index].expression);
+                                    }
+                                }
+                            }
+                        }
+                        BUSTER_TEST_RAW(arguments, returns == 1 && effects == 0, cases[case_index].expression);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27995,6 +28081,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
+    BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);

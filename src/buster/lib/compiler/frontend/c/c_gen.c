@@ -46926,15 +46926,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
                 return true;
             }
         }
-        if (right_known)
-        {
-            bool right_truth = c_ir_constant_truth(builder, &right);
-            if ((operation == C_CONDITIONAL_LOGICAL_AND && !right_truth) || (operation == C_CONDITIONAL_LOGICAL_OR && right_truth))
-            {
-                *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_LOGICAL_OR);
-                return true;
-            }
-        }
+        // The left operand is always evaluated. A right-hand annihilator
+        // predicts the value but cannot certify an unknown live operand as
+        // constant for __builtin_constant_p or initializer consumers.
         *result = (CIrConstantValue){.type = builder->s32_type, .kind = C_IR_CONSTANT_UNKNOWN};
         return true;
     }

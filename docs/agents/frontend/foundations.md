@@ -4,6 +4,21 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Logical constant eligibility
+
+`c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
+left operand of `&&` and `||`. A known right-hand zero/one may predict the result,
+but does not prove that a live call or volatile read is eligible for constant
+treatment. `__builtin_constant_p(effect() && 0)` and the corresponding `|| 1`
+query therefore return zero without evaluating their operands. Proven left
+short circuits (`0 && effect()` and `1 || effect()`) still return one.
+
+`c_test_logical_constant_predicates` checks result bits and absence of emitted
+effects across six target layouts and both frontend forms. The existing
+`basic_c_builtin_memory.c` runtime fixture checks direct/comma/volatile queries,
+short-circuit controls, and exactly-once ordinary/choose-expression fallbacks.
+Truth conversion of places and operand preparation retain their separate owners.
+
 ## Direct local SSA (GitHub #34)
 
 `c_ir_ssa_*` in `c_gen.c` constructs pruned canonical block-argument SSA for
