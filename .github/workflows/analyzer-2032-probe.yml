@@ -1,0 +1,29 @@
+name: Analyzer 2032 matched evidence
+on:
+  push:
+    branches: [codex/2032-matched-analyzer-evidence]
+permissions:
+  contents: read
+jobs:
+  matched:
+    name: Matched analyzer comparison and candidate-only
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Execute same-host matched workflow bodies
+        shell: bash
+        run: python3 tools/research/2032_analyzer_probe.py
+      - name: Retain complete matched evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: analyzer-2032-matched-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/issue-2032-matched/
+            build/analyzer-tree/compile_commands.json
+            build/analyzer-tree/CMakeCache.txt
+          retention-days: 14
