@@ -2,6 +2,7 @@
  * the CLI and its native tests; injected failures go through the real writer.
  */
 #include "queue.h"
+#include "zen5_calibration_profile.h"
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -46,6 +47,12 @@ BUSTER_CT_CHECK(sizeof(bq_validate_buster_profile) - 1 <= BQ_RECIPE_PROFILE_CAP)
  * installed service (main.c), which has no override. */
 BUSTER_GLOBAL_LOCAL String8 bq_retirement_profile_test_override;
 #endif
+/* Held (#426): a real executable profile whose stages the systemd broker
+ * cannot start yet. It is neither admitted nor served, so every submission,
+ * gateway, materialization, worker-unit and export path refuses it; the
+ * capabilities text is unchanged (it has no room for another name). */
+BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
+BUSTER_CT_CHECK(sizeof(bq_zen5_calibration_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
 
 u32 bq_u32(u8 const* bytes)
 {
@@ -147,7 +154,8 @@ BqRecipe bq_recipe_from_name(String8 name)
                       string_equal(name, S8("fake-failure-v1")) ? BQ_RECIPE_FAKE_FAILURE :
                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
                       string_equal(name, S8("native-retirement-performance-v1")) ?
-                      BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_UNKNOWN;
+                      BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED :
+                      string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION : BQ_RECIPE_UNKNOWN;
     return result;
 }
 
@@ -165,6 +173,7 @@ String8 bq_recipe_name(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = S8("native-retirement-performance-v1");
+    else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION) result = S8("zen5-calibration-v1");
     return result;
 }
 
@@ -176,6 +185,8 @@ String8 bq_recipe_profile(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = (String8){(char8*)bq_native_retirement_blocked_profile,
                            sizeof(bq_native_retirement_blocked_profile) - 1};
+    else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
+        result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
 #if defined(BUSTER_BENCH_SERVICE_TEST) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
     if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_retirement_profile_test_override.length)
         result = bq_retirement_profile_test_override;
@@ -188,9 +199,11 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
     char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
-                          recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? "bench_service_retirement_recipe" : "";
+                          recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? "bench_service_retirement_recipe" :
+                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
-                               recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+                               recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
+                               recipe == BQ_RECIPE_ZEN5_CALIBRATION);
     if (files) *files = (BqRecipeFiles){0};
     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
                       snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
@@ -271,7 +284,8 @@ bool bq_recipe_service(BqRecipe recipe)
 
 bool bq_recipe_blocked(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && !bq_recipe_retirement_admitted();
+    bool result = (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && !bq_recipe_retirement_admitted()) ||
+                  recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 

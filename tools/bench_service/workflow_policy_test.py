@@ -31,12 +31,16 @@ BROKER_RUNTIME = SERVICE / "systemd_runtime.h"
 RECIPE_TEST = SERVICE / "dispatch_recipe_test.py"
 
 # The reviewed dispatch allowlist (#2071): recipe -> service runtime budget in
-# seconds. The broker enforces one fixed RuntimeMaxSec for every recipe, so
-# each budget must equal it; a shorter wait would give up on a job the service
-# still runs. A recipe that needs a different budget needs a reviewed broker
-# change first. The installed service still refuses any recipe its compiled
-# registry does not serve.
-REVIEWED_RECIPES = (("validate-buster-v1", 3600), ("zen5-calibration-v1", 3600))
+# seconds. validate-buster-v1 has no budget of its own, so it waits for the
+# broker's fixed RuntimeMaxSec. zen5-calibration-v1 enforces the budget-seconds
+# pinned in its installed profile (zen5_recipe.c stops every stage at that
+# deadline and the stage units are bound to the outer unit), so its wait is
+# that budget, which must not exceed RuntimeMaxSec. A shorter wait than a
+# recipe's enforced budget would give up on a job the service still runs. The
+# installed service still refuses any recipe its compiled registry does not
+# serve (zen5-calibration-v1 is held there until the broker carries its stages).
+REVIEWED_RECIPES = (("validate-buster-v1", 3600), ("zen5-calibration-v1", 2700))
+ZEN5_PROFILE = SERVICE / "profiles" / "zen5-calibration-v1.recipe"
 FINALIZATION_ALLOWANCE = 600
 JOB_MARGIN = 300
 JOB_TIMEOUT_MINUTES = 120
@@ -283,6 +287,7 @@ def main() -> int:
             "tools/bench_service/exclusive_admission_test.c",
             '"$RUNNER_TEMP/exclusive-admission-test"',
             "python3 -B tools/bench_service/dispatch_recipe_test.py",
+            "python3 -B tools/bench_service/zen5_profile_test.py",
         ):
             if marker not in policy:
                 errors.append(f"workflow-policy check is missing marker: {marker}")
@@ -474,8 +479,14 @@ def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) 
     if runtime_seconds is None:
         errors.append("the broker must define one whole-second RuntimeMaxSec")
     else:
+        broker_seconds = runtime_seconds
+        profile = ZEN5_PROFILE.read_text(encoding="utf-8") if ZEN5_PROFILE.is_file() else ""
+        enforced = re.findall(r"(?m)^budget-seconds=([1-9][0-9]*)$", profile)
         for name, budget in REVIEWED_RECIPES:
-            if budget != runtime_seconds:
+            if name == "zen5-calibration-v1":
+                if len(enforced) != 1 or budget != int(enforced[0]) or budget > broker_seconds:
+                    errors.append(f"{name} budget must equal its profile budget-seconds and fit RuntimeMaxSec")
+            elif budget != broker_seconds:
                 errors.append(f"{name} budget must equal the broker RuntimeMaxSec")
 
     refusal = (

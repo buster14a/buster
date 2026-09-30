@@ -303,6 +303,14 @@ the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
 
+`compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
+with the PATH `clang` at `x86-64`, `haswell` and `znver5`. Each row runs only
+when the host CPU can execute it. The Zen 5 row also requires that Clang accept
+`-march=znver5`, which Clang supports from version 19. A single probe compile
+checks this, and an older Clang (Ubuntu 24.04 ships 18) prints
+`PADDED_VECTOR_ZNVER5_ROW status=not-run` with its version line. The row is then
+not run and is not counted as passed.
+
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
 GCC requests preserving existing configurations. The GCC row selects Homebrew
