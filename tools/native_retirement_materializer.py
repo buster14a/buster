@@ -122,6 +122,11 @@ ARCHIVED_PICS = ("0", "1")
 ARCHIVED_ALLOCATORS = ("mir-stack", "fast", "quality")
 SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
 NEXT_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+# #1986 scheduling-test bytes only; corpus and target axes are unchanged.
+APPLE_CI_SUPPORT_CONTRACT_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210"
+# #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
+# byte/hash row updated; corpus and target axes are unchanged.
+PROPOSED_SUPPORT_CONTRACT_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -884,7 +889,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
     contract_data = _read_no_follow(contract, "support contract")
     contract_sha256 = hashlib.sha256(contract_data).hexdigest()
     if not contract_data or contract_sha256 not in (
-            SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256):
+            SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256,
+            APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:
