@@ -16,6 +16,7 @@
 #include <buster/lib/arena.c>
 #include <buster/lib/file.c>
 #include <buster/lib/integer.c>
+#include <buster/lib/time.c>
 #include <stdio.h>
 BUSTER_GLOBAL_LOCAL void audit_initialize(void)
 {

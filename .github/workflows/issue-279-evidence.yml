@@ -70,6 +70,8 @@ jobs:
         run: |
           set -euo pipefail
           (cd candidate; "$RUNNER_TEMP/build-candidate" build --config Release -t test_all -- -j2) 2>&1 | tee evidence/test-all.log
+          git -C candidate fetch --depth=1 origin af6b2b100acfdd9c970e35e33d4468cd35883812
+          (cd candidate; "$RUNNER_TEMP/build-candidate" source_size --base af6b2b100acfdd9c970e35e33d4468cd35883812) 2>&1 | tee evidence/source-size.log
           (cd candidate; "$RUNNER_TEMP/build-candidate" test_mode_matrix --config Release) 2>&1 | tee evidence/mode-matrix.log
       - name: Same-source whole compiler time and peak RSS
         run: |
