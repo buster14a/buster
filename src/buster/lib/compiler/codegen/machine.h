@@ -1543,6 +1543,10 @@ typedef enum MachineEditKind
     // Predicate edge captures address an explicit frame slot directly.
     MACHINE_EDIT_FRAME_SPILL,
     MACHINE_EDIT_FRAME_RELOAD,
+    // subject vreg, whose single definition is the target's frame address
+    // row, recomputes that address into location preg at point: the reload
+    // of a value naming a slot that keeps its own storage all function.
+    MACHINE_EDIT_REMATERIALIZE_FRAME,
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
