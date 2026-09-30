@@ -7,6 +7,9 @@
 //   alone. It builds no tree; every later consumer re-walks token ranges.
 //   The same top-level/body walks validate active integer token spellings,
 //   including unevaluated operands, before any type-only shortcut can hide one.
+//   Every preprocessing number is converted exactly once, first, by
+//   c_number_facts_build; validation, semantic typing and folding, and
+//   lowering read those published CNumberFacts instead of reconverting.
 //   A function body is split into statements the same way, and the one fact
 //   kept about them is the token range of each _Static_assert statement
 //   (CParserStaticAssert), which c_parse_bind_function_static_asserts
@@ -32,6 +35,8 @@
 // restore the shared type table after a failed attempt.
 //
 // Layout, in file order; each anchor is a definition to search for:
+//   c_number_facts_build, c_number_convert_at     the number facts published
+//                                                 beside the final stream
 //   c_parse_token_class_compute,                  keyword and token
 //   c_parse_position_index_build                  classification, the
 //                                                 matching-delimiter index
@@ -4748,13 +4753,21 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER)
     {
         CTypeKind kind = C_TYPE_INT;
-        String8 first_spelling = c_token_spelling(preprocess.spelling_base, first);
-        bool hexadecimal = first_spelling.length >= 2 && first_spelling.pointer[0] == '0' && (first_spelling.pointer[1] == 'x' || first_spelling.pointer[1] == 'X');
-        bool floating = false;
-        for (u64 index = 0; index < first_spelling.length; index += 1)
+        // An integer literal's kind was typed once by the syntax pass for this
+        // data model; only a floating spelling, or a token the facts do not
+        // cover, reads its spelling here.
+        CNumberFact fact = c_number_fact(result->number_facts, preprocess.tokens, start);
+        bool floating = (fact.flags & C_NUMBER_FACT_FLOATING) != 0;
+        bool typed = !floating && c_number_fact_kind(result->number_facts, fact, preprocess.target, &kind);
+        String8 first_spelling = typed ? (String8){0} : c_token_spelling(preprocess.spelling_base, first);
+        if (!fact.present)
         {
-            u8 byte = first_spelling.pointer[index];
-            floating |= byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
+            bool hexadecimal = first_spelling.length >= 2 && first_spelling.pointer[0] == '0' && (first_spelling.pointer[1] == 'x' || first_spelling.pointer[1] == 'X');
+            for (u64 index = 0; index < first_spelling.length; index += 1)
+            {
+                u8 byte = first_spelling.pointer[index];
+                floating |= byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
+            }
         }
         if (floating)
         {
@@ -4804,7 +4817,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                 kind = c_type_kind_complex_of(kind);
             }
         }
-        else
+        else if (!typed)
         {
             u64 integer = 0;
             kind = c_conditional_number(first_spelling, &integer)
@@ -7109,7 +7122,7 @@ BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preproces
 typedef struct CParseInitializerContinuation CParseInitializerContinuation;
 
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
-                                                                    CIrDecodedString* decoded_out);
+                                                                    CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 
 BUSTER_C_INTERNAL bool c_parse_arena_can_allocate(Arena* arena, u64 size, u64 alignment)
 {
@@ -7401,7 +7414,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CType
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
 {
     CIrDecodedString decoded = {0};
-    if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded) || decoded.element_count == UINT64_MAX ||
+    if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, result->string_literals, &decoded) || decoded.element_count == UINT64_MAX ||
         !c_parse_result_reserve_array_bounds(result, 1))
     {
         return C_TYPE_ID_INVALID;
@@ -8118,7 +8131,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (c_ir_tokens_are_string_literals(preprocess, start, end))
     {
         CIrDecodedString decoded = {0};
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, start, end, &decoded) ||
+        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, start, end, result->string_literals, &decoded) ||
             decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
@@ -8148,7 +8161,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (string_start < string_end && c_ir_tokens_are_string_literals(preprocess, string_start, string_end))
     {
         CIrDecodedString decoded = {0};
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, &decoded) ||
+        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded) ||
             decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
@@ -13951,7 +13964,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
                 if (element && c_ir_tokens_are_string_literals(preprocess, initializer, declaration_end))
                 {
                     CIrDecodedString decoded = {0};
-                    if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, initializer, declaration_end, &decoded) &&
+                    if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, initializer, declaration_end, result->string_literals, &decoded) &&
                         decoded.element_count != UINT64_MAX &&
                         c_parse_initializer_string_element_compatible(preprocess, result, record->element_type, decoded))
                     {
@@ -19879,11 +19892,174 @@ BUSTER_C_INTERNAL void c_parser_diagnostic(Arena* arena, CParserResult* result, 
     }
 }
 
-BUSTER_C_INTERNAL void c_parser_validate_integer_token(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess, CToken token)
+// The number facts of a final stream (see CNumberFacts): one masked shape
+// compare per 64-token window finds the numbers, then each is classified,
+// converted and typed for the stream's target exactly once. The syntax pass
+// already converted every number it validated; building the facts first is
+// that same work, done where every later consumer can read it.
+BUSTER_C_SHARED CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess)
 {
-    String8 spelling = c_token_spelling(preprocess->spelling_base, token);
-    u64 value = 0;
-    if (!c_number_is_float(spelling) && !c_conditional_number(spelling, &value))
+    CNumberFacts* facts = 0;
+    CTokenShape const* shapes = c_preprocess_token_shapes(preprocess);
+    if (arena && preprocess->tokens && preprocess->token_count && preprocess->token_count <= UINT32_MAX)
+    {
+        u32 token_count = (u32)preprocess->token_count;
+        u32 window_count = (token_count + 63) / 64;
+        facts = arena_allocate(arena, CNumberFacts, 1);
+        *facts = (CNumberFacts){
+            .tokens = preprocess->tokens,
+            .number_masks = arena_allocate(arena, u64, window_count),
+            .number_ranks = arena_allocate(arena, u32, window_count),
+            .cpu_arch = preprocess->target.cpu_arch,
+            .os = preprocess->target.os,
+            .token_count = token_count,
+        };
+        Simd512 number_shape = simd512_splat((u8)C_TOKEN_PREPROCESSING_NUMBER);
+        u32 number_count = 0;
+        for (u32 window = 0; window < window_count; window += 1)
+        {
+            u32 base = window * 64;
+            Mask64 numbers = 0;
+            if (shapes)
+            {
+                numbers = simd512_equal_byte(simd512_load_masked(shapes + base, mask64_prefix(token_count - base)), number_shape);
+                // The rows decide: a lane the sidecar marks is kept only when
+                // its row is a number too, so a view whose shapes do not match
+                // its rows loses facts (its consumers then convert) but can
+                // never attach one number's fact to another token.
+                for (Mask64 marked = numbers; marked; marked = mask64_and(marked, marked - 1))
+                {
+                    u32 lane = mask64_first_set(marked);
+                    if (preprocess->tokens[base + lane].kind != C_TOKEN_PREPROCESSING_NUMBER)
+                    {
+                        numbers &= ~((Mask64)1 << lane);
+                    }
+                }
+            }
+            else
+            {
+                for (u32 lane = 0; lane < 64 && base + lane < token_count; lane += 1)
+                {
+                    numbers |= (Mask64)(preprocess->tokens[base + lane].kind == C_TOKEN_PREPROCESSING_NUMBER) << lane;
+                }
+            }
+            facts->number_masks[window] = numbers;
+            facts->number_ranks[window] = number_count;
+            number_count += mask64_count(numbers);
+        }
+        facts->number_count = number_count;
+        facts->values = arena_allocate(arena, u64, number_count ? number_count : 1);
+        facts->flags = arena_allocate(arena, u8, number_count ? number_count : 1);
+        u32 ordinal = 0;
+        for (u32 window = 0; window < window_count; window += 1)
+        {
+            for (Mask64 numbers = facts->number_masks[window]; numbers; numbers = mask64_and(numbers, numbers - 1))
+            {
+                String8 spelling = c_token_spelling(preprocess->spelling_base, preprocess->tokens[window * 64 + mask64_first_set(numbers)]);
+                u64 value = 0;
+                bool converted = c_conditional_number(spelling, &value);
+                CTypeKind kind = converted ? c_semantic_integer_literal_kind(preprocess->target, 0, spelling, value) : C_TYPE_INVALID;
+                facts->values[ordinal] = value;
+                facts->flags[ordinal] = (u8)((c_number_is_float(spelling) ? C_NUMBER_FACT_FLOATING : 0) |
+                                             (converted ? C_NUMBER_FACT_CONVERTED : 0) | ((u32)kind & C_NUMBER_FACT_KIND_MASK));
+                ordinal += 1;
+            }
+        }
+    }
+    return facts;
+}
+
+BUSTER_C_SHARED bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index, u64* value_out)
+{
+    CNumberFact fact = c_number_fact(facts, tokens, token_index);
+    bool result;
+    if (fact.present)
+    {
+        result = (fact.flags & C_NUMBER_FACT_CONVERTED) != 0;
+        if (result)
+        {
+            *value_out = fact.value;
+        }
+    }
+    else
+    {
+        result = c_conditional_number(c_token_spelling(spelling_base, tokens[token_index]), value_out);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// The bytes a number-fact table publishes: header, rank windows and one value
+// and flag byte per number (alignment padding excluded).
+u64 c_test_number_facts_bytes(CNumberFacts const* facts)
+{
+    u64 result = 0;
+    if (facts)
+    {
+        u64 window_count = ((u64)facts->token_count + 63) / 64;
+        u64 number_slots = facts->number_count ? facts->number_count : 1;
+        result = sizeof(*facts) + window_count * (sizeof(*facts->number_masks) + sizeof(*facts->number_ranks)) +
+                 number_slots * (sizeof(*facts->values) + sizeof(*facts->flags));
+    }
+    return result;
+}
+
+// Every number fact of `preprocess` against the conversions it replaces:
+// presence exactly on preprocessing numbers, the floating class, the
+// conversion and its value (with a sentinel proving a failed conversion
+// writes nothing), and the kind for the stream's target. A token array the
+// facts were not built for, or another data model, is never answered.
+bool c_test_number_facts_agree(Arena* arena, CPreprocessResult preprocess, u32* number_count_out)
+{
+    CNumberFacts const* facts = c_number_facts_build(arena, &preprocess);
+    bool result = facts != 0;
+    u32 number_count = 0;
+    Target other = preprocess.target;
+    other.os = other.os == OPERATING_SYSTEM_WINDOWS ? OPERATING_SYSTEM_LINUX : OPERATING_SYSTEM_WINDOWS;
+    for (u32 index = 0; result && index < preprocess.token_count; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        CNumberFact fact = c_number_fact(facts, preprocess.tokens, index);
+        result = fact.present == (token.kind == C_TOKEN_PREPROCESSING_NUMBER) && !c_number_fact(facts, preprocess.tokens + 1, index).present;
+        if (result && fact.present)
+        {
+            number_count += 1;
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            u64 sentinel = UINT64_C(0x5a5aa5a55a5aa5a5);
+            u64 value = sentinel;
+            u64 fact_value = sentinel;
+            bool converted = c_conditional_number(spelling, &value);
+            bool fact_converted = c_number_convert_at(facts, preprocess.spelling_base, preprocess.tokens, index, &fact_value);
+            CTypeKind kind = converted ? c_semantic_integer_literal_kind(preprocess.target, 0, spelling, value) : C_TYPE_INVALID;
+            CTypeKind fact_kind = C_TYPE_COUNT;
+            CTypeKind other_kind = C_TYPE_COUNT;
+            result = converted == fact_converted && value == fact_value && ((fact.flags & C_NUMBER_FACT_FLOATING) != 0) == c_number_is_float(spelling) &&
+                     c_number_fact_kind(facts, fact, preprocess.target, &fact_kind) && fact_kind == kind &&
+                     !c_number_fact_kind(facts, fact, other, &other_kind) && other_kind == C_TYPE_COUNT;
+        }
+    }
+    result = result && facts->number_count == number_count;
+    *number_count_out = number_count;
+    return result;
+}
+#endif
+
+BUSTER_C_INTERNAL void c_parser_validate_integer_token(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess, u32 token_index)
+{
+    CToken token = preprocess->tokens[token_index];
+    CNumberFact fact = c_number_fact(result->number_facts, preprocess->tokens, token_index);
+    bool invalid;
+    if (fact.present)
+    {
+        invalid = !(fact.flags & (C_NUMBER_FACT_FLOATING | C_NUMBER_FACT_CONVERTED));
+    }
+    else
+    {
+        String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+        u64 value = 0;
+        invalid = !c_number_is_float(spelling) && !c_conditional_number(spelling, &value);
+    }
+    if (invalid)
     {
         c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
                             S8("invalid integer literal or value outside the supported 64-bit range"));
@@ -20328,7 +20504,7 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
     return end;
 }
 
-CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult result = {0};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
@@ -20337,6 +20513,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         u32 token_count = (u32)preprocess.token_count;
         result.declaration_capacity = token_count + 1;
         result.diagnostic_capacity = token_count + 1;
+        result.number_facts = c_number_facts_build(arena, &preprocess);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
         u32 index = 0;
@@ -20367,7 +20544,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 }
                 if (shape == C_TOKEN_PREPROCESSING_NUMBER)
                 {
-                    c_parser_validate_integer_token(arena, &result, &preprocess, token);
+                    c_parser_validate_integer_token(arena, &result, &preprocess, index);
                 }
                 else if (shape == C_TOKEN_IDENTIFIER)
                 {
@@ -20442,7 +20619,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                             CTokenShape body_shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
                             if (body_shape == C_TOKEN_PREPROCESSING_NUMBER)
                             {
-                                c_parser_validate_integer_token(arena, &result, &preprocess, preprocess.tokens[index]);
+                                c_parser_validate_integer_token(arena, &result, &preprocess, index);
                             }
                             else if (body_shape == C_TOKEN_IDENTIFIER)
                             {
@@ -20607,6 +20784,14 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         }
     }
 
+    return result;
+}
+
+CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+{
+    C_CENSUS_PHASE_BEGIN(PARSE);
+    CParserResult result = c_parse_ast_run(arena, preprocess);
+    C_CENSUS_PHASE_END();
     return result;
 }
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
@@ -21312,7 +21497,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &value.type);
         if (first.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            value.is_float = c_number_is_float(spelling);
+            CNumberFact fact = c_number_fact(result->number_facts, preprocess.tokens, start);
+            value.is_float = fact.present ? (fact.flags & C_NUMBER_FACT_FLOATING) != 0 : c_number_is_float(spelling);
             if (value.is_float)
             {
                 IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, value.type);
@@ -21325,7 +21511,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             }
             else
             {
-                value.valid = c_conditional_number(spelling, &value.integer);
+                value.valid = c_number_convert_at(result->number_facts, preprocess.spelling_base, preprocess.tokens, start, &value.integer);
             }
         }
         else if (first.kind == C_TOKEN_CHARACTER_LITERAL)
@@ -23237,7 +23423,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                 CIrDecodedString decoded = {0};
                 CParseInitializerInferenceFrame array = {.type = type};
                 u64 count = 0;
-                bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, &decoded);
+                bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded);
                 if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &array, &count) &&
                     decoded.element_count > count))
                 {
@@ -25290,7 +25476,7 @@ BUSTER_C_INTERNAL String8 c_parse_asm_bound_register(CTypeParseMachine* machine,
                 !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                 preprocess.tokens[cursor + 2].kind != C_TOKEN_STRING_LITERAL) continue;
             CIrDecodedString decoded = {0};
-            if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor + 2, cursor + 3, &decoded))
+            if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor + 2, cursor + 3, result->string_literals, &decoded))
             {
                 String8 name = {.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
                 if (name.length > 1 && name.pointer[0] == '%') name = string_slice(name, 1, name.length);
@@ -25419,7 +25605,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     bool output = separator_count == 1 || cursor < separators[1];
                     CIrDecodedString decoded = {0};
                     String8 text = {0};
-                    if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, &decoded))
+                    if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded))
                     {
                         text = (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
                         message = c_parse_asm_constraint_shape(text, output);
@@ -25543,7 +25729,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                 if (preprocess.tokens[cursor].kind == C_TOKEN_STRING_LITERAL)
                 {
                     CIrDecodedString decoded = {0};
-                    bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, &decoded);
+                    bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded);
                     valid &= decoded.element_width == 1;
                     stack_clobber |= valid && string_equal((String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, S8("st"));
                     rbx_clobber |= valid && c_semantic_asm_clobber_matches_constraint(preprocess.target,
@@ -25567,7 +25753,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
         if (!message.length && separator_count <= 4)
         {
             CIrDecodedString decoded = {0};
-            bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, open + 1, template_end, &decoded);
+            bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, open + 1, template_end, result->string_literals, &decoded);
             String8 assembly = {.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
             if (valid) message = c_semantic_asm_special_operands_message(preprocess.target, assembly, constraints, operands,
                 operand_count, output_count, rbx_clobber);
@@ -26150,6 +26336,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     CParseResult result = {
         .arena = arena,
         .symbols = preprocess.symbols,
+        .number_facts = syntax.number_facts,
     };
     if (syntax.diagnostic_count)
     {
@@ -26342,6 +26529,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
+    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
@@ -26929,6 +27117,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
     }
     result.analysis_complete = true;
+    // The literal memo stays published: lowering reads the recorded bytes
+    // and never records.
     scratch_end(machine_temporary);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     if (phase_arena)
@@ -26944,12 +27134,18 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
 }
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    return c_analyze_semantics_core(arena, preprocess, syntax, false);
+    C_CENSUS_PHASE_BEGIN(SEMANTIC);
+    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, false);
+    C_CENSUS_PHASE_END();
+    return result;
 }
 
 CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    return c_analyze_semantics_core(arena, preprocess, syntax, true);
+    C_CENSUS_PHASE_BEGIN(SEMANTIC);
+    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, true);
+    C_CENSUS_PHASE_END();
+    return result;
 }
 
 CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)

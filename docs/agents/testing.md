@@ -18,11 +18,21 @@
   `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
   module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
-  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  `python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
   corrupt/incomplete entries, failure propagation, argument forwarding and
-  concurrent immutable publication. CI runs it on every desktop OS/architecture
-  lane before installing optional tools.
+  concurrent immutable publication. Each desktop Release shard owns this suite;
+  the checks shard retains the required lifecycle step without repeating it.
+  Windows runs the same tests through
+  `python tools/bootstrap_wrapper_cases.py --jobs 2`: two independent scenarios
+  at once, with the existing six-writer publication scenario running alone.
+  All within-scenario cache transitions stay ordered. The policy step executes
+  `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
+  covering deadlines, launch/startup failures, cancellation, descendant cleanup,
+  failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
+  The whole original suite's obsolete workflow assertions remain tracked by
+  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
+  CI contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds

@@ -13,6 +13,7 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
+#include <buster/lib/compiler/frontend/c/c_census.h>
 
 typedef enum CTokenKind
 {
@@ -1239,6 +1240,8 @@ struct CParserDeclaration
     u8 reserved[2];
 };
 
+typedef struct CNumberFacts CNumberFacts;
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1247,6 +1250,10 @@ struct CParserResult
     // Null until the first syntax diagnostic; capacity is the logical limit,
     // not allocated storage. Nonempty rows retain the parse arena's lifetime.
     CDiagnostic* diagnostics;
+    // The conversion of every preprocessing number of the final stream, made
+    // once here and read by semantic analysis and lowering (c_number_fact).
+    // Null for hand-built inputs, whose consumers convert the spelling.
+    CNumberFacts const* number_facts;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -1399,6 +1406,8 @@ struct CTokenPositionIndex
     bool built;
 };
 
+typedef struct CStringLiteralMemo CStringLiteralMemo;
+
 // Work of the parse-side layout fold (c_parse_type_layout_core), the
 // sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
 // exists. Counts of actual operations, not timings; see
@@ -1458,6 +1467,13 @@ struct CParseResult
     CAggregateLookup* aggregate_lookup;
     CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
+    // Borrowed from the syntax result: immutable number conversions keyed by
+    // final-stream token index (see CParserResult.number_facts).
+    CNumberFacts const* number_facts;
+    // The decoded bytes of narrow string-literal fragments, decoded once per
+    // final-stream token: semantic analysis records them, lowering reads them
+    // (CStringLiteralMemo in c_internal.h). Null for hand-built results.
+    CStringLiteralMemo* string_literals;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
@@ -1640,10 +1656,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_token_length(char8 co
 // The spelling of a token relative to its owning result's spelling base.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE String8 c_token_spelling(char8 const* spelling_base, CToken token)
 {
-    return (String8){
+    String8 result = {
         .pointer = (char8*)spelling_base + token.offset,
         .length = c_token_length(spelling_base, token),
     };
+#if BUSTER_BENCH_ALLOCATIONS
+    c_census_spelling_read(result.pointer, result.length);
+#endif
+    return result;
 }
 // The #pragma pack alignment in effect at a final-stream token index: the
 // greatest pack_changes entry at or before it, 0 (natural alignment) before

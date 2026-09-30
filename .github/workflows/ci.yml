@@ -310,6 +310,7 @@ jobs:
             tools/coverage_manifest_test.py=coverage-manifest.log
             tools/matrix_shard_test.py=matrix-shard.log
             tests/ci_tools_test.py=workflow-tools.log
+            tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
             tools/ci_matrix_phases_test.py=matrix-phases-test.log
             tools/ci_native_observation_test.py=native-observation-test.log
             tools/native_target_compatibility_test.py=native-target-compatibility.log
@@ -349,7 +350,11 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          else
+            "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          fi
 
       - name: Install mold
         id: mold
