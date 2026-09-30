@@ -13,8 +13,9 @@
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
-// preparation (ir_prepare_canonical_module in ir_fast.c), immutable CFG
-// publication (ir_function_publish_cfg in
+// preparation (ir_prepare_canonical_module in ir_fast.c), the fixed-width
+// integer semantics every compile-time evaluator shares (ir_integer_* in
+// ir_integer.c), immutable CFG publication (ir_function_publish_cfg in
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
@@ -5328,9 +5329,14 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
     {
+        // The signed value the sign and magnitude spell must lie in
+        // [-2^(width-1), 2^width): a reader that materializes the magnitude
+        // unreduced (the native emitters do) then sees the same number as one
+        // that reduces it (ir_integer_constant_decode).
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
         if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
-            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+            (ir_integer_type_width(type) && !ir_integer_constant_canonical(instruction, ir_integer_type_width(type))))
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6103,3 +6109,4 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>
 #include <buster/lib/compiler/ir/ir_fast.c>
+#include <buster/lib/compiler/ir/ir_integer.c>

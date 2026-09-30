@@ -2394,6 +2394,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_record_diagnostic_equiva
     return result;
 }
 
+// Preprocessing releases its phase arena before it returns, and semantic
+// analysis releases each layout query's tables. Compile the same sources with
+// every released byte overwritten (arena_test_fill_releases) and without, and
+// require identical results: an error code, a diagnostic, a warning or an
+// object byte that read released memory would differ. -g adds debug
+// information, whose source map, file table and names are the longest-lived
+// references into what preprocessing built.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_released_phase_fill(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("#include <stddef.h>\n#define PAIR(a, b) ((a) + (b))\nstruct inner { long long l; char tail[3]; };\n"
+           "struct outer { struct inner items[sizeof(struct inner) / 8]; char bytes[_Alignof(struct inner) + 1]; };\n"
+           "_Static_assert(sizeof(struct outer) == 2 * sizeof(struct inner) + 16, \"layout\");\n"
+           "#line 70 \"renamed.c\"\nsize_t size_of_outer = sizeof(struct outer) + PAIR(1, 2);\n"
+           "int f(struct outer* o, int n) { int a[n]; a[0] = o->items[1].tail[2]; return a[0] + (int)offsetof(struct outer, bytes); }\n"),
+        S8("#pragma pack(push, 2)\nstruct packed { char c; int i; };\n#pragma pack(pop)\n#warning phase warning text\n"
+           "#define TWICE(x) ((x) * 2)\n#pragma push_macro(\"TWICE\")\n#undef TWICE\n#pragma pop_macro(\"TWICE\")\n"
+           "int g(struct packed* p) { return TWICE(p->i) + (int)sizeof(struct packed); }\n"),
+        S8("#define CALL(x) x(\nint h(void) { return CALL(h) 1; }\n"),
+        S8("#if 1 +\n#endif\nint i;\n"),
+        S8("#include \"phase-release-missing.h\"\nint j;\n"),
+        S8("int bad = 1;\x18\nint after_bad;\n"),
+        S8("struct S { int x; }; int k(struct S s) { return s + 1; }\n"),
+        S8("int m(void) { int a[sizeof(struct undefined_tag)]; return a[0]; }\n"),
+        S8("typedef struct { char c[3]; } Three; Three t[4]; _Static_assert(sizeof t == 12, \"three\");\n"
+           "int n(int x) { switch (x) { case sizeof(Three): return 3; default: return 0; } }\n"),
+    };
+    String8 debug_modes[] = {S8("-g0"), S8("-g")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 debug = 0; debug < BUSTER_ARRAY_LENGTH(debug_modes); debug += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-released-phase-fill"), S8(".c"));
+            String8 outputs[2] = {
+                buster_test_temporary_path(arena, S8("buster-released-phase-fill-plain"), S8(".o")),
+                buster_test_temporary_path(arena, S8("buster-released-phase-fill-filled"), S8(".o")),
+            };
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[index])));
+            CompilerDriverResult results[2];
+            ByteSlice objects[2] = {0};
+            for (u32 fill = 0; fill < 2; fill += 1)
+            {
+                String8 command[] = {debug_modes[debug], S8("-std=gnu23"), S8("-c"), S8("-o"), outputs[fill], input};
+                arena_test_fill_releases(fill != 0);
+                results[fill] = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                arena_test_fill_releases(false);
+                if (results[fill].error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    objects[fill] = file_read(arena, outputs[fill], (FileReadOptions){0});
+                }
+            }
+            BUSTER_TEST_RAW(arguments, results[0].error == results[1].error,
+                            string_format(arena, S8("source={S8}\nplain={u32}\nfilled={u32}"), sources[index], (u32)results[0].error, (u32)results[1].error));
+            BUSTER_STRING_TEST(arguments, results[0].diagnostic, results[1].diagnostic);
+            BUSTER_STRING_TEST(arguments, results[0].warning, results[1].warning);
+            BUSTER_TEST(arguments, results[0].diagnostic_count == results[1].diagnostic_count);
+            for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(results[0].diagnostic_count, results[1].diagnostic_count); diagnostic += 1)
+            {
+                BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, results[0].diagnostics[diagnostic]),
+                                   compiler_diagnostic_render(arena, results[1].diagnostics[diagnostic]));
+            }
+            BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
+                                       (!objects[0].length || !memcmp(objects[0].pointer, objects[1].pointer, (size_t)objects[0].length)));
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // The same sources reach the frontend through syntax-only and object actions.
 // Compare structured diagnostics as well as their rendered severity/location/
 // ordering; backend capability failures are deliberately absent from this corpus.
@@ -6599,7 +6671,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
                     (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS));
                 if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), S8(".exe"));
+                    // Each combination runs its own images: Windows may refuse to
+                    // replace an image that just ran (#2089).
+                    u32 iteration = (target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                    String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), executable_suffix);
                     String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                         S8("-o"), executable, source};
                     CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
@@ -6612,7 +6688,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
                     if (host_compiled)
                     {
-                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-mixed"), S8(".exe"));
+                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-mixed"), executable_suffix);
                         String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                             S8("-o"), mixed, S8("tests/differential/many_native_arguments.c"), host_object};
                         CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
@@ -6674,7 +6750,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                         // regression gates all three MIR allocators against Clang.
                         if (native_target && mode != 0 && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                         {
-                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), S8(".exe"));
+                            // Each combination runs its own image: Windows may refuse to
+                            // replace an image that just ran (#2089).
+                            u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * BUSTER_ARRAY_LENGTH(pics) + pic;
+                            String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), executable_suffix);
                             String8 link[10];
                             u32 count = 0;
                             link[count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -6746,7 +6826,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
                 {
                     String8 source = fixture ? S8("tests/basic_c_aarch64_windows_variadic_boundary.c") : S8("tests/basic_c_aarch64_platform_variadic.c");
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), S8(".o"));
+                    // Every combination links and runs its own images. Windows can
+                    // keep an image that just ran open (loader teardown, Defender)
+                    // and refuse its replacement with ERROR_ACCESS_DENIED (#2089),
+                    // so no iteration relinks a path an earlier one executed.
+                    u32 iteration = ((target * BUSTER_ARRAY_LENGTH(modes) + mode) * BUSTER_ARRAY_LENGTH(frontends) + frontend) * 2 + fixture;
+                    String8 object_suffix = string_format(temporary.arena, S8("-{u32}.o"), iteration);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), object_suffix);
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
@@ -6760,7 +6846,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
                     bool native_target = target == (BUSTER_WINDOWS ? 1u : 0u);
                     if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-run"), S8(".exe"));
+                        String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-run"), executable_suffix);
                         String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                             S8("-o"), executable, source};
                         CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
@@ -6773,7 +6860,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
                         if (host_compiled && !fixture)
                         {
-                            String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-mixed"), S8(".exe"));
+                            String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-mixed"), executable_suffix);
                             String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                                 S8("-o"), mixed, S8("tests/differential/aarch64_platform_variadic.c"), host_object};
                             CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
@@ -6787,7 +6874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 #if BUSTER_WINDOWS
                         if (boundary_compiled && fixture)
                         {
-                            String8 boundary = buster_test_temporary_path(temporary.arena, S8("buster-windows-variadic-boundary-run"), S8(".exe"));
+                            String8 boundary = buster_test_temporary_path(temporary.arena, S8("buster-windows-variadic-boundary-run"), executable_suffix);
                             String8 boundary_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                                 S8("-DBUSTER_PLATFORM_VA_ABI_PROBE=1"), S8("-o"), boundary, source, boundary_object};
                             CompilerDriverResult boundary_result = compiler_driver_execute_invocation(temporary.arena,
@@ -13237,6 +13324,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);
 

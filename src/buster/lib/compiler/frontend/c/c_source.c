@@ -54,6 +54,11 @@
 //   c_pp_parenthesis_depth                     shape sidecar, and what the
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
+//   c_integer_operation,                       C integer operators over the
+//   c_integer_constant_binary/unary            shared ir_integer_* semantics:
+//                                              one operation table for runtime
+//                                              lowering and every constant
+//                                              evaluator
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
 //   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
@@ -64,6 +69,10 @@
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
+//   c_preprocess_seal, c_phase_arena_retire    the phase boundary: the result
+//                                              copied out of the phase arena
+//                                              before its release
+//                                              (docs/compiler-lifetime.md)
 //   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
 
@@ -5356,8 +5365,79 @@ enum
     C_CONDITIONAL_VALUE_FAULT = 2,
 };
 
+BUSTER_C_SHARED bool c_integer_operation(CConditionalOperator operation, bool is_signed, IrUnaryOperation* unary_out, IrBinaryOperation* binary_out)
+{
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    switch (operation)
+    {
+    case C_CONDITIONAL_UNARY_MINUS: unary = IR_UNARY_INTEGER_NEGATE; break;
+    case C_CONDITIONAL_BITWISE_NOT: unary = IR_UNARY_INTEGER_BITWISE_NOT; break;
+    case C_CONDITIONAL_LOGICAL_NOT: unary = IR_UNARY_BOOLEAN_NOT; break;
+    case C_CONDITIONAL_MULTIPLY: binary = IR_BINARY_INTEGER_MULTIPLY; break;
+    case C_CONDITIONAL_DIVIDE: binary = is_signed ? IR_BINARY_SIGNED_DIVIDE : IR_BINARY_UNSIGNED_DIVIDE; break;
+    case C_CONDITIONAL_REMAINDER: binary = is_signed ? IR_BINARY_SIGNED_REMAINDER : IR_BINARY_UNSIGNED_REMAINDER; break;
+    case C_CONDITIONAL_ADD: binary = IR_BINARY_INTEGER_ADD; break;
+    case C_CONDITIONAL_SUBTRACT: binary = IR_BINARY_INTEGER_SUBTRACT; break;
+    case C_CONDITIONAL_SHIFT_LEFT: binary = IR_BINARY_SHIFT_LEFT; break;
+    case C_CONDITIONAL_SHIFT_RIGHT: binary = is_signed ? IR_BINARY_SIGNED_SHIFT_RIGHT : IR_BINARY_UNSIGNED_SHIFT_RIGHT; break;
+    case C_CONDITIONAL_BITWISE_AND: binary = IR_BINARY_INTEGER_BITWISE_AND; break;
+    case C_CONDITIONAL_BITWISE_XOR: binary = IR_BINARY_INTEGER_BITWISE_XOR; break;
+    case C_CONDITIONAL_BITWISE_OR: binary = IR_BINARY_INTEGER_BITWISE_OR; break;
+    case C_CONDITIONAL_LESS: binary = is_signed ? IR_BINARY_SIGNED_LESS : IR_BINARY_UNSIGNED_LESS; break;
+    case C_CONDITIONAL_LESS_EQUAL: binary = is_signed ? IR_BINARY_SIGNED_LESS_EQUAL : IR_BINARY_UNSIGNED_LESS_EQUAL; break;
+    case C_CONDITIONAL_GREATER: binary = is_signed ? IR_BINARY_SIGNED_GREATER : IR_BINARY_UNSIGNED_GREATER; break;
+    case C_CONDITIONAL_GREATER_EQUAL: binary = is_signed ? IR_BINARY_SIGNED_GREATER_EQUAL : IR_BINARY_UNSIGNED_GREATER_EQUAL; break;
+    case C_CONDITIONAL_EQUAL: binary = IR_BINARY_INTEGER_EQUAL; break;
+    case C_CONDITIONAL_NOT_EQUAL: binary = IR_BINARY_INTEGER_NOT_EQUAL; break;
+    default: break;
+    }
+    *unary_out = unary;
+    *binary_out = binary;
+    return unary != IR_UNARY_COUNT || binary != IR_BINARY_COUNT;
+}
+
+BUSTER_C_SHARED CIntegerConstantResult c_integer_constant_binary(CConditionalOperator operation, IrInteger left, IrInteger right, u32 width,
+                                                                bool is_signed, u32 count_width)
+{
+    CIntegerConstantResult result = {.faults = IR_INTEGER_FAULT_UNSUPPORTED};
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    if (c_integer_operation(operation, is_signed, &unary, &binary) && binary != IR_BINARY_COUNT)
+    {
+        bool shift = binary == IR_BINARY_SHIFT_LEFT || binary == IR_BINARY_SIGNED_SHIFT_RIGHT || binary == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+        IrIntegerResult computed = ir_integer_binary(binary, left, right, width, shift ? count_width : width);
+        result.bits = computed.bits;
+        result.faults = computed.faults;
+        result.comparison = ir_integer_binary_is_comparison(binary);
+    }
+    result.constant = !(result.faults & (IR_INTEGER_FAULT_UNSUPPORTED | IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_SHIFT_COUNT));
+    return result;
+}
+
+BUSTER_C_SHARED CIntegerConstantResult c_integer_constant_unary(CConditionalOperator operation, IrInteger operand, u32 width)
+{
+    CIntegerConstantResult result = {.bits = ir_integer_mask(operand, width)};
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    if (c_integer_operation(operation, true, &unary, &binary) && unary != IR_UNARY_COUNT)
+    {
+        IrIntegerResult computed = ir_integer_unary(unary, operand, width);
+        result.bits = computed.bits;
+        result.faults = computed.faults;
+        result.comparison = unary == IR_UNARY_BOOLEAN_NOT;
+    }
+    else if (operation != C_CONDITIONAL_UNARY_PLUS)
+    {
+        result.faults = IR_INTEGER_FAULT_UNSUPPORTED;
+    }
+    result.constant = !(result.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, u8* value_flags, u32* value_count)
 {
+    IR_SEMANTIC_RECORD(PREPROCESSOR_NODES, 1);
     bool valid = true;
     if (c_conditional_is_unary(operation))
     {
@@ -5369,23 +5449,12 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         {
             u32 index = *value_count - 1;
             u64* value = values + index;
-            switch (operation)
+            CIntegerConstantResult computed = c_integer_constant_unary(operation, (IrInteger){.low = *value}, 64);
+            valid = computed.constant;
+            *value = computed.bits.low;
+            if (computed.comparison)
             {
-            case C_CONDITIONAL_UNARY_PLUS:
-                break;
-            case C_CONDITIONAL_UNARY_MINUS:
-                *value = 0 - *value;
-                break;
-            case C_CONDITIONAL_LOGICAL_NOT:
-                *value = !*value;
                 value_flags[index] &= C_CONDITIONAL_VALUE_FAULT;
-                break;
-            case C_CONDITIONAL_BITWISE_NOT:
-                *value = ~*value;
-                break;
-            default:
-                valid = false;
-                break;
             }
         }
     }
@@ -5424,95 +5493,55 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         u8 left_flags = value_flags[index];
         u8 flags = (u8)(left_flags | right_flags);
         bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
-        switch (operation)
+        bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
+        bool division = operation == C_CONDITIONAL_DIVIDE || operation == C_CONDITIONAL_REMAINDER;
+        if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
         {
-        case C_CONDITIONAL_MULTIPLY:
-            *left *= right;
-            break;
-        case C_CONDITIONAL_DIVIDE:
-        case C_CONDITIONAL_REMAINDER:
-            // Never execute an invalid host division, even in a subtree
-            // whose fault will be discarded by an enclosing short circuit.
-            if ((flags & C_CONDITIONAL_VALUE_FAULT) || !right ||
-                (!mixed_unsigned && (s64)*left == INT64_MIN && (s64)right == -1))
+            // Only an operand the operator evaluates contributes its fault.
+            bool conjunction = operation == C_CONDITIONAL_LOGICAL_AND;
+            flags = (u8)((left_flags | ((*left != 0) == conjunction ? right_flags : 0)) & C_CONDITIONAL_VALUE_FAULT);
+            *left = conjunction ? *left && right : *left || right;
+        }
+        else if (division && (flags & C_CONDITIONAL_VALUE_FAULT))
+        {
+            // Never divide under an operand's fault, even in a subtree an
+            // enclosing short circuit will discard.
+            *left = 0;
+        }
+        else
+        {
+            // Preprocessing arithmetic is C arithmetic at intmax_t/uintmax_t
+            // (C17 6.10.1p4): 64 bits, unsigned when either operand is, and a
+            // shift takes the left operand's signedness with its count read
+            // as the unsigned 64-bit value it carries.
+            bool is_signed = shift ? !(left_flags & C_CONDITIONAL_VALUE_UNSIGNED) : !mixed_unsigned;
+            CIntegerConstantResult computed = c_integer_constant_binary(operation, (IrInteger){.low = *left}, (IrInteger){.low = right}, 64, is_signed, 64);
+            valid = !(computed.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+            if (division && (computed.faults & (IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_SIGNED_OVERFLOW)))
             {
+                // A division by zero and INT64_MIN / -1 (and their remainders)
+                // are this evaluator's deferred faults.
                 flags |= C_CONDITIONAL_VALUE_FAULT;
                 *left = 0;
             }
-            else if (mixed_unsigned)
+            else if (shift && (computed.faults & IR_INTEGER_FAULT_SHIFT_COUNT))
             {
-                *left = operation == C_CONDITIONAL_DIVIDE ? *left / right : *left % right;
+                // A count of 64 or more shifts every bit out: zero, or the
+                // sign for an arithmetic right shift.
+                *left = operation == C_CONDITIONAL_SHIFT_RIGHT && is_signed ? (u64)((s64)*left >> 63) : 0;
             }
             else
             {
-                *left = operation == C_CONDITIONAL_DIVIDE ? (u64)((s64)*left / (s64)right) : (u64)((s64)*left % (s64)right);
+                *left = computed.bits.low;
             }
-            break;
-        case C_CONDITIONAL_ADD:
-            *left += right;
-            break;
-        case C_CONDITIONAL_SUBTRACT:
-            *left -= right;
-            break;
-        case C_CONDITIONAL_SHIFT_LEFT:
-            *left = right < 64 ? *left << right : 0;
-            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
-            break;
-        case C_CONDITIONAL_SHIFT_RIGHT:
-            if (left_flags & C_CONDITIONAL_VALUE_UNSIGNED)
+            if (shift)
             {
-                *left = right < 64 ? *left >> right : 0;
+                flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
             }
-            else
+            else if (computed.comparison)
             {
-                *left = right < 64 ? (u64)((s64)*left >> right) : (u64)((s64)*left >> 63);
+                flags &= C_CONDITIONAL_VALUE_FAULT;
             }
-            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
-            break;
-        case C_CONDITIONAL_LESS:
-            *left = mixed_unsigned ? *left < right : (s64)*left < (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_LESS_EQUAL:
-            *left = mixed_unsigned ? *left <= right : (s64)*left <= (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_GREATER:
-            *left = mixed_unsigned ? *left > right : (s64)*left > (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_GREATER_EQUAL:
-            *left = mixed_unsigned ? *left >= right : (s64)*left >= (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_EQUAL:
-            *left = *left == right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_NOT_EQUAL:
-            *left = *left != right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_BITWISE_AND:
-            *left &= right;
-            break;
-        case C_CONDITIONAL_BITWISE_XOR:
-            *left ^= right;
-            break;
-        case C_CONDITIONAL_BITWISE_OR:
-            *left |= right;
-            break;
-        case C_CONDITIONAL_LOGICAL_AND:
-            flags = (u8)((left_flags | (*left ? right_flags : 0)) & C_CONDITIONAL_VALUE_FAULT);
-            *left = *left && right;
-            break;
-        case C_CONDITIONAL_LOGICAL_OR:
-            flags = (u8)((left_flags | (*left ? 0 : right_flags)) & C_CONDITIONAL_VALUE_FAULT);
-            *left = *left || right;
-            break;
-        default:
-            valid = false;
-            break;
         }
         value_flags[index] = flags;
     }
@@ -5862,6 +5891,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                                                                      CPreprocessOptions* options, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
+    IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
     CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
@@ -8293,7 +8323,260 @@ BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
     { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
 };
 
-CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
+// The preprocessor's end-of-phase boundary. Everything c_preprocess builds is
+// allocated in its phase arena; before that arena is released, the seal
+// copies the graph a later phase can reach from CPreprocessResult into the
+// caller's arena, at exact sizes, and leaves the rest behind: per-file lexed
+// rows and shapes, macro records and their argument/expansion staging, class
+// masks, include identity tables, line staging, the region-name table and the
+// worst-case checkpoint reservations. Tokens, token shapes and spellings live
+// in their own recovery arenas and are not part of the phase arena.
+//
+// The copied graph is complete by construction of these structures, and the
+// size checks below fail the build when one of them changes shape, so a new
+// pointer field cannot cross the boundary without a matching rule here. A
+// pointer the phase arena does not own -- a caller's path, a static spelling,
+// the spelling space -- is left as it is.
+typedef struct CPreprocessSeal CPreprocessSeal;
+struct CPreprocessSeal
+{
+    Arena* destination;
+    Arena* phase_arena;
+    u64 phase_start;
+    CPhaseBoundaryMetrics metrics;
+};
+
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 184);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 80);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceMap) == 32);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 64);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 8 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
+BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
+
+BUSTER_C_INTERNAL bool c_preprocess_seal_owns(CPreprocessSeal const* seal, void const* pointer)
+{
+    return arena_range_contains(seal->phase_arena, seal->phase_start, seal->phase_arena->position, pointer);
+}
+
+// One surviving array: copied when the phase arena owns it, kept otherwise.
+BUSTER_C_INTERNAL void* c_preprocess_seal_array(CPreprocessSeal* seal, void const* pointer, u64 element_size, u64 count, u64 alignment)
+{
+    void* result = (void*)pointer;
+    if (pointer)
+    {
+        seal->metrics.references += 1;
+        if (c_preprocess_seal_owns(seal, pointer))
+        {
+            u64 size = arena_array_size(element_size, count);
+            result = arena_allocate_bytes(seal->destination, size, alignment);
+            if (size)
+            {
+                memcpy(result, pointer, size);
+            }
+            seal->metrics.sealed_bytes += size;
+            seal->metrics.sealed_objects += 1;
+        }
+    }
+    return result;
+}
+
+#define c_preprocess_seal_typed(seal, pointer, T, count) ((T*)c_preprocess_seal_array((seal), (pointer), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
+
+BUSTER_C_INTERNAL String8 c_preprocess_seal_string(CPreprocessSeal* seal, String8 string)
+{
+    String8 result = string;
+    if (string.pointer)
+    {
+        result.pointer = (char8*)c_preprocess_seal_array(seal, string.pointer, 1, string.length, 1);
+    }
+    return result;
+}
+
+// Regions of one lexed file share its checkpoint arrays -- every include it
+// makes splits it into another region -- so each array is copied once and the
+// later regions are pointed at that copy. The table is keyed by the old
+// address and sized for at most half occupancy.
+typedef struct CPreprocessSealCheckpoints CPreprocessSealCheckpoints;
+struct CPreprocessSealCheckpoints
+{
+    IrSourceCheckpoint* old_checkpoints;
+    IrSourceCheckpoint* checkpoints;
+    u32* checkpoint_offsets;
+    u32* checkpoint_pages;
+    u32 checkpoint_count;
+    u32 checkpoint_page_count;
+};
+
+BUSTER_C_INTERNAL void c_preprocess_seal_map(CPreprocessSeal* seal, IrSourceMap* map)
+{
+    map->keys = c_preprocess_seal_typed(seal, map->keys, IrSourceRegionKey, map->keys ? (u64)map->count + 1 : 0);
+    map->pages = c_preprocess_seal_typed(seal, map->pages, u32, map->page_count);
+    map->regions = c_preprocess_seal_typed(seal, map->regions, IrSourceRegion, map->count);
+    Arena* conflicts[] = {
+        seal->destination,
+        seal->phase_arena,
+    };
+    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    u32 slot_count = 16;
+    while (slot_count < (u64)map->count * 2)
+    {
+        slot_count <<= 1;
+    }
+    CPreprocessSealCheckpoints* slots = arena_allocate_zeroed(temporary.arena, CPreprocessSealCheckpoints, slot_count);
+    for (u32 index = 0; index < map->count; index += 1)
+    {
+        IrSourceRegion* region = &map->regions[index];
+        if (!region->checkpoints)
+        {
+            continue;
+        }
+        u64 hash = ((u64)region->checkpoints >> 4) * 0x9E3779B97F4A7C15ull;
+        u32 slot = (u32)(hash >> 32) & (slot_count - 1);
+        while (slots[slot].old_checkpoints && slots[slot].old_checkpoints != region->checkpoints)
+        {
+            slot = (slot + 1) & (slot_count - 1);
+        }
+        CPreprocessSealCheckpoints* entry = &slots[slot];
+        // Every region of one lex carries that lex's counts; a larger count
+        // would only ever get a larger copy, never a read past a shorter one.
+        if (!entry->old_checkpoints || region->checkpoint_count > entry->checkpoint_count ||
+            region->checkpoint_page_count > entry->checkpoint_page_count)
+        {
+            entry->old_checkpoints = region->checkpoints;
+            entry->checkpoints = c_preprocess_seal_typed(seal, region->checkpoints, IrSourceCheckpoint, region->checkpoint_count);
+            entry->checkpoint_offsets = c_preprocess_seal_typed(seal, region->checkpoint_offsets, u32, region->checkpoint_count);
+            entry->checkpoint_pages = c_preprocess_seal_typed(seal, region->checkpoint_pages, u32, region->checkpoint_page_count);
+            entry->checkpoint_count = region->checkpoint_count;
+            entry->checkpoint_page_count = region->checkpoint_page_count;
+        }
+        else
+        {
+            seal->metrics.references += (u64)(region->checkpoint_offsets != 0) + (u64)(region->checkpoint_pages != 0) + 1;
+        }
+        region->checkpoints = entry->checkpoints;
+        region->checkpoint_offsets = entry->checkpoint_offsets;
+        region->checkpoint_pages = entry->checkpoint_pages;
+    }
+    scratch_end(temporary);
+}
+
+BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResult* result)
+{
+    if (result->recovery)
+    {
+        CSourceMapRecovery* recovery = c_preprocess_seal_typed(seal, result->recovery, CSourceMapRecovery, 1);
+        c_preprocess_seal_map(seal, &recovery->map);
+        // Nothing appends a region once the phase ends; the copy is exact.
+        recovery->capacity = recovery->map.count;
+        result->recovery = recovery;
+    }
+    if (result->symbols)
+    {
+        // Parsing and lowering keep interning into the table, so it moves to
+        // the caller's arena whole, spare capacity included, and grows there.
+        CSymbolTable* table = c_preprocess_seal_typed(seal, result->symbols, CSymbolTable, 1);
+        table->arena = seal->destination;
+        table->names = c_preprocess_seal_typed(seal, table->names, String8, table->name_capacity);
+        table->slots = c_preprocess_seal_typed(seal, table->slots, CSymbolSlot, table->slot_capacity);
+        table->builtin_kinds = c_preprocess_seal_typed(seal, table->builtin_kinds, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        table->class_bits = c_preprocess_seal_typed(seal, table->class_bits, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        table->word_bits = c_preprocess_seal_typed(seal, table->word_bits, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        for (u32 id = 1; id <= table->count; id += 1)
+        {
+            table->names[id] = c_preprocess_seal_string(seal, table->names[id]);
+        }
+        result->symbols = table;
+    }
+    result->diagnostics = c_preprocess_seal_typed(seal, result->diagnostics, CDiagnostic, result->diagnostic_count);
+    result->diagnostic_capacity = result->diagnostic_count;
+    for (u64 index = 0; index < result->diagnostic_count; index += 1)
+    {
+        result->diagnostics[index].message = c_preprocess_seal_string(seal, result->diagnostics[index].message);
+    }
+    result->files = c_preprocess_seal_typed(seal, result->files, String8, result->file_count);
+    for (u32 index = 0; index < result->file_count; index += 1)
+    {
+        result->files[index] = c_preprocess_seal_string(seal, result->files[index]);
+    }
+    result->pack_changes = c_preprocess_seal_typed(seal, result->pack_changes, CPackAlignment, result->pack_change_count);
+    if (result->detail)
+    {
+        CPreprocessDetail* detail = c_preprocess_seal_typed(seal, result->detail, CPreprocessDetail, 1);
+        detail->lexed_files = c_preprocess_seal_typed(seal, detail->lexed_files, CSourceFileMetrics, detail->lexed_file_count);
+        for (u32 index = 0; index < detail->lexed_file_count; index += 1)
+        {
+            detail->lexed_files[index].path = c_preprocess_seal_string(seal, detail->lexed_files[index].path);
+        }
+        result->detail = detail;
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u64 c_test_pointer_in_range(void const* pointer, void const* start, void const* end)
+{
+    u8 const* address = (u8 const*)pointer;
+    return address >= (u8 const*)start && address < (u8 const*)end;
+}
+
+u64 c_test_preprocess_references_range(CPreprocessResult const* result, void const* start, void const* end)
+{
+    u64 count = c_test_pointer_in_range(result->tokens, start, end) + c_test_pointer_in_range(result->spelling_base, start, end) +
+                c_test_pointer_in_range(result->recovery, start, end) + c_test_pointer_in_range(result->symbols, start, end) +
+                c_test_pointer_in_range(result->diagnostics, start, end) + c_test_pointer_in_range(result->files, start, end) +
+                c_test_pointer_in_range(result->pack_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
+    CSourceMapRecovery const* recovery = result->recovery;
+    if (recovery)
+    {
+        IrSourceMap const* map = &recovery->map;
+        count += c_test_pointer_in_range(recovery->token_shapes, start, end) + c_test_pointer_in_range(map->keys, start, end) +
+                 c_test_pointer_in_range(map->regions, start, end) + c_test_pointer_in_range(map->pages, start, end);
+        for (u32 index = 0; index < map->count; index += 1)
+        {
+            IrSourceRegion const* region = &map->regions[index];
+            count += c_test_pointer_in_range(region->checkpoints, start, end) + c_test_pointer_in_range(region->checkpoint_offsets, start, end) +
+                     c_test_pointer_in_range(region->checkpoint_pages, start, end);
+        }
+    }
+    CSymbolTable const* table = result->symbols;
+    if (table)
+    {
+        count += c_test_pointer_in_range(table->arena, start, end) + c_test_pointer_in_range(table->names, start, end) +
+                 c_test_pointer_in_range(table->slots, start, end) + c_test_pointer_in_range(table->builtin_kinds, start, end) +
+                 c_test_pointer_in_range(table->class_bits, start, end) + c_test_pointer_in_range(table->word_bits, start, end);
+        for (u32 id = 1; id <= table->count; id += 1)
+        {
+            count += c_test_pointer_in_range(table->names[id].pointer, start, end);
+        }
+    }
+    for (u64 index = 0; index < result->diagnostic_count; index += 1)
+    {
+        count += c_test_pointer_in_range(result->diagnostics[index].message.pointer, start, end);
+    }
+    for (u32 index = 0; index < result->file_count; index += 1)
+    {
+        count += c_test_pointer_in_range(result->files[index].pointer, start, end);
+    }
+    if (result->detail)
+    {
+        count += c_test_pointer_in_range(result->detail->lexed_files, start, end);
+        for (u32 index = 0; index < result->detail->lexed_file_count; index += 1)
+        {
+            count += c_test_pointer_in_range(result->detail->lexed_files[index].path.pointer, start, end);
+        }
+    }
+    return count;
+}
+#endif
+
+void c_phase_arena_retire(Arena* arena)
+{
+    arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
+}
+
+CPreprocessResult c_preprocess(Arena* result_arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
     {
@@ -8307,14 +8590,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .target = options.target,
         .dialect = options.dialect,
     };
-    if (!arena)
+    if (!result_arena)
     {
         return result;
     }
     // The detail block outlives this call in the caller's arena: the result is
     // returned and then copied by value all the way down the frontend, and
     // every copy shares this one block.
-    result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+    result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
     };
@@ -8345,8 +8628,24 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                                .flags = {.pool_reuse = 1},
                                                            })
                                           : 0;
-    if (!token_shape_arena)
+    // Everything below that names `arena` is phase-local: it is allocated in
+    // the phase arena above its entry position, and what a later phase needs
+    // is copied out by c_preprocess_seal before the release at the end.
+    Arena* phase_arena = options.phase_arena;
+    bool phase_arena_owned = !phase_arena && token_shape_arena;
+    if (phase_arena_owned)
     {
+        phase_arena = arena_create((ArenaCreation){
+            .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+    }
+    if (!token_shape_arena || !phase_arena)
+    {
+        if (token_shape_arena)
+        {
+            arena_destroy(token_shape_arena, 1);
+        }
         if (token_arena)
         {
             arena_destroy(token_arena, 1);
@@ -8357,6 +8656,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         return result;
     }
+    u64 phase_start = phase_arena->position;
+    Arena* arena = phase_arena;
     CSpellingSpace space_storage = {
         .base = (char8*)spelling_arena + arena_minimum_position,
         .arena = spelling_arena,
@@ -8367,6 +8668,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .spelling_arena = spelling_arena,
         .token_arena = token_arena,
         .token_shape_arena = token_shape_arena,
+        .phase_arena = options.phase_arena,
     };
     result.recovery = recovery;
     result.spelling_base = space->base;
@@ -9742,6 +10044,18 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         {
             diagnostic->location = c_source_location_from_position(diagnostic->location.map_offset, position);
         }
+    }
+    CPreprocessSeal seal = {
+        .destination = result_arena,
+        .phase_arena = phase_arena,
+        .phase_start = phase_start,
+    };
+    c_preprocess_seal(&seal, &result);
+    seal.metrics.released_bytes = arena_release_to_position(phase_arena, phase_start);
+    result.detail->boundary = seal.metrics;
+    if (phase_arena_owned)
+    {
+        c_phase_arena_retire(phase_arena);
     }
     return result;
 }

@@ -3,13 +3,15 @@
 // database rows and their exact analyzer argv, clang_analyze_worker owns a shard,
 // and clang_analyze_aggregate requires one terminal result for every selected TU.
 // clang_analyze_main also exposes preparation, independent workers and replay of
-// aggregation. Results are evidence for one fresh run, never an incremental cache.
+// aggregation and an opt-in two/four-worker qualification campaign. Results are
+// evidence for one fresh run, never an incremental cache.
 
 #define BUSTER_ANALYZE_DEFAULT_SHARDS 8
 #define BUSTER_ANALYZE_DEFAULT_JOBS 2
 #define BUSTER_ANALYZE_MAX_SHARDS 256
 #define BUSTER_ANALYZE_TIMEOUT_SECONDS 600
 #define BUSTER_ANALYZE_RESULT_VERSION "BUSTER_CLANG_ANALYZE_RESULT_V1\n"
+#define BUSTER_ANALYZE_QUALIFICATION_SAMPLES 4
 
 typedef struct ClangAnalyzeOptions ClangAnalyzeOptions;
 struct ClangAnalyzeOptions
@@ -28,6 +30,8 @@ struct ClangAnalyzeOptions
     bool aggregate;
     bool worker;
     bool self_test;
+    bool qualify_workers;
+    String8* run_record;
 };
 
 typedef struct ClangAnalyzeUnit ClangAnalyzeUnit;
@@ -733,9 +737,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             // Always aggregate, even when a worker failed or never launched.
             bool aggregate = clang_analyze_aggregate(arena, options, plan);
             success = success && aggregate && baseline;
-            string_print(S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}\n"),
+            String8 record = string_format(arena, S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}\n"),
                          os_now_microseconds() - start + setup_us, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
                          options.results, success ? S8("pass") : S8("fail"));
+            string_print(S8("{S8}"), record);
+            if (options.run_record) *options.run_record = record;
         }
     }
     return success;
@@ -743,12 +749,74 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena);
 
+BUSTER_GLOBAL_LOCAL u64 clang_analyze_children_cpu_microseconds(void)
+{
+    u64 result = 0;
+#if BUSTER_LINUX || BUSTER_APPLE
+    struct rusage usage = {0};
+    if (getrusage(RUSAGE_CHILDREN, &usage) == 0)
+    {
+        result = (u64)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000 +
+                 (u64)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_qualify_workers(Arena* arena, ClangAnalyzeOptions options)
+{
+    // Counterbalance order without running competing arms on the same host.
+    // Each arm still uses the ordinary scheduler, deadlines and aggregate.
+    u64 jobs[BUSTER_ANALYZE_QUALIFICATION_SAMPLES] = {2, 4, 4, 2};
+    u64 cpus = os_get_logical_thread_count();
+    ClangAnalyzePlan frozen;
+    bool success = cpus >= 4 && options.shards >= 4 && clang_analyze_plan(arena, options, &frozen);
+    if (!success) string_print(S8("error: worker qualification requires at least four host logical CPUs, four shards and a valid inventory\n"));
+    success = success && clang_analyze_new_directory(arena, options.results);
+    if (success)
+    {
+        String8List records = {0};
+        string8_list_push(arena, &records, S8("BUSTER_ANALYZE_WORKER_QUALIFICATION_V1\n"));
+        for (u64 sample = 0; sample < BUSTER_ARRAY_LENGTH(jobs); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            Arena* scratch = temporary.arena;
+            ClangAnalyzeOptions arm = options;
+            arm.qualify_workers = false;
+            arm.jobs = jobs[sample];
+            arm.results = path_join(scratch, options.results, string_format(scratch, S8("sample-{u64}-jobs-{u64}"), sample, arm.jobs));
+            String8 run_record = {0};
+            arm.run_record = &run_record;
+            u64 cpu_start = clang_analyze_children_cpu_microseconds();
+            u64 start = os_now_microseconds();
+            bool passed = clang_analyze_run(scratch, arm);
+            u64 elapsed = os_now_microseconds() - start;
+            u64 cpu_end = clang_analyze_children_cpu_microseconds();
+            ClangAnalyzePlan current;
+            bool unchanged = clang_analyze_plan(scratch, options, &current) && string_equal(frozen.fingerprint, current.fingerprint);
+            passed = passed && unchanged && run_record.length;
+            String8 record = string_format(arena, S8("ANALYZE_WORKER_SAMPLE sample={u64} jobs={u64} elapsed_us={u64} children_cpu_us={u64} host_logical_cpus={u64} eligible={u64} inventory_sha256={S8} status={S8}\n"),
+                sample, arm.jobs, elapsed, cpu_end >= cpu_start ? cpu_end - cpu_start : 0, cpus, frozen.count, frozen.fingerprint, passed ? S8("pass") : S8("fail"));
+            bool written = clang_analyze_write(scratch, path_join(scratch, arm.results, S8("run.txt")), run_record);
+            string8_list_push(arena, &records, record);
+            string_print(S8("{S8}"), record);
+            success = success && passed && written;
+            scratch_end(temporary);
+        }
+        String8 summary = string_join_arena(arena, string8_list_to_slice(arena, records), true);
+        bool written = clang_analyze_write(arena, path_join(arena, options.results, S8("qualification.txt")), summary);
+        success = success && written;
+    }
+    return success;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 arguments)
 {
     ClangAnalyzeOptions options = {.database = S8("build"), .shards = BUSTER_ANALYZE_DEFAULT_SHARDS,
         .jobs = BUSTER_ANALYZE_DEFAULT_JOBS, .timeout = BUSTER_ANALYZE_TIMEOUT_SECONDS};
     bool valid = true;
     bool database_set = false;
+    bool jobs_set = false;
     for (u64 i = 0; valid && i < arguments.length; i += 1)
     {
         String8 argument = arguments.pointer[i];
@@ -758,6 +826,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
         else if (string_equal(argument, S8("--prepare")) && !has_value) options.prepare = true;
         else if (string_equal(argument, S8("--aggregate")) && !has_value) options.aggregate = true;
         else if (string_equal(argument, S8("--self-test")) && !has_value) options.self_test = true;
+        else if (string_equal(argument, S8("--qualify-workers")) && !has_value) options.qualify_workers = true;
         else if (!string_starts_with_sequence(argument, S8("--")) && !database_set)
         {
             options.database = argument;
@@ -776,7 +845,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
                 u64 number = 0;
                 valid = text_parse_u64(value, &number);
                 if (string_equal(argument, S8("--shards"))) options.shards = number;
-                else if (string_equal(argument, S8("--jobs"))) options.jobs = number;
+                else if (string_equal(argument, S8("--jobs")))
+                {
+                    options.jobs = number;
+                    jobs_set = true;
+                }
                 else if (string_equal(argument, S8("--timeout"))) options.timeout = number;
                 else if (string_equal(argument, S8("--shard")))
                 {
@@ -792,7 +865,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
             options.timeout && options.timeout <= 86400 && (!options.worker || options.shard < options.shards) &&
             ((u32)options.prepare + (u32)options.aggregate + (u32)options.worker <= 1) &&
             (!(options.prepare || options.aggregate || options.worker) || options.results.length) &&
-            (!options.baseline_driver.length || !(options.prepare || options.aggregate || options.worker));
+            (!options.baseline_driver.length || !(options.prepare || options.aggregate || options.worker)) &&
+            (!options.qualify_workers || !(options.prepare || options.aggregate || options.worker || options.self_test || jobs_set || options.baseline_driver.length));
     if (valid && options.self_test)
     {
         valid = arguments.length == 1 && clang_analyze_self_test(arena);
@@ -808,12 +882,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
         if (options.jobs > options.shards) options.jobs = options.shards;
         u64 cpus = os_get_logical_thread_count();
         if (cpus && options.jobs > cpus) options.jobs = cpus;
-        valid = clang_analyze_run(arena, options);
+        valid = options.qualify_workers ? clang_analyze_qualify_workers(arena, options) : clang_analyze_run(arena, options);
     }
     else
     {
         string_print(S8("error: clang_analyze [database] [--config Release] [--shards N] [--jobs N] [--timeout seconds] [--results fresh-directory] "
-                        "[--prepare | --shard zero-based-index | --aggregate] [--clang path] [--quiet]; or --self-test\n"));
+                        "[--prepare | --shard zero-based-index | --aggregate | --qualify-workers] [--clang path] [--quiet]; or --self-test\n"));
     }
     return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
@@ -896,6 +970,13 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
             .results = path_join(arena, root, string_format(arena, S8("case-{u64}"), mode))};
         bool passed = written && clang_analyze_run(arena, options);
         clang_analyze_test_check(passed == (mode == 0 || mode == 6), modes[mode], &failures);
+        if (mode <= 1 && os_get_logical_thread_count() >= 4)
+        {
+            ClangAnalyzeOptions qualification = options;
+            qualification.results = path_join(arena, root, string_format(arena, S8("worker-budget-{u64}"), mode));
+            bool qualified = written && clang_analyze_qualify_workers(arena, qualification);
+            clang_analyze_test_check(qualified == (mode == 0), mode ? S8("worker-budget-failure-propagates") : S8("worker-budget-complete-inventories"), &failures);
+        }
         ClangAnalyzePlan plan;
         bool planned = clang_analyze_plan(arena, options, &plan);
         clang_analyze_test_check(planned && plan.count == 4 && plan.excluded == 2 && plan.units[0].shard == plan.units[1].shard,
