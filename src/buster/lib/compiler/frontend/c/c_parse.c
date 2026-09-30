@@ -5197,6 +5197,52 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 continue;
             }
             CToken first = preprocess.tokens[task->start];
+            if (c_preprocess_dialect_is_gnu(preprocess.dialect) &&
+                c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_BRACE) &&
+                c_parse_matching_delimiter_indexed(result, preprocess, task->start) == task->end - 1)
+            {
+                // Parentheses have already been stripped. A GNU statement
+                // expression takes the type of its final expression statement.
+                // Retarget this task so nested bodies stay on the task stack.
+                u32 statement = task->start + 1;
+                u32 tail_start = statement;
+                u32 tail_end = statement;
+                for (u32 index = statement; index + 1 < task->end; index += 1)
+                {
+                    CToken token = preprocess.tokens[index];
+                    if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                    {
+                        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+                        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                        {
+                            statement = close + 1;
+                            tail_start = statement;
+                            tail_end = statement;
+                        }
+                        index = close;
+                    }
+                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                    {
+                        tail_start = statement;
+                        tail_end = index;
+                        statement = index + 1;
+                    }
+                }
+                bool expression = tail_start < tail_end && statement == task->end - 1 &&
+                    !c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[tail_start]);
+                if (expression)
+                {
+                    task->start = tail_start;
+                    task->end = tail_end;
+                    task->operators_checked = false;
+                }
+                else
+                {
+                    last = c_parse_expression_scalar_type(result, C_TYPE_VOID);
+                    task_count -= 1;
+                }
+                continue;
+            }
             if (task->end == task->start + 1)
             {
                 // A single token cannot contain a cast or an operator. Keep

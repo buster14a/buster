@@ -47972,20 +47972,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                u32 selected_start = 0;
-                u32 selected_end = 0;
-                IrTypeId selected_type = IR_TYPE_ID_INVALID;
+                CTypeIdentityQuery answer;
                 CIrConstantValue selected = {0};
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 if (close >= end ||
-                    !c_ir_generic_selection(builder, index, close + 1, &selected_start, &selected_end, &selected_type) ||
-                    !c_ir_query_constant(builder, selected_start, selected_end, &selected))
+                    !c_ir_type_identity_query(builder, index, close + 1, &answer) || answer.result_start == UINT32_MAX ||
+                    !c_ir_query_constant(builder, answer.result_start, answer.result_end, &selected))
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start,
                                                           value_count, operator_count);
                 }
-                (void)selected_type;
                 if (value_count >= capacity)
                 {
                     return false;
