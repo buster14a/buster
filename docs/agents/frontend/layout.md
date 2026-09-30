@@ -377,7 +377,9 @@ which type they hand it next (`c_parse_layout_next`) and where its facts live
 (`c_parse_layout_resolved`/`_size`/`_alignment`/`_provisional`/`_publish`).
 The body takes the agenda as a parameter and is inlined into each driver with
 a constant, so the ordered passes' copy carries no agenda branch; keep new
-reads and writes of per-query facts on those accessors.
+reads and writes of per-query facts on those accessors. Its aggregate branch
+places members through `c_record_layout_place` (above), which reads only the
+target and the member it is handed, so it adds no agenda prerequisite.
 
 - **Ordered passes** (`c_parse_type_layout_passes`, the only driver before this
   section existed). Per-query columns cover the whole type table, seeded from
