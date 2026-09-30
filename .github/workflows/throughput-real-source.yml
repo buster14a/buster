@@ -135,6 +135,7 @@ jobs:
           .ci-tools/build test_cjson --config Release "$PWD/external/cjson" 2>&1 | tee evidence/cjson.log
       - name: Existing Lua correctness oracle
         id: oracle_lua
+        continue-on-error: ${{ inputs.qualify_pinned_inputs }}
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.lua_git.outcome == 'success' && steps.lua_release.outcome == 'success' }}
         shell: bash
         run: |
@@ -142,6 +143,7 @@ jobs:
           .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
       - name: Existing SQLite correctness oracle
         id: oracle_sqlite
+        continue-on-error: ${{ inputs.qualify_pinned_inputs }}
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.sqlite.outcome == 'success' }}
         shell: bash
         run: |
@@ -160,6 +162,39 @@ jobs:
           printf 'apt-inputs=%s\ncompiler=%s\ncjson=%s\nlua=%s\nsqlite=%s\n' "$APT_INPUTS" "$COMPILER" "$CJSON" "$LUA" "$SQLITE" | tee evidence/outcomes.txt
           printf 'Hosted functional qualification only; no dedicated-host timing acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
           cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate pinned-input qualification boundary
+        if: ${{ !cancelled() && inputs.qualify_pinned_inputs }}
+        shell: bash
+        env:
+          APT_INPUTS: ${{ steps.native_dependencies.outcome }}
+          COMPILER: ${{ steps.compiler.outcome }}
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
+        run: |
+          set -euo pipefail
+          test "$APT_INPUTS" = success
+          test "$COMPILER" = success
+          test "$CJSON" = success
+          test -s evidence/apt-readline/pinned.identity.json
+          test -s evidence/apt-readline/selected.identity.json
+          case "$LUA" in
+            success) ;;
+            failure)
+              grep -F "in function 'partition': could not lower call to 'sort_comp'" evidence/lua.log
+              grep -F "LUA_COMPILE_SUMMARY allocator=fast units=34 failed=1 status=fail" evidence/lua.log
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$SQLITE" in
+            success) ;;
+            failure)
+              grep -F "in function 'sqlite3RegisterBuiltinFunctions': could not lower initializer expression for local 'aBuiltinFunc'" evidence/sqlite.log
+              grep -F "error: test_sqlite stage=library config=threadsafe allocator=fast failed" evidence/sqlite.log
+              ;;
+            *) exit 1 ;;
+          esac
       - name: Verify descriptor and staged-input preflights
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
@@ -360,7 +395,7 @@ jobs:
           cat evidence/admission-outcomes.txt
           exit "$admission_failed"
       - name: Validate hosted functional admission receipts
-        if: ${{ !cancelled() && steps.admission.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.admission.outcome == 'success' && steps.oracle_cjson.outcome == 'success' && steps.oracle_lua.outcome == 'success' && steps.oracle_sqlite.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
