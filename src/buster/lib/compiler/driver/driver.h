@@ -118,6 +118,10 @@ struct CompilerDriverInvocation
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
     String8 source_metrics_path;
+    // Where to write the phase-lifetime ledger (`lifetime.*` keys). Kept out
+    // of the source metrics because resident sizes and arena extents vary
+    // from run to run and between compiler binaries.
+    String8 lifetime_metrics_path;
     // API-only opt-out from retaining structured records. Legacy diagnostic
     // text and warnings remain available; clean compilation allocates neither.
     bool suppress_diagnostic_records;
@@ -228,8 +232,8 @@ typedef enum CompilerLifetimeBoundary
 
 // What was live when a unit crossed one boundary. Byte counts are logical
 // arena extents (exact, including untouched worst-case reservations);
-// resident_bytes is the process RSS and is sampled only when source metrics
-// or verbose output were requested. The allocation and commit deltas cover
+// resident_bytes is the process RSS and is sampled only when lifetime
+// metrics were requested (-flifetime-metrics=). The allocation and commit deltas cover
 // the phase that ended here and are nonzero only with BUSTER_BENCH_ALLOCATIONS.
 typedef struct CompilerLifetimeSample CompilerLifetimeSample;
 struct CompilerLifetimeSample

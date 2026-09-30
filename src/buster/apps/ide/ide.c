@@ -903,8 +903,10 @@ BUSTER_GLOBAL_LOCAL void source_metrics_append_group(Arena* arena, String8* text
 
 // The phase-lifetime ledger (docs/compiler-lifetime.md) as `lifetime.*` keys:
 // per-boundary live extents, the preprocessing seal, the semantic query
-// releases, the frontend release and the byte-lifetime integrals. Resident bytes vary run to run, so they appear
-// here and never in `-v`.
+// releases, the frontend release and the byte-lifetime integrals. Resident
+// bytes and arena extents vary with the run and the compiler binary, so they
+// have their own file: `-fsource-metrics` output must stay identical across
+// bootstrap generations (self_host_audit_compare in build.c).
 BUSTER_GLOBAL_LOCAL void source_metrics_append_lifetime(Arena* arena, String8* text, CompilerLifetimeLedger const* lifetime)
 {
     // Static group names: the text grows contiguously in `arena`, so nothing
@@ -954,7 +956,7 @@ BUSTER_GLOBAL_LOCAL void source_metrics_append_lifetime(Arena* arena, String8* t
 }
 
 BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String8 unit, CSourceMetrics unique, CSourceMetrics lexed,
-                                              CPreprocessedMetrics preprocessed, CompilerLifetimeLedger const* lifetime)
+                                              CPreprocessedMetrics preprocessed)
 {
 #if BUSTER_BENCH_ALLOCATIONS
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
@@ -971,7 +973,6 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("spelling_bytes"), preprocessed.spelling_bytes);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("expansions"), preprocessed.expansions);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("definitions"), preprocessed.definitions);
-    source_metrics_append_lifetime(arena, &text, lifetime);
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
@@ -987,6 +988,14 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
                                     construction.values[index]);
     }
 #endif
+    return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
+}
+
+// `-flifetime-metrics=<path>`: the ledger alone, in the source-metrics format.
+BUSTER_GLOBAL_LOCAL bool write_lifetime_metrics(Arena* arena, String8 path, CompilerLifetimeLedger const* lifetime)
+{
+    String8 text = {0};
+    source_metrics_append_lifetime(arena, &text, lifetime);
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
@@ -1087,12 +1096,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         // error like an unwritable -o: the caller asked for a measurement and
         // would otherwise read a stale file, or none, without being told.
         if (invocation.source_metrics_path.length &&
-            !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed,
-                                  &compile.lifetime))
+            !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
         {
             compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;
         }
+    }
+    // Written for failed compiles too: the ledger records how far a unit got
+    // and what it released on the way out.
+    if (invocation.lifetime_metrics_path.length && !write_lifetime_metrics(arena, invocation.lifetime_metrics_path, &compile.lifetime))
+    {
+        compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.lifetime_metrics_path);
+        result = PROCESS_RESULT_FAILED;
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
     {

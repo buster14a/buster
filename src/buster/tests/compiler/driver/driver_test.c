@@ -11543,6 +11543,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-l:libandroid.so"),
         S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
+        S8("-flifetime-metrics=lifetime.txt"),
         S8("-o"),
         S8("output.o"),
         S8("source.c"),
@@ -11586,6 +11587,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
     BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
+    BUSTER_STRING_TEST(arguments, invocation.lifetime_metrics_path, S8("lifetime.txt"));
     BUSTER_TEST(arguments, invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
 
     String8 bitfield_options[][2] = {

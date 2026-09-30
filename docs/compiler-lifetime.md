@@ -93,8 +93,10 @@ only keep them resident.
 - A phase arena is retired by the thread that created it, at the end of the
   last phase that uses it: a rewound arena that is never retired keeps its
   committed pages.
-- Resident sizes vary run to run; they appear in `-fsource-metrics` output,
-  never in `-v`.
+- Resident sizes and arena extents vary with the run and the compiler binary;
+  they appear only in `-flifetime-metrics` output, never in `-v` or in
+  `-fsource-metrics`, whose output the self-host audit requires to be
+  identical across bootstrap generations.
 
 ## Stale-reference defenses
 
@@ -115,7 +117,8 @@ arrays and strings, pointer fields) and what the phase released.
 
 `CompilerDriverResult.lifetime` samples each boundary of a unit (preprocess,
 parse, semantic, lower, frontend release, prepare, codegen, object, emit) and
-`ide cc -fsource-metrics=<path>` writes it as `lifetime.*` keys:
+`ide cc -flifetime-metrics=<path>` writes it as `lifetime.*` keys, for failed
+compiles too:
 
 | Key | Meaning |
 |---|---|

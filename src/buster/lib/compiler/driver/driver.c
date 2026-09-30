@@ -511,6 +511,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
     }
+    else if (invocation->lifetime_metrics_path.length)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("lifetime metrics are not supported for GPU target: {S8}"), invocation->lifetime_metrics_path);
+    }
     else if (compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_C) ||
              compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT))
     {
@@ -1622,6 +1626,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (value.length)
         {
             invocation.source_metrics_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("-flifetime-metrics="));
+        if (value.length)
+        {
+            invocation.lifetime_metrics_path = value;
             continue;
         }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
@@ -3784,7 +3794,7 @@ BUSTER_GLOBAL_LOCAL CompilerLifetimeRecorder compiler_driver_lifetime_begin(Comp
         .ledger = ledger,
         .unit_arena = unit_arena,
         .unit_start = unit_arena->position,
-        .sample_resident = invocation->verbose || invocation->source_metrics_path.length,
+        .sample_resident = invocation->lifetime_metrics_path.length != 0,
     };
 #if BUSTER_BENCH_ALLOCATIONS
     result.allocations = arena_benchmark_counters();
