@@ -31,7 +31,7 @@ for label, ide in [("baseline", ide_base), ("candidate", ide_fixed)]:
             for name, body in witnesses.items():
                 path=out/(name+".c"); path.write_text(body)
                 binary=out/(label+"-"+name+"-"+form[1:]+"-"+mode)
-                r=run([ide,"cc","-std=c11",form,"-fregister-allocator="+mode,"-fverify-codegen","-fno-codegen-fallback",path,"-o",binary])
+                r=run([ide,"cc","-std=c11",form,"-fregister-allocator="+mode,"-fverify-codegen",("-fmachine-fallback" if mode == "none" else "-fno-machine-fallback"),path,"-o",binary])
                 if label == "baseline" and name == "negative-long":
                     assert r.returncode != 0 and ("static initializer" in r.stderr or "global initializer" in r.stderr), r
                 else:
@@ -43,7 +43,7 @@ for dialect in ["c11", "gnu17"]:
         for mode in ["none", "mir-stack", "fast", "quality"]:
             key=dialect+"-"+form[1:]+"-"+mode
             binary=out/key
-            flags=["-std="+dialect,form,"-fregister-allocator="+mode,"-fverify-codegen","-fno-codegen-fallback"]
+            flags=["-std="+dialect,form,"-fregister-allocator="+mode,"-fverify-codegen",("-fmachine-fallback" if mode == "none" else "-fno-machine-fallback")]
             assert run([ide_fixed,"cc",*flags,fixture,"-o",binary]).returncode == 0
             assert run([binary]).returncode == 0
             obj=out/(key+".o")

@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 31c1d71ac9279be7e1754e5b6e3e91addef7f10e
+          ref: fc803dce4ddbd04ce0abff3c242a1836409370bc
           path: candidate
           persist-credentials: false
       - name: Build pinned trusted compilers
