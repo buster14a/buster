@@ -27,7 +27,7 @@ jobs:
       - name: Build exact candidate
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/half-fixed" f8e405732d0759c7af548d62424e182a3e03a6dd
+          git worktree add --detach "$RUNNER_TEMP/half-fixed" 0bbe3a2674a2f4b326ba00d3cd789b8a0fa2d006
           cd "$RUNNER_TEMP/half-fixed"
           git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/half-evidence/source-identity.txt"
           git diff --exit-code
