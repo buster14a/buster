@@ -1,0 +1,83 @@
+name: ABI warm-query evidence (temporary)
+on:
+  push:
+    branches: [codex/279-abi-warm-query]
+    paths: [src/buster/lib/compiler/ir/ir.c, tools/research/abi_warm_query/**, .github/workflows/issue-279-evidence.yml]
+permissions:
+  contents: read
+concurrency:
+  group: issue-279-evidence
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 80
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: af6b2b100acfdd9c970e35e33d4468cd35883812
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: candidate
+          persist-credentials: false
+      - name: Environment
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+          clang --version | tee evidence/clang.txt
+          lscpu > evidence/lscpu.txt
+          uname -a > evidence/uname.txt
+          git -C baseline rev-parse HEAD HEAD^{tree} > evidence/baseline.txt
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/candidate.txt
+      - name: Compare original ABI traces
+        run: |
+          set -euo pipefail
+          for version in baseline candidate; do
+            clang -O3 -g -march=native -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Werror -Wno-unused-function -Wno-unused-variable -ffunction-sections -fdata-sections -I"$version/src" candidate/tools/research/abi_warm_query/service.c -Wl,--gc-sections -lm -pthread -o "$PWD/evidence/service-$version"
+            objdump -d "$PWD/evidence/service-$version" > "evidence/service-$version.asm"
+          done
+          sha256sum evidence/service-* > evidence/service.sha256
+          python3 candidate/tools/research/abi_warm_query/compare_service.py "$PWD/evidence/service-baseline" "$PWD/evidence/service-candidate" "$PWD/evidence/service-samples.json" | tee evidence/service-summary.jsonl
+      - name: Focused ABI sanitizer replay
+        run: |
+          set -euo pipefail
+          clang -O1 -g -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Werror -Wno-unused-function -Wno-unused-variable -ffunction-sections -fdata-sections -fsanitize=address,undefined -fno-omit-frame-pointer -Icandidate/src candidate/tools/research/abi_warm_query/service.c -Wl,--gc-sections -lm -pthread -o evidence/service-sanitize
+          evidence/service-sanitize dense | tee evidence/sanitize-dense.json
+          evidence/service-sanitize sparse | tee evidence/sanitize-sparse.json
+      - name: Build both trusted Clang compilers
+        run: |
+          set -euo pipefail
+          for version in baseline candidate; do
+            (cd "$version"
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/build-$version"
+              "$RUNNER_TEMP/build-$version" generate --cc clang --ci
+              "$RUNNER_TEMP/build-$version" build --config Release -t ide -- -j2
+            ) 2>&1 | tee "evidence/build-$version.log"
+          done
+      - name: Before and after self-host fixed point
+        run: |
+          set -euo pipefail
+          for version in baseline candidate; do
+            (cd "$version"; "$RUNNER_TEMP/build-$version" test_self_host --config Release) 2>&1 | tee "evidence/self-host-$version.log"
+          done
+      - name: Candidate Release suite and supported modes
+        run: |
+          set -euo pipefail
+          (cd candidate; "$RUNNER_TEMP/build-candidate" build --config Release -t test_all -- -j2) 2>&1 | tee evidence/test-all.log
+          (cd candidate; "$RUNNER_TEMP/build-candidate" test_mode_matrix --config Release) 2>&1 | tee evidence/mode-matrix.log
+      - name: Same-source whole compiler time and peak RSS
+        run: |
+          set -euo pipefail
+          python3 candidate/tools/research/abi_warm_query/compare_compiler.py "$PWD/baseline/build/Release/ide" "$PWD/candidate/build/Release/ide" "$PWD/baseline" "$PWD/evidence/compiler-samples.json" | tee evidence/compiler-summary.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-279-evidence
+          path: evidence
+          retention-days: 30
