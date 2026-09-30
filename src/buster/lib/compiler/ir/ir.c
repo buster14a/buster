@@ -3260,6 +3260,9 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             }
             u32 first = (u32)(task.offset / 8);
             u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, (u64)1) - 1) / 8);
+            bool xmm128_value = type->layout.size == 16 &&
+                                (type->kind == IR_TYPE_VECTOR ||
+                                 (type->kind == IR_TYPE_FLOAT && type->bit_width == 128));
             for (u32 part = first; part <= last; part += 1)
             {
                 if (part >= 2)
@@ -3267,8 +3270,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                     valid = false;
                     break;
                 }
-                IrAbiClass part_class = type->kind == IR_TYPE_VECTOR && type->layout.size == 16 && part != first
-                                            ? IR_ABI_CLASS_FLOAT_UP : abi_class;
+                IrAbiClass part_class = xmm128_value && part != first ? IR_ABI_CLASS_FLOAT_UP : abi_class;
                 classes[part] = ir_system_v_abi_class_merge(classes[part], part_class);
             }
         }
@@ -3529,12 +3531,13 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         }
                         return value;
                     }
-                    if (convention == IR_ABI_CONVENTION_AAPCS64 && type->bit_width == 128 && size == 16)
+                    if ((convention == IR_ABI_CONVENTION_AAPCS64 ||
+                         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64) &&
+                        type->bit_width == 128 && size == 16)
                     {
-                        // Base AAPCS64 carries IEEE binary128 directly in one
-                        // Q register for arguments and results. Keep the whole
-                        // sixteen-byte image in one vector-file ABI part so
-                        // caller, callee and compiler-rt declarations agree.
+                        // AAPCS64 and System V x86-64 carry IEEE binary128 in
+                        // one Q/XMM register. Keep the whole sixteen-byte image
+                        // in one vector-file ABI part so callers and callees agree.
                         value.part_count = 1;
                         value.parts[0] = (IrAbiPart){
                             .abi_class = IR_ABI_CLASS_VECTOR,
@@ -3776,11 +3779,15 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
                 {
                     IrType* element_type = ir_type_from_id(&program->types, element);
+                    // A binary128 member takes a whole Q register, the same
+                    // sixteen-byte vector-file part a scalar binary128 uses.
+                    bool vector_part = element_type->kind == IR_TYPE_VECTOR ||
+                                       (element_type->kind == IR_TYPE_FLOAT && element_type->bit_width == 128);
                     value.part_count = count;
                     for (u32 part = 0; part < count; part += 1)
                     {
                         value.parts[part] = (IrAbiPart){
-                            .abi_class = element_type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
+                            .abi_class = vector_part ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
                             .value_offset = part * (u32)element_type->layout.size,
                             .size = (u32)element_type->layout.size,
                         };

@@ -2566,6 +2566,50 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_copy_bytes(Wasm64FunctionEmitter* emitter, u6
     wasm64_fe_u32(emitter, 0);
 }
 
+// ORs a bit-field's value into zeroed little-endian aggregate storage one byte
+// at a time, so packed spans and neighbouring fields need no wider access.
+BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_bit_field_insert(Wasm64FunctionEmitter* emitter, IrValueId aggregate, u64 offset, IrValueId operand,
+                                                         IrType* operand_type, IrField* field)
+{
+    Wasm64ValType valtype = 0;
+    wasm64_valtype_for_type(emitter->context, operand_type, false, &valtype);
+    u32 first = field->bit_offset / 8;
+    u32 end = field->bit_width ? (field->bit_offset + field->bit_width + 7) / 8 : first;
+    for (u32 byte = first; byte < end; byte += 1)
+    {
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_u8(emitter, 0x31); // i64.load8_u
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+        wasm64_fe_emit_value(emitter, operand);
+        if (valtype != WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+        }
+        if (field->bit_width < 64)
+        {
+            wasm64_fe_i64_const(emitter, (s64)((UINT64_C(1) << field->bit_width) - 1));
+            wasm64_fe_u8(emitter, 0x83); // i64.and
+        }
+        u32 bit = byte * 8;
+        if (bit > field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(bit - field->bit_offset));
+            wasm64_fe_u8(emitter, 0x88); // i64.shr_u
+        }
+        else if (bit < field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(field->bit_offset - bit));
+            wasm64_fe_u8(emitter, 0x86); // i64.shl
+        }
+        wasm64_fe_u8(emitter, 0x84); // i64.or
+        wasm64_fe_u8(emitter, 0x3c); // i64.store8
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
 {
     bool valid = wasm64_type_is_local_aggregate(type);
@@ -2588,13 +2632,15 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
         valid = operand_type && operand_type->layout.resolved &&
                 emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
                 (wasm64_type_is_scalar(operand_type) || wasm64_type_is_local_aggregate(operand_type));
+        IrField* bit_field = 0;
         if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
         {
             u64 field_index = instruction->immediates[index];
-            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            valid = field_index < type->field_count;
             if (valid)
             {
                 offset = type->fields[field_index].offset;
+                bit_field = type->fields[field_index].is_bit_field ? type->fields + field_index : 0;
             }
         }
         else if (valid)
@@ -2605,8 +2651,20 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
                 offset = (u64)index * operand_type->layout.size;
             }
         }
-        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
-        if (valid)
+        if (valid && bit_field)
+        {
+            valid = wasm64_type_is_integer(operand_type) && bit_field->bit_width <= 64 &&
+                    offset <= type->layout.size && (bit_field->bit_offset + bit_field->bit_width + 7) / 8 <= type->layout.size - offset;
+            if (valid)
+            {
+                wasm64_fe_emit_bit_field_insert(emitter, instruction->result, offset, operand, operand_type, bit_field);
+            }
+        }
+        else if (valid)
+        {
+            valid = offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        }
+        if (valid && !bit_field)
         {
             wasm64_fe_emit_value(emitter, instruction->result);
             wasm64_fe_emit_address_add(emitter, offset);
