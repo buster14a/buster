@@ -565,6 +565,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   to a flattened canonical pointer. Typedef declarations evaluate bounds where
   they occur; later objects and type queries reuse those declaration-time
   values even after a bound variable changes.
+  `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
+  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  checks nested call arguments and the effects of VLA-valued `typeof` operands.
   A saved size does not suppress evaluation of a VLA-typed operand. The
   sizeof continuation evaluates its operand once through the existing
   expression machine, discards the row address, and retains that size.

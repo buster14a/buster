@@ -9280,6 +9280,7 @@ BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prepro
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
                                                 CIrVlaLayout* result);
 BUSTER_C_INTERNAL CIrVlaArrayType* c_ir_vla_array_type(CIntegerIrBuilder* builder, IrTypeId type);
+BUSTER_C_INTERNAL bool c_ir_pointer_to_variable_array(CIntegerIrBuilder* builder, CTypeId type, CTypeId* array_out, IrTypeId* element_out);
 
 BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const* limits, CTypeKind kind, u64 value)
 {
@@ -13482,6 +13483,7 @@ struct CIrExpressionCoreState
     u32 sizeof_vla_end;
     bool sizeof_vla_previous_preparing_calls;
     bool sizeof_vla_computed;
+    bool type_name_previous_preparing_calls;
     CIrVlaLayout* type_name_layout;
     IrTypeId pending_type;
     IrSourceRange pending_source;
@@ -24146,6 +24148,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type(CIntegerIrBuilder* builder, CTypeId t
     return result;
 }
 
+BUSTER_C_INTERNAL IrTypeId c_ir_vla_local_query_type(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
+{
+    IrTypeId result = local->is_variable_length_array ? c_ir_vla_c_type(builder, local->c_type) : local->type;
+    if (local->is_vla_parameter && local->c_type.value < builder->parse.type_count &&
+        builder->parse.types[local->c_type.value].kind == C_TYPE_ARRAY)
+    {
+        IrType* array = ir_type_from_id(&builder->program->types, result);
+        if (array && array->kind == IR_TYPE_ARRAY)
+        {
+            result = c_ir_add_pointer_type(builder->program, builder->pointer_types, array->element_type);
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_typeof_array(CIntegerIrBuilder* builder, IrTypeId type, u32 start, u32 end)
 {
     CIrVlaArrayType* array = c_ir_vla_array_type(builder, type);
@@ -24255,7 +24272,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 }
                 if (local)
                 {
-                    type = local->is_variable_length_array ? c_ir_vla_c_type(builder, local->c_type) : local->type;
+                    type = c_ir_vla_local_query_type(builder, local);
                 }
                 else if (operand_entity.value < builder->parse.entity_count)
                 {
@@ -24322,9 +24339,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 }
             }
             // A parenthesized or otherwise compound operand (for example
-            // `(map)->key`) needs the full expression type walker.  Unlike
-            // lowering, typeof does not evaluate the operand, so this query
-            // is side-effect free and preserves array/function types.
+            // `(map)->key`) needs the full expression type walker. This
+            // speculative query preserves array/function types; required
+            // VLA operand effects run in the layout continuation.
             // A type-name operand -- `typeof(int __attribute__((vector_size(16))))`
             // -- reads through the type-name reader, which applies the
             // attributes a type name carries.
@@ -26980,7 +26997,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     IrTypeId type = IR_TYPE_ID_INVALID;
     if (local)
     {
-        type = local->is_variable_length_array ? c_ir_vla_c_type(builder, local->c_type) : local->type;
+        type = c_ir_vla_local_query_type(builder, local);
     }
     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
     {
@@ -28636,6 +28653,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_SIZE ||
         frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_CAST)
     {
+        builder->preparing_calls = state->type_name_previous_preparing_calls;
         if (!machine->child_result.success)
         {
             builder->failure_message = S8("could not evaluate the bounds of a variably modified type name");
@@ -29326,6 +29344,8 @@ c_ir_expression_core_loop:
                     CIrLowerVlaLayoutState* layout = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
                     *layout = (CIrLowerVlaLayoutState){.result = state->type_name_layout, .type_name = operand_type,
                                                      .named_type = true, .token = token};
+                    state->type_name_previous_preparing_calls = builder->preparing_calls;
+                    builder->preparing_calls = false;
                     frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_SIZE;
                     c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT, .as.vla_layout = layout});
                     yielded_sizeof = true;
@@ -29336,13 +29356,12 @@ c_ir_expression_core_loop:
                 index = consumed_index;
                 continue;
             }
-            IrTypeId original_expression_type = IR_TYPE_ID_INVALID;
             CIrQueryFrame original_query = {0};
             bool original_expression_typed = operand_type.value == IR_ID_UNDERLYING_INVALID &&
                 (builder->vla_array_types || builder->vla_value_count) &&
                 c_ir_query_execute(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_OPERAND_TYPE,
                     .start = operand_start, .end = operand_end}, &original_query) && original_query.success;
-            original_expression_type = original_query.result_type;
+            IrTypeId original_expression_type = original_query.result_type;
             CIrVlaArrayType* expression_array = original_expression_typed
                                                   ? c_ir_vla_array_type(builder, original_expression_type) : 0;
             if (!is_sizeof && expression_array)
@@ -29900,6 +29919,8 @@ c_ir_expression_core_loop:
                     CIrLowerVlaLayoutState* layout = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
                     *layout = (CIrLowerVlaLayoutState){.result = state->type_name_layout, .type_name = cast->element_type,
                                                      .named_type = true, .token = token};
+                    state->type_name_previous_preparing_calls = builder->preparing_calls;
+                    builder->preparing_calls = false;
                     frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_CAST;
                     c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT, .as.vla_layout = layout});
                     return;
@@ -32041,6 +32062,23 @@ BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CType
                                                                     .as.vla_layout = state,
                                                                 });
     return lowered.success;
+}
+
+BUSTER_C_INTERNAL bool c_ir_prepare_vla_pointer_local(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CTypeId array_type, CToken name)
+{
+    CIrVlaLayout layout = {0};
+    bool result = c_ir_prepare_vla_layout(builder, array_type, name, false, true, &layout);
+    if (result)
+    {
+        local->vla_element_type = layout.element_type;
+        local->vla_dimension_counts = layout.dimension_counts;
+        local->vla_suffix_sizes = layout.suffix_sizes;
+        local->vla_dimension_count = layout.dimension_count;
+        local->is_variable_length_array = true;
+        local->is_vla_parameter = true;
+        c_ir_vla_local_shape(builder, local);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
@@ -35937,6 +35975,13 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
         }
     }
+    CTypeId variable_array_type = C_TYPE_ID_INVALID;
+    bool pointer_to_variable_array = local_type.value == IR_ID_UNDERLYING_INVALID &&
+        c_ir_pointer_to_variable_array(builder, local_entity->type, &variable_array_type, &variable_element_type);
+    if (pointer_to_variable_array)
+    {
+        local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+    }
     IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
     IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
     CToken name = builder->preprocess.tokens[name_index];
@@ -36089,6 +36134,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     if (place.value == IR_ID_UNDERLYING_INVALID || !local)
     {
         builder->failure_message = string_format(builder->arena, S8("could not lower automatic local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
+        return false;
+    }
+    if (pointer_to_variable_array && !c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name))
+    {
+        builder->failure_message = S8("could not lower the bounds of a pointer-to-VLA local");
         return false;
     }
     state->local = local;
@@ -40265,23 +40315,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (pointer_to_variable_array)
                 {
-                    CIrVlaLayout pointer_layout = {0};
-                    if (!c_ir_prepare_vla_layout(builder, variable_array_type, name, false, true, &pointer_layout))
+                    if (!c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name))
                     {
                         builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of the array '{S8}' points to"),
                                                                  c_token_spelling(builder->preprocess.spelling_base, name));
                         return false;
                     }
-                    // runtime_size stays invalid, as it does for an array
-                    // parameter: `sizeof p` is the pointer's, and the sizeof
-                    // arm refuses suffix 0 for an is_vla_parameter local.
-                    local->vla_element_type = pointer_layout.element_type;
-                    local->vla_dimension_counts = pointer_layout.dimension_counts;
-                    local->vla_suffix_sizes = pointer_layout.suffix_sizes;
-                    local->vla_dimension_count = pointer_layout.dimension_count;
-                    local->is_variable_length_array = true;
-                    local->is_vla_parameter = true;
-                    c_ir_vla_local_shape(builder, local);
                 }
                 u32 initializer_index = end;
                 u32 declarator_brackets = 0;
