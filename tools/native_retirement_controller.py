@@ -10,7 +10,10 @@ Ordinary-bound PRs need no writer (#1893). When main's committed repository-
 source snapshot falls behind its admitted sources, the separate catch-up
 workflow opens one bot-owned PR from CATCH_UP_BRANCH whose only commit is empty
 (open_catch_up); the controller then dispatches the writer for it like any
-ordinary request, without prerequisite CI, and auto-merge queues it.
+ordinary request, without prerequisite CI. The writer enables auto-merge with
+its publication credential once it has published the head: GitHub starts no
+merge_group workflows for a queue entry enqueued by GITHUB_TOKEN, so the opener
+must never enable it.
 
 Map: ledger codec; writer/outcome reconciliation; catch-up detection
 (snapshot_stale, is_catch_up_pr, catch_up_admissible); candidate selection;
@@ -29,7 +32,6 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.error
-import urllib.request
 
 import native_retirement_automation as automation
 import native_retirement_integration as integration
@@ -47,16 +49,12 @@ CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
 CATCH_UP_BODY = (
     "Automatic catch-up (#1893). This PR's only commit is empty. The trusted "
     "native-retirement writer replaces it with generated state reconstructed for "
-    "main, and auto-merge queues it. Do not edit or push to this branch.\n"
+    "main and enables auto-merge. Do not edit or push to this branch.\n"
 )
 # Main-push commands whose stale-main exit is a no-op once a successor run of
 # the same workflow file exists (#2003). dispatch follows a claim and stays red.
 SUPERSEDABLE = {"catch-up": Path(CATCH_UP_PATH).name,
                 "plan": Path(automation.CONTROLLER_PATH).name}
-AUTO_MERGE_MUTATION = (
-    "mutation($id: ID!) { enablePullRequestAutoMerge("
-    "input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }"
-)
 
 
 def ledger_body(record: dict) -> str:
@@ -432,7 +430,7 @@ def dispatch(api, request: dict) -> dict:
     return result
 
 
-def open_catch_up(api, graphql, base: str) -> dict:
+def open_catch_up(api, base: str) -> dict:
     """Create one empty commit on main, point the bot branch at it and open a PR."""
     import native_retirement_merge_gate as gate
     tree = api.request("git/commits/" + base)["tree"]["sha"]
@@ -456,14 +454,11 @@ def open_catch_up(api, graphql, base: str) -> dict:
         "title": CATCH_UP_TITLE, "head": gate.CATCH_UP_BRANCH, "base": "main",
         "body": CATCH_UP_BODY, "maintainer_can_modify": False})
     number = automation.positive(pr.get("number"), "catch-up PR")
-    node = pr.get("node_id")
-    if not isinstance(node, str) or not node:
-        raise automation.AutomationError("catch-up PR has no node identity")
-    graphql(AUTO_MERGE_MUTATION, {"id": node})
+    # No auto-merge here: a GITHUB_TOKEN enqueue starts no merge_group CI.
     return {"status": "opened", "pull_request": number, "head": sha}
 
 
-def catch_up(api, graphql, repo: Path, base: str, run_id: int) -> dict:
+def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
     run = api.request("actions/runs/" + str(run_id))
     automation.verify_run(run, api.repository, run_id, CATCH_UP_PATH, base, CATCH_UP_EVENTS)
     if run.get("status") != "in_progress":
@@ -486,7 +481,7 @@ def catch_up(api, graphql, repo: Path, base: str, run_id: int) -> dict:
             # Re-read main last: never open a request for a revision already replaced.
             if api.request("git/ref/heads/main")["object"]["sha"] != base:
                 raise automation.AutomationMoved("main moved before opening a catch-up", 75)
-            result = open_catch_up(api, graphql, base)
+            result = open_catch_up(api, base)
     return result
 
 
@@ -531,21 +526,6 @@ def _superseded_status(api, command: str, error: automation.AutomationMoved) -> 
     return result
 
 
-def github_graphql(token: str):
-    def call(query: str, variables: dict) -> dict:
-        request = urllib.request.Request(
-            "https://api.github.com/graphql", method="POST",
-            data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
-            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read())
-        if not isinstance(data, dict) or data.get("errors"):
-            raise automation.AutomationError("GraphQL request failed: " +
-                                             json.dumps(data.get("errors") if isinstance(data, dict) else data)[:500])
-        return data
-    return call
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("plan", "dispatch", "catch-up"))
@@ -556,8 +536,8 @@ def main(argv=None) -> int:
     try:
         api = integration.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
         if args.command == "catch-up":
-            report = catch_up(api, github_graphql(os.environ["GH_TOKEN"]), args.repo_root,
-                              os.environ["GITHUB_WORKFLOW_SHA"], int(os.environ["GITHUB_RUN_ID"]))
+            report = catch_up(api, args.repo_root, os.environ["GITHUB_WORKFLOW_SHA"],
+                              int(os.environ["GITHUB_RUN_ID"]))
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
                 summary.write("## Retirement catch-up\n\n```json\n" +
                               json.dumps(report, indent=2) + "\n```\n")
