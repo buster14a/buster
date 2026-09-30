@@ -556,7 +556,15 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Indexing, pointer offsets/differences and dereferencing use that saved shape;
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
-  of a named VLA pointer's dereference reads the cached suffix size.
+  of a VLA pointer's dereference reads the cached suffix size, including
+  computed pointers and `*&array`. Type queries retain frontend-only runtime
+  array shells through type names and `typeof`; they never use the predictor's
+  integer guess as a VLA size. `sizeof(T[n][m])` lowers its bounds through the
+  existing layout continuation, while alignment queries do not evaluate bounds.
+  Pointer-to-VLA casts evaluate their bounds and attach the resulting shape
+  to a flattened canonical pointer. Typedef declarations evaluate bounds where
+  they occur; later objects and type queries reuse those declaration-time
+  values even after a bound variable changes.
   A saved size does not suppress evaluation of a VLA-typed operand. The
   sizeof continuation evaluates its operand once through the existing
   expression machine, discards the row address, and retains that size.

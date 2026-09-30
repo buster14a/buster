@@ -5847,6 +5847,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_dynamic_stack(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stdlib.h>\n"
+        "static int calls;\n"
+        "static int three(void) { calls++; return 3; }\n"
+        "static int one(void) { calls++; return 1; }\n"
+        "struct M { double d; int i; };\n"
+        "struct context { unsigned num; };\n"
+        "static int type_names(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3, m = 5;\n"
+        "    struct context c = { 3 }, *ctx = &c;\n"
+        "    fail |= sizeof(int[n]) != 12;\n"
+        "    fail |= sizeof(char[n]) != 3;\n"
+        "    fail |= sizeof(double[n][m]) != 120;\n"
+        "    fail |= sizeof(struct M[n]) != 48;\n"
+        "    fail |= _Alignof(struct M[n]) != 8;\n"
+        "    fail |= sizeof(int (*)[n]) != 8;\n"
+        "    fail |= sizeof(struct M[ctx->num + 1]) != 64;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(int[three()]) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(char[three()][three()]) != 9 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    fail |= _Alignof(struct M[three()]) != 8 || calls != 0;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(sizeof(int[three()])) != sizeof(sizeof(0)) || calls != 0;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int computed_operands(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3;\n"
+        "    int v[n], matrix[2][n], (*pv)[n] = &matrix[0];\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(*(pv + one())) != 12 || calls != 1;\n"
+        "    fail |= sizeof(*&v) != 12;\n"
+        "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
+        "    n = 7;\n"
+        "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(*(one() ? pv : pv)) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(sizeof(*(pv + one()))) != sizeof(sizeof(0)) || calls != 0;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int typedef_bounds(void)\n"
+        "{\n"
+        "    int fail = 0, k = 3;\n"
+        "    typedef int T[k];\n"
+        "    k = 5;\n"
+        "    T x, y;\n"
+        "    fail |= sizeof x != 12 || sizeof y != 12 || sizeof(T) != 12;\n"
+        "    fail |= sizeof(T[2]) != 24;\n"
+        "    calls = 0;\n"
+        "    typedef double Row[three()];\n"
+        "    Row a[2];\n"
+        "    fail |= sizeof a != 48 || sizeof(Row) != 24 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    typedef int (*P)[three()];\n"
+        "    P p = &x;\n"
+        "    fail |= sizeof(*p) != 12 || calls != 1;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int heap_and_cast(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3, m = 5;\n"
+        "    double (*a)[m] = malloc(sizeof(double[n][m]));\n"
+        "    if (a)\n"
+        "    {\n"
+        "        for (int i = 0; i < n; i++)\n"
+        "        {\n"
+        "            for (int j = 0; j < m; j++) a[i][j] = i * m + j;\n"
+        "        }\n"
+        "        fail |= a[n - 1][m - 1] != 14;\n"
+        "        double (*b)[m] = (double (*)[m])a;\n"
+        "        b[1][2] = 37;\n"
+        "        fail |= a[1][2] != 37 || sizeof(*b) != 40;\n"
+        "        calls = 0;\n"
+        "        int (*p)[three()] = (int (*)[three()])a;\n"
+        "        fail |= calls != 2 || sizeof(*p) != 12;\n"
+        "        free(a);\n"
+        "    }\n"
+        "    else fail = 1;\n"
+        "    return fail;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int fail = type_names();\n"
+        "    fail |= computed_operands();\n"
+        "    fail |= typedef_bounds();\n"
+        "    fail |= heap_and_cast();\n"
+        "    return fail;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vla-runtime-types"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vla-runtime-types-run"), S8(".exe"));
+                    String8 command[] = {optimizations[optimization], modes[mode], frontends[frontend], S8("-fverify-codegen"),
+                                         S8("-o"), executable, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_row_address(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11684,6 +11816,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_alignment);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_runtime_types);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_dynamic_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_i128_divide);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
