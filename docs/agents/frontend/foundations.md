@@ -265,6 +265,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Its caller supplies the semantic model at the expression's declaration point.
   Scope alone cannot reconstruct earlier tag completeness from a finished unit;
   deferred consumers must retain the bindings and layout facts of their operands.
+  Recognized vector-size attributes accept only nonzero literals in the query;
+  other arguments remain unresolved before the legacy recursive folder can run.
+  Already declared vector types remain readable.
   `c_test_type_constant_query_isolation` snapshots shared rows/indexes and an
   active machine on successful and refused queries (GitHub #1247).
 - Legacy integer constant ranges and static assertions share the private

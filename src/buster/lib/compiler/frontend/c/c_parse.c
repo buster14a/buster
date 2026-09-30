@@ -21879,6 +21879,39 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
     return constant;
 }
 
+// The legacy vector-size folder can reenter machineless type reading through
+// sizeof/casts in its argument. Protected queries admit only its literal fast
+// path; prepared vector types remain ordinary published rows to read.
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool supported = true;
+    for (u32 index = start; supported && index < end;)
+    {
+        u32 after = c_parse_skip_attributes(preprocess, index, end);
+        if (after == index)
+        {
+            index += 1;
+            continue;
+        }
+        for (u32 attribute = index; supported && attribute < after; attribute += 1)
+        {
+            CToken token = preprocess.tokens[attribute];
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_vector_size_word(c_token_spelling(preprocess.spelling_base, token)))
+            {
+                u32 close = attribute + 1 < after &&
+                    c_token_is_punctuator(&preprocess.tokens[attribute + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                        ? c_parse_matching_delimiter_indexed(result, preprocess, attribute + 1) : UINT32_MAX;
+                u32 value = 0;
+                supported = attribute + 3 < after && close == attribute + 3 &&
+                    preprocess.tokens[attribute + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+                    c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[attribute + 2]), &value) && value;
+            }
+        }
+        index = after;
+    }
+    return supported;
+}
+
 // The declaration machine's frames, slots, mutation limit and caches never
 // participate in this query. The copied model shares immutable published rows;
 // readers can only append beyond its counts, and table growth changes only the
@@ -21935,8 +21968,9 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         query.expression_scalar_types = scalar_types;
         CTypeLayoutStatistics statistics = {0};
         query.type_layout_statistics = &statistics;
+        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end);
         bool single = end == start + 1;
-        u32 capacity = single ? 0 : end - start + 16;
+        u32 capacity = single || !supported ? 0 : end - start + 16;
         CTypeParseMachine query_machine = {
             .frames = capacity ? arena_allocate(arena, CTypeParseFrame, capacity) : 0,
             .frame_checkpoints = capacity ? arena_allocate(arena, CParseResult, capacity) : 0,
@@ -21952,7 +21986,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         CParseResult syntax_checkpoint = query;
         CTokenPositionIndex syntax_positions = {0};
         if (query.position_index) syntax_positions = *query.position_index;
-        String8 error = single ? (String8){0}
+        String8 error = single || !supported ? (String8){0}
                               : c_parse_constant_expression_syntax_error(&query_machine, &query, preprocess, scope, start, end, &error_token);
         // Syntax probing appended rows only to its private model. Restore
         // those counts and scalar IDs before the value walk; model storage
@@ -21963,7 +21997,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         else memset(scalar_types, 0xff, sizeof(scalar_types));
         if (syntax_error) *syntax_error = error;
         if (syntax_token) *syntax_token = error_token;
-        if (!error.length)
+        if (!error.length && supported)
         {
             constant = c_parse_typed_integer_constant(&query_machine, arena, preprocess, &query, scope, start, end);
             if (constant.type.value >= result->type_count) constant.type = C_TYPE_ID_INVALID;

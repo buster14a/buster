@@ -16239,6 +16239,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         {S8("sizeof(struct F)"), 2, true},
         {S8("sizeof(struct G *)"), 8, true},
         {S8("sizeof(struct Missing *)"), 8, true},
+        {S8("sizeof(V16)"), 16, true},
+        {S8("sizeof(int __attribute__((vector_size(16))))"), 16, true},
+        {S8("sizeof(int __attribute__((vector_size(8 * 2))))"), 0, false},
+        {S8("sizeof(int __attribute__((__vector_size(8 * 2))))"), 0, false},
+        {S8("sizeof(int __attribute__((__vector_size__(sizeof(int __attribute__((vector_size(16)))) * 4))))"), 0, false},
+        {S8("sizeof(int [[gnu::vector_size(sizeof(int))]])"), 0, false},
         {S8("_Generic((struct S *)0, struct S *: 9, default: 3)"), 9, true},
         {S8("_Generic((__typeof__(obj) *)0, __typeof__(obj) *: 11, default: 3)"), 11, true},
         {S8("_Generic(0, int: _Generic(0, int: 7, default: 9), default: 3)"), 7, true},
@@ -16272,6 +16278,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         CTestTypeConstantCase test = cases[case_index];
         String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"),
             S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
+               " typedef int V16 __attribute__((vector_size(16)));"
                " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = "),
             test.expression, S8("; return probe; }"));
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
@@ -16339,7 +16346,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                 CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
                 BUSTER_TEST(arguments, query.model_unchanged);
                 BUSTER_TEST(arguments, query.machine_unchanged);
-                BUSTER_TEST(arguments, query.constant.valid == test.valid);
+                BUSTER_TEST_RAW(arguments, query.constant.valid == test.valid,
+                    string_format(temporary.arena, S8("protected query {S8} variant={u32} expected={u32} actual={u32}"),
+                        test.expression, variant, (u32)test.valid, (u32)query.constant.valid));
                 if (query.constant.valid && test.valid)
                 {
                     BUSTER_TEST(arguments, !query.constant.is_negative && query.constant.magnitude_high == 0);
