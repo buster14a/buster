@@ -1246,7 +1246,10 @@ and forks a producer.
 `bq_retirement_profile_complete` accepts the profile. That requires every
 integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
 reference-policy, nine census, required-checks, row-plan and campaign-budget
-digests) and no `status=blocked` line. `bq_worker_unit` passes the compiled
+digests) and exactly one status line, which must be exactly
+`status=admitted` (`BQ_RETIREMENT_PROFILE_ADMITTED_STATUS`). A missing line, a
+second line, `blocked`, a `blocked-` prefix, a trailing space or a carriage
+return each refuse. `bq_worker_unit` passes the compiled
 profile (`bq_retirement_worker_unit_installed`), which is blocked. A
 production retirement job is therefore still refused with `BQ_BAD_REQUEST`
 before the lease handoff, the keeper, any directory or any child. The other
@@ -1269,7 +1272,15 @@ complete fixture profile.
 4. It waits for the producer on a pidfd until the execution deadline plus
    twice the 10-second stop budget. A producer still running then is killed.
    The exited producer is reaped only after the SIGTERM forwarder is
-   disarmed, so the forwarder never names a reusable pid.
+   disarmed, so the forwarder never names a reusable pid. The bound's stop
+   budget is tied to `BQ_WORKER_STOP_MILLISECONDS` by a compile-time check
+   in `worker_linux.c`.
+5. While SIGTERM is still blocked, it consumes any SIGTERM that arrived after
+   the forwarder was disarmed (`sigtimedwait` with a zero timeout) and
+   reports `BQ_WORKER_CANCEL_SIGNAL`, unless the result is already
+   `BQ_CLEANUP_FAILED`. Delivered under the restored disposition, that
+   signal would otherwise end the unit before it stops its keeper and
+   releases the lease.
 
 `bq_worker_unit_pinned` then stops the keeper as before and returns the
 mapped status:
@@ -1295,8 +1306,13 @@ mapped status:
 profile seams. The projection holds the pinned census files itself. The
 stop reason is rechecked between steps.
 
-Everything is released in reverse on every path, and a surviving
-descendant turns the result into `BQ_CLEANUP_FAILED`. A failure sends no
+Everything is released in reverse on every path. The subreaper makes an
+escaped descendant (a `setsid` and double-fork grandchild of a stage) the
+producer's child, so the gate's no-children check refuses it instead of
+passing while it runs under init. A descendant surviving at the end turns
+the result into `BQ_CLEANUP_FAILED` and is killed and reaped
+(`bq_retirement_check_sweep`), so nothing is reparented past the producer.
+A failure sends no
 phase message after PREPARING. Its partial evidence stays in the attempt,
 and the ready record is never written.
 
@@ -1711,8 +1727,10 @@ descriptor count changed.
 **Checks.**
 
 - **Profile.** Every digest pin of the complete profile is required, and so
-  is every pin in the list. A non-digest pin, a `status=blocked` line and a
-  second status line are refused.
+  is every pin in the list. A non-digest pin is refused, and so is every
+  status other than exactly one `status=admitted` line: a missing line,
+  `blocked`, `blocked-pending`, a trailing space, a carriage return, another
+  case, an empty value and a second line.
 - **Blocked profile.** The public `bq_worker_unit`, a blocked-status copy and
   a copy without the row-plan pin each return `BQ_BAD_REQUEST`. No keeper
   directory, no `retirement-build/` and no child exists afterwards.
@@ -1729,6 +1747,16 @@ descriptor count changed.
 - **Killed producer.** Killing the producer during job 64's hanging generate
   returns `BQ_CLEANUP_FAILED`. The test reaps the orphaned broker CLI and
   stage as a temporary subreaper.
+- **Escaped grandchild.** Job 73's baseline generate leaves a detached
+  (`setsid`, double-fork) grandchild with no inherited descriptor. The
+  producer's subreaper exposes it, so the gate refuses and the producer
+  sweeps it: the unit returns `BQ_CLEANUP_FAILED`, no ready record exists and
+  the grandchild is gone.
+- **Late SIGTERM.** A SIGTERM raised in the unit's teardown window
+  (`bq_retirement_worker_unit_test_late_term`, compiled only with
+  `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`) after job 30's failing generate is
+  consumed. The unit returns `BQ_WORKER_CANCEL_SIGNAL` instead of dying before
+  its keeper stops.
 
 In every case the keeper's socket is gone and no descriptor or child leaks.
 
@@ -1737,6 +1765,12 @@ In every case the keeper's socket is gone and no descriptor or child leaks.
 - running the producer in the unit process;
 - dropping the not-yet-wired result;
 - dropping the admission check, a pin or the status check;
+- accepting any status except `blocked`, or no status line;
 - not forwarding SIGTERM, or not writing the self-pipe;
 - not stopping the keeper;
-- mapping a signalled producer by its exit code.
+- mapping a signalled producer by its exit code;
+- not becoming a subreaper, or not sweeping a surviving descendant;
+- not consuming a SIGTERM held in the teardown window.
+
+A stop budget that drifts from `BQ_WORKER_STOP_MILLISECONDS` does not
+compile.

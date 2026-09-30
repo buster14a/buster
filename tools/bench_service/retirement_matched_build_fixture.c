@@ -174,6 +174,43 @@ int main(int argc, char** argv)
                     nanosleep(&pause, NULL);
                 }
             }
+            /* Job 73 leaves a detached grandchild (setsid, then a double
+             * fork) with no inherited descriptor and records its pid in
+             * <workspaces>/job-73-escaped.pid; only a subreaper above the
+             * stage sees it (the worker-unit producer's regression). */
+            char const* attempt = !result && baseline ? strstr(argv[3], "/job-73-attempt-") : NULL;
+            if (attempt)
+            {
+                char escaped_path[600];
+                int escaped_length = snprintf(escaped_path, sizeof(escaped_path), "%.*s/job-73-escaped.pid",
+                                              (int)(attempt - argv[3]), argv[3]);
+                pid_t middle = escaped_length > 0 && (size_t)escaped_length < sizeof(escaped_path) ? fork() : -1;
+                if (middle == 0)
+                {
+                    pid_t escaped = setsid() >= 0 ? fork() : -1;
+                    if (escaped == 0)
+                    {
+                        for (int descriptor = 0; descriptor < 1024; descriptor += 1) close(descriptor);
+                        int null = open("/dev/null", O_RDWR);
+                        bool quiet = null == 0 && dup(null) == 1 && dup(null) == 2 && chdir("/") == 0;
+                        for (unsigned i = 0; quiet && i < 1200; i += 1)
+                        {
+                            struct timespec pause = {0, 50000000};
+                            nanosleep(&pause, NULL);
+                        }
+                        _exit(0);
+                    }
+                    FILE* escaped_file = escaped > 0 ? fopen(escaped_path, "w") : NULL;
+                    bool recorded = escaped_file && fprintf(escaped_file, "%ld\n", (long)escaped) > 0;
+                    if (escaped_file && fclose(escaped_file) != 0) recorded = false;
+                    _exit(recorded ? 0 : 1);
+                }
+                int middle_status = 0;
+                pid_t waited = -1;
+                do { if (middle > 0) waited = waitpid(middle, &middle_status, 0); }
+                while (waited < 0 && errno == EINTR);
+                if (waited != middle || !WIFEXITED(middle_status) || WEXITSTATUS(middle_status)) result = 1;
+            }
             if (!result && (strstr(argv[3], "job-39-attempt-49") || strstr(argv[3], "job-69-attempt-")))
             {
                 char flood[8192];

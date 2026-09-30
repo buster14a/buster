@@ -11,7 +11,8 @@
  *
  * Entry points (all reached only from bq_worker_unit):
  *   bq_retirement_profile_complete     admission: every integration pin is
- *                                      present and no status=blocked line
+ *                                      present and exactly one
+ *                                      status=admitted line
  *   bq_retirement_worker_unit_installed
  *                                      the compiled profile and fixed roots
  *   bq_retirement_worker_unit_run      fork the producer, close the parent's
@@ -31,9 +32,11 @@
  * build (which sends PREPARING), project, oracle, gate and ready, then the
  * in-unit campaign through lane D's READY (bq_retirement_worker_campaign_run
  * in retirement_worker_campaign.c: SETTLING, MEASURING, A/A, admission, A/B),
- * and releases everything in reverse on every path.
- * bq_retirement_worker_unit_wait waits for the producer under the execution
- * deadline plus the stop budget.
+ * and releases everything in reverse on every path, sweeping any surviving
+ * descendant (bq_retirement_check_sweep). bq_retirement_worker_unit_wait
+ * waits for the producer under the execution deadline plus the stop budget
+ * without reaping it; bq_retirement_worker_unit_run then disarms the
+ * forwarder, reaps, and consumes a SIGTERM held in that teardown window.
  *
  * PR 2 stops after READY: composition, the authority and MEASURED are not
  * wired yet (PR 3), so a READY producer exits with BQ_UNSUPPORTED
@@ -89,9 +92,12 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
     "campaign-budget-sha256=", "untimed-commands-sha256="};
 
+/* The only admitting status line; the compiled profile says status=blocked. */
+#define BQ_RETIREMENT_PROFILE_ADMITTED_STATUS "status=admitted"
+
 /* Every digest pin, lane D's frozen campaign values (seed, pairs, resamples
  * and bootstrap members, each canonical and in range:
- * bq_retirement_unit_campaign_pins) and no status=blocked line. */
+ * bq_retirement_unit_campaign_pins) and exactly one status=admitted line. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
 {
     char pin[SHA256_HEX_CAPACITY];
@@ -100,6 +106,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
     for (u32 index = 0; complete && index < BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins); index += 1)
         complete = bq_retirement_profile_sha(profile, string_from_pointer(bq_retirement_worker_unit_pins[index]), pin);
     complete = complete && bq_retirement_unit_campaign_pins(profile, &pins);
+    /* Exactly one status line, and it must be the admitting value byte for
+     * byte: blocked, a blocked- prefix, a trailing space or carriage return,
+     * a second line or no line at all refuses. */
     u64 offset = 0;
     u32 statuses = 0;
     String8 line = {0};
@@ -109,10 +118,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_profile_complete(String8 profile)
         if (line.length >= status.length && !memcmp(line.pointer, status.pointer, (size_t)status.length))
         {
             statuses += 1;
-            complete = !string_equal(line, S8("status=blocked"));
+            complete = string_equal(line, S8(BQ_RETIREMENT_PROFILE_ADMITTED_STATUS));
         }
     }
-    complete = complete && statuses <= 1;
+    complete = complete && statuses == 1;
     return complete;
 }
 
@@ -131,6 +140,12 @@ BUSTER_GLOBAL_LOCAL BqRetirementWorkerUnitSeams bq_retirement_worker_unit_instal
  * the producer; both are read only by the signal handlers below. */
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_retirement_worker_unit_producer;
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_retirement_worker_unit_cancel_fd = -1;
+#ifdef BQ_RETIREMENT_CORRECTNESS_TEST_ONLY
+/* Test seam (never in the installed service, which retirement_unit.c
+ * enforces): raise SIGTERM in the unit process's teardown window, after the
+ * producer exited and while SIGTERM is blocked. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_unit_test_late_term;
+#endif
 
 BUSTER_GLOBAL_LOCAL void bq_retirement_worker_unit_forward(int signal_number)
 {
@@ -225,8 +240,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_produce(BqRetirementWorker
     if (results >= 0 && close(results) != 0 && result == BQ_OK) result = BQ_IO;
     if (installed >= 0 && close(installed) != 0 && result == BQ_OK) result = BQ_IO;
     if (workspaces >= 0 && close(workspaces) != 0 && result == BQ_OK) result = BQ_IO;
-    /* Every step proves its own children gone; a survivor fails the unit. */
-    if (!bq_retirement_check_descendants_absent()) result = BQ_CLEANUP_FAILED;
+    /* Every step proves its own children gone. A survivor (a subreaped
+     * escapee included) fails the unit and is killed and reaped here, so
+     * nothing is reparented past the producer. */
+    if (!bq_retirement_check_descendants_absent())
+    {
+        bool found = false;
+        bq_retirement_check_sweep(&found);
+        result = BQ_CLEANUP_FAILED;
+    }
     return result;
 }
 
@@ -342,6 +364,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnit
     /* Disarm the forwarder with SIGTERM blocked, then reap: the handler never
      * names a reaped (reusable) pid. */
     bool reblocked = masked && sigprocmask(SIG_BLOCK, &blocked, NULL) == 0;
+#ifdef BQ_RETIREMENT_CORRECTNESS_TEST_ONLY
+    if (reblocked && bq_retirement_worker_unit_test_late_term) raise(SIGTERM);
+#endif
     if (handled && sigaction(SIGTERM, &previous, NULL) != 0 && result == BQ_OK) result = BQ_IO;
     bq_retirement_worker_unit_producer = 0;
     int status = 0;
@@ -355,6 +380,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_unit_run(BqRetirementWorkerUnit
     if (result == BQ_OK)
         result = !exited || reaped != producer || WIFSIGNALED(status) ? BQ_CLEANUP_FAILED :
                  code > BQ_OK && code <= BQ_EXPORT_TIMEOUT ? (BqError)code : BQ_WORKER_FAILED;
+    /* A SIGTERM held since the forwarder was disarmed would be delivered
+     * under the restored disposition and end the unit before it stops its
+     * keeper and releases the lease: consume it and report the cancellation
+     * (an unproven cleanup still wins). */
+    struct timespec immediately = {0, 0};
+    bool terminated = reblocked && sigtimedwait(&blocked, NULL, &immediately) == SIGTERM;
+    if (terminated && result != BQ_CLEANUP_FAILED) result = BQ_WORKER_CANCEL_SIGNAL;
     if (reblocked && sigprocmask(SIG_SETMASK, &prior, NULL) != 0 && result == BQ_OK) result = BQ_IO;
     return result;
 }
