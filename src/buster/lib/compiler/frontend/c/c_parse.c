@@ -20,7 +20,9 @@
 // - c_analyze_semantics sizes its tables from a token census
 //   (c_parse_token_census, vectorized), then builds the CParseResult the
 //   lowering stage consumes: interned types, entities, scopes, and
-//   diagnostics.
+//   diagnostics. Layout queries (c_parse_type_layout_core) keep their
+//   query-local tables in the machine's phase arena and release them on
+//   return (docs/compiler-lifetime.md).
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -2074,6 +2076,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         *alignment_out = cache->alignments[requested.value];
         return true;
     }
+    // Everything the solve allocates below is the query's own -- the tables
+    // sized to the whole type table, bound token copies and spellings,
+    // evaluation buffers -- and nothing reads it after the query returns.
+    // With a phase arena it is released on return (nested queries release
+    // first, in stack order) instead of accumulating for the rest of the
+    // compile in whichever arena the caller passed, which several callers
+    // pass as the translation unit's. The layout cache below stays in the
+    // result arena: it outlives the query and grows inside one.
+    Arena* query_arena = machine && machine->phase_arena ? machine->phase_arena : arena;
+    u64 query_mark = query_arena->position;
     // The type table can grow while the solve parses alignof/sizeof operand
     // types; the scratch arrays cover the types that existed at entry and
     // later additions stay unresolved for this query.
@@ -2096,22 +2108,22 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         }
         cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
         pending_count = cache->pending_count;
-        pending = arena_allocate(arena, u32, pending_count + 1);
+        pending = arena_allocate(query_arena, u32, pending_count + 1);
         memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
     }
     else
     {
         pending_count = type_count;
-        pending = arena_allocate(arena, u32, pending_count + 1);
+        pending = arena_allocate(query_arena, u32, pending_count + 1);
         for (u32 type_index = 0; type_index < type_count; type_index += 1)
         {
             pending[type_index] = type_index;
         }
     }
-    u64* sizes = arena_allocate(arena, u64, type_count + 1);
-    u32* alignments = arena_allocate(arena, u32, type_count + 1);
-    bool* resolved = arena_allocate(arena, bool, type_count + 1);
-    bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    u64* sizes = arena_allocate(query_arena, u64, type_count + 1);
+    u32* alignments = arena_allocate(query_arena, u32, type_count + 1);
+    bool* resolved = arena_allocate(query_arena, bool, type_count + 1);
+    bool* provisional = arena_allocate(query_arena, bool, type_count + 1);
     if (cache)
     {
         memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
@@ -2125,7 +2137,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
     memset(provisional, 0, sizeof(*provisional) * type_count);
     CParseLayoutContext layout_context = {
         .machine = machine,
-        .arena = arena,
+        .arena = query_arena,
         .preprocess = preprocess,
         .result = result,
         .alignments = alignments,
@@ -2322,14 +2334,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                 CArrayBound bound = result->array_bounds[type.array_bound];
                 u64 count = 0;
                 bool unresolved_identifier = false;
-                CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
+                CToken* bound_tokens = arena_allocate(query_arena, CToken, bound.token_count * 2 + 1);
                 u32 bound_token_count = 0;
                 u64 bound_spelling_capacity = 0;
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
                     bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[bound.token_start + bound_index]) + 21;
                 }
-                CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
+                CSpellingSpace bound_space = c_space_local(query_arena, bound_spelling_capacity);
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
@@ -2455,7 +2467,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                             break;
                         }
                         bound_tokens[bound_token_count++] = c_space_token(
-                            &bound_space, string_format(arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
+                            &bound_space, string_format(query_arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
                             C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
                         bound_index += close - (bound.token_start + bound_index);
                         continue;
@@ -2539,14 +2551,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                         {
                             bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
                         }
-                        bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant_value),
+                        bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(query_arena, S8("{u64}"), constant_value),
                                                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
                         continue;
                     }
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
                 CPreprocessResult evaluation = {
-                    .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
+                    .diagnostics = arena_allocate(query_arena, CDiagnostic, bound.token_count + 1),
                     .target = preprocess.target,
                     .dialect = preprocess.dialect,
                 };
@@ -2558,7 +2570,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                     array_provisional = true;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
-                         !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
+                         !c_integer_expression_evaluate(query_arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
                          evaluation.diagnostic_count ||
                          (count && sizes[type.element_type.value] > UINT64_MAX / count))
                 {
@@ -2713,13 +2725,18 @@ requested_resolved:
         }
         cache->pending_count = kept_count;
     }
-    if (!resolved[requested.value])
+    bool found = resolved[requested.value];
+    if (found)
     {
-        return false;
+        *size_out = sizes[requested.value];
+        *alignment_out = alignments[requested.value];
     }
-    *size_out = sizes[requested.value];
-    *alignment_out = alignments[requested.value];
-    return true;
+    if (query_arena != arena)
+    {
+        machine->phase_released_bytes += arena_release_to_position(query_arena, query_mark);
+        machine->phase_releases += 1;
+    }
+    return found;
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -25049,6 +25066,19 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     {
         return result;
     }
+    // Query-local state goes to the unit's phase arena, or to a private one
+    // when the caller has none; without either the queries keep today's
+    // arenas, so a failed reservation costs memory, never the analysis.
+    Arena* phase_arena = preprocess.recovery ? preprocess.recovery->phase_arena : 0;
+    bool phase_arena_owned = !phase_arena;
+    if (phase_arena_owned)
+    {
+        phase_arena = arena_create((ArenaCreation){
+            .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+    }
+    u64 phase_start = phase_arena ? phase_arena->position : 0;
     Arena* machine_conflicts[] = {
         arena,
     };
@@ -25060,6 +25090,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .incomplete_array_chain = arena_allocate(machine_buffer_arena, CTypeId, incomplete_array_chain_capacity),
         .incomplete_array_chain_capacity = incomplete_array_chain_capacity,
         .scratch_arena = machine_temporary.arena,
+        .phase_arena = phase_arena,
         .layout_cache = {.tokens = preprocess.tokens},
         .promoted_member_work = arena_allocate(machine_buffer_arena, CParsePromotedMemberWork, promoted_member_capacity),
         .promoted_member_visited = arena_allocate(machine_buffer_arena, u32, promoted_member_capacity),
@@ -25745,6 +25776,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.analysis_complete = true;
     scratch_end(machine_temporary);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
+    if (phase_arena)
+    {
+        result.phase_released_bytes = machine.phase_released_bytes + arena_release_to_position(phase_arena, phase_start);
+        result.phase_releases = machine.phase_releases + 1;
+        if (phase_arena_owned)
+        {
+            c_phase_arena_retire(phase_arena);
+        }
+    }
     return result;
 }
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)

@@ -1993,15 +1993,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_diagnostic_message_lifetime(UnitTe
     return result;
 }
 
-// c_preprocess releases its phase arena before it returns, so every fact a
-// later phase reads must be owned outside that arena. The first run
-// overwrites whatever it releases (arena_test_fill_releases); the second has
-// no caller phase arena. A fact borrowed from released memory would read the
-// fill and differ, here or in the semantic analysis and lowering below. The
-// source reaches every sealed structure: expansion stamps, a #line text
+// c_preprocess releases its phase arena before it returns, and semantic
+// analysis releases each layout query's tables, so every fact a later phase
+// reads must be owned outside that arena. The first run overwrites whatever
+// it releases (arena_test_fill_releases); the second has no caller phase
+// arena. A fact borrowed from released memory would read the fill and differ.
+// The source reaches every sealed structure: expansion stamps, a #line text
 // region, a builtin include (file table, metrics rows, checkpoints shared by
 // the regions its includer splits into), pack changes, push/pop_macro and a
-// #warning message the phase built.
+// #warning message the phase built; its bounds and assertions drive layout
+// queries whose tables the semantic phase releases.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2048,7 +2049,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments*
         BUSTER_TEST(arguments, sealed_detail->boundary.sealed_bytes != 0 && sealed_detail->boundary.sealed_objects != 0);
         BUSTER_TEST(arguments, sealed_detail->boundary.references >= sealed_detail->boundary.sealed_objects);
         BUSTER_TEST(arguments, reference_detail->boundary.released_bytes != 0);
-        BUSTER_TEST(arguments, sealed.recovery && reference.recovery);
+        BUSTER_TEST(arguments, sealed.recovery && sealed.recovery->phase_arena == phase && reference.recovery && !reference.recovery->phase_arena);
         BUSTER_TEST(arguments, c_test_preprocess_references_range(&sealed, (u8*)phase + phase_start, (u8*)phase + released_end) == 0);
         BUSTER_TEST(arguments, sealed.error_count == 0 && sealed.warning_count == 1 && sealed.diagnostic_count == reference.diagnostic_count);
         for (u64 index = 0; index < BUSTER_MIN(sealed.diagnostic_count, reference.diagnostic_count); index += 1)
@@ -2088,7 +2089,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments*
                            left_location.file == right_location.file;
         }
         BUSTER_TEST(arguments, tokens_equal);
-        // Parsing, semantic analysis and lowering consume the sealed result.
+        // Semantic analysis reuses the unit's phase arena for its layout
+        // queries and releases it again; lowering then consumes the model.
         arena_test_fill_releases(true);
         CParseResult sealed_parse = c_parse(arena, sealed);
         arena_test_fill_releases(false);
@@ -2096,6 +2098,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments*
         BUSTER_TEST(arguments, phase->position == phase_start);
         BUSTER_TEST(arguments, sealed_parse.diagnostic_count == 0 && reference_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, sealed_parse.type_count == reference_parse.type_count && sealed_parse.entity_count == reference_parse.entity_count);
+        // Both runs had a phase arena for the queries -- the caller's, and a
+        // private one -- and released the same queries from it.
+        BUSTER_TEST(arguments, sealed_parse.phase_releases > 1 && sealed_parse.phase_releases == reference_parse.phase_releases);
+        BUSTER_TEST(arguments, sealed_parse.phase_released_bytes != 0 && reference_parse.phase_released_bytes != 0);
         CIRLowerResult sealed_ir = c_lower_to_ir(arena, S8("phase-release.c"), sealed, sealed_parse, target_native);
         CIRLowerResult reference_ir = c_lower_to_ir(arena, S8("phase-release.c"), reference, reference_parse, target_native);
         BUSTER_TEST(arguments, sealed_ir.program && reference_ir.program && !sealed_ir.diagnostic_count && !reference_ir.diagnostic_count);

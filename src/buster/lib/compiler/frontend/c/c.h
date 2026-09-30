@@ -600,6 +600,10 @@ struct CSourceMapRecovery
     // Keeping it in a separate private arena preserves the row stream's
     // contiguous layout while giving parser shape walks a linear byte scan.
     Arena* token_shape_arena;
+    // The caller-owned phase arena (CPreprocessOptions.phase_arena) the later
+    // frontend phases of this unit share, or null. Borrowed, never released
+    // through this record.
+    Arena* phase_arena;
     CTokenShape* token_shapes;
     IrSourceMap map;
     // Region-array capacity, kept across the respell pass that may append.
@@ -1473,6 +1477,13 @@ struct CParseResult
     u32 type_alignment_capacity;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
+    // Phase-arena bytes semantic analysis released (logical) and the releases
+    // that returned them: one per layout query, plus analysis' own at its end.
+    // Set once when analysis returns, so a speculative rollback of this record
+    // cannot lose them; zero without a phase arena. See
+    // docs/compiler-lifetime.md.
+    u64 phase_released_bytes;
+    u64 phase_releases;
     // True only after the selected analysis entry point completed its passes.
     // Resource-limit exits can otherwise look like a successful empty model.
     bool analysis_complete;

@@ -8224,7 +8224,7 @@ struct CPreprocessSeal
 };
 
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 176);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 72);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 80);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceMap) == 32);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 64);
@@ -8545,6 +8545,7 @@ CPreprocessResult c_preprocess(Arena* result_arena, String8 source, CPreprocessO
         .spelling_arena = spelling_arena,
         .token_arena = token_arena,
         .token_shape_arena = token_shape_arena,
+        .phase_arena = options.phase_arena,
     };
     result.recovery = recovery;
     result.spelling_base = space->base;
