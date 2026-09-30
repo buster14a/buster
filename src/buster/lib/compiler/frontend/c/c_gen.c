@@ -14156,6 +14156,8 @@ BUSTER_C_INTERNAL u32 c_ir_lower_frame_token_index(CIrLowerFrame frame)
             return frame.as.automatic_declaration_list ? frame.as.automatic_declaration_list->start : UINT32_MAX;
         case C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT:
             return frame.as.assignment_statement ? frame.as.assignment_statement->start : UINT32_MAX;
+        case C_IR_LOWER_FRAME_BODY_TYPEDEF:
+            return frame.as.type_declaration ? frame.as.type_declaration->start : UINT32_MAX;
         default:
             return UINT32_MAX;
     }
@@ -29310,11 +29312,20 @@ c_ir_expression_core_loop:
             IrTypeId original_expression_type = IR_TYPE_ID_INVALID;
             CIrQueryFrame original_query = {0};
             bool original_expression_typed = operand_type.value == IR_ID_UNDERLYING_INVALID &&
+                (builder->vla_array_types || builder->vla_value_count) &&
                 c_ir_query_execute(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_OPERAND_TYPE,
                     .start = operand_start, .end = operand_end}, &original_query) && original_query.success;
             original_expression_type = original_query.result_type;
             CIrVlaArrayType* expression_array = original_expression_typed
                                                   ? c_ir_vla_array_type(builder, original_expression_type) : 0;
+            if (!is_sizeof && expression_array)
+            {
+                IrType* array = ir_type_from_id(&builder->program->types, original_expression_type);
+                values[value_count++] = c_ir_emit_integer_value_typed(builder, array->layout.alignment, false, token, builder->size_type);
+                expect_operand = false;
+                index = consumed_index;
+                continue;
+            }
             if (is_sizeof && expression_array)
             {
                 state->sizeof_vla_computed = true;
@@ -31214,11 +31225,12 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
     CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
     CIrLowerTypedefState* state = frame->as.type_declaration;
     bool success = frame->stage == C_IR_LOWER_STAGE_BEGIN || machine->child_result.success;
+    bool pending = false;
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
         state->index = state->start;
     }
-    while (success && state->index < state->end)
+    while (success && !pending && state->index < state->end)
     {
         u32 index = state->index++;
         CEntityId entity = c_ir_identifier_entity(builder, index);
@@ -31241,11 +31253,14 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
                     .array_type = type, .token = builder->preprocess.tokens[index]};
                 frame->stage = C_IR_LOWER_STAGE_CHILD;
                 c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT, .as.vla_layout = layout});
-                return;
+                pending = true;
             }
         }
     }
-    c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+    if (!pending)
+    {
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+    }
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* builder);
@@ -31891,7 +31906,9 @@ BUSTER_C_INTERNAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
         case C_IR_LOWER_FRAME_STATEMENT_EXPRESSION:
             c_ir_lower_statement_expression_step(builder);
             return;
-        case C_IR_LOWER_FRAME_BODY_TYPEDEF: c_ir_lower_typedef_step(builder); break;
+        case C_IR_LOWER_FRAME_BODY_TYPEDEF:
+            c_ir_lower_typedef_step(builder);
+            return;
         case C_IR_LOWER_FRAME_BODY_VLA_LAYOUT:
             c_ir_lower_vla_layout_step(builder);
             return;
