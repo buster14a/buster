@@ -64,6 +64,16 @@
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
+## Host CPU probing
+
+`entry_point` resolves host CPU facts through `target` and the selected
+`x86_64` or `aarch64` probe module. Split consumers register that architecture
+module; unity `target.c` includes it. The x86-64 probe owns CPUID/XGETBV and
+model/feature/brand queries without a compiler dependency. The existing
+`x86_64_encode_register_operation` declaration in `x86_64.h` is implemented by
+`compiler_assembly_metadata`; instruction-encoding consumers register that
+compiler module, while CPU-probe consumers do not.
+
 ## Transactional process spawning
 
 `os_get_environment_variable` searches the environment snapshot captured at
