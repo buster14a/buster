@@ -389,6 +389,33 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runtime assertion census"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
 
+    def test_unknown_metadata_keeps_retained_native_runner_observations(self):
+        item, _, condition = self.complete_desktop()
+        expected = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        result = qualification.record(self.root, item["result"])
+        for name in ("ImageOS", "ImageVersion", "BUSTER_CI_RUNNER", "BUSTER_CI_ZIG_CACHE_HIT"):
+            result["metadata"][name] = "unknown"
+        item["result"] = reference(self.root, "unknown-metadata.json", result)
+        self.assertEqual(qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap"), expected)
+        for name in ("ImageOS", "ImageVersion", "BUSTER_CI_RUNNER", "BUSTER_CI_ZIG_CACHE_HIT"):
+            del result["metadata"][name]
+        item["result"] = reference(self.root, "missing-metadata.json", result)
+        self.assertEqual(qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap"), expected)
+        self.assertEqual(qualification.phase_environment({"runner": {"ImageOS": "unknown"}}, {"ImageOS": "unknown"}), {"ImageOS": "unknown"})
+        result["metadata"]["GITHUB_SHA"] = "unknown"
+        item["result"] = reference(self.root, "unknown-source.json", result)
+        with self.assertRaisesRegex(ValueError, "result run identity"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_conflicting_known_metadata_cannot_replace_native_observations(self):
+        item, _, condition = self.complete_desktop()
+        for field, value in (("ImageOS", "other"), ("ImageVersion", "2"), ("BUSTER_CI_RUNNER", "other"), ("BUSTER_CI_ZIG_CACHE_HIT", "true")):
+            result = qualification.record(self.root, item["result"])
+            result["metadata"][field] = value
+            invalid = dict(item, result=reference(self.root, "conflicting-metadata.json", result))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "conflicting known phase metadata"):
+                qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+
     def reject_coverage(self, item, coverage, condition, change, message):
         changed = copy.deepcopy(coverage)
         change(changed)

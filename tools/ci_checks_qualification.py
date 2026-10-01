@@ -180,6 +180,18 @@ def conditions(root, reference, run):
     return entries, normalized
 
 
+def phase_environment(summary, metadata):
+    """Keep retained native observations when generic metadata is unknown."""
+    environment = dict(summary.get("runner", {}))
+    for name, value in metadata.items():
+        retained_value = environment.get(name)
+        if known(retained_value) and known(value):
+            require(retained_value == value, "conflicting known phase metadata: " + name)
+        if known(value) or not known(retained_value):
+            environment[name] = value
+    return environment
+
+
 def policy_rows(coverage, environment):
     """Bind the archived census to the independent production lane contract."""
     identity = coverage["identity"]
@@ -253,7 +265,7 @@ def desktop(root, item, run, condition, variant):
     identity = coverage.get("identity", {})
     require(str(identity.get("run_id")) == str(run["id"]) and identity.get("run_attempt") == "1" and identity.get("source_revision") == run["head_sha"], "desktop coverage belongs to a different run/source")
     require(meta.get("GITHUB_SHA") == run["head_sha"] and str(meta.get("GITHUB_RUN_ID")) == str(run["id"]) and meta.get("GITHUB_RUN_ATTEMPT") == "1", "desktop result run identity mismatch")
-    environment = dict(summary.get("runner", {}), **meta)
+    environment = phase_environment(summary, meta)
     rows, selected = policy_rows(coverage, environment)
     report = phases.analyze(root / item["phase_directory"], coverage, environment)
     require(report == summary and result.get("matrix_phases") == summary, "retained phase summary differs from native journal replay/result")
