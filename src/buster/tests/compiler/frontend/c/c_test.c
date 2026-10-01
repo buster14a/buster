@@ -17654,8 +17654,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                                             IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
                                             String8 name = llp64 ? expected[argument].llp64_name : expected[argument].lp64_name;
                                             BUSTER_TEST_RAW(arguments, type && type->kind == IR_TYPE_INTEGER && string_equal(type->name, name),
-                                                string_format(temporary.arena, S8("integer conversion CALL operand {S8}, target={u32} frontend={u32}"),
-                                                              expected[argument].name, target_index, frontend));
+                                                string_format(temporary.arena, S8("integer conversion CALL operand {S8}, target={u32} frontend={u32}: expected={S8} actual={S8}"),
+                                                              expected[argument].name, target_index, frontend, name, type ? type->name : S8("<invalid>")));
                                         }
                                     }
                                 }

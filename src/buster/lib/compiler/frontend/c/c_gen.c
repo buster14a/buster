@@ -23544,24 +23544,10 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         else if (right_type.value != operation_type.value && binary != IR_BINARY_SHIFT_LEFT && binary != IR_BINARY_SIGNED_SHIFT_RIGHT &&
                  binary != IR_BINARY_UNSIGNED_SHIFT_RIGHT)
         {
-            if (right_type_value->is_signed == operation_type_value->is_signed)
-            {
-                if (right_type_value->bit_width > operation_type_value->bit_width)
-                {
-                    operation_type = right_type;
-                    operation_type_value = right_type_value;
-                }
-            }
-            else if (!right_type_value->is_signed && right_type_value->bit_width >= operation_type_value->bit_width)
-            {
-                operation_type = right_type;
-                operation_type_value = right_type_value;
-            }
-            else if (right_type_value->is_signed && !operation_type_value->is_signed && right_type_value->bit_width > operation_type_value->bit_width)
-            {
-                operation_type = right_type;
-                operation_type_value = right_type_value;
-            }
+            // Emission and protected type queries must choose one C identity,
+            // including equal-width operands with different conversion ranks.
+            operation_type = c_ir_usual_arithmetic_type(builder, operation_type, right_type);
+            operation_type_value = ir_type_from_id(&builder->program->types, operation_type);
         }
     }
     if (operation_type_value->kind == IR_TYPE_FLOAT && operation_type_value->bit_width > 64)
