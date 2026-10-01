@@ -10424,7 +10424,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     // happening to fit in 8 bits; form semantics still decide 32 versus 32S.
     for (u32 index = 0; index < operand_count; index += 1)
     {
-        if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
+        if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol &&
+            physical[index].width < 32)
         {
             physical[index].width = 32;
         }
