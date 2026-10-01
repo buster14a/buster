@@ -380,7 +380,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_zig_test.py",
             "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
-            "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
+            "tools/matrix_shard_test.py", "tools/matrix_unit_observation_test.py", "tools/differential_ci_policy_test.py",
             "tools/native_producer_profile_test.py", "tools/native_target_compatibility_test.py",
             "tools/ci_llvm_test.py",
             "tools/ci_configure_evidence_test.py",
