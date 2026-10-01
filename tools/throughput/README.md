@@ -72,7 +72,19 @@ before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
 directly, pass an absent or empty directory. If a child exit-code check fails,
 it prints the exit code, signal, timeout, launch error and wall time, followed by
 the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
-test root, which the harness artifacts upload.
+test root, which the harness artifacts upload. The desktop matrix also retains
+these parent diagnostics and the child-log tail in `combinations.log`.
+
+The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
+and three-second child deadline. It restores the saved limit only after
+comparison has closed the reports, then emits `SUMMARY_WRITE_FAILURE` with the
+setup stage/errno, comparison result and restoration status. Otherwise the
+injected limit truncates the child log itself to one byte. The parent requires
+the complete diagnostic, absence of partial reports, unchanged sealed evidence,
+and successful normal report regeneration. A separate invalid-resource control
+must report setup failure without entering comparison or deleting good reports.
+This diagnostic coverage does not classify an unreproduced child crash, launch
+failure or timeout as a file-size-limit defect, and it never retries the child.
 
 A direct standalone build is useful when diagnosing the harness:
 

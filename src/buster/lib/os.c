@@ -791,6 +791,9 @@ BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
 }
 #endif
 
+// Every created thread's stack reservation; see os_thread_create.
+#define OS_THREAD_STACK_SIZE BUSTER_MB(8)
+
 OsThreadHandle* os_thread_create(ThreadCreateOptions options)
 {
     OsEntity* result = 0;
@@ -811,7 +814,16 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         u64 counted = options.untracked ? 0 : 1;
         atomic_u64_add(&os_live_thread_count, counted);
 #if defined(__linux__) || defined(__APPLE__)
-        int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
+        // Apple gives secondary threads 512 KiB; the main thread, Linux threads
+        // (RLIMIT_STACK) and Windows threads (the PE reservation set in
+        // CMakeLists.txt) get 8 MiB. Lane workers compile like the main thread,
+        // and sanitized x86-64 selection overflowed 512 KiB, so every thread
+        // reserves OS_THREAD_STACK_SIZE. The default stays when attributes fail.
+        pthread_attr_t attributes;
+        bool attributes_initialized = pthread_attr_init(&attributes) == 0;
+        bool attributes_sized = attributes_initialized && pthread_attr_setstacksize(&attributes, OS_THREAD_STACK_SIZE) == 0;
+        int create_result = pthread_create(&result->thread.handle, attributes_sized ? &attributes : 0, &pthread_entry_point, result);
+        if (attributes_initialized) { pthread_attr_destroy(&attributes); }
         bool os_result = create_result == 0;
         if (!os_result)
         {
