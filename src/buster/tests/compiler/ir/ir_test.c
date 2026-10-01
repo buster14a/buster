@@ -850,6 +850,40 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Alignment tail padding is NO_CLASS, and a leading padding eightbyte
+    // must not move the surviving piece down in its object representation.
+    {
+        IrProgram fixture = ir_program_initialize(arguments->arena, 0, 12, 0, 0);
+        IrTypeId scalar_types[] = {
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64,
+                .layout = {.size = 8, .alignment = 8, .resolved = true}}),
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+                .layout = {.size = 8, .alignment = 8, .resolved = true}}),
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32,
+                .layout = {.size = 4, .alignment = 4, .resolved = true}}),
+        };
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(scalar_types); shape += 1)
+        {
+            for (u32 upper = 0; upper < 2; upper += 1)
+            {
+                IrField* field = arena_allocate(arguments->arena, IrField, 1);
+                *field = (IrField){.name = S8("value"), .type = scalar_types[shape], .offset = upper * 8};
+                IrTypeId record = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT,
+                    .fields = field, .field_count = 1, .layout = {.size = 16, .alignment = 16, .resolved = true}});
+                for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+                {
+                    IrAbiValue abi = ir_type_abi_value(&fixture, record, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+                    BUSTER_TEST(arguments, !abi.indirect && !abi.memory && abi.part_count == 1);
+                    BUSTER_TEST(arguments, abi.parts[0].abi_class == (shape == 1 ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER));
+                    BUSTER_TEST(arguments, abi.parts[0].value_offset == upper * 8 && abi.parts[0].size == 8);
+                    IrAbiValue windows = ir_type_abi_value(&fixture, record, IR_ABI_CONVENTION_WIN64_X86_64, (IrAbiUse)use);
+                    BUSTER_TEST(arguments, windows.indirect && windows.part_count == 1 &&
+                                           windows.parts[0].abi_class == IR_ABI_CLASS_POINTER);
+                }
+            }
+        }
+    }
+
     // A large unrelated type table must not turn a two-field ABI query into
     // a type-table-sized scratch request. Use fresh scratch arenas so an old
     // high-water mark cannot conceal an allocation regression. The ABI-context

@@ -150,6 +150,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
+- System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
+  argument or result register. `ir_classify_abi_value` publishes only live
+  pieces, preserving their offsets in the complete aggregate storage image;
+  spilling still copies that complete image. Win64's indirect aggregate
+  convention is unchanged. `ir_tests` covers leading and trailing padding
+  across all ABI uses; `compiler_driver_test_sysv_padding_eightbytes` exchanges
+  aligned float/integer records in both directions with the configured host
+  compiler and available Linux GCC, including register exhaustion, aggregate
+  returns and variadic access in every native allocator/frontend form.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.
