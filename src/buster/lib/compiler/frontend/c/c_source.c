@@ -1,7 +1,7 @@
 // Source loading, lexing, and preprocessing — the first stage of the
 // frontend, entered through c_preprocess near the bottom of the file. It
 // turns a root file into the flat CToken stream every later stage walks:
-// translation (line splices and carriage returns folded out), lexing,
+// translation (dialect trigraphs, line splices and carriage returns), lexing,
 // directive handling, include resolution (real files and the builtin
 // resource headers), macro expansion, and the source metrics behind the
 // SOURCE table. c_prewarm at the bottom fills the lazily built tables on
@@ -858,7 +858,7 @@ BUSTER_C_INTERNAL bool c_horizontal_whitespace(char8 character)
     }
 }
 
-BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 source, u64 offset)
+BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 source, u64 offset, bool trigraphs)
 {
     while (offset + 8 <= source.length)
     {
@@ -869,7 +869,13 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
         u64 backslash = word ^ UINT64_C(0x5C5C5C5C5C5C5C5C);
         u64 low = UINT64_C(0x0101010101010101);
         u64 high = UINT64_C(0x8080808080808080);
-        u64 found = (((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash)) & high;
+        u64 found = ((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash);
+        if (trigraphs)
+        {
+            u64 question = word ^ UINT64_C(0x3F3F3F3F3F3F3F3F);
+            found |= (question - low) & ~question;
+        }
+        found &= high;
         if (found)
         {
             break;
@@ -879,7 +885,7 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
     while (offset < source.length)
     {
         char8 probe = source.pointer[offset];
-        if (probe == '\r' || probe == '\n' || probe == '\\')
+        if (probe == '\r' || probe == '\n' || probe == '\\' || (trigraphs && probe == '?'))
         {
             break;
         }
@@ -889,7 +895,7 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
 }
 
 #if BUSTER_C_TRANSLATE_AVX512
-BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset, bool trigraphs)
 {
     Simd512 carriage_return = simd512_splat('\r');
     Simd512 line_feed = simd512_splat('\n');
@@ -900,6 +906,10 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
         Simd512 chunk = simd512_load(source.pointer + offset);
         Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
                            simd512_equal_byte(chunk, backslash);
+        if (trigraphs)
+        {
+            stop_mask |= simd512_equal_byte(chunk, simd512_splat('?'));
+        }
         if (stop_mask)
         {
             offset += mask64_first_set(stop_mask);
@@ -912,7 +922,7 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
     }
     if (!stopped)
     {
-        offset = c_translate_plain_run_end_swar(source, offset);
+        offset = c_translate_plain_run_end_swar(source, offset, trigraphs);
     }
     return offset;
 }
@@ -927,12 +937,12 @@ bool c_test_space_null_empty_tokens(Arena* arena)
     return !token.length && !copied.length && token.offset == copied.offset;
 }
 
-BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset, bool trigraphs)
 {
     while (offset < source.length)
     {
         char8 probe = source.pointer[offset];
-        if (probe == '\r' || probe == '\n' || probe == '\\')
+        if (probe == '\r' || probe == '\n' || probe == '\\' || (trigraphs && probe == '?'))
         {
             break;
         }
@@ -943,31 +953,24 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offse
 
 bool c_test_translate_plain_run_paths_agree(String8 source)
 {
-    if (source.length && !source.pointer)
+    bool result = !source.length || source.pointer;
+    for (u32 mode = 0; result && mode < 2; mode += 1)
     {
-        return false;
-    }
-    u64 offset = 0;
-    for (;;)
-    {
-        u64 scalar_end = c_translate_plain_run_end_scalar(source, offset);
-        if (c_translate_plain_run_end_swar(source, offset) != scalar_end)
+        bool trigraphs = mode != 0;
+        for (u64 offset = 0; result; offset += 1)
         {
-            return false;
-        }
+            u64 scalar_end = c_translate_plain_run_end_scalar(source, offset, trigraphs);
+            result = c_translate_plain_run_end_swar(source, offset, trigraphs) == scalar_end;
 #if BUSTER_C_TRANSLATE_AVX512
-        if (c_translate_plain_run_end_avx512(source, offset) != scalar_end)
-        {
-            return false;
-        }
+            result = result && c_translate_plain_run_end_avx512(source, offset, trigraphs) == scalar_end;
 #endif
-        if (offset == source.length)
-        {
-            break;
+            if (offset == source.length)
+            {
+                break;
+            }
         }
-        offset += 1;
     }
-    return true;
+    return result;
 }
 #endif
 
@@ -999,11 +1002,37 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
+// the supported earlier strict C modes require their phase-one replacement.
+BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
+{
+    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+}
+
+BUSTER_C_INTERNAL char8 c_translate_trigraph_character(char8 third)
+{
+    char8 result = 0;
+    switch (third)
+    {
+    case '=': result = '#'; break;
+    case '/': result = '\\'; break;
+    case '\'': result = '^'; break;
+    case '(': result = '['; break;
+    case ')': result = ']'; break;
+    case '!': result = '|'; break;
+    case '<': result = '{'; break;
+    case '>': result = '}'; break;
+    case '-': result = '~'; break;
+    default: break;
+    }
+    return result;
+}
+
 // force_scalar keeps the byte-at-a-time run loop as the whole implementation,
 // which is what c_lex_reference lexes through so the differential gate
 // compares the chunk fast path against it.
 BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar,
-                                                      CSourceAllocationPlan const* plan)
+                                                      bool trigraphs, CSourceAllocationPlan const* plan)
 {
     CTranslatedSource result = {0};
     if (plan)
@@ -1041,6 +1070,12 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                     Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
                     Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
+                    if (trigraphs)
+                    {
+                        // Stop at the first question mark, including the last
+                        // lanes whose raw triple belongs to the next chunk.
+                        stops |= simd512_equal_byte(chunk, simd512_splat('?'));
+                    }
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
                     {
@@ -1104,8 +1139,8 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 }
             }
 #endif
-            // A run containing no '\r', '\n', or '\\' keeps line/column linear,
-            // so it copies through whole and only those three bytes reach the exact
+            // A run containing no newline, backslash or enabled trigraph
+            // candidate keeps line/column linear; editing bytes reach the exact
             // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
             // time; every fallback retains the previous eight-byte SWAR scan.
             u64 plain_end = input;
@@ -1116,7 +1151,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 while (plain_end < source.length)
                 {
                     char8 character = source.pointer[plain_end];
-                    if (character == '\r' || character == '\n' || character == '\\')
+                    if (character == '\r' || character == '\n' || character == '\\' || (trigraphs && character == '?'))
                     {
                         break;
                     }
@@ -1126,9 +1161,9 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             else
             {
 #if BUSTER_C_TRANSLATE_AVX512
-                plain_end = c_translate_plain_run_end_avx512(source, input);
+                plain_end = c_translate_plain_run_end_avx512(source, input, trigraphs);
 #else
-                plain_end = c_translate_plain_run_end_swar(source, input);
+                plain_end = c_translate_plain_run_end_swar(source, input, trigraphs);
 #endif
             }
             if (plain_end > input)
@@ -1152,6 +1187,19 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 continue;
             }
             char8 character = source.pointer[input];
+            u64 character_length = 1;
+            if (trigraphs && character == '?' && source.length - input >= 3 && source.pointer[input + 1] == '?')
+            {
+                char8 replacement = c_translate_trigraph_character(source.pointer[input + 2]);
+                if (replacement)
+                {
+                    // Consume raw input only: phase-two splicing must not
+                    // create another phase-one replacement opportunity.
+                    character = replacement;
+                    character_length = 3;
+                    run_broken = true;
+                }
+            }
             u64 newline_length = 0;
             if (character == '\r')
             {
@@ -1161,16 +1209,17 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             {
                 newline_length = 1;
             }
-            if (character == '\\' && input + 1 < source.length)
+            if (character == '\\' && character_length < source.length - input)
             {
                 u64 splice_length = 0;
-                if (source.pointer[input + 1] == '\n')
+                if (source.pointer[input + character_length] == '\n')
                 {
-                    splice_length = 2;
+                    splice_length = character_length + 1;
                 }
-                else if (source.pointer[input + 1] == '\r')
+                else if (source.pointer[input + character_length] == '\r')
                 {
-                    splice_length = input + 2 < source.length && source.pointer[input + 2] == '\n' ? 3 : 2;
+                    splice_length = character_length + 1 < source.length - input && source.pointer[input + character_length + 1] == '\n'
+                        ? character_length + 2 : character_length + 1;
                 }
                 if (splice_length)
                 {
@@ -1203,8 +1252,9 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             else
             {
                 translated[output++] = character;
-                input += 1;
-                column += 1;
+                input += character_length;
+                column += (u32)character_length;
+                run_broken = character_length != 1;
             }
         }
         translated[output] = 0;
@@ -1217,7 +1267,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
         checkpoint_count += 1;
         if (space)
         {
-            // The translated copy only shrinks (splices delete bytes); hand the
+            // Translation only shrinks (trigraphs/splices delete bytes); hand the
             // unused tail back so the next spelling packs against it.
             c_space_shrink(space, source.length - output);
         }
@@ -3120,7 +3170,7 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
 }
 #endif
 
-BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
+BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar, bool trigraphs)
 {
     CLexResult result = {0};
     CSourceAllocationPlan plan;
@@ -3142,7 +3192,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
             // map offset without inspecting the caller's source pointer.
             c_source_allocation_plan(0, &plan);
         }
-        CTranslatedSource translated = c_translate_source(arena, source_supported ? space : 0, source_supported ? source : (String8){0}, force_scalar, &plan);
+        CTranslatedSource translated = c_translate_source(arena, source_supported ? space : 0, source_supported ? source : (String8){0}, force_scalar, trigraphs, &plan);
         if (!source_supported && space)
         {
             // Reuse the previous spelling's final byte as the empty source's
@@ -3242,29 +3292,34 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
     return result;
 }
 
-BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source)
+BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source, bool trigraphs)
 {
-    return c_lex_dispatch(arena, space, source, false);
+    return c_lex_dispatch(arena, space, source, false, trigraphs);
 }
 
 #if BUSTER_INCLUDE_TESTS
+CLexResult c_test_lex_dialect(Arena* arena, String8 source, CPreprocessDialect dialect, bool force_scalar)
+{
+    return c_lex_dispatch(arena, 0, source, force_scalar, c_translate_trigraphs_enabled(dialect));
+}
+
 CLexResult c_test_lex_include_source(Arena* arena, String8 source)
 {
     CSpellingSpace space = c_space_local(arena, 1024);
-    return c_lex_space(arena, &space, source);
+    return c_lex_space(arena, &space, source, false);
 }
 #endif
 
 CLexResult c_lex(Arena* arena, String8 source)
 {
-    return c_lex_dispatch(arena, 0, source, false);
+    return c_lex_dispatch(arena, 0, source, false, false);
 }
 
 // The scalar reference loop, whatever the host: the differential gate asserts
 // the dispatched lexer agrees with it byte for byte.
 CLexResult c_lex_reference(Arena* arena, String8 source)
 {
-    return c_lex_dispatch(arena, 0, source, true);
+    return c_lex_dispatch(arena, 0, source, true, false);
 }
 
 typedef struct CMacro CMacro;
@@ -4535,7 +4590,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
 BUSTER_C_INTERNAL void c_macro_define_object_text(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
                                                     String8 replacement_text)
 {
-    CLexResult lex = c_lex_space(arena, space, replacement_text);
+    CLexResult lex = c_lex_space(arena, space, replacement_text, false);
     c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
     u32 replacement_count = 0;
     while (replacement_count < lex.token_count && lex.tokens[replacement_count].kind != C_TOKEN_NEWLINE &&
@@ -8482,7 +8537,7 @@ BUSTER_C_INTERNAL void c_preprocess_command_definition(Arena* arena, CSpellingSp
     String8 prefix = S8("#define ");
     // Separate the synthetic directive terminator from a trailing backslash so translation cannot splice the replacement away.
     String8 text = string_format(arena, S8("{S8}{S8} {S8} \n"), prefix, definition.name, definition.value);
-    CLexResult lex = c_lex_space(arena, space, text);
+    CLexResult lex = c_lex_space(arena, space, text, false);
     for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
     {
         c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
@@ -8500,7 +8555,7 @@ BUSTER_C_INTERNAL void c_preprocess_command_undefinition(Arena* arena, CSpelling
 {
     String8 prefix = S8("#undef ");
     String8 text = string_format(arena, S8("{S8}{S8}\n"), prefix, name);
-    CLexResult lex = c_lex_space(arena, space, text);
+    CLexResult lex = c_lex_space(arena, space, text, false);
     for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
     {
         c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
@@ -9265,7 +9320,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                   .start = 0,
                                   .kind = IR_SOURCE_REGION_STAMP,
                               });
-    CLexResult root_lex = c_lex_space(arena, space, source);
+    // Preprocessed input already completed phase one; synthesized spellings
+    // and command definitions likewise lex with replacement disabled.
+    bool trigraphs = !options.already_preprocessed && c_translate_trigraphs_enabled(options.dialect);
+    CLexResult root_lex = c_lex_space(arena, space, source, trigraphs);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
@@ -9565,7 +9623,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         // The documented cost: a program that calls fesetround and then
         // reads FLT_ROUNDS sees a stale 1, exactly as it did under GCC
         // before the builtin existed.
-        CLexResult flt_rounds_lex = c_lex_space(arena, space, S8("1"));
+        CLexResult flt_rounds_lex = c_lex_space(arena, space, S8("1"), false);
         c_symbols_intern_tokens(symbol_table, flt_rounds_lex.spelling_base, flt_rounds_lex.tokens, flt_rounds_lex.token_shapes, flt_rounds_lex.token_count);
         CMacro* flt_rounds_macro =
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__builtin_flt_rounds"), flt_rounds_lex.tokens, 1, 0, 0, true, false);
@@ -10179,7 +10237,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                     include_once = guard_macro && guard_macro->definition.defined;
                                 }
                                 include_file->included = true;
-                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
+                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source, trigraphs);
                                 // A suppressed include lexed nothing and adds
                                 // zeroes; its path was already counted by the
                                 // inclusion that did the lexing, and its

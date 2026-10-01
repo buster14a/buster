@@ -1,6 +1,7 @@
 // GCC/Clang-compatible macro source boundaries: ordinary newline lookahead,
 // source conditionals inside arguments, and push/pop effects at the rescan
-// cursor. Pin tokens, expansion ownership, and diagnostic source attribution.
+// cursor. Pin tokens, expansion ownership, diagnostic source attribution and
+// dialect-owned phase-one trigraph translation in c_trigraph_preprocess_tests.
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
@@ -318,10 +319,135 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
     return result;
 }
 
+// Raw translation witnesses stay outside the frozen external corpora. Every
+// dialect is checked against fixed tokens; Linux x64 also requires both host
+// preprocessors rather than treating a missing tool as passing evidence.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 expected;
+        String8 gnu_expected;
+    } cases[] = {
+        {S8("?" "?=define VALUE 7\n?" "?=if VALUE != 7\n?" "?=error wrong_branch\n?" "?=endif\nVALUE\n"), S8("7"), {0}},
+        {S8("?" "?=define JOINED 19\nJO?" "?/\nINED\n"), S8("19"), {0}},
+        {S8("\"?" "?(" "?" "?)" "?" "?<" "?" "?>" "?" "?=" "?" "?/n" "?" "?'" "?" "?!" "?" "?-\" '?" "?/n'\n"),
+         S8("\"[]{}#\\n^|~\" '\\n'"), {0}},
+        {S8("\"???"
+            "=\" \"?" "?x\" \"?" "?\" \"?\"\n"), S8("\"?#\" \"?" "?x\" \"?" "?\" \"?\""), {0}},
+        {S8("\"?\\\n?=\"\n"), S8("\"?" "?=\""), S8("\"?" "?=\"")},
+        {S8("#define S(x) #x\nS(?\\\n?=)\n"), S8("\"?" "?=\""), S8("\"?" "?=\"")},
+        {S8("/?" "?/\n* hidden */ kept\n// hidden ?" "?/\nmore\nlast\n"), S8("kept last"), {0}},
+        {S8("#include <trigraph-included.h>\nHEADER\n"), S8("23"), S8("?" "?=define HEADER 23 HEADER")},
+    };
+    struct
+    {
+        CPreprocessDialect dialect;
+        String8 flag;
+        bool gnu;
+    } modes[] = {
+        {C_PREPROCESS_DIALECT_C99, S8("-std=c99"), false},
+        {C_PREPROCESS_DIALECT_C11, S8("-std=c11"), false},
+        {C_PREPROCESS_DIALECT_C17, S8("-std=c17"), false},
+        {C_PREPROCESS_DIALECT_GNU17, S8("-std=gnu17"), true},
+    };
+    TemporalArena files = scratch_begin(&arguments->arena, 1);
+    String8 root = buster_test_temporary_path(files.arena, S8("trigraph-preprocess"), S8(".dir"));
+    String8 header = string_format_z(files.arena, S8("{S8}/trigraph-included.h"), root);
+    bool files_ready = root.pointer && os_make_directory_attempt(root) &&
+        file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("?" "?=define HEADER 23\n")));
+    BUSTER_TEST(arguments, files_ready);
+    if (files_ready)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(cases); test += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(&files.arena, 1);
+                String8 expected_source = modes[mode].gnu
+                    ? (cases[test].gnu_expected.length ? cases[test].gnu_expected : cases[test].source) : cases[test].expected;
+                CLexResult expected = c_lex(temporary.arena, expected_source);
+                CPreprocessResult actual = c_preprocess(temporary.arena, cases[test].source,
+                    (CPreprocessOptions){.source_path = S8("trigraph-preprocess.c"), .dialect = modes[mode].dialect,
+                                         .include_paths = &root, .include_path_count = 1});
+                String8 diagnostic = string_format(temporary.arena, S8("trigraph preprocessing case={u32} mode={S8}"), test, modes[mode].flag);
+                u64 expected_index = 0;
+                BUSTER_TEST_RAW(arguments, actual.error_count == 0 && expected.diagnostic_count == 0, diagnostic);
+                for (u64 token = 0; token < actual.token_count; token += 1)
+                {
+                    while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+                    {
+                        expected_index += 1;
+                    }
+                    if (BUSTER_REQUIRE(arguments, expected_index < expected.token_count))
+                    {
+                        BUSTER_TEST_RAW(arguments, actual.tokens[token].kind == expected.tokens[expected_index].kind, diagnostic);
+                        BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[token]),
+                            c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+                        expected_index += 1;
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, expected_index == expected.token_count, diagnostic);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+                String8 source_path = buster_test_temporary_path(temporary.arena, S8("trigraph-reference"), S8(".c"));
+                bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(cases[test].source));
+                BUSTER_TEST(arguments, written);
+                String8 names[] = {S8("clang"), S8("gcc")};
+                for (u32 reference_index = 0; reference_index < BUSTER_ARRAY_LENGTH(names); reference_index += 1)
+                {
+                    String8 compiler = executable_resolve_in_path(temporary.arena, names[reference_index]);
+                    BUSTER_TEST(arguments, compiler.length != 0);
+                    if (BUSTER_REQUIRE(arguments, compiler.length && written))
+                    {
+                        String8 command[] = {compiler, S8("-E"), S8("-P"), S8("-nostdinc"), S8("-Wno-trigraphs"),
+                            modes[mode].flag, S8("-I"), root, source_path};
+                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                  .use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, spawn.handle != 0);
+                        if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                        {
+                            ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                            String8 output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+                            String8 error = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]);
+                            String8 parts[] = {diagnostic, S8("\ncompiler: "), compiler, S8("\nsource:\n"), cases[test].source,
+                                S8("\nstdout:\n"), string_slice(output, 0, BUSTER_MIN(output.length, 4096)),
+                                S8("\nstderr:\n"), string_slice(error, 0, BUSTER_MIN(error.length, 4096))};
+                            String8 context = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+                            BUSTER_TEST_RAW(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS, context);
+                            if (BUSTER_REQUIRE(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS))
+                            {
+                                CLexResult reference = c_lex(temporary.arena, output);
+                                BUSTER_TEST_RAW(arguments, reference.diagnostic_count == 0, context);
+                                UnitTestResult compared = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, context);
+                                result.test_count += compared.test_count;
+                                result.succeeded_test_count += compared.succeeded_test_count;
+                            }
+                        }
+                    }
+                }
+#endif
+                if (actual.recovery)
+                {
+                    arena_destroy(actual.recovery->spelling_arena, 1);
+                    arena_destroy(actual.recovery->token_arena, 1);
+                    arena_destroy(actual.recovery->token_shape_arena, 1);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    scratch_end(files);
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
