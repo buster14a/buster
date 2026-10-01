@@ -27,9 +27,19 @@
   device space: every ordinary chord has at most 0.25 pixel geometric error,
   while ten subdivision levels cap one source curve at 1,024 segments. A
   count-then-emit pass allocates the exact path and rejects more than 1,048,576
-  raster points; a conservative limit of 67,108,864 scanline edge-search steps
+  raster points. Compound glyphs align unsigned byte/word indices in their
+  original outline points after applying component matrices, including nested
+  compounds. An explicit stack admits up to eight component levels; retained
+  original points are capped at 1,048,576, while glyph visits, anchor searches
+  and decoded/translated points share a 9,437,184-unit work budget. Glyph-local reads
+  and instruction-payload ranges are checked. Hinting and its phantom points
+  are not evaluated: an attachment outside the original outline points returns
+  an all-zero bitmap and rolls back its arena allocations; phantom-point support
+  is tracked by [#2138](https://github.com/buster14a/buster/issues/2138). A
+  conservative limit of 67,108,864 scanline edge-search steps
   further bounds raster work. The headless `truetype_tests` module covers these
-  contracts, including scale-sensitive curve goldens, the subdivision cap and
+  contracts, including point/XY attachment equivalence, transformed/nested
+  unsigned indices, scale-sensitive curve goldens, the subdivision cap and
   a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
   configurations.
 - The active headless `ide` target has no production TrueType caller. It adds
@@ -46,6 +56,17 @@
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
 ## Transactional process spawning
+
+`os_get_environment_variable` searches the environment snapshot captured at
+entry. Windows names compare without case (`SystemRoot`/`SYSTEMROOT`,
+`PATH`/`Path`), using ordinal Unicode mapping for non-ASCII differences;
+POSIX names remain distinct. ASCII and byte-equal names need no allocation;
+the Unicode fallback uses temporary scratch or a private arena when no thread
+context is selected. The first matching captured entry
+wins, including an empty value, and the returned slice preserves its original
+bytes and pointer. Missing or empty query names return a null-empty slice.
+Registered `os_tests` cover these rules with serially replaced snapshots and
+restore the original environment before any other test runs.
 
 `os_process_spawn` validates all bounded argv and environment strings before it
 allocates a pipe or initializes a platform spawn object. Empty argv, embedded

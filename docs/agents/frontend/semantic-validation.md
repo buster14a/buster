@@ -57,6 +57,38 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
+`CParseResult.type_identity_queries` retains successful `_Generic` selections
+and `__builtin_types_compatible_p` answers through lowering. These compact rows
+contain original token ranges or an integer answer; no frontend identity enters
+canonical IR. The shared semantic resolver uses `CType` compatibility, applies
+lvalue/array/function conversion only to generic controllers, and preserves
+qualifiers below the outermost level. The GNU builtin ignores only outermost
+qualifiers. Associations use full abstract declarators, including function
+pointers and pointers to arrays. A generic expression retains its selected
+expression's type, including when inspected by `typeof` or `sizeof`.
+
+The existing token position index records identity-query candidates once.
+Nested queries settle in reverse token order on an explicit work walk; the
+expression task stack follows the selected range without evaluating the
+controller or discarded values. Append-only answers participate in semantic
+result checkpoints. Lowering consumes retained answers; model-building-only
+callers resolve missing answers through the same semantic helper.
+
+`c_test_type_identity_authority` inspects the independent expected return
+constants in raw canonical IR for both frontend forms on six native layouts.
+The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
+pointer, conditional-pointer and GNU-compatibility answers across enumerators,
+static assertions, static initializers, array bounds, case labels and runtime
+values. Driver coverage runs it with strict codegen verification under both
+frontend forms and all four native allocators. The equivalence table accepts
+qualifier-distinguished associations and rejects a missing compatible arm.
+
+The conversion and compatibility rules follow C17 6.3.2.1, 6.5.1.1 and 6.7.3;
+WG14 [DR 481](https://www.open-std.org/jtc1/sc22/wg14/issues/c11c17/issue0481.html)
+records the historical generic-controller conversion question. The builtin's
+outermost-qualifier rule and constant-expression contract follow the
+[GCC documentation](https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html).
+
 Every type-machine push copies a whole `CTypeParseFrame`, so a frame holds
 neither a parse-result snapshot nor the token stream. The frames of one run
 share the root query's `CPreprocessResult` by pointer; the root outlives the

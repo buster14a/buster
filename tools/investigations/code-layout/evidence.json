@@ -1,0 +1,610 @@
+{
+  "accepted_performance_measurements": null,
+  "artifact": 11068386417,
+  "artifact_zip_sha256": "1688050ec6262c00540238aeaa392197ea5ab4b407e70c961b644b997e931621",
+  "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n",
+  "compiler_sha256": "59a4c315321989ebede527eba56709fbba43ab59cf1dc2df84a9cb7253f90c1b",
+  "datasets": {
+    "fixtures": {
+      "first_one_shot_nonminimum": [],
+      "full_census_sha256": "47b95abd51cde64da93f5cb75248b41da4fc6f953a3c2ac3564d631784d54644",
+      "limits": [
+        "No object rewrite or relocation resolution performed",
+        "No alignment directives recovered or reapplied; unity census is frozen-padding sensitivity only",
+        "No claim that debug ranges, unwind offsets, RIP-relative fields, section boundaries or external references are valid after rewriting",
+        "No generated-program runtime or compiler throughput measurement",
+        "Exhaustive oracle only for candidate_count <= 12; minimum is for this unaligned fixed-fragment model"
+      ],
+      "objects": [
+        {
+          "bytes": 9568,
+          "debug_unwind_sections": [
+            {
+              "bytes": 120,
+              "name": ".eh_frame"
+            },
+            {
+              "bytes": 0,
+              "name": ".pdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".xdata"
+            },
+            {
+              "bytes": 902,
+              "name": ".debug_info"
+            },
+            {
+              "bytes": 327,
+              "name": ".debug_abbrev"
+            },
+            {
+              "bytes": 582,
+              "name": ".debug_line"
+            },
+            {
+              "bytes": 452,
+              "name": ".debug_str"
+            },
+            {
+              "bytes": 425,
+              "name": ".debug_loc"
+            },
+            {
+              "bytes": 128,
+              "name": ".debug_ranges"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$S"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$T"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_addr"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str_offsets"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_rnglists"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loclists"
+            }
+          ],
+          "executable_sections": [
+            {
+              "alignment": 16,
+              "bytes": 1708,
+              "name": ".text"
+            }
+          ],
+          "path": "/home/runner/work/buster/buster/evidence/basic_c_switch_case_blocks.o",
+          "sha256": "d6ddf6379402659c8228901f5ba7ac97a9a28181888e3bada9ecab8dcf8b645d",
+          "skipped": [
+            {
+              "name": ".text",
+              "reason": "zero symbol size; no invented function extent"
+            }
+          ]
+        },
+        {
+          "bytes": 11784,
+          "debug_unwind_sections": [
+            {
+              "bytes": 216,
+              "name": ".eh_frame"
+            },
+            {
+              "bytes": 0,
+              "name": ".pdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".xdata"
+            },
+            {
+              "bytes": 1027,
+              "name": ".debug_info"
+            },
+            {
+              "bytes": 327,
+              "name": ".debug_abbrev"
+            },
+            {
+              "bytes": 636,
+              "name": ".debug_line"
+            },
+            {
+              "bytes": 492,
+              "name": ".debug_str"
+            },
+            {
+              "bytes": 876,
+              "name": ".debug_loc"
+            },
+            {
+              "bytes": 320,
+              "name": ".debug_ranges"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$S"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$T"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_addr"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str_offsets"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_rnglists"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loclists"
+            }
+          ],
+          "executable_sections": [
+            {
+              "alignment": 16,
+              "bytes": 2266,
+              "name": ".text"
+            }
+          ],
+          "path": "/home/runner/work/buster/buster/evidence/basic_c_nested_control_substatement.o",
+          "sha256": "67dc2a2a6bf5b0e51a080c9f8e193fd915aaf443f1f6ef9cdf3179333f977d10",
+          "skipped": [
+            {
+              "name": ".text",
+              "reason": "zero symbol size; no invented function extent"
+            }
+          ]
+        },
+        {
+          "bytes": 10232,
+          "debug_unwind_sections": [
+            {
+              "bytes": 184,
+              "name": ".eh_frame"
+            },
+            {
+              "bytes": 0,
+              "name": ".pdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".xdata"
+            },
+            {
+              "bytes": 997,
+              "name": ".debug_info"
+            },
+            {
+              "bytes": 327,
+              "name": ".debug_abbrev"
+            },
+            {
+              "bytes": 565,
+              "name": ".debug_line"
+            },
+            {
+              "bytes": 460,
+              "name": ".debug_str"
+            },
+            {
+              "bytes": 468,
+              "name": ".debug_loc"
+            },
+            {
+              "bytes": 224,
+              "name": ".debug_ranges"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$S"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$T"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_addr"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str_offsets"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_rnglists"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loclists"
+            }
+          ],
+          "executable_sections": [
+            {
+              "alignment": 16,
+              "bytes": 1579,
+              "name": ".text"
+            }
+          ],
+          "path": "/home/runner/work/buster/buster/evidence/basic_c_goto_into_loop.o",
+          "sha256": "47a4a1a664e75f7077b2df6ca02dcf9facf79f971abfc3029e67577f7082a34c",
+          "skipped": [
+            {
+              "name": ".text",
+              "reason": "zero symbol size; no invented function extent"
+            }
+          ]
+        },
+        {
+          "bytes": 14072,
+          "debug_unwind_sections": [
+            {
+              "bytes": 120,
+              "name": ".eh_frame"
+            },
+            {
+              "bytes": 0,
+              "name": ".pdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".xdata"
+            },
+            {
+              "bytes": 1296,
+              "name": ".debug_info"
+            },
+            {
+              "bytes": 327,
+              "name": ".debug_abbrev"
+            },
+            {
+              "bytes": 891,
+              "name": ".debug_line"
+            },
+            {
+              "bytes": 480,
+              "name": ".debug_str"
+            },
+            {
+              "bytes": 436,
+              "name": ".debug_loc"
+            },
+            {
+              "bytes": 96,
+              "name": ".debug_ranges"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$S"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$T"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_addr"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str_offsets"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_rnglists"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loclists"
+            }
+          ],
+          "executable_sections": [
+            {
+              "alignment": 16,
+              "bytes": 4985,
+              "name": ".text"
+            }
+          ],
+          "path": "/home/runner/work/buster/buster/evidence/basic_c_conditional_array_branch.o",
+          "sha256": "412f2c80f4b9bef1d845f09a060f248bca080d1dec6db195b3fe83897a368fa2",
+          "skipped": [
+            {
+              "name": ".text",
+              "reason": "zero symbol size; no invented function extent"
+            }
+          ]
+        }
+      ],
+      "source_checked_no_inline_asm": true,
+      "summary": {
+        "all_modeled_branches_legal": true,
+        "baseline_bytes": 10429,
+        "candidate_count": 284,
+        "code_relocations_requiring_offset_mapping": 48,
+        "edge_count": 286,
+        "fixed_rel8_edges": 2,
+        "fragment_count": 2104,
+        "functions": 17,
+        "maximum_widening_iterations": 3,
+        "one_shot_bytes": 9825,
+        "one_shot_saved_bytes": 604,
+        "one_shot_short_branches": 181,
+        "oracle_assignments": 5443,
+        "oracle_functions": 9,
+        "oracle_one_shot_mismatches": 0,
+        "oracle_widening_mismatches": 0,
+        "rip_relative_instructions_requiring_separate_fixup_authority": 18,
+        "shortest_widen_bytes": 9787,
+        "shortest_widen_short_branches": 192,
+        "widening_branch_checks": 689,
+        "widening_fragment_visits": 4981,
+        "widening_iterations": 32,
+        "widening_saved_bytes": 642,
+        "widenings": 92
+      }
+    },
+    "unity": {
+      "first_one_shot_nonminimum": [
+        {
+          "aliases": [
+            "os_barrier_wait"
+          ],
+          "baseline_branch_legal": true,
+          "baseline_bytes": 370,
+          "candidate_count": 8,
+          "code_relocations_requiring_offset_mapping": 4,
+          "edge_count": 8,
+          "excluded_branches": {
+            "relocated_relative_branches": 4
+          },
+          "fixed_local_calls": 0,
+          "fixed_rel8_edges": 0,
+          "fragment_count": 91,
+          "name": "os_barrier_wait",
+          "object": "/home/runner/work/buster/buster/evidence/unity.o",
+          "one_shot_branch_legal": true,
+          "one_shot_bytes": 347,
+          "one_shot_short_branches": 7,
+          "oracle": {
+            "assignments": 256,
+            "first_minimum_mask": 255,
+            "legal_assignments": 176,
+            "minimum_model_bytes": 344,
+            "one_shot_matches_minimum": false,
+            "widening_matches_minimum": true
+          },
+          "original_start": 68288,
+          "padding_policy": "observed bytes frozen; original alignment directives are unavailable",
+          "rip_relative_instructions_requiring_separate_fixup_authority": 0,
+          "section": ".text",
+          "shortest_widen_branch_legal": true,
+          "shortest_widen_bytes": 344,
+          "shortest_widen_short_branches": 8,
+          "symbols_requiring_offset_mapping": 1,
+          "widening_branch_checks": 8,
+          "widening_fragment_visits": 91,
+          "widening_iterations": 1,
+          "widenings": 0
+        }
+      ],
+      "full_census_sha256": "3433156255ac7573f0cc4800a2ac44af0f69acea896de2d3dd8dd4a45c890def",
+      "limits": [
+        "No object rewrite or relocation resolution performed",
+        "No alignment directives recovered or reapplied; unity census is frozen-padding sensitivity only",
+        "No claim that debug ranges, unwind offsets, RIP-relative fields, section boundaries or external references are valid after rewriting",
+        "No generated-program runtime or compiler throughput measurement",
+        "Exhaustive oracle only for candidate_count <= 12; minimum is for this unaligned fixed-fragment model"
+      ],
+      "objects": [
+        {
+          "bytes": 38327624,
+          "debug_unwind_sections": [
+            {
+              "bytes": 183472,
+              "name": ".eh_frame"
+            },
+            {
+              "bytes": 0,
+              "name": ".pdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".xdata"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_info"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_abbrev"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loc"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_ranges"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$S"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug$T"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_addr"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_str_offsets"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_line_str"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_rnglists"
+            },
+            {
+              "bytes": 0,
+              "name": ".debug_loclists"
+            }
+          ],
+          "executable_sections": [
+            {
+              "alignment": 16,
+              "bytes": 21638362,
+              "name": ".text"
+            }
+          ],
+          "path": "/home/runner/work/buster/buster/evidence/unity.o",
+          "sha256": "258ec5a9b66a7d1eb0ac8ef984e1744cd7bc2f1ee7e34c7ed8f9c548d91d2691",
+          "skipped": []
+        }
+      ],
+      "source_checked_no_inline_asm": false,
+      "summary": {
+        "all_modeled_branches_legal": true,
+        "baseline_bytes": 21598568,
+        "candidate_count": 246280,
+        "code_relocations_requiring_offset_mapping": 52027,
+        "edge_count": 246284,
+        "fixed_rel8_edges": 4,
+        "fragment_count": 3789440,
+        "functions": 5341,
+        "maximum_widening_iterations": 7,
+        "one_shot_bytes": 21171525,
+        "one_shot_saved_bytes": 427043,
+        "one_shot_short_branches": 129767,
+        "oracle_assignments": 1096127,
+        "oracle_functions": 2502,
+        "oracle_one_shot_mismatches": 157,
+        "oracle_widening_mismatches": 0,
+        "rip_relative_instructions_requiring_separate_fixup_authority": 9812,
+        "shortest_widen_bytes": 21154239,
+        "shortest_widen_short_branches": 134833,
+        "widening_branch_checks": 713759,
+        "widening_fragment_visits": 10993993,
+        "widening_iterations": 10540,
+        "widening_saved_bytes": 444329,
+        "widenings": 111447
+      }
+    }
+  },
+  "diagnostic_commit": "72fa6b3f8b9f9b2d13a55fd94d657e3f4a25098f",
+  "evidence_class": "hosted object census and offline model; no production rewrite or performance acceptance",
+  "failed_attempt": {
+    "artifact": 11067781291,
+    "artifact_zip_sha256": "1b0d56ee09ffdf6ac1ec903daa0d66ca9d2bdf6e1fbf5667edac36c67400c90a",
+    "diagnostic_commit": "37c7c479d1b4bd90bf744b2e4b67c2c26493968e",
+    "diagnostic_tree": "79f79e09100b5e2be04d6887ff67861a4152a905",
+    "failure": "unity baseline target refused xgetbv without XSAVE; no valid unity object",
+    "fixtures_a0_summary": {
+      "all_modeled_branches_legal": true,
+      "baseline_bytes": 10429,
+      "candidate_count": 284,
+      "code_relocations_requiring_offset_mapping": 48,
+      "edge_count": 286,
+      "fixed_rel8_edges": 2,
+      "fragment_count": 2104,
+      "functions": 17,
+      "maximum_widening_iterations": 3,
+      "one_shot_bytes": 9833,
+      "one_shot_saved_bytes": 596,
+      "one_shot_short_branches": 179,
+      "oracle_assignments": 5443,
+      "oracle_functions": 9,
+      "oracle_one_shot_mismatches": 0,
+      "oracle_widening_mismatches": 0,
+      "rip_relative_instructions_requiring_separate_fixup_authority": 18,
+      "shortest_widen_bytes": 9787,
+      "shortest_widen_short_branches": 192,
+      "widening_branch_checks": 689,
+      "widening_fragment_visits": 4981,
+      "widening_iterations": 32,
+      "widening_saved_bytes": 642,
+      "widenings": 92
+    },
+    "job": 109662806185,
+    "run": 36644060882
+  },
+  "fixture_sources": [
+    {
+      "inline_asm_marker": false,
+      "sha256": "418d84ee09a2315cfb5b84323b1c2ebeb8ece736d48ba52034e94da19a1c4141",
+      "source": "tests/basic_c_switch_case_blocks.c"
+    },
+    {
+      "inline_asm_marker": false,
+      "sha256": "78e8e513b527514633b22f88c4da18a389e6448793a4ff4542454cff5c0e4be4",
+      "source": "tests/basic_c_nested_control_substatement.c"
+    },
+    {
+      "inline_asm_marker": false,
+      "sha256": "6a0ee16f81371c14edcdacb3b1c5491c95370b3a2700ca95a6906e40fb8344e6",
+      "source": "tests/basic_c_goto_into_loop.c"
+    },
+    {
+      "inline_asm_marker": false,
+      "sha256": "f92cfcac4e9c934598c2e98a8a8e6b1dd41bca9e52028c0762c064cff73a8495",
+      "source": "tests/basic_c_conditional_array_branch.c"
+    }
+  ],
+  "job": 109664515098,
+  "objdump": "GNU objdump (GNU Binutils for Ubuntu) 2.46\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n",
+  "production_commit": "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+  "production_tree": "8810c6603e47e5eecf26e1d73633619a347c70d8",
+  "run": 36644597106
+}

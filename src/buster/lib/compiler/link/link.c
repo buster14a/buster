@@ -14,8 +14,10 @@
 // for -shared, PIE for -pie) has one writer,
 // link_native_image_elf64_x86_64_position_independent, for x86-64 Linux; the
 // dispatcher refuses the kind on every other target, and its own comment
-// states the relocation and preemption rules. link_elf_version_plan_build is
-// the symbol-version construction it shares with the x86-64 dynamic writer.
+// states the relocation and preemption rules. link_elf_version_plan_build and
+// link_elf_copy_plan_build are the symbol-version and copy-slot construction
+// it shares with the x86-64 dynamic writer.
+// link_validate_linker_arguments refuses unconsumed options before any writer.
 // Before x86-64 Linux writer selection,
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
@@ -52,10 +54,11 @@
 // it with `atexit`. The UEFI writer has neither a stub nor such a loader and
 // refuses the link; link_initializer_plan_empty is that refusal.
 //
-// A second rule crosses the dynamic ELF writers: imported data reaches a
-// non-PIE executable through a copy relocation, and the slot that relocation
-// fills stands for the shared library's object, not for the name the program
-// referenced. When the driver was able to read the library's symbol table
+// A second rule crosses the dynamic ELF writers: imported data reaches an
+// executable through a copy relocation (every imported object in a
+// fixed-address one, those a rel32 reads in a PIE), and the slot that
+// relocation fills stands for the shared library's object, not for the name
+// the program referenced. When the driver was able to read the library's symbol table
 // (NativeDynamicDataSymbol), the writer defines every name exported at that
 // address on the slot, sizes the slot from the library, and gives two imported
 // names for one object one slot; see link_elf_index_initialize. Defining
@@ -5370,6 +5373,200 @@ BUSTER_GLOBAL_LOCAL void link_elf_version_plan_write(LinkElfVersionPlan* plan, u
     }
 }
 
+BUSTER_GLOBAL_LOCAL void link_elf_write_relocation(u8* bytes, u64* cursor, u64 offset, u32 symbol, u32 type, u64 addend)
+{
+    link_write_u64(bytes, *cursor, offset);
+    link_write_u64(bytes, *cursor + 8, ((u64)symbol << 32) | type);
+    link_write_u64(bytes, *cursor + 16, addend);
+    *cursor += ELF_RELOCATION_SIZE;
+}
+
+// Copy relocations, shared by the fixed-address and PIE executable writers:
+// imported data an object reaches with a rel32 gets local storage the loader
+// fills from the shared library (R_X86_64_COPY).
+//
+// What is reserved is the library's object, not the one name this program
+// spelled.  A shared library exports one object under every name it was
+// aliased to — glibc publishes `environ`, `_environ` and `__environ` at
+// one address — and a definition in the executable takes precedence over
+// the library's own for all of them.  An executable that defines only the
+// referenced name therefore leaves libc writing `__environ` into libc's
+// storage while the program reads a copy taken before startup ran, which
+// is how `extern char **environ` came to read null.  So each slot carries
+// every exported name at its address, takes the library's own size, and is
+// shared by two imports that name one object.  When the library's symbol
+// table was not read, the slot keeps the pointer-sized shape it had.
+//
+// Imports are numbered by the writer; `copied[import]` selects the ones that
+// take a slot.  Alias names are listed per owning import in import order, and
+// the writer gives them consecutive .dynsym entries in that order.
+typedef struct LinkElfCopyPlan LinkElfCopyPlan;
+struct LinkElfCopyPlan
+{
+    String8* alias_names;
+    u32* alias_first;
+    u32* alias_counts;
+    u32* owners;
+    u64* sizes;
+    String8 symbol;
+    // The .dynstr bytes the alias names add, NUL terminators included.
+    u64 alias_name_size;
+    u32 alias_count;
+    u32 slot_count;
+    LinkError error;
+};
+
+BUSTER_GLOBAL_LOCAL LinkElfCopyPlan link_elf_copy_plan_build(Arena* arena, LinkElfIndex* exports, ObjectFile* object, String8 const* import_names,
+                                                             bool const* copied, u32 import_count, u64 name_size)
+{
+    LinkElfCopyPlan plan = {0};
+    plan.alias_names = arena_allocate(arena, String8, (u64)exports->data_count + 1);
+    plan.alias_first = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.alias_counts = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.owners = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.sizes = arena_allocate(arena, u64, (u64)import_count + 1);
+    LinkGlobalSymbolTable globals = {0};
+    bool globals_valid = true;
+    if (exports->data_count)
+    {
+        u64 capacity = link_elf_index_capacity(object->symbol_count);
+        globals_valid = object->symbol_count < UINT32_MAX &&
+                        capacity * sizeof(u32) + BUSTER_ALIGN_OF(u32) <= exports->arena->reserved_size - exports->arena->position;
+        if (globals_valid) globals_valid = link_global_symbol_table_initialize(exports->arena, object->symbols, object->symbol_count, &globals);
+        for (u32 symbol = 0; globals_valid && symbol < object->symbol_count; symbol += 1)
+        {
+            if (object->symbols[symbol].global)
+            {
+                u32* slot = link_global_symbol_table_slot(&globals, object->symbols[symbol].name);
+                if (slot) *slot = symbol;
+                else globals_valid = false;
+            }
+        }
+    }
+    if (!globals_valid)
+    {
+        plan.error = LINK_ERROR_INVALID_INPUT;
+    }
+    for (u32 import_index = 0; plan.error == LINK_ERROR_NONE && import_index < import_count; import_index += 1)
+    {
+        plan.alias_first[import_index] = plan.alias_count;
+        plan.alias_counts[import_index] = 0;
+        plan.owners[import_index] = UINT32_MAX;
+        plan.sizes[import_index] = 0;
+        if (!copied[import_index]) continue;
+        LinkElfName* name = link_elf_name(exports, import_names[import_index], false);
+        LinkElfDataEntry* definition = name && name->data != UINT32_MAX ? exports->data + name->data : 0;
+        LinkElfDataGroup* group = definition ? exports->groups + definition->group : 0;
+        u64 slot_size = definition && definition->symbol->size ? definition->symbol->size : sizeof(u64);
+        if (group && group->owner != UINT32_MAX)
+        {
+            plan.owners[import_index] = group->owner;
+            continue;
+        }
+        plan.owners[import_index] = import_index;
+        plan.slot_count += 1;
+        if (group) group->owner = import_index;
+        // Walk only this object's exports, in their original table order.
+        // Table identity (not virtual address alone) distinguishes libraries.
+        // A caller may expose the same table through different-length views;
+        // only the selected definition's view contributes aliases.
+        for (u32 entry = group ? group->first : UINT32_MAX; entry != UINT32_MAX; entry = exports->data[entry].next)
+        {
+            LinkElfDataEntry* data = exports->data + entry;
+            NativeDynamicDataSymbol* exported = data->symbol;
+            if ((u64)(exported - group->table) >= definition->table_count ||
+                string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
+                exported->name.length >= UINT32_MAX || name_size + plan.alias_name_size > UINT32_MAX - exported->name.length - 1)
+            {
+                continue;
+            }
+            u32* global = link_global_symbol_table_slot(&globals, exported->name);
+            LinkElfName* alias = exports->names + data->name;
+            if ((global && *global != UINT32_MAX) || alias->alias_owner == import_index) continue;
+            // Preserve the old sizing rule: an existing global/import or a
+            // duplicate version-name does not enlarge the owner's slot.
+            alias->alias_owner = import_index;
+            slot_size = BUSTER_MAX(slot_size, exported->size);
+            plan.alias_names[plan.alias_count++] = exported->name;
+            plan.alias_name_size += exported->name.length + 1;
+        }
+        if (slot_size > UINT32_MAX)
+        {
+            plan.error = LINK_ERROR_INVALID_INPUT;
+            plan.symbol = import_names[import_index];
+        }
+        plan.alias_counts[import_index] = plan.alias_count - plan.alias_first[import_index];
+        plan.sizes[import_index] = slot_size;
+    }
+    return plan;
+}
+
+// Places each owner's slot from `start`, aligned as its size asks, and gives
+// an import that shares an owner the owner's address.  Returns the end.
+BUSTER_GLOBAL_LOCAL u64 link_elf_copy_plan_place(LinkElfCopyPlan const* plan, bool const* copied, u32 import_count, u64 start, u64 image_base,
+                                                 u64* addresses)
+{
+    u64 cursor = start;
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        u32 owner = plan->owners[import_index];
+        if (!copied[import_index])
+        {
+            continue;
+        }
+        if (owner != import_index)
+        {
+            addresses[import_index] = addresses[owner];
+            continue;
+        }
+        cursor = align_forward(cursor, plan->sizes[import_index] >= 16 ? 16 : 8);
+        addresses[import_index] = image_base + cursor;
+        cursor += plan->sizes[import_index];
+    }
+    return cursor;
+}
+
+// The library's other names for each copy-relocated object, defined at the
+// same slot so the library's own post-startup stores through them land in
+// the executable's copy: consecutive .dynsym entries from
+// `first_alias_symbol`, their names appended at `*name_cursor`.
+BUSTER_GLOBAL_LOCAL void link_elf_copy_aliases_write(LinkElfCopyPlan const* plan, u32 import_count, u64 const* addresses, u8* bytes,
+                                                    u64 dynamic_symbol_offset, u64 first_alias_symbol, u64 dynamic_string_offset, u64* name_cursor,
+                                                    u16 section_index)
+{
+    u64 alias_symbol_index = first_alias_symbol;
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        for (u32 alias_index = 0; alias_index < plan->alias_counts[import_index]; alias_index += 1)
+        {
+            String8 alias = plan->alias_names[plan->alias_first[import_index] + alias_index];
+            u64 symbol_offset = dynamic_symbol_offset + alias_symbol_index * ELF_SYMBOL_SIZE;
+            link_write_u32(bytes, symbol_offset, (u32)(*name_cursor - dynamic_string_offset));
+            memcpy(bytes + *name_cursor, alias.pointer, alias.length);
+            *name_cursor += alias.length + 1;
+            bytes[symbol_offset + 4] = 0x11;
+            link_write_u16(bytes, symbol_offset + 6, section_index);
+            link_write_u64(bytes, symbol_offset + 8, addresses[import_index]);
+            link_write_u64(bytes, symbol_offset + 16, plan->sizes[import_index]);
+            alias_symbol_index += 1;
+        }
+    }
+}
+
+// One R_X86_64_COPY per slot, naming the owning import's .dynsym entry,
+// which each writer numbers `import + 1`.
+BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* plan, bool const* copied, u32 import_count, u64 const* addresses,
+                                                        u8* bytes, u64* relocation_cursor)
+{
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        if (copied[import_index] && plan->owners[import_index] == import_index)
+        {
+            link_elf_write_relocation(bytes, relocation_cursor, addresses[import_index], import_index + 1, ELF_RELOCATION_TYPE_X86_64_COPY, 0);
+        }
+    }
+}
+
 // `layout_section_offsets`, when given, receives the image offset of every
 // object section, so the AArch64 writer that overlays this layout can place
 // its own relocations against the same addresses.
@@ -5478,101 +5675,22 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // stderr variables) use copy relocations.  Reserve local storage for each
     // imported object so the PC-relative references in non-PIC upstream
     // objects remain within the executable's image; the dynamic loader fills
-    // those slots from the shared library.
-    //
-    // What is reserved is the library's object, not the one name this program
-    // spelled.  A shared library exports one object under every name it was
-    // aliased to — glibc publishes `environ`, `_environ` and `__environ` at
-    // one address — and a definition in the executable takes precedence over
-    // the library's own for all of them.  An executable that defines only the
-    // referenced name therefore leaves libc writing `__environ` into libc's
-    // storage while the program reads a copy taken before startup ran, which
-    // is how `extern char **environ` came to read null.  So each slot carries
-    // every exported name at its address, takes the library's own size, and is
-    // shared by two imports that name one object.  When the library's symbol
-    // table was not read, the slot keeps the pointer-sized shape it had.
-    String8* alias_names = arena_allocate(arena, String8, (u64)exports->data_count + 1);
-    u32* import_alias_first = arena_allocate(arena, u32, import_count);
-    u32* import_alias_counts = arena_allocate(arena, u32, import_count);
-    u32* import_copy_owners = arena_allocate(arena, u32, import_count);
-    u64* import_copy_sizes = arena_allocate(arena, u64, import_count);
-    LinkGlobalSymbolTable globals = {0};
-    bool globals_valid = true;
-    if (exports->data_count)
-    {
-        u64 capacity = link_elf_index_capacity(object->symbol_count);
-        globals_valid = object->symbol_count < UINT32_MAX &&
-                        capacity * sizeof(u32) + BUSTER_ALIGN_OF(u32) <= exports->arena->reserved_size - exports->arena->position;
-        if (globals_valid) globals_valid = link_global_symbol_table_initialize(exports->arena, object->symbols, object->symbol_count, &globals);
-        for (u32 symbol = 0; globals_valid && symbol < object->symbol_count; symbol += 1)
-        {
-            if (object->symbols[symbol].global)
-            {
-                u32* slot = link_global_symbol_table_slot(&globals, object->symbols[symbol].name);
-                if (slot) *slot = symbol;
-                else globals_valid = false;
-            }
-        }
-    }
-    if (!globals_valid)
-    {
-        result.error = LINK_ERROR_INVALID_INPUT;
-        return result;
-    }
-    u32 alias_count = 0;
-    u32 copy_slot_count = 0;
+    // those slots from the shared library (link_elf_copy_plan_build).
+    bool* import_copied = arena_allocate(arena, bool, (u64)import_count + 1);
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        import_alias_first[import_index] = alias_count;
-        import_alias_counts[import_index] = 0;
-        import_copy_owners[import_index] = UINT32_MAX;
-        import_copy_sizes[import_index] = 0;
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA) continue;
-        LinkElfName* name = link_elf_name(exports, import_names[import_index], false);
-        LinkElfDataEntry* definition = name && name->data != UINT32_MAX ? exports->data + name->data : 0;
-        LinkElfDataGroup* group = definition ? exports->groups + definition->group : 0;
-        u64 slot_size = definition && definition->symbol->size ? definition->symbol->size : sizeof(u64);
-        if (group && group->owner != UINT32_MAX)
-        {
-            import_copy_owners[import_index] = group->owner;
-            continue;
-        }
-        import_copy_owners[import_index] = import_index;
-        copy_slot_count += 1;
-        if (group) group->owner = import_index;
-        // Walk only this object's exports, in their original table order.
-        // Table identity (not virtual address alone) distinguishes libraries.
-        // A caller may expose the same table through different-length views;
-        // only the selected definition's view contributes aliases.
-        for (u32 entry = group ? group->first : UINT32_MAX; entry != UINT32_MAX; entry = exports->data[entry].next)
-        {
-            LinkElfDataEntry* data = exports->data + entry;
-            NativeDynamicDataSymbol* exported = data->symbol;
-            if ((u64)(exported - group->table) >= definition->table_count ||
-                string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
-                exported->name.length >= UINT32_MAX || imported_name_size > UINT32_MAX - exported->name.length - 1)
-            {
-                continue;
-            }
-            u32* global = link_global_symbol_table_slot(&globals, exported->name);
-            LinkElfName* alias = exports->names + data->name;
-            if ((global && *global != UINT32_MAX) || alias->alias_owner == import_index) continue;
-            // Preserve the old sizing rule: an existing global/import or a
-            // duplicate version-name does not enlarge the owner's slot.
-            alias->alias_owner = import_index;
-            slot_size = BUSTER_MAX(slot_size, exported->size);
-            alias_names[alias_count++] = exported->name;
-            imported_name_size += exported->name.length + 1;
-        }
-        if (slot_size > UINT32_MAX)
-        {
-            result.error = LINK_ERROR_INVALID_INPUT;
-            result.symbol = import_names[import_index];
-            return result;
-        }
-        import_alias_counts[import_index] = alias_count - import_alias_first[import_index];
-        import_copy_sizes[import_index] = slot_size;
+        import_copied[import_index] = import_kinds[import_index] == OBJECT_SYMBOL_DATA;
     }
+    LinkElfCopyPlan copies = link_elf_copy_plan_build(arena, exports, object, import_names, import_copied, import_count, imported_name_size);
+    if (copies.error != LINK_ERROR_NONE)
+    {
+        result.error = copies.error;
+        result.symbol = copies.symbol;
+        return result;
+    }
+    imported_name_size += copies.alias_name_size;
+    u32 alias_count = copies.alias_count;
+    u32 copy_slot_count = copies.slot_count;
     u32 dynamic_data_relocation_count = copy_slot_count;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
@@ -5699,7 +5817,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 versioned_name_count = (u64)import_count + alias_count;
     String8* versioned_names = arena_allocate(arena, String8, versioned_name_count + 1);
     memcpy(versioned_names, import_names, (u64)import_count * sizeof(*versioned_names));
-    memcpy(versioned_names + import_count, alias_names, (u64)alias_count * sizeof(*versioned_names));
+    memcpy(versioned_names + import_count, copies.alias_names, (u64)alias_count * sizeof(*versioned_names));
     LinkElfVersionPlan versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, import_count, needed_library_count);
     if (versions.error != LINK_ERROR_NONE)
     {
@@ -5756,23 +5874,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 copy_data_offset = align_forward(section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size, 16);
-    u64 copy_slot_cursor = copy_data_offset;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
-    {
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
-        {
-            continue;
-        }
-        u32 owner = import_copy_owners[import_index];
-        if (owner != import_index)
-        {
-            copy_slot_addresses[import_index] = copy_slot_addresses[owner];
-            continue;
-        }
-        copy_slot_cursor = align_forward(copy_slot_cursor, import_copy_sizes[import_index] >= 16 ? 16 : 8);
-        copy_slot_addresses[import_index] = image_base + copy_slot_cursor;
-        copy_slot_cursor += import_copy_sizes[import_index];
-    }
+    u64 copy_slot_cursor = link_elf_copy_plan_place(&copies, import_copied, import_count, copy_data_offset, image_base, copy_slot_addresses);
     u64 writable_memory_end = copy_slot_cursor;
     if (file_size > UINT32_MAX)
     {
@@ -5834,29 +5936,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // retaining the imported name used by the R_X86_64_COPY entry.
             link_write_u16(bytes, symbol_offset + 6, 0xfff1);
             link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
-            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_copy_owners[import_index]]);
+            link_write_u64(bytes, symbol_offset + 16, copies.sizes[copies.owners[import_index]]);
         }
     }
-    // The library's other names for each copy-relocated object, defined at the
-    // same slot so the library's own post-startup stores through them land in
-    // the executable's copy.
-    u64 alias_symbol_index = (u64)import_count + 1;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
-    {
-        for (u32 alias_index = 0; alias_index < import_alias_counts[import_index]; alias_index += 1)
-        {
-            String8 alias = alias_names[import_alias_first[import_index] + alias_index];
-            u64 symbol_offset = dynamic_symbol_offset + alias_symbol_index * ELF_SYMBOL_SIZE;
-            link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
-            memcpy(bytes + dynamic_name_cursor, alias.pointer, alias.length);
-            dynamic_name_cursor += alias.length + 1;
-            bytes[symbol_offset + 4] = 0x11;
-            link_write_u16(bytes, symbol_offset + 6, 0xfff1);
-            link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
-            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_index]);
-            alias_symbol_index += 1;
-        }
-    }
+    link_elf_copy_aliases_write(&copies, import_count, copy_slot_addresses, bytes, dynamic_symbol_offset, (u64)import_count + 1, dynamic_string_offset,
+                                &dynamic_name_cursor, 0xfff1);
     u64 export_symbol_slot = (u64)import_count + 1 + alias_count;
     for (u32 export_index = 0; export_index < export_count; export_index += 1)
     {
@@ -6263,19 +6347,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
-    u32 copy_relocation_cursor = 0;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
-    {
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA || import_copy_owners[import_index] != import_index)
-        {
-            continue;
-        }
-        u64 relocation_entry = relocation_offset + plt_relocation_size + (u64)copy_relocation_cursor * ELF_RELOCATION_SIZE;
-        link_write_u64(bytes, relocation_entry, copy_slot_addresses[import_index]);
-        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_X86_64_COPY);
-        link_write_u64(bytes, relocation_entry + 16, 0);
-        copy_relocation_cursor += 1;
-    }
+    u64 copy_relocation_cursor = relocation_offset + plt_relocation_size;
+    link_elf_copy_relocations_write(&copies, import_copied, import_count, copy_slot_addresses, bytes, &copy_relocation_cursor);
     u64 dynamic_cursor = dynamic_offset;
 #define BUSTER_LINK_DYNAMIC(tag, value)                                                                                                                        \
     do                                                                                                                                                         \
@@ -6389,7 +6462,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .dynamic_offset = dynamic_offset,
                                       .dynamic_size = dynamic_size,
                                       .import_indices = import_indices,
-                                      .copy_alias_names = alias_names,
+                                      .copy_alias_names = copies.alias_names,
                                       .copy_alias_symbol_offset = dynamic_symbol_offset + ((u64)import_count + 1) * ELF_SYMBOL_SIZE,
                                       .copy_alias_count = alias_count,
                                       .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
@@ -6424,9 +6497,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 // what makes the data half of that rule necessary.  A direct call or rel32
 // binds to this image's own definition (a direct reference cannot be
 // preempted, which is ld's -Bsymbolic-functions answer), and a rel32 to
-// preemptible data, an import that is not a function, a 32-bit absolute
-// address or any address relocation in code is refused: those need an object
-// compiled with -fPIC.  A GOT load of a definition bound here is relaxed into
+// preemptible data, a 32-bit absolute address or any address relocation in
+// code is refused: those need an object compiled with -fPIC.  A rel32 to
+// imported data is refused in a shared object too; a PIE gives the object a
+// copy slot after .bss instead (link_elf_pic_copy_mark), as ld and lld do for
+// GCC's -fPIE code, and binds every reference to it there.  A GOT load of a definition bound here is relaxed into
 // a direct LEA where the psABI allows it and gets a RELATIVE slot otherwise.
 //
 // Thread-local storage follows the image kind.  A PIE is the initial
@@ -6446,7 +6521,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 //        .rela.plt
 //   RW, read-only after relocation (PT_GNU_RELRO): .rodata, [.init_array,
 //        .fini_array], .dynamic, .got
-//   RW: .got.plt (lazy PLT slots), .data, .tdata, .tbss, .bss
+//   RW: .got.plt (lazy PLT slots), .data, .tdata, .tbss, .bss, [PIE copy slots]
 // .rodata moves behind the relocation boundary because a C constant may hold
 // an address, and the one page of alignment is what avoids text relocations.
 
@@ -6467,12 +6542,15 @@ enum
 // What one symbol is to a position-independent image.  IMPORTED and ZERO are
 // the two fates of an undefined symbol; EXPORTED marks a .dynsym definition,
 // and PREEMPTIBLE the exported definitions another module may replace.
+// COPIED marks an IMPORTED data symbol a PIE holds in a copy slot, which
+// every reference then binds to as it would to a definition here.
 enum
 {
     LINK_ELF_PIC_SYMBOL_IMPORTED = 1,
     LINK_ELF_PIC_SYMBOL_EXPORTED = 2,
     LINK_ELF_PIC_SYMBOL_PREEMPTIBLE = 4,
     LINK_ELF_PIC_SYMBOL_ZERO = 8,
+    LINK_ELF_PIC_SYMBOL_COPIED = 16,
 };
 
 // What one .got slot holds, and so which dynamic relocation fills it.
@@ -6515,6 +6593,10 @@ struct LinkElfPicImage
     u32* got_indices;
     u32* dynamic_tls_indices;
     u32* static_tls_indices;
+    // Per import (.dynsym index - 1): whether it takes a copy slot, and the
+    // slot's address once the layout places it.
+    bool* copied;
+    u64* copy_addresses;
     // Per relocation.
     u8* actions;
     // Per PLT entry, .dynsym entry and .got slot: the symbol it stands for.
@@ -6580,6 +6662,31 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_fail(LinkElfPicImage* image, LinkError err
         image->error = error;
         image->symbol = symbol;
     }
+}
+
+// Whether a reference to this symbol is resolved by the loader rather than
+// bound here: an import without a copy slot, or a preemptible definition.
+BUSTER_GLOBAL_LOCAL bool link_elf_pic_bound_elsewhere(u8 symbol_class)
+{
+    return (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED ||
+           (symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) != 0;
+}
+
+// The address a symbol bound here has in the image: its copy slot or its
+// definition; zero for anything else.
+BUSTER_GLOBAL_LOCAL u64 link_elf_pic_symbol_address(LinkElfPicImage* image, u64 const* section_offsets, u32 symbol_index)
+{
+    ObjectSymbol* symbol = image->object->symbols + symbol_index;
+    u64 result = 0;
+    if (image->classes[symbol_index] & LINK_ELF_PIC_SYMBOL_COPIED)
+    {
+        result = image->copy_addresses[image->dynamic_indices[symbol_index] - 1];
+    }
+    else if (symbol->section < OBJECT_SECTION_COUNT)
+    {
+        result = section_offsets[symbol->section] + symbol->value;
+    }
+    return result;
 }
 
 // Decides every symbol's fate and numbers .dynsym: the null entry, the
@@ -6674,6 +6781,29 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plt_entry(LinkElfPicImage* image, u32 symb
     }
 }
 
+// A PIE's copy relocations.  GCC compiles -fPIE code on the assumption that
+// the executable holds the data it reads directly, so a rel32 to imported
+// data asks for a copy slot, as ld and lld make one in a PIE; the slot then
+// binds every other reference to the symbol here too.  A shared object has
+// no such slot and keeps refusing the reference in link_elf_pic_plan.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_copy_mark(LinkElfPicImage* image)
+{
+    ObjectFile* object = image->object;
+    for (u32 index = 0; !image->shared && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        u32 symbol_index = relocation->symbol;
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 && relocation->section < OBJECT_SECTION_COUNT &&
+            !object_section_kind_is_debug((ObjectSectionKind)relocation->section) && symbol_index < object->symbol_count &&
+            (image->classes[symbol_index] & LINK_ELF_PIC_SYMBOL_IMPORTED) && object->symbols[symbol_index].kind == OBJECT_SYMBOL_DATA &&
+            object->symbols[symbol_index].thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_YES)
+        {
+            image->classes[symbol_index] |= LINK_ELF_PIC_SYMBOL_COPIED;
+            image->copied[image->dynamic_indices[symbol_index] - 1] = true;
+        }
+    }
+}
+
 // The planning pass: one action per relocation, and the PLT entries, .got
 // slots and dynamic relocations those actions need.
 BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
@@ -6688,7 +6818,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         ObjectSymbol* symbol = valid ? object->symbols + relocation->symbol : 0;
         u8 symbol_class = valid ? image->classes[relocation->symbol] : 0;
         bool is_thread_local = valid && link_elf_symbol_is_thread_local(symbol);
-        bool bound_elsewhere = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_PREEMPTIBLE)) != 0;
+        bool imported = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED;
+        bool bound_elsewhere = link_elf_pic_bound_elsewhere(symbol_class);
         if (!valid)
         {
             link_elf_pic_fail(image, LINK_ERROR_RELOCATION, (String8){0});
@@ -6704,7 +6835,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             case OBJECT_RELOCATION_X86_64_PC64:
             case OBJECT_RELOCATION_X86_64_PC32:
             case OBJECT_RELOCATION_X86_64_PLT32:
-                if (symbol_class & LINK_ELF_PIC_SYMBOL_IMPORTED)
+                if (imported)
                 {
                     valid = relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || symbol->kind == OBJECT_SYMBOL_FUNCTION;
                     if (valid) link_elf_pic_plt_entry(image, relocation->symbol);
@@ -6804,14 +6935,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
     }
 }
 
-// `-soname,NAME`, `--soname=NAME`, `-h,NAME` or the pair `-soname` `NAME`,
-// however -Wl or -Xlinker delivered it.
+// -Wl has already been split; a separated SONAME operand is consumed once,
+// even when its bytes look like another option.
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_soname_option(String8 argument)
+{
+    return string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
+}
+
 BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLinkOptions options)
 {
     String8 result = {0};
-    static String8 const prefixes[] = {S8_INITIALIZER("-soname,"), S8_INITIALIZER("--soname,"), S8_INITIALIZER("-soname="),
-                                       S8_INITIALIZER("--soname="), S8_INITIALIZER("-h,")};
-    static String8 const separated[] = {S8_INITIALIZER("-soname"), S8_INITIALIZER("--soname"), S8_INITIALIZER("-h")};
+    static String8 const prefixes[] = {S8_INITIALIZER("-soname="), S8_INITIALIZER("--soname=")};
     for (u32 index = 0; index < options.linker_argument_count; index += 1)
     {
         String8 argument = options.linker_arguments[index];
@@ -6822,12 +6956,9 @@ BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLink
                 result = string_slice(argument, prefixes[prefix].length, argument.length);
             }
         }
-        for (u32 name = 0; index + 1 < options.linker_argument_count && name < BUSTER_ARRAY_LENGTH(separated); name += 1)
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(argument))
         {
-            if (string_equal(argument, separated[name]))
-            {
-                result = options.linker_arguments[index + 1];
-            }
+            result = options.linker_arguments[++index];
         }
     }
     return result;
@@ -6838,20 +6969,17 @@ BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_present(NativeExecutableLinkOp
     bool result = false;
     for (u32 index = 0; index < options.linker_argument_count; index += 1)
     {
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+            continue;
+        }
         for (u32 spelling = 0; spelling < spelling_count; spelling += 1)
         {
             result |= string_equal(options.linker_arguments[index], spellings[spelling]);
         }
     }
     return result;
-}
-
-BUSTER_GLOBAL_LOCAL void link_elf_write_relocation(u8* bytes, u64* cursor, u64 offset, u32 symbol, u32 type, u64 addend)
-{
-    link_write_u64(bytes, *cursor, offset);
-    link_write_u64(bytes, *cursor + 8, ((u64)symbol << 32) | type);
-    link_write_u64(bytes, *cursor + 16, addend);
-    *cursor += ELF_RELOCATION_SIZE;
 }
 
 // Writes PLT0 and one lazy entry per imported function, with the .got.plt
@@ -6906,7 +7034,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_got_write(LinkElfPicImage* image, u8* byte
         ObjectSymbol* symbol = object->symbols + symbol_index;
         u64 slot_offset = got_offset + (u64)slot * sizeof(u64);
         bool defined = symbol->section < OBJECT_SECTION_COUNT;
-        u64 address = defined ? section_offsets[symbol->section] + symbol->value : 0;
+        u64 address = link_elf_pic_symbol_address(image, section_offsets, symbol_index);
         u64 thread_local_offset = defined ? link_elf_thread_local_offset(object, symbol) : 0;
         switch ((LinkElfPicGotKind)image->got_kinds[slot])
         {
@@ -6954,16 +7082,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
         u64 section_start = section_offsets[relocation->section];
         u64 section_end = section_start + section->data.length;
         u64 place = section_start + relocation->offset;
+        bool imported = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED;
         u64 target = 0;
-        if (symbol_class & LINK_ELF_PIC_SYMBOL_IMPORTED)
+        if (imported)
         {
             target = image->plt_indices[relocation->symbol] == UINT32_MAX
                          ? 0
                          : plt_offset + ((u64)image->plt_indices[relocation->symbol] + 1) * ELF_PLT_ENTRY_SIZE;
         }
-        else if (symbol->section < OBJECT_SECTION_COUNT)
+        else
         {
-            target = section_offsets[symbol->section] + symbol->value;
+            target = link_elf_pic_symbol_address(image, section_offsets, relocation->symbol);
         }
         s64 displacement = 0;
         switch (action)
@@ -7004,11 +7133,11 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
         {
             u64 value = 0;
             bool zero = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
-            valid = valid && link_address_addend(zero || (symbol_class & LINK_ELF_PIC_SYMBOL_IMPORTED) ? 0 : target, relocation->addend, &value);
+            valid = valid && link_address_addend(zero || imported ? 0 : target, relocation->addend, &value);
             if (valid)
             {
                 link_write_u64(bytes, place, value);
-                if (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_PREEMPTIBLE))
+                if (link_elf_pic_bound_elsewhere(symbol_class))
                 {
                     link_elf_write_relocation(bytes, relocation_cursor, place, image->dynamic_indices[relocation->symbol], ELF_RELOCATION_TYPE_X86_64_64,
                                               (u64)relocation->addend);
@@ -7071,7 +7200,9 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
 // A System V .hash with a real bucket array: a library is searched by every
 // lookup the loader makes, so one chain through every symbol would make each
 // of them linear in the library's size.
-BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* bytes, u64 hash_offset, u32 bucket_count, u32 dynamic_symbol_count)
+// The copy-slot aliases follow every symbol-backed entry, from `first_alias`.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* bytes, u64 hash_offset, u32 bucket_count, u32 dynamic_symbol_count,
+                                                 u32 first_alias, String8 const* alias_names)
 {
     link_write_u32(bytes, hash_offset, bucket_count);
     link_write_u32(bytes, hash_offset + 4, dynamic_symbol_count);
@@ -7079,7 +7210,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* byt
     u64 chains = buckets + (u64)bucket_count * sizeof(u32);
     for (u32 dynamic = 1; dynamic < dynamic_symbol_count; dynamic += 1)
     {
-        String8 name = image->object->symbols[image->dynamic_symbols[dynamic]].name;
+        String8 name = dynamic < first_alias ? image->object->symbols[image->dynamic_symbols[dynamic]].name : alias_names[dynamic - first_alias];
         u64 bucket = buckets + (u64)(link_elf_hash(name) % bucket_count) * sizeof(u32);
         link_write_u32(bytes, chains + (u64)dynamic * sizeof(u32), link_read_u32(bytes, bucket));
         link_write_u32(bytes, bucket, dynamic);
@@ -7094,8 +7225,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
     static char8 const runtime_library[] = "libc.so.6";
     static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
-    static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined"), S8_INITIALIZER("-z,defs"),
-                                                     S8_INITIALIZER("defs")};
+    static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
+    bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
+    for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
+    {
+        if (link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+        }
+        else
+        {
+            no_undefined |= string_equal(options.linker_arguments[index], S8("-z")) && string_equal(options.linker_arguments[index + 1], S8("defs"));
+        }
+    }
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
     LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared};
     if ((options.dynamic_library_count && !options.dynamic_libraries) || options.dynamic_library_count == UINT32_MAX ||
@@ -7121,6 +7263,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u32 loader_atexit_displacement_offset = 0;
     u8* entry_stub = 0;
     u32* initializer_displacement_offsets = 0;
+    u32* copy_import_indices = 0;
     if (result.error == LINK_ERROR_NONE && !shared)
     {
         ObjectFile stripped_object = {0};
@@ -7173,8 +7316,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         memset(image.got_indices, 0xff, symbol_count * sizeof(u32));
         memset(image.dynamic_tls_indices, 0xff, symbol_count * sizeof(u32));
         memset(image.static_tls_indices, 0xff, symbol_count * sizeof(u32));
+        image.copied = arena_allocate_zeroed(arena, bool, symbol_count);
+        image.copy_addresses = arena_allocate_zeroed(arena, u64, symbol_count);
         link_elf_pic_classify(&image, link_elf_linker_argument_present(options, export_dynamic_spellings, BUSTER_ARRAY_LENGTH(export_dynamic_spellings)),
-                              link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings)));
+                              no_undefined);
+        if (image.error == LINK_ERROR_NONE) link_elf_pic_copy_mark(&image);
+        // .symtab describes a copied import as the slot .dynsym defines.
+        copy_import_indices = arena_allocate(arena, u32, symbol_count);
+        for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
+        {
+            copy_import_indices[symbol] = image.classes[symbol] & LINK_ELF_PIC_SYMBOL_COPIED ? image.dynamic_indices[symbol] - 1 : UINT32_MAX;
+        }
         // The entry stub calls `exit` and `__cxa_atexit` through the PLT
         // when the program does not define them itself.
         for (u32 hosted = 0; !shared && hosted < 2; hosted += 1)
@@ -7209,7 +7361,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u64 symbol_name_offset = dynamic_string_size;
     dynamic_string_size += image.dynamic_name_size;
     LinkElfVersionPlan versions = {0};
-    u32 dynamic_symbol_count = 1 + image.import_count + image.export_count;
+    // The copy slots' alias names follow the imports and exports in .dynsym.
+    LinkElfCopyPlan copies = {0};
+    u32 first_alias = 1 + image.import_count + image.export_count;
     if (result.error == LINK_ERROR_NONE)
     {
         String8* import_names = arena_allocate(arena, String8, (u64)image.import_count + 1);
@@ -7217,7 +7371,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         {
             import_names[import] = object->symbols[image.dynamic_symbols[import + 1]].name;
         }
-        versions = link_elf_version_plan_build(arena, exports, import_names, image.import_count, image.import_count, needed_library_count);
+        copies = link_elf_copy_plan_build(arena, exports, object, import_names, image.copied, image.import_count, dynamic_string_size);
+        result.error = copies.error;
+        result.symbol = copies.symbol;
+        image.dynamic_relocation_count += copies.slot_count;
+        dynamic_string_size += copies.alias_name_size;
+    }
+    u32 dynamic_symbol_count = first_alias + copies.alias_count;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        u64 versioned_name_count = (u64)image.import_count + copies.alias_count;
+        String8* versioned_names = arena_allocate(arena, String8, versioned_name_count + 1);
+        for (u32 import = 0; import < image.import_count; import += 1)
+        {
+            versioned_names[import] = object->symbols[image.dynamic_symbols[import + 1]].name;
+        }
+        memcpy(versioned_names + image.import_count, copies.alias_names, (u64)copies.alias_count * sizeof(*versioned_names));
+        versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, image.import_count, needed_library_count);
         result.error = versions.error;
         result.symbol = versions.symbol;
         dynamic_string_size += versions.version_name_size;
@@ -7303,7 +7473,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u64 thread_local_size = align_forward(thread_local_memory_size, thread_local_alignment);
     section_offsets[OBJECT_SECTION_ZERO] = align_forward(section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + thread_local_memory_size,
                                                          BUSTER_MAX(object->sections[OBJECT_SECTION_ZERO].alignment, 1u));
-    u64 writable_end = section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size;
+    u64 zero_end = section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size;
+    // The copy slots follow .bss; at base zero their offsets are already the
+    // load-relative addresses the COPY relocations name.
+    u64 writable_end = copies.slot_count ? link_elf_copy_plan_place(&copies, image.copied, image.import_count, align_forward(zero_end, 16), 0,
+                                                                    image.copy_addresses)
+                                         : zero_end;
     if (result.error == LINK_ERROR_NONE && file_size > UINT32_MAX)
     {
         result.error = LINK_ERROR_INVALID_INPUT;
@@ -7332,7 +7507,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         }
         if (soname.length) memcpy(bytes + dynamic_string_offset + soname_offset, soname.pointer, soname.length);
         u64 dynamic_name_cursor = dynamic_string_offset + symbol_name_offset;
-        for (u32 dynamic = 1; dynamic < dynamic_symbol_count; dynamic += 1)
+        for (u32 dynamic = 1; dynamic < first_alias; dynamic += 1)
         {
             u32 symbol_index = image.dynamic_symbols[dynamic];
             ObjectSymbol* symbol = object->symbols + symbol_index;
@@ -7350,7 +7525,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                                                                           : section_offsets[symbol->section] + symbol->value);
                 link_write_u64(bytes, entry + 16, symbol->size);
             }
+            else if (image.classes[symbol_index] & LINK_ELF_PIC_SYMBOL_COPIED)
+            {
+                // A real section index, not SHN_ABS: the loader adds the
+                // load base only to a section-relative value.
+                link_write_u16(bytes, entry + 6, link_elf_loaded_section_index(OBJECT_SECTION_ZERO));
+                link_write_u64(bytes, entry + 8, image.copy_addresses[dynamic - 1]);
+                link_write_u64(bytes, entry + 16, copies.sizes[copies.owners[dynamic - 1]]);
+            }
         }
+        link_elf_copy_aliases_write(&copies, image.import_count, image.copy_addresses, bytes, dynamic_symbol_offset, first_alias, dynamic_string_offset,
+                                    &dynamic_name_cursor, link_elf_loaded_section_index(OBJECT_SECTION_ZERO));
         if (versions.version_count)
         {
             // Imports carry the version they bound to and definitions
@@ -7359,12 +7544,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                         needed_library_count);
             for (u32 dynamic = 1; dynamic < dynamic_symbol_count; dynamic += 1)
             {
-                u16 version = dynamic <= image.import_count ? versions.name_versions[dynamic - 1] : 1;
+                u16 version = dynamic <= image.import_count ? versions.name_versions[dynamic - 1]
+                              : dynamic < first_alias       ? 1
+                                                            : versions.name_versions[image.import_count + (dynamic - first_alias)];
                 link_write_u16(bytes, version_symbol_offset + (u64)dynamic * sizeof(u16), version);
             }
         }
-        link_elf_pic_hash_write(&image, bytes, hash_offset, hash_bucket_count, dynamic_symbol_count);
+        link_elf_pic_hash_write(&image, bytes, hash_offset, hash_bucket_count, dynamic_symbol_count, first_alias, copies.alias_names);
         u64 relocation_cursor = data_relocation_offset;
+        link_elf_copy_relocations_write(&copies, image.copied, image.import_count, image.copy_addresses, bytes, &relocation_cursor);
         if (image.plt_count && !link_elf_pic_plt_write(&image, bytes, plt_offset, got_plt_offset, plt_relocation_offset))
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -7565,6 +7753,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                           .init_array_size = init_array_size,
                                           .fini_array_offset = section_offsets[OBJECT_SECTION_FINI_ARRAY],
                                           .fini_array_size = fini_array_size,
+                                          .import_indices = copy_import_indices,
+                                          .copy_alias_names = copies.alias_names,
+                                          .copy_alias_symbol_offset = dynamic_symbol_offset + (u64)first_alias * ELF_SYMBOL_SIZE,
+                                          .copy_alias_count = copies.alias_count,
+                                          .copy_zero_size = copies.slot_count ? writable_end - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                           .dynamic = true,
                                       });
     }
@@ -13539,7 +13732,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
         }
     }
     NativeExecutableLinkResult result = {0};
-    if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
+    else if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
         result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
@@ -13741,6 +13938,43 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_elf_classify_untyped_imports(Arena* arena, L
     return result;
 }
 
+bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions options, bool dynamic_image, String8* unsupported)
+{
+    bool valid = !options.linker_argument_count || options.linker_arguments != 0;
+    bool elf = (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID) &&
+               (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+    for (u32 index = 0; valid && index < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        bool export_dynamic = string_equal(argument, S8("-E")) || string_equal(argument, S8("-export-dynamic")) ||
+                              string_equal(argument, S8("--export-dynamic"));
+        bool no_undefined = string_equal(argument, S8("--no-undefined")) || string_equal(argument, S8("-no-undefined"));
+        bool soname_pair = link_elf_linker_argument_soname_option(argument);
+        bool soname_joined = string_starts_with_sequence(argument, S8("-soname=")) || string_starts_with_sequence(argument, S8("--soname="));
+        valid = elf && (no_undefined || (export_dynamic && dynamic_image));
+        if (elf && string_equal(argument, S8("-z")))
+        {
+            valid = index + 1 < options.linker_argument_count && string_equal(options.linker_arguments[index + 1], S8("defs"));
+            if (valid) index += 1;
+        }
+        else if (elf && (soname_pair || soname_joined))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind == NATIVE_IMAGE_SHARED;
+            if (soname_pair)
+            {
+                valid = valid && index + 1 < options.linker_argument_count && options.linker_arguments[index + 1].length;
+                if (valid) index += 1;
+            }
+            else
+            {
+                valid = valid && argument.pointer[argument.length - 1] != '=';
+            }
+        }
+        if (!valid && unsupported) *unsupported = argument.length ? argument : S8("(empty argument)");
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -13753,6 +13987,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    else if (!link_validate_linker_arguments(object->target, options, true, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
@@ -13778,7 +14016,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             {
                 dynamic_image = link_elf_symbol_needs_dynamic_import(exports, object->symbols + index);
             }
-            if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+            if (!link_validate_linker_arguments(object->target, options, dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE, &result.symbol))
+            {
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            else if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
             {
                 result = link_native_image_elf64_x86_64_position_independent(arena, object, options, exports);
             }

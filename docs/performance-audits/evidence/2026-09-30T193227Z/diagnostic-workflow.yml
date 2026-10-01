@@ -1,0 +1,68 @@
+name: Issue 129 row-writer experiment
+on:
+  push:
+    branches: [codex/129-row-writer-probe]
+permissions:
+  contents: read
+concurrency:
+  group: issue-129-probe-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Source census and independent leaf oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          exec > >(tee evidence/transcript.log) 2>&1
+          set -x
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revisions.txt
+          lscpu > evidence/cpu.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          python3 tools/research/simd_word_consumer/census.py > evidence/census.json
+          source_file=tools/research/simd_word_consumer/probe.c
+          common=(-Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char)
+          for compiler in clang gcc; do
+            "$compiler" "${common[@]}" -O2 -march=x86-64 "$source_file" -o "evidence/$compiler-scalar"
+            "evidence/$compiler-scalar"
+            "$compiler" "${common[@]}" -O1 -march=x86-64 -fsanitize=address,undefined -fno-sanitize-recover=all "$source_file" -o "evidence/$compiler-scalar-sanitize"
+            ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "evidence/$compiler-scalar-sanitize"
+            for target in znver4 znver5; do
+              "$compiler" "${common[@]}" -O2 -march="$target" -S "$source_file" -o "evidence/$compiler-$target.s"
+            done
+          done
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512bw /proc/cpuinfo; then
+            for compiler in clang gcc; do
+              "$compiler" "${common[@]}" -O2 -march=x86-64 -mavx512f -mavx512bw "$source_file" -o "evidence/$compiler-base"
+              "evidence/$compiler-base"
+            done
+          else
+            printf 'BASE execution unavailable: runner lacks AVX512F/BW.\n'
+          fi
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512bw /proc/cpuinfo && grep -qw avx512vbmi /proc/cpuinfo && grep -qw avx512_vbmi2 /proc/cpuinfo; then
+            for compiler in clang gcc; do
+              "$compiler" "${common[@]}" -O2 -march=x86-64 -mavx512f -mavx512bw -mavx512vbmi -mavx512vbmi2 "$source_file" -o "evidence/$compiler-full"
+              "evidence/$compiler-full"
+              "$compiler" "${common[@]}" -O1 -march=x86-64 -mavx512f -mavx512bw -mavx512vbmi -mavx512vbmi2 -fsanitize=address,undefined -fno-sanitize-recover=all "$source_file" -o "evidence/$compiler-full-sanitize"
+              ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "evidence/$compiler-full-sanitize"
+            done
+          else
+            printf 'FULL execution unavailable: runner lacks F/BW/VBMI/VBMI2.\n'
+          fi
+          sha256sum "$source_file" tools/research/simd_word_consumer/census.py src/buster/lib/simd.h > evidence/sources.sha256
+          git diff --exit-code
+          git diff --check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-129-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error

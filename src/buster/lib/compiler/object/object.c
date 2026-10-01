@@ -39,6 +39,8 @@
 //                                                  (COFF, Mach-O)
 //   object_writer_capacity_aligned                 checked Mach-O file bound
 //                                                  (and the ELF reference's)
+//   object_aarch64_elf_page_relocate               checked direct/GOT page and
+//                                                  scaled memory relocations
 //   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
@@ -453,10 +455,34 @@ BUSTER_GLOBAL_LOCAL bool object_absolute32s_value(u64 address, s64 addend, s32* 
 #define OBJECT_AARCH64_ADD_X_IMMEDIATE UINT32_C(0x91000000)
 #define OBJECT_AARCH64_MOVZ_X UINT32_C(0xd2800000)
 
+BUSTER_GLOBAL_LOCAL bool object_relocation_kind_is_aarch64_elf_ldst(ObjectRelocationKind kind)
+{
+    return kind >= OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 && kind <= OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12;
+}
+
+// AAELF64 278/284/285/286/299 carry the access size in the relocation type.
+// The instruction must independently agree: unsigned-immediate LD/ST only,
+// including scalar, sign-extending and SIMD forms (and scale-three PRFM).
+BUSTER_GLOBAL_LOCAL bool object_aarch64_elf_ldst_scale(ObjectRelocationKind kind, u32 word, u32* scale)
+{
+    u32 instruction_scale = 0;
+    u32 canonical = word & ~(A64_IMM12_MAX << 10);
+    bool valid = scale && object_relocation_kind_is_aarch64_elf_ldst(kind) &&
+                 (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000) &&
+                 object_mach_pageoff12_shift(canonical, &instruction_scale) &&
+                 instruction_scale == (u32)(kind - OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12);
+    if (valid)
+    {
+        *scale = instruction_scale;
+    }
+    return valid;
+}
+
 bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind)
 {
     return kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 ||
-           kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+           kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 ||
+           object_relocation_kind_is_aarch64_elf_ldst(kind);
 }
 
 // R_AARCH64_LD64_GOT_LO12_NC names `LDR Xt, [Xn, #imm]`, 64-bit unsigned
@@ -472,7 +498,8 @@ BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
     return valid;
 }
 
-// AAELF64 275/277 use Page(S+A)-Page(P) and the low twelve bits of S+A.
+// AAELF64 direct page pairs use Page(S+A)-Page(P) and the low twelve bits
+// of S+A: ADD uses byte granularity, LD/ST scales by the relocation's size.
 // Share the checked address arithmetic and instruction authority between
 // the in-memory linker and both native ELF executable writers.
 //
@@ -509,6 +536,15 @@ bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 p
     else if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
     {
         valid = a64_add_lo12_patch(word, (u32)(address & A64_IMM12_MAX), patched);
+    }
+    else if (valid && object_relocation_kind_is_aarch64_elf_ldst(kind))
+    {
+        u32 scale = 0;
+        valid = object_aarch64_elf_ldst_scale(kind, word, &scale) && !(address & (((u64)1 << scale) - 1));
+        if (valid)
+        {
+            *patched = (word & ~(A64_IMM12_MAX << 10)) | ((u32)((address & A64_IMM12_MAX) >> scale) << 10);
+        }
     }
     else
     {
@@ -1596,6 +1632,14 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
     {
         return false;
     }
+    if (object_relocation_kind_is_aarch64_elf_ldst(relocation->kind))
+    {
+        u32 scale = 0;
+        if (!object_aarch64_elf_ldst_scale(relocation->kind, word, &scale))
+        {
+            return false;
+        }
+    }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
     {
         s64 addend = 0;
@@ -1828,6 +1872,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             return true;
         }
         case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12:
         case OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
@@ -5646,6 +5695,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                                    : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
                                    : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
+                                   : relocation_type == 278                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12
+                                   : relocation_type == 284                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12
+                                   : relocation_type == 285                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12
+                                   : relocation_type == 286                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12
+                                   : relocation_type == 299                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12
                                    : relocation_type == 311                           ? OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21
                                    : relocation_type == 312                           ? OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12
                                    : relocation_type == 282                           ? OBJECT_RELOCATION_AARCH64_JUMP26
@@ -5694,6 +5748,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             u32 instruction = 0;
                             u32 canonical = 0;
                             u32 immediate = 0;
+                            u32 scale = 0;
                             A64MCInst decoded = {0};
                             bool page = kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21;
                             read_ok = !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
@@ -5701,6 +5756,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             if (read_ok && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
                             {
                                 read_ok = object_aarch64_got_load_read(instruction, &immediate);
+                                canonical = instruction & ~(A64_IMM12_MAX << 10);
+                            }
+                            else if (read_ok && object_relocation_kind_is_aarch64_elf_ldst(kind))
+                            {
+                                read_ok = object_aarch64_elf_ldst_scale(kind, instruction, &scale);
+                                immediate = (instruction >> 10) & A64_IMM12_MAX;
                                 canonical = instruction & ~(A64_IMM12_MAX << 10);
                             }
                             else if (read_ok)
@@ -5715,7 +5776,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 // unlike its executed displacement and Mach-O's rule.
                                 if (section_type == 9)
                                 {
-                                    addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind))
+                                    {
+                                        // AAELF64 REL instruction addends are
+                                        // sign-extended after access-size scaling.
+                                        read_ok = a64_signed_scaled_immediate_decode(immediate, 12, (u8)scale, &addend);
+                                    }
+                                    else
+                                    {
+                                        addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                    }
                                 }
                                 memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
                             }
@@ -11799,6 +11869,11 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
            : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12        ? 278
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12       ? 284
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12       ? 285
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12       ? 286
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12      ? 299
            : kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21        ? 311
            : kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12     ? 312
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
@@ -14040,9 +14115,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u32 word = 0;
             u32 canonical = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            u64 validation_target = object_relocation_kind_is_aarch64_elf_ldst(source->kind) ? 0 : source->offset;
             if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
                 object->sections[source->section].alignment < 4 ||
-                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, source->offset, 0, &canonical))
+                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, validation_target, 0, &canonical))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;

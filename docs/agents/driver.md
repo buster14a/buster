@@ -267,10 +267,17 @@ labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
 symbol table again once every reference to one is folded, the way GNU as drops
 its own `.L` locals. A repeat or lock prefix alone on a line joins the
-instruction on the next one. And a same-section PC-relative reference to a
-label defined in the file is written into the bytes; only a cross-section or
-undefined name becomes a relocation. `@PLT` is dropped: a static link resolves
-such a call the same way it resolves a plain one. Sections keep their own
+instruction on the next one. A same-section PC-relative reference is written
+into the bytes only when its symbol's identity cannot change at link time.
+Weak symbols, including hidden weak definitions, retain references for strong
+replacement. Default-visible ELF globals also retain references for shared
+library interposition; hidden strong and local labels still fold. Cross-section
+and undefined references remain relocations. Direct x86 ELF calls and jumps to
+default-visible globals use PLT32, and an explicit `@PLT` request is preserved
+for a retained direct call/jump. Other `@PLT` operand forms are diagnosed.
+Retained displacement families the object model cannot express (such as an
+8-bit `loop` to a weak symbol) fail before publishing an object. ELF visibility
+rules do not change COFF or Mach-O global fixups. Sections keep their own
 names -- `.init` and `.fini` are neither `.text` nor absent -- and a
 hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
@@ -451,9 +458,14 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   in a shared object, for an exported definition, because an executable may
   copy-relocate the library's data and the library must then follow the copy.
   Direct calls bind to the library's own definitions (ld's
-  `-Bsymbolic-functions` answer). A rel32 to preemptible data or to imported
-  data, 32-bit absolute addresses, and address relocations in code are refused
-  with a hint to compile with `-fPIC`; copy relocations are not produced.
+  `-Bsymbolic-functions` answer). A rel32 to preemptible data, 32-bit absolute
+  addresses, and address relocations in code are refused with a hint to
+  compile with `-fPIC`. A rel32 to imported data is refused in a shared object;
+  a PIE instead reserves a copy slot after `.bss` and emits `R_X86_64_COPY`,
+  as ld and lld do for GCC's `-fPIE` code, and every other reference to that
+  symbol binds to the slot. The slot planning (`link_elf_copy_plan_build`,
+  including the library's alias names such as `environ`/`__environ`) is shared
+  with the fixed-address writer.
 - A shared object exports every defined default-visibility symbol, leaves
   undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
   executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
@@ -479,12 +491,44 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
 a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
 PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
 library must follow), calls and data in both directions, the lifecycle order
-of initializers and handlers, a randomized PIE base, a CPython extension when
-`python3` and its headers exist, and the `-fPIC` refusal.
+of initializers and handlers, a randomized PIE base, copy relocations in a
+Buster PIE for an object that reads library data and `environ` with rel32s
+(the shape GCC's `-fPIE` emits), a CPython extension when `python3` and its
+headers exist, and the `-fPIC` refusal.
 `compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
 AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+## Pass-through options
+
+`-Wl,a,b,c` produces three individual linker arguments, in order. Each
+`-Xlinker value` contributes exactly one argument; commas in that value are
+not split. Empty comma fields and missing operands fail with a diagnostic.
+The driver and native linker share `link_validate_linker_arguments`, and the
+linker checks the actual static/dynamic image before publishing output.
+
+The supported subset is:
+
+- Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
+  `--export-dynamic` export definitions. A static image refuses these options.
+- Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
+  two arguments `-z defs` require strong references to resolve. Executables
+  already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
+  `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
+
+Other linker values and unsupported targets/output modes fail rather than
+silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
+preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
+export validation. Unknown options, entry overrides, wrapping, archive-mode
+switches, runtime paths, version scripts, and other `-z` modes are refused.
+
+`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
+preprocessor macro/include operations and dependency requests. Direct `-D`,
+`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
+`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
+preserves any existing artifact instead of reporting a successful stale build.
 
 ## Object output (`-c`)
 

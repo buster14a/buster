@@ -1,0 +1,33 @@
+{
+  "failed_legality_or_widening_minimum_checks": 0,
+  "index_slice_equivalence_cases": 136,
+  "optimized_script_sha256": "972b081824df53e1ec06c19f56b91c92132c68a937e9d764ad3e9b8f94078c79",
+  "original_A0_script_sha256": "8b5bb0d0f62ccc7ca99198ef3748d701f54e72ed260c97f02bf20fc61235efe1",
+  "overlap_exclusion_equivalence_cases": 6196,
+  "prospective_A1_discriminating_witness": {
+    "baseline_branch_legal": true,
+    "baseline_bytes": 134,
+    "candidate_count": 2,
+    "edge_count": 2,
+    "one_shot_branch_legal": true,
+    "one_shot_bytes": 130,
+    "one_shot_short_branches": 1,
+    "oracle": {
+      "assignments": 4,
+      "first_minimum_mask": 3,
+      "legal_assignments": 3,
+      "minimum_model_bytes": 127,
+      "one_shot_matches_minimum": false,
+      "widening_matches_minimum": true
+    },
+    "shortest_widen_branch_legal": true,
+    "shortest_widen_bytes": 127,
+    "shortest_widen_short_branches": 2,
+    "widening_branch_checks": 2,
+    "widening_fragment_visits": 4,
+    "widening_iterations": 1,
+    "widenings": 0
+  },
+  "prospective_A1_fixed_fragment_generated_models": 12348,
+  "prospective_A1_one_shot_minimum_mismatches": 1036
+}
