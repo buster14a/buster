@@ -45,12 +45,33 @@ TOOL
 cat >"$test_root/bin/xcrun" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
+if [[ ${1:-} == simctl && ${2:-} == spawn ]]; then
+    printf 'fake diagnostic %s: simulator command output\n' "${4:-}" >&2
+    case "${FAKE_DIAGNOSTIC_MODE:-success}" in
+        reject) exit 70 ;;
+        native-124) exit 124 ;;
+        timeout) exec sleep 60 ;;
+        large)
+            python3 -c 'import sys; sys.stdout.write("X" * 131072)'
+            exit 71
+            ;;
+    esac
+    exit 0
+fi
 if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
+    if [[ $# -ne 8 || ${6:-} != test || ${7:-} != --verbose=1 || ${8:-} != --ci=1 ]]; then
+        echo "incorrect iOS payload arguments: $*" >&2
+        exit 97
+    fi
     printf 'timeout %s\nproducer %s\n' "$(ps -p "$$" -o ppid= | tr -d ' ')" "$$" >>"$FAKE_PIDS"
+    if [[ $FAKE_RESULT != empty ]]; then
+        printf 'TEST_MODULE_TIMING index=28 module=x86_64_forwarding_tests duration_ns=1 passed=1 failed=0 assertions=1 status=pass\n'
+        printf 'TEST_ARENA_V1 kind=fixture module=x86_64_metadata_tests fixture=first index=0\n'
+    fi
     case "$FAKE_RESULT" in
         success) printf 'BUSTER_IOS_RESULT: SUCCESS\n' ;;
         failure) printf 'BUSTER_IOS_RESULT: FAILURE\n' ;;
-        hang) : ;;
+        hang|empty) : ;;
     esac
     # The same process stays attached after its terminal marker.
     exec sleep 60
@@ -61,9 +82,11 @@ chmod +x "$test_root/bin/tee" "$test_root/bin/codesign" "$test_root/bin/xcrun"
 export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
-    local state="$test_root/$label" status=0 deadline kind pid
+    local diagnostic_mode=${6:-success}
+    local state="$test_root/$label" status=0 deadline kind pid probe status_log output_log expected_probe expected_progress
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app"
     export RUNNER_TEMP="$state" FAKE_PIDS="$state/pids" FAKE_RESULT="$outcome"
+    export FAKE_DIAGNOSTIC_MODE="$diagnostic_mode"
     export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
     export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=3
     export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
@@ -105,11 +128,49 @@ run_case() {
         echo "$label leaked its FIFO directory" >&2
         exit 1
     fi
+    if [[ $expected == 1 ]]; then
+        expected_progress='last_completed_module=x86_64_forwarding_tests last_completed_index=28 last_observed_module=x86_64_metadata_tests'
+        if [[ $outcome == empty ]]; then
+            expected_progress='last_completed_module=unavailable last_completed_index=unavailable last_observed_module=unavailable'
+        fi
+        if ! grep -qF "$expected_progress" "$state/output"; then
+            cat "$state/output" >&2
+            echo "$label did not report completed/observed module progress" >&2
+            exit 1
+        fi
+        case "$diagnostic_mode" in
+            success) expected_probe='outcome=success status=0 native_status=0 capture_status=0' ;;
+            reject) expected_probe='outcome=command-failure status=70 native_status=70 capture_status=0' ;;
+            native-124) expected_probe='outcome=command-failure status=124 native_status=124 capture_status=0' ;;
+            timeout) expected_probe='outcome=timeout status=124 native_status=unavailable capture_status=0' ;;
+            large) expected_probe='outcome=command-failure status=71 native_status=71 capture_status=0' ;;
+        esac
+        for probe in process-table unified-log crash-reports; do
+            output_log="$state/buster-ios-console.Debug.log.diagnostic-$probe.log"
+            status_log="$state/buster-ios-console.Debug.log.diagnostic-$probe.status.log"
+            grep -qF "$expected_probe" "$status_log"
+            grep -qF 'deadline_seconds=1 output_limit_bytes=65536' "$status_log"
+            grep -qF 'capture_receipt=complete' "$status_log"
+            [[ $(wc -c <"$output_log") -le 65536 ]]
+            if [[ $diagnostic_mode != success ]]; then
+                grep -qF "warning: iOS diagnostic unavailable name=$probe" "$state/output"
+                grep -qF 'fake diagnostic' "$output_log"
+            fi
+            if [[ $diagnostic_mode == large ]]; then
+                grep -qF 'retained_bytes=65536 truncated=1' "$status_log"
+            fi
+        done
+    fi
     rm -f "$state/pids"
     printf 'iOS monitor cleanup passed: %s\n' "$label"
 }
 run_case success success 0 0 1
 run_case failure failure 1 0 1
 run_case timeout hang 1 0 1
+run_case no-progress empty 1 0 1
+run_case rejected-probes hang 1 0 1 reject
+run_case native-124-probes hang 1 0 1 native-124
+run_case timed-out-probes hang 1 0 1 timeout
+run_case large-probes hang 1 0 1 large
 run_case interrupted hang 143 1 1
 run_case batch success 0 0 2

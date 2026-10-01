@@ -35,6 +35,36 @@ permissions:
   contents: read
 
 jobs:
+  native-probes:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: macos-26
+    # Includes the launcher's existing readiness continuation/replacement and
+    # bounded context probes; each production command keeps its own deadline.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Ensure bounded native simulator probes are available
+        shell: bash
+        run: brew install coreutils
+      - name: Exercise timeout diagnostics on the hosted ARM64 simulator
+        shell: bash
+        env:
+          BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/ios-native-probe-evidence
+        run: |
+          set -euo pipefail
+          /bin/bash ios/launch_diagnostics_simulator_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-native-probes.log"
+      - name: Retain native simulator probe results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-native-probes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ios-native-probes.log
+            ${{ runner.temp }}/ios-native-probe-evidence/
+          if-no-files-found: error
+          retention-days: 7
   fake-tools:
     if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     strategy:

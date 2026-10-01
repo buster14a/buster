@@ -303,6 +303,7 @@ test_ios_batch_and_cleanup() (
     assert_count 1 'simctl shutdown FAKE-UDID' "$log"
     assert_count 2 'simctl install FAKE-UDID' "$log"
     assert_count 2 'simctl launch --console-pty FAKE-UDID' "$log"
+    assert_count 2 'dev.buster.ide test --verbose=1 --ci=1' "$log"
     assert_file_contains "$result_marker_success" "$state/console.Debug.log"
     assert_file_contains "$result_marker_success" "$state/console.Release.log"
 )

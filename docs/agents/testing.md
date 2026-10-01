@@ -151,6 +151,20 @@
   resolves safe `.` and `..` segments inside the rooted APK asset namespace so
   nested quoted includes consume the same fixture bytes as desktop tests;
   traversal above the asset root is rejected.
+- The iOS payload runs `test --verbose=1 --ci=1`. Failed launches report
+  `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
+  module/index and the last module observed in timing or arena records;
+  `unavailable` means no such record arrived. The last observed module is
+  evidence of progress, not a claim that it is still running. Simulator
+  process-table, unified-log and crash-report probes retain separate bounded
+  lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
+  native exit, timeout/helper status and capture completion distinguished.
+  Probe failure does not establish an app crash. The attached-monitor mocks
+  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
+  payload with real CoreSimulator boot, probes and shutdown on hosted macOS
+  ARM64. The mobile lifecycle workflow retains actual probe availability and
+  failure reasons there; real app compilation/execution remains in mobile CI.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and
