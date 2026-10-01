@@ -276,6 +276,12 @@ Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
 before native build-tree mutation. Only Release owns preflight and canonical
 producer obligations. Each isolated sanitizer job receives its full host budget.
 
+The configure-evidence collector recognizes the native default compiler-tree
+prefixes for `sanitized-debug`, `sanitized-release`, and `portability` alongside
+the unsharded, Release and grouped-checks trees. It retains the same bounded
+CMake diagnostics for each split owner, excludes superbuild trees, and fails
+when no matrix configure trees are present.
+
 Qualification uses manual dispatch of the existing `ci.yml` on three branches
 pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
 
