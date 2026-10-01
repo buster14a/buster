@@ -80,6 +80,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
   symbols and initializer arrays, then runs the guarded fixture through
   native source and object links in all four allocators (GitHub #666).
+- **ELF unwind records name the producing object's instruction bytes.**
+  `object_append_dwarf_cfi` uses local text-section symbols plus function
+  offsets on x86-64 and AArch64, with or without PIC and debug information.
+  Named text sections get their own local anchors. A weak default's FDE
+  therefore stays with its own code when a strong definition overrides it.
+  `link_elf_eh_frame_header_write` refuses duplicate initial locations with
+  `LINK_ERROR_RELOCATION`, including legacy function-symbol FDEs that resolve
+  to the same winner; no unwinder search order chooses between their rules.
+  Registered driver tests inspect serialized relocations in all four allocator
+  modes and exercise host-compiled overrides under GNU ld, available LLD and
+  Buster's linker in both input orders on native Linux x86-64 and AArch64.
+  Link tests cover duplicate refusal and distinct local-anchor controls for
+  both architectures on every test host.
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is

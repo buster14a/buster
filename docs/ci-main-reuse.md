@@ -53,10 +53,10 @@ runner allocation**. Desktop jobs run their existing Zig cache lifecycle, sanita
 rechecks the source evidence and receipt digest, validates the retained main
 jobs and their steps (cache-only desktop jobs require every cache/evidence step, and successful skipping of every validation step), and requires the three skipped job groups. A source
 rerun or missing proof at this point fails `CI complete`; it never converts
-missing execution into green. The receipt is retained as
+missing execution into green. The verification result is retained as
 `main-ci-reuse-finish.json` inside `desktop-partitions-<run>-<attempt>`,
-with source run/job/artifact IDs and the
-current main job inventory. No candidate-controlled code has publication
+with the verified receipt (source run/job/artifact IDs and current main jobs),
+or a structured failure report without a receipt. No candidate-controlled code has publication
 authority, no cross-event cancellation key is shared, and no check is forged.
 
 This is policy `buster-main-ci-reuse-v2`. Existing required checks, matrix
@@ -65,6 +65,47 @@ Desktop cache jobs still allocate all ten platform runners and the analyzer rece
 build/test and compiler-install work, not those allocations. Reducing them to
 five cache publishers is a separate cache/check-contract transition. Independent
 workflows require their own event/coverage review before reuse can be enabled.
+
+## Receipt handoff and finalization (#2134)
+
+The decision exports the complete canonical JSON receipt plus its SHA-256 digest,
+not just the digest. It includes the exact main run/attempt and source run/attempt,
+source branch/completion, commit, workflow blob, jobs and artifacts. The handoff is
+bounded to 32 KiB. Workflow expressions enter the finish command through quoted
+environment variables; missing, oversized, malformed, cross-run or digest-mismatched
+handoffs fail before any source API lookup. The decision result is uploaded as
+`main-ci-reuse-<run>-<attempt>`; reuse is not enabled if that upload fails.
+
+Finalization first reads the recorded source by run ID, rather than choosing a
+new source from a list. It also checks the workflow-scoped, exact-SHA merge-group
+listing so a competing run cannot silently replace the recorded source. An empty
+listing, moving pagination total, HTTP 429/5xx, or transport interruption permits
+at most two additional discovery reads, after one and two seconds respectively.
+The bound source is rechecked during those waits. Multiple/replacement runs,
+changed attempts/identity, failed execution, malformed listings, exhausted page
+bounds, and definite permission errors do not retry. A persistently unavailable
+or inconsistent listing remains a failure: direct retrieval alone is not a
+waiver of the uniqueness/completeness policy. Before scheduling, missing proof
+still selects full CI immediately rather than polling.
+
+Both phases write `buster-main-ci-reuse-result-v1` diagnostic JSON. Only a
+`status: verified` result contains `receipt`. Failures record the phase, stage,
+classified reason, expected digest/source identity when validated, and bounded
+candidate IDs/attempts for each discovery read. These records are separate from
+the canonical receipt passed between jobs. They contain no token or full API
+response. No failed finish prints a successful-reuse summary. An unusable output
+filesystem makes the command fail rather than authorize reuse without retention.
+
+GitHub can represent skipped native/mobile matrices as two same-name,
+unexpanded placeholders instead of eight named native/mobile/UEFI rows. The
+reuse reader validates these before name-based executed-job de-duplication. It
+accepts only the complete eight named skips, or exactly two recognized matrix
+placeholders plus the UEFI skip. Skipped rows require unique IDs, the exact main
+run/SHA/first attempt, terminal `skipped`, no steps and no allocated runner.
+Mixed, missing, extra or unrecognized rows fail. Diagnostics retain their IDs
+as **skipped**, never as successful executions. The workflow independently
+requires each native/mobile/UEFI group result to be skipped; all source coverage
+and retained main execution checks remain required.
 
 ## Qualification and measurement
 

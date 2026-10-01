@@ -183,6 +183,9 @@ typedef u64 UI_BoxFlags;
 #define UI_BoxFlag_HasFuzzyMatchRanges (UI_BoxFlags)(1ull << 54)
 #define UI_BoxFlag_RoundChildrenByParent (UI_BoxFlags)(1ull << 55)
 #define UI_BoxFlag_SquishAnchored (UI_BoxFlags)(1ull << 56)
+// Reserve Left/Right for the focused widget; Tab and vertical arrows retain
+// their normal focus-navigation policy.
+#define UI_BoxFlag_OwnsHorizontalArrows (UI_BoxFlags)(1ull << 57)
 
 //- rjf: debug
 #define UI_BoxFlag_Debug (UI_BoxFlags)(1ull << 63)
@@ -204,13 +207,13 @@ typedef u64 UI_BoxFlags;
 #define UI_BoxFlag_ViewClamp (UI_BoxFlag_ViewClampX | UI_BoxFlag_ViewClampY)
 #define UI_BoxFlag_DisableFocusEffects (UI_BoxFlag_DisableFocusBorder | UI_BoxFlag_DisableFocusOverlay)
 
-#define UI_BOX_FLAG_COUNT (57)
+#define UI_BOX_FLAG_COUNT (58)
 #define UI_BoxFlag_AllContiguous (UI_BoxFlags)((1ull << UI_BOX_FLAG_COUNT) - 1ull)
 #define UI_BoxFlag_All (UI_BoxFlags)(UI_BoxFlag_AllContiguous | UI_BoxFlag_Debug)
 
 BUSTER_CT_CHECK((UI_BoxFlag_All & UI_BoxFlag_AllContiguous) == UI_BoxFlag_AllContiguous);
 BUSTER_CT_CHECK((UI_BoxFlag_All & UI_BoxFlag_Debug) == UI_BoxFlag_Debug);
-BUSTER_CT_CHECK((UI_BoxFlag_All & ((UI_BoxFlags)0x3full << 57)) == 0);
+BUSTER_CT_CHECK((UI_BoxFlag_All & ((UI_BoxFlags)0x1full << UI_BOX_FLAG_COUNT)) == 0);
 
 typedef enum UI_BoxFlagSupportKind
 {
@@ -483,6 +486,10 @@ struct UI_Signal
     u8 modifiers;
     u8 reserved_key[2];
     float2 scroll_delta;
+    // Last owned in-bounds left-button release in event-list order, valid
+    // when UI_SignalFlag_LeftClicked is set. Later moves/outside releases
+    // do not replace the completed click coordinate.
+    float2 left_click_position;
     u32 clicked_left : 1;
     u32 pressed_left : 1;
     u32 released_left : 1;

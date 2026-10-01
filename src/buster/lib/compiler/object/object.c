@@ -18,6 +18,8 @@
 //
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
+// object_append_dwarf_cfi anchors ELF FDEs to local text-section symbols so
+// weak/strong arbitration cannot attach unwind rules to replacement code.
 //
 // __attribute__((section)) (issue 1276) is the one way a section of its own
 // name enters the model: codegen lays every named definition out after the
@@ -10175,12 +10177,10 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
 // Each FDE's initial location, as a PC-relative reference to the function it
 // describes. `section_symbols`, indexed by section, holds the local symbol
 // covering each text section -- `.text` and every named one (issue 1276) --
-// or is null to name the function itself. Under -fPIC it has to be the
-// former: an FDE naming a preemptible function is a PC-relative reference to
-// an interposable symbol, which `ld` refuses in a shared object for the same
-// reason it refuses one in the body -- and every consumer of these records
-// resolves the symbol's address plus the addend, so the section symbol with
-// the function's own offset names the identical byte.
+// or is null for the non-ELF path. Every ELF FDE must name its own instruction
+// bytes, independently of PIC: resolving a weak function symbol to a strong
+// override would attach the default's CFA program and range to different code.
+// The local section symbol plus the function's offset cannot be interposed.
 BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built, u32 const* section_symbols)
 {
     if (!built.valid)
@@ -11508,9 +11508,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .alignment = object_section_default_alignment(kind),
         };
     }
-    result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
-                                                             (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
-                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0) + named.count);
+    result.symbols = arena_allocate(arena, ObjectSymbol,
+                                    module->entry_count + module->global_count + alias_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
+                                        (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) + (windows_unwind.function_count ? 1 : 0) +
+                                        (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64 ? 1 : 0) + named.count);
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry entry = module->entries[entry_index];
@@ -11787,12 +11788,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     {
         u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index, entry_by_symbol, entry_symbol_capacity);
         object_append_codeview(&result, codeview, entry_by_symbol, entry_symbol_capacity);
-        // One local symbol over the text section, added only for the code
-        // model that needs it and only when the debug sections did not
-        // already contribute the same one, so an object built without -fPIC
-        // keeps the symbol table it has always had.
+        // ELF unwind relocations always use local section anchors. Reuse the
+        // debug text anchor when present; -g0 still needs an independent one.
         u32* cfi_section_symbols = 0;
-        if (cfi.valid && module->position_independent)
+        if (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
         {
             cfi_section_symbols = arena_allocate(arena, u32, result.section_count);
             memset(cfi_section_symbols, 0xFF, sizeof(*cfi_section_symbols) * result.section_count);
