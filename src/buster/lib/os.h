@@ -191,6 +191,7 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_HANDLE_LIST,
     PROCESS_SPAWN_FAILURE_SPAWN,
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
+    PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;

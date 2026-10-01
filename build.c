@@ -41960,30 +41960,63 @@ BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRu
         command_print(run->arguments);
     }
 
+    bool requested_directory = run->working_directory.pointer && run->working_directory.length;
     bool restore_directory = false;
+    bool captured_directory = false;
+    OsError directory_error = {0};
 #if BUSTER_WINDOWS
     char16 old_directory_buffer[BUSTER_KB(32) / sizeof(char16)];
-    DWORD old_directory_length = 0;
-    if (run->working_directory.pointer && run->working_directory.length)
+    if (requested_directory)
     {
-        old_directory_length = GetCurrentDirectoryW(BUSTER_ARRAY_LENGTH(old_directory_buffer), old_directory_buffer);
-        if (old_directory_length > 0 && old_directory_length < BUSTER_ARRAY_LENGTH(old_directory_buffer))
+        DWORD old_directory_length = GetCurrentDirectoryW(BUSTER_ARRAY_LENGTH(old_directory_buffer), old_directory_buffer);
+        captured_directory = old_directory_length > 0 && old_directory_length < BUSTER_ARRAY_LENGTH(old_directory_buffer);
+        if (captured_directory)
         {
             TemporalArena temp = scratch_begin(&arena, 1);
             String16 directory16 = string16_from_string8(temp.arena, run->working_directory, true);
             restore_directory = SetCurrentDirectoryW(directory16.pointer) != 0;
+            if (!restore_directory)
+            {
+                directory_error = os_get_last_error();
+            }
             scratch_end(temp);
+        }
+        else
+        {
+            directory_error = old_directory_length ? (OsError){ERROR_INSUFFICIENT_BUFFER} : os_get_last_error();
         }
     }
 #else
     char old_directory_buffer[BUSTER_KB(32)];
-    if (run->working_directory.pointer && run->working_directory.length && getcwd(old_directory_buffer, sizeof(old_directory_buffer)))
+    if (requested_directory)
     {
-        restore_directory = chdir(run->working_directory.pointer) == 0;
+        captured_directory = getcwd(old_directory_buffer, sizeof(old_directory_buffer)) != 0;
+        if (captured_directory)
+        {
+            restore_directory = chdir(run->working_directory.pointer) == 0;
+        }
+        if (!restore_directory)
+        {
+            directory_error = os_get_last_error();
+        }
     }
 #endif
 
-    ProcessSpawnResult spawn = os_process_spawn(run->arguments, run->environment_keys, run->environment_values, run->spawn_options);
+    ProcessSpawnResult spawn;
+    if (requested_directory && !restore_directory)
+    {
+        // Entering the requested directory is a prerequisite, not a best-effort
+        // hint: launching here could write into or test the caller's checkout.
+        command_print(run->arguments);
+        string_print(S8("error: could not {S8} before starting the command above in {S8}: {EOs}\n"),
+                     captured_directory ? S8("enter the requested working directory") : S8("capture the build driver's working directory"),
+                     run->working_directory, directory_error);
+        spawn = (ProcessSpawnResult){.error = directory_error, .failure = PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY};
+    }
+    else
+    {
+        spawn = os_process_spawn(run->arguments, run->environment_keys, run->environment_values, run->spawn_options);
+    }
 
     if (restore_directory)
     {
