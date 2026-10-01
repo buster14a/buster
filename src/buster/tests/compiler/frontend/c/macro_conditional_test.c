@@ -358,8 +358,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
     String8 header = string_format_z(files.arena, S8("{S8}/trigraph-included.h"), root);
     bool files_ready = root.pointer && os_make_directory_attempt(root) &&
         file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("?" "?=define HEADER 23\n")));
-    BUSTER_TEST(arguments, files_ready);
-    if (files_ready)
+    if (BUSTER_REQUIRE(arguments, files_ready))
     {
         for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(cases); test += 1)
         {
@@ -375,21 +374,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
                 String8 diagnostic = string_format(temporary.arena, S8("trigraph preprocessing case={u32} mode={S8}"), test, modes[mode].flag);
                 u64 expected_index = 0;
                 BUSTER_TEST_RAW(arguments, actual.error_count == 0 && expected.diagnostic_count == 0, diagnostic);
-                for (u64 token = 0; token < actual.token_count; token += 1)
+                if (BUSTER_REQUIRE(arguments, actual.tokens && actual.spelling_base && expected.tokens && expected.spelling_base &&
+                                   actual.error_count == 0 && expected.diagnostic_count == 0))
                 {
-                    while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+                    for (u64 token = 0; token < actual.token_count; token += 1)
                     {
-                        expected_index += 1;
+                        while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+                        {
+                            expected_index += 1;
+                        }
+                        if (BUSTER_REQUIRE(arguments, expected_index < expected.token_count))
+                        {
+                            BUSTER_TEST_RAW(arguments, actual.tokens[token].kind == expected.tokens[expected_index].kind, diagnostic);
+                            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[token]),
+                                c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+                            expected_index += 1;
+                        }
                     }
-                    if (BUSTER_REQUIRE(arguments, expected_index < expected.token_count))
-                    {
-                        BUSTER_TEST_RAW(arguments, actual.tokens[token].kind == expected.tokens[expected_index].kind, diagnostic);
-                        BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[token]),
-                            c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
-                        expected_index += 1;
-                    }
+                    BUSTER_TEST_RAW(arguments, expected_index == expected.token_count, diagnostic);
                 }
-                BUSTER_TEST_RAW(arguments, expected_index == expected.token_count, diagnostic);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
                 String8 source_path = buster_test_temporary_path(temporary.arena, S8("trigraph-reference"), S8(".c"));
                 bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(cases[test].source));
@@ -421,9 +424,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
                             {
                                 CLexResult reference = c_lex(temporary.arena, output);
                                 BUSTER_TEST_RAW(arguments, reference.diagnostic_count == 0, context);
-                                UnitTestResult compared = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, context);
-                                result.test_count += compared.test_count;
-                                result.succeeded_test_count += compared.succeeded_test_count;
+                                if (BUSTER_REQUIRE(arguments, reference.tokens && reference.spelling_base && expected.tokens && expected.spelling_base &&
+                                                   reference.diagnostic_count == 0 && expected.diagnostic_count == 0))
+                                {
+                                    UnitTestResult compared = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, context);
+                                    result.test_count += compared.test_count;
+                                    result.succeeded_test_count += compared.succeeded_test_count;
+                                }
                             }
                         }
                     }

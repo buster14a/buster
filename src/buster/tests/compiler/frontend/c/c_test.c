@@ -8484,16 +8484,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
     u32 lines[] = {1, 1, 1, 2, 2, 2};
     u32 columns[] = {1, 2, 5, 1, 3, 6};
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, preprocess.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1);
-    for (u32 token = 0; token < BUSTER_ARRAY_LENGTH(spellings) && token < preprocess.token_count; token += 1)
+    if (BUSTER_REQUIRE(arguments, preprocess.tokens && preprocess.spelling_base &&
+                       preprocess.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1))
     {
-        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[token]);
-        BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]), spellings[token]);
-        BUSTER_TEST(arguments, location.offset == offsets[token] && location.line == lines[token] && location.column == columns[token]);
-        BUSTER_TEST(arguments, location.file < preprocess.file_count);
-        if (location.file < preprocess.file_count)
+        for (u32 token = 0; token < BUSTER_ARRAY_LENGTH(spellings); token += 1)
         {
-            BUSTER_STRING_TEST(arguments, preprocess.files[location.file], S8("trigraph-map.c"));
+            CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[token]);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]), spellings[token]);
+            BUSTER_TEST(arguments, location.offset == offsets[token] && location.line == lines[token] && location.column == columns[token]);
+            if (BUSTER_REQUIRE(arguments, preprocess.files && location.file < preprocess.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, preprocess.files[location.file], S8("trigraph-map.c"));
+            }
         }
     }
     if (preprocess.recovery)
@@ -8515,8 +8517,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
     {
         CPreprocessResult unchanged = c_preprocess(temporary.arena, boundary ? preserved : S8("COMMAND"), options[boundary]);
         BUSTER_TEST(arguments, unchanged.diagnostic_count == 0);
-        BUSTER_TEST(arguments, unchanged.token_count == 2);
-        c_test_preprocessed_token(arguments, &result, unchanged, 0, C_TOKEN_STRING_LITERAL, preserved);
+        if (BUSTER_REQUIRE(arguments, unchanged.token_count == 2))
+        {
+            c_test_preprocessed_token(arguments, &result, unchanged, 0, C_TOKEN_STRING_LITERAL, preserved);
+        }
         if (unchanged.recovery)
         {
             arena_destroy(unchanged.recovery->spelling_arena, 1);
