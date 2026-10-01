@@ -28,6 +28,64 @@ actual hierarchy.
 The only resume signal is `CONT` for the exact outer instance; stage units
 accept `TERM` or `KILL` only.
 
+### Recipe selector and zen5-calibration-v1 stages (#426)
+
+The typed request is version 2, in the #923 layout: the former `reserved`
+word is a recipe selector (`0` smoke, `1` retirement, `2` zen5) and a
+`runtime_max_usec` word follows the attempt (176 to 184 bytes). On this
+revision the broker accepts only the smoke and zen5 selectors, requires a zero
+runtime word (every unit keeps the fixed `RuntimeMaxSec=3600000000us`), and
+requires signals to carry selector and runtime `0`. The zen5 outer unit is
+started with
+
+```text
+start-zen5-outer <job> <attempt> <revision> <revision>
+```
+
+which requires the two revisions to be equal and runs `worker-unit` with the
+`zen5-calibration-v1` recipe name. Its stages use the existing
+`start-stage <job> <attempt> <stage> <revision> <revision>` verb with one of
+the thirteen names of `zen5_stage.h` (broker and gate stage numbers 16 to 28):
+`zen5-<id>-generate` and `zen5-<id>-build` for `immutable`, `same-root-A`,
+`same-root-B`, `cross-root-A` and `cross-root-B`, then `zen5-oracle`,
+`zen5-pmu` and `zen5-captures`. The broker builds each argv, working directory
+and path grant from that header, which the recipe and the credential gate
+share:
+
+- the ten build stages run as `buster-bench` with the fixed build driver's
+  Release `generate` or `build`; only their configured root under
+  `ATTEMPT/zen5/builds/` is writable, and the trusted driver creates it first;
+- `zen5-oracle` and `zen5-captures` run the build driver's
+  `bench_service_zen5_capture` as `buster-bench-candidate`, writing only
+  `ATTEMPT/zen5/staging/oracle` or `ATTEMPT/zen5/staging/captures`;
+- `zen5-pmu` runs `/usr/bin/python3 -B -E -s` on the driver-owned pinned copy
+  in `ATTEMPT/zen5/pmu-tool` as the candidate account, writing only
+  `ATTEMPT/zen5/staging/pmu`. Its seccomp allow-list alone adds
+  `perf_event_open`. No capability is granted and no host setting changes:
+  the host's `perf_event_paranoid` decides, and a refused counter is recorded
+  as `invalid`, never zero.
+
+Every zen5 stage reads `ATTEMPT/base/source` and `ATTEMPT/zen5` read-only and
+cannot reach the queue, lease or result root. Every stage unit, smoke and zen5
+alike, also lists `/run/buster-bench` and `/run/buster-bench-systemd-broker`
+in `InaccessiblePaths`: both control sockets authenticate only by peer
+uid/gid, and a stage runs revision-controlled code. The broker does not yet
+tie a stage request's selector to the live outer unit's recipe; with the
+sockets out of reach, only the trusted outer unit can make such a request.
+A zen5 revision must still be as trusted as a smoke base, because the build
+stages run its CMake as `buster-bench` with write access to their roots. The credential gate admits
+exactly each stage's program and first argument. `systemd-run --wait` returns
+only after the stage unit is inactive, so no stage process remains when the
+driver reads staging. The worker's cleanup enumerates all eighteen stage
+names.
+
+**Upgrade together.** Version 2 changes the request frame for every
+operation, smoke included, and the broker accepts only its own version.
+Install the service, broker and credential gate from the same reviewed
+revision in one step, with dispatch disabled and no live outer or stage unit.
+A mixed pair refuses every start and signal, including cleanup signals for
+units the older pair started, so drain first.
+
 The template retains root UID with empty capability sets. Its primary group
 is `buster-bench` and its supplementary group is `buster-bench-candidate`.
 The broker's own request-time check tolerates root's group 0 besides those

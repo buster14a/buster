@@ -123,7 +123,7 @@ static bool run_case(char const* label, gid_t service_extra, gid_t candidate_ext
     review_account_group_queries = 0;
     if (ok)
     {
-        BqBrokerRequest request = {.magic=BQ_BROKER_MAGIC, .version=1, .operation=review_operation,
+        BqBrokerRequest request = {.magic=BQ_BROKER_MAGIC, .version=BQ_BROKER_VERSION, .operation=review_operation,
             .signal_number=review_operation == BQ_BROKER_SIGNAL ? BQ_BROKER_CONT : 0,
             .job=1, .attempt=2,
             .base="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

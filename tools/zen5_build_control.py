@@ -162,6 +162,9 @@ def validate_capture(value: Any) -> tuple[list[str], list[str]]:
         problems.append("capture version must be 1")
     if value.get("purpose") != "same-source cross-build calibration":
         problems.append("capture purpose is malformed")
+    # A calibration capture never authorizes an A/B decision (#426).
+    if "ab_authorized" in value and value.get("ab_authorized") is not False:
+        problems.append("ab_authorized must be false")
     kind = value.get("control_kind")
     if not isinstance(kind, str) or kind not in CONTROL_KINDS:
         problems.append("control_kind must be same-root-rebuild or cross-root")
