@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only queue-to-main CI reuse for issue #1808.
 
-Only the eight native, mobile and UEFI jobs are reusable. The desktop shards
-populate main's Zig cache, lint checks the main history, and the analyzer has
-an event-specific reference; all three stay on the main push. This module
+Native, mobile, UEFI and desktop validation are reusable. Desktop jobs retain
+only main's Zig cache lifecycle; lint checks the main history and the analyzer
+has an event-specific reference, so both still validate on main. This module
 never creates a check or changes a ref. A missing proof schedules the normal
 jobs, while a proof that changes after jobs were skipped fails the aggregate.
 """
@@ -26,7 +26,7 @@ REPOSITORY = "buster14a/buster"
 REPOSITORY_ID = 1071732997
 WORKFLOW_ID = 197051687
 WORKFLOW_PATH = ".github/workflows/ci.yml"
-POLICY = "buster-main-ci-reuse-v1"
+POLICY = "buster-main-ci-reuse-v2"
 MAX_AGE = timedelta(hours=2)
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -43,6 +43,28 @@ REUSED = (
     ("UEFI firmware boot", "uefi-boot", "Build compiler and boot both architectures in all allocators"),
 )
 REUSED_NAMES = frozenset(row[0] for row in REUSED)
+# Desktop jobs still execute cache publication on main, under their existing
+# names and authority. Only their already-proven validation is reused.
+DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
+                 "Combination matrix (Windows)" if os_name == "windows"
+                 else "Combination matrix (Linux, macOS)")
+                for name, os_name, arch in (
+                    ("Linux x86-64", "linux", "x86_64"),
+                    ("Linux AArch64", "linux", "aarch64"),
+                    ("macOS AArch64", "macos", "aarch64"),
+                    ("Windows x86-64", "windows", "x86_64"),
+                    ("Windows AArch64", "windows", "aarch64"))
+                for shard in github_ci_time.COMBINATION_SHARDS)
+DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
+SOURCE_COVERAGE = REUSED + DESKTOP
+CACHE_STEPS = ("Checkout", "Resolve exact Zig cache policy", "Restore Zig archive",
+               "Validate exact Zig cache restore", "Install verified Zig",
+               "Retain exact Zig cache evidence", "Report reused desktop validation",
+               "Sanitize desktop logs", "Retain desktop logs")
+VALIDATION_STEPS = ("Workflow tool regression tests", "Bootstrap wrapper regression tests",
+                    "Install mold", "Install latest stable LLVM", "Application compilers",
+                    "Combination matrix (Linux, macOS)", "Combination matrix (Windows)",
+                    "Collect CMake configure evidence", "Desktop result and reproduction")
 RETAINED_NAMES = tuple(name for name in github_ci_time.COMBINATION_JOBS
                        if name not in REUSED_NAMES)
 
@@ -105,7 +127,7 @@ def successful_source_jobs(api, source, sha):
     require(all(type(identifier) is int and identifier > 0 for identifier in identifiers) and
             len(set(identifiers)) == len(identifiers), "source job IDs are missing or duplicated")
     by_name = {job["name"]: job for job in jobs}
-    for name, _, step in REUSED:
+    for name, _, step in SOURCE_COVERAGE:
         mandatory = {step}
         if name in github_ci_time.NATIVE:
             if name.startswith("Windows"):
@@ -118,14 +140,14 @@ def successful_source_jobs(api, source, sha):
             require(len(matches) == 1 and matches[0].get("status") == "completed" and
                     matches[0].get("conclusion") == "success",
                     name + ": required coverage step is missing or unsuccessful: " + required_step)
-    return [{"name": name, "job_id": by_name[name]["id"]} for name, _, _ in REUSED]
+    return [{"name": name, "job_id": by_name[name]["id"]} for name, _, _ in SOURCE_COVERAGE]
 
 
 def retained_artifacts(api, source, now):
     run_id = source["id"]
     rows = api.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
     result = []
-    for _, prefix, _ in REUSED:
+    for _, prefix, _ in SOURCE_COVERAGE:
         name = f"{prefix}-{run_id}-1"
         matches = [row for row in rows if row.get("name") == name]
         require(len(matches) == 1, "missing or ambiguous queue artifact: " + name)
@@ -194,8 +216,22 @@ def verify_current_jobs(api, sha, run_id):
     require(all(job.get("status") == "completed" and job.get("conclusion") == "skipped"
                 for job in reused), "reusable main job ran or has an ambiguous result")
     jobs = [job for job in jobs if job.get("name") not in REUSED_NAMES]
-    errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
-                                                   expected_names=RETAINED_NAMES)
+    desktop = [job for job in jobs if job.get("name") in DESKTOP_NAMES]
+    require({job["name"] for job in desktop} == DESKTOP_NAMES and len(desktop) == len(DESKTOP),
+            "main cache job identities are missing or duplicated")
+    for job in desktop:
+        require(job.get("run_id") == run_id and job.get("head_sha") == sha and
+                job.get("run_attempt") == 1 and job.get("status") == "completed" and
+                job.get("conclusion") == "success", "main cache job failed or is misbound")
+        for step_name in CACHE_STEPS + VALIDATION_STEPS:
+            matches = [step for step in job.get("steps", []) if step.get("name") == step_name]
+            expected = "success" if step_name in CACHE_STEPS else "skipped"
+            require(len(matches) == 1 and matches[0].get("status") == "completed" and
+                    matches[0].get("conclusion") == expected,
+                    job["name"] + ": cache-only step proof missing: " + step_name)
+    validation = [job for job in jobs if job.get("name") not in DESKTOP_NAMES]
+    errors = github_ci_time.validate_required_jobs(validation, run_id, 1, sha,
+                       expected_names=tuple(name for name in RETAINED_NAMES if name not in DESKTOP_NAMES))
     require(not errors, "; ".join(errors))
     identifiers = [job.get("id") for job in jobs]
     require(all(type(identifier) is int and identifier > 0 for identifier in identifiers) and
@@ -247,7 +283,7 @@ def cli():
             print("Main CI reuse unavailable; running full validation: " + str(error))
     else:
         source = receipt["source_run_id"]
-        print(f"Main CI reuse verified {len(REUSED)} source jobs in "
+        print(f"Main CI reuse verified {len(SOURCE_COVERAGE)} source jobs in "
               f"https://github.com/{REPOSITORY}/actions/runs/{source}/attempts/1")
         arguments.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     if arguments.phase == "decide":
@@ -257,11 +293,12 @@ def cli():
                 output.write("receipt_digest=" + receipt_digest(receipt) + "\n")
     if receipt is not None:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-            summary.write(f"Queue validation reused for {len(REUSED)} jobs: "
+            summary.write(f"Queue validation reused for {len(SOURCE_COVERAGE)} jobs: "
                           f"[run {receipt['source_run_id']}, attempt 1]"
                           f"(https://github.com/{REPOSITORY}/actions/runs/"
                           f"{receipt['source_run_id']}/attempts/1). "
-                          "The skipped main jobs did not execute.\n")
+                          "Native, mobile and UEFI jobs did not execute on main. "
+                          "Desktop jobs ran only the main Zig cache lifecycle; their validation did not repeat.\n")
     return status
 
 

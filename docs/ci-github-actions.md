@@ -65,8 +65,8 @@ independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
 which checks all groups and the exact 21-job inventory, including all ten
 desktop partitions and all five native jobs, for full executions. On a
-qualifying same-commit main push, eight native/mobile/UEFI jobs are instead
-proven by the exact queue run while desktop, lint and analyzer run on main;
+qualifying same-commit main push, eighteen native/mobile/UEFI and desktop validation jobs are instead
+proven by the exact queue run while desktop cache publication, lint and analyzer run on main;
 see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
 The old six names alone do not
 prove coverage. See [combination sharding](ci-combination-shards.md) for native
