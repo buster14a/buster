@@ -2811,8 +2811,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // maps to the sse2 feature. The AT&T share is the larger one because the
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5635 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3955 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5641 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3949 &&
                              source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
     // Metadata-owned shift layout makes these four APX NF double-shift
@@ -2830,6 +2830,24 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
                                  record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  record.intel_byte_count == 7 && record.intel_relocation_count == 0 &&
+                                 record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
+    }
+    // The scalar migration adds exactly six Intel APX NF count forms:
+    // LZCNT, POPCNT and TZCNT at 16/64 bits. Every other census row and
+    // every AT&T result retains its prior classification.
+    static BusterX86MetadataFormKey const source_scalar_nf_forms[] = {
+        {1872, UINT64_C(4187280867753370953)}, {1876, UINT64_C(1790044485232069853)},
+        {2043, UINT64_C(8281910395158412051)}, {2047, UINT64_C(2157521719384409774)},
+        {2833, UINT64_C(7499193492896024103)}, {2837, UINT64_C(14595909189199549348)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(source_scalar_nf_forms); index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[source_scalar_nf_forms[index].form_id];
+        BUSTER_TEST(arguments, record.stable_hash == source_scalar_nf_forms[index].stable_hash &&
+                                 record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 record.intel_byte_count == 6 && record.intel_relocation_count == 0 &&
                                  record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE &&
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
     }
@@ -2872,8 +2890,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6669 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3260 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6675 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3254 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);

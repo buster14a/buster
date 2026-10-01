@@ -190,6 +190,183 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_shift_layout(UnitTestArguments*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_scalar_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+
+    // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-scalar-oracle.s.
+    u8 const expected[] = {
+        0x90, 0xc3, 0xcc, 0x66, 0x98, 0x98, 0x48, 0x98, 0x66, 0x99, 0x99, 0x48,
+        0x99, 0x44, 0x8b, 0x45, 0x00, 0x66, 0x47, 0x89, 0x54, 0x8c, 0x80, 0x4d,
+        0x8b, 0x9d, 0x00, 0x00, 0x00, 0x00, 0x41, 0x80, 0x45, 0x00, 0x7f, 0x66,
+        0x43, 0x81, 0xac, 0x8c, 0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x45, 0x13,
+        0x45, 0x7f, 0x4d, 0x1b, 0x8d, 0x80, 0x00, 0x00, 0x00, 0x48, 0x83, 0x25,
+        0x00, 0x00, 0x00, 0x00, 0x7f, 0x41, 0x81, 0xca, 0x80, 0x00, 0x00, 0x00,
+        0x47, 0x33, 0x1c, 0x8c, 0x41, 0x80, 0x7d, 0x00, 0xff, 0x49, 0xf7, 0x45,
+        0x00, 0x80, 0x00, 0x00, 0x00, 0x66, 0x45, 0x6b, 0x45, 0x00, 0x80, 0x45,
+        0x69, 0x4d, 0x00, 0x7f, 0xff, 0xff, 0xff, 0x41, 0xf6, 0x65, 0x00, 0x49,
+        0xf7, 0xbd, 0x80, 0x00, 0x00, 0x00, 0x41, 0xfe, 0x85, 0x00, 0x00, 0x00,
+        0x00, 0x66, 0x41, 0xff, 0xc8, 0x41, 0xf7, 0xd9, 0x49, 0xf7, 0xd2, 0x41,
+        0xff, 0xb5, 0x00, 0x00, 0x00, 0x00, 0x43, 0x8f, 0x04, 0x8c, 0x66, 0x45,
+        0x0f, 0xbc, 0x45, 0x00, 0x45, 0x0f, 0xbd, 0x4d, 0x7f, 0x49, 0x0f, 0xca,
+        0x4d, 0x0f, 0xa3, 0x45, 0x00, 0x0f, 0xba, 0x2d, 0x00, 0x00, 0x00, 0x00,
+        0x07, 0xf0, 0x4d, 0x0f, 0xc1, 0x45, 0x00, 0xf0, 0x45, 0x0f, 0xb0, 0x45,
+        0x00, 0x41, 0x0f, 0x94, 0x85, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x0f, 0x45,
+        0x8d, 0x80, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00, 0xe9, 0x00,
+        0x00, 0x00, 0x00, 0x0f, 0x85, 0x00, 0x00, 0x00, 0x00,
+    };
+    String8 const sources[] = {
+        S8("nop\n"
+           "ret\n"
+           "int3\n"
+           "cbw\n"
+           "cwde\n"
+           "cdqe\n"
+           "cwd\n"
+           "cdq\n"
+           "cqo\n"
+           "mov r8d, dword ptr [rbp]\n"
+           "mov word ptr [r12+r9*4-128], r10w\n"
+           "mov r11, qword ptr [r13+external_mov]\n"
+           "add byte ptr [r13], 127\n"
+           "sub word ptr [r12+r9*4-129], 128\n"
+           "adc r8d, dword ptr [r13+127]\n"
+           "sbb r9, qword ptr [r13+128]\n"
+           "and qword ptr [rip+external_alu], 127\n"
+           "or r10d, 128\n"
+           "xor r11d, dword ptr [r12+r9*4]\n"
+           "cmp byte ptr [r13], 255\n"
+           "test qword ptr [r13], 128\n"
+           "imul r8w, word ptr [r13], -128\n"
+           "imul r9d, dword ptr [r13], -129\n"
+           "mul byte ptr [r13]\n"
+           "idiv qword ptr [r13+128]\n"
+           "inc byte ptr [r13+external_unary]\n"
+           "dec r8w\n"
+           "neg r9d\n"
+           "not r10\n"
+           "push qword ptr [r13+external_push]\n"
+           "pop qword ptr [r12+r9*4]\n"
+           "bsf r8w, word ptr [r13]\n"
+           "bsr r9d, dword ptr [r13+127]\n"
+           "bswap r10\n"
+           "bt qword ptr [r13], r8\n"
+           "bts dword ptr [rip+external_bit], 7\n"
+           "lock xadd qword ptr [r13], r8\n"
+           "lock cmpxchg byte ptr [r13], r8b\n"
+           "sete byte ptr [r13+external_set]\n"
+           "cmovne r9, qword ptr [r13+128]\n"
+           "call external_call\n"
+           "jmp external_jump\n"
+           "jne external_condition\n"),
+        S8("nop\n"
+           "ret\n"
+           "int3\n"
+           "cbtw\n"
+           "cwtl\n"
+           "cltq\n"
+           "cwtd\n"
+           "cltd\n"
+           "cqto\n"
+           "movl (%rbp), %r8d\n"
+           "movw %r10w, -128(%r12,%r9,4)\n"
+           "movq external_mov(%r13), %r11\n"
+           "addb $127, (%r13)\n"
+           "subw $128, -129(%r12,%r9,4)\n"
+           "adcl 127(%r13), %r8d\n"
+           "sbbq 128(%r13), %r9\n"
+           "andq $127, external_alu(%rip)\n"
+           "orl $128, %r10d\n"
+           "xorl (%r12,%r9,4), %r11d\n"
+           "cmpb $255, (%r13)\n"
+           "testq $128, (%r13)\n"
+           "imulw $-128, (%r13), %r8w\n"
+           "imull $-129, (%r13), %r9d\n"
+           "mulb (%r13)\n"
+           "idivq 128(%r13)\n"
+           "incb external_unary(%r13)\n"
+           "decw %r8w\n"
+           "negl %r9d\n"
+           "notq %r10\n"
+           "pushq external_push(%r13)\n"
+           "popq (%r12,%r9,4)\n"
+           "bsfw (%r13), %r8w\n"
+           "bsrl 127(%r13), %r9d\n"
+           "bswapq %r10\n"
+           "btq %r8, (%r13)\n"
+           "btsl $7, external_bit(%rip)\n"
+           "lock xaddq %r8, (%r13)\n"
+           "lock cmpxchgb %r8b, (%r13)\n"
+           "sete external_set(%r13)\n"
+           "cmovneq 128(%r13), %r9\n"
+           "call external_call\n"
+           "jmp external_jump\n"
+           "jne external_condition\n"),
+    };
+    u64 const offsets[] = {26, 60, 117, 134, 164, 185, 198, 203, 209};
+    s64 const addends[] = {0, -5, 0, 0, -5, 0, -4, -4, -4};
+    AssemblyRelocationKind const kinds[] = {ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_PC32};
+    String8 const symbols[] = {S8("external_mov"), S8("external_alu"), S8("external_unary"), S8("external_push"), S8("external_bit"), S8("external_set"), S8("external_call"), S8("external_jump"), S8("external_condition")};
+    for (u32 syntax = 0; syntax < BUSTER_ARRAY_LENGTH(sources); syntax += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, sources[syntax],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, expected, sizeof(expected)));
+        bool relocations_match = encoded.relocation_count == BUSTER_ARRAY_LENGTH(offsets);
+        for (u32 index = 0; relocations_match && index < encoded.relocation_count; index += 1)
+        {
+            AssemblyRelocation relocation = encoded.relocations[index];
+            relocations_match = relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                relocation.kind == kinds[index] && relocation.symbol < encoded.symbol_count &&
+                                string_equal(encoded.symbols[relocation.symbol].name, symbols[index]);
+        }
+        BUSTER_TEST(arguments, relocations_match);
+    }
+    AssemblyEncodeResult invalid = assembly_encode(arguments->arena,
+        S8("mov r11, qword ptr [r13+valid_disp]\n"
+           "mov r8b, ah\n"
+           "lock bt qword ptr [r13+invalid_lock], r8\n"
+           "mov r9, qword ptr [r13+2147483648]\n"
+           "cmove r8b, byte ptr [r13+invalid_width]\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const valid_prefix[] = {0x4d, 0x8b, 0x9d, 0, 0, 0, 0};
+    BUSTER_TEST(arguments, invalid.diagnostic_count == 4 &&
+                               assembly_test_bytes_equal(invalid.bytes, valid_prefix, sizeof(valid_prefix)) &&
+                               invalid.relocation_count == 1 && invalid.relocations[0].offset == 3 &&
+                               invalid.symbol_count == 1 && string_equal(invalid.symbols[0].name, S8("valid_disp")));
+    String8 const mnemonics[] = {S8("MOV"), S8("ADD"), S8("ADC"), S8("SUB"), S8("SBB"), S8("AND"), S8("OR"), S8("XOR"), S8("CMP"), S8("TEST")};
+    u16 const widths[] = {8, 16, 32, 64};
+    s64 const displacements[] = {-129, -128, 0, 127, 128, 0};
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(mnemonics); operation += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        {
+            for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+            {
+                u16 width = widths[width_index];
+                BusterX86MetadataPhysicalOperand operands[2] = {
+                    {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = width,
+                     .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                                .has_index = true, .index = {.index = 9, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                                .scale = 4, .source_width = width, .has_displacement = true, .displacement = displacements[displacement_index],
+                                .has_symbol = displacement_index == 5, .symbol = displacement_index == 5 ? S8("external_disp") : (String8){0}}},
+                    {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .has_value = true, .value = 127},
+                };
+                String8 features[] = {S8("*")};
+                UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
+                    .mnemonic = mnemonics[operation], .operands = operands, .operand_count = BUSTER_ARRAY_LENGTH(operands),
+                    .features = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)}, .address_size = 64,
+                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true});
+                result.test_count += agreement.test_count;
+                result.succeeded_test_count += agreement.succeeded_test_count;
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
 {
     bool result = false;
@@ -2850,6 +3027,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         .os = OPERATING_SYSTEM_LINUX,
     };
     BUSTER_TEST_FIXTURE(arguments, assembly_test_shift_layout);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_scalar_layout);
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;
