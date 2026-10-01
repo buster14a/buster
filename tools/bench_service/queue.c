@@ -301,14 +301,16 @@ bool bq_recipe_real(BqRequest const* request)
     return result;
 }
 
-/* The journal's transition model: a job of either service recipe follows the
+/* The journal's transition model: a job of any service recipe follows the
  * real (worker-owned) transitions whatever this build admits, so a journal
  * appended while the retirement profile was admitted still replays under a
- * blocked build. Its jobs then stay inert: bq_recipe_real refuses them. */
+ * blocked build. Its jobs then stay inert: bq_recipe_real refuses them. The
+ * served zen5 recipe (#426) is always real, as bq_recipe_real is on main. */
 bool bq_recipe_real_journal(BqRequest const* request)
 {
     BqRecipe recipe = bq_request_recipe(request);
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
+                  recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 
