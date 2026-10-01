@@ -1,0 +1,73 @@
+name: Archive external control 1898
+
+on:
+  push:
+    branches:
+      - codex/1898-external-archive-control
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-external-control-1898
+  cancel-in-progress: false
+
+jobs:
+  external-archive:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout diagnostic controller
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: control
+      - name: Checkout immutable subject
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ffce5acfd5beddee2100da4bd7e2b8cf942d9110
+          persist-credentials: false
+          path: subject
+      - name: Verify identities and controller syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C subject rev-parse HEAD)" = ffce5acfd5beddee2100da4bd7e2b8cf942d9110
+          test "$(git -C control rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m py_compile control/.github/scripts/1898-external-archive-control.py
+      - name: Install reviewed LLVM toolchain
+        timeout-minutes: 15
+        working-directory: subject
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/1898-evidence"
+          python3 tools/ci_llvm.py --target x86_64-linux --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/1898-evidence/llvm.log"
+      - name: Build exact-source compiler
+        timeout-minutes: 15
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/1898-evidence/build.log") 2>&1
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --cc clang --ci --linker DEFAULT
+          ./build/build build --config Release -t ide
+      - name: Independent ordinary archive controls
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 control/.github/scripts/1898-external-archive-control.py subject "$RUNNER_TEMP/1898-evidence/controls" \
+            2>&1 | tee "$RUNNER_TEMP/1898-evidence/control.log"
+      - name: Retain diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: archive-external-1898-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/1898-evidence
+          if-no-files-found: error
