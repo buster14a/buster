@@ -1,0 +1,32 @@
+name: LLVM ICU package provenance
+on:
+  push:
+    branches: [codex/2122-llvm-icu-provenance]
+permissions:
+  contents: read
+jobs:
+  package:
+    if: ${{ github.server_url == 'https://github.com' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            mirror: https://archive.ubuntu.com/ubuntu
+            arch: amd64
+          - runner: ubuntu-26.04-arm
+            mirror: https://ports.ubuntu.com/ubuntu-ports
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Read signed Jammy package metadata
+        env:
+          MIRROR: ${{ matrix.mirror }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/icu-lists/partial"
+          echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $MIRROR jammy main" > "$RUNNER_TEMP/icu.list"
+          options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/icu.list" -o 'Dir::Etc::sourceparts=-' -o "Dir::State::lists=$RUNNER_TEMP/icu-lists" -o 'Dir::Cache::pkgcache=' -o 'Dir::Cache::srcpkgcache=' -o 'APT::Update::Error-Mode=any' -o 'Acquire::Retries=3')
+          sudo apt-get "${options[@]}" update
+          apt-cache "${options[@]}" show libicu70=70.1-2
