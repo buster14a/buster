@@ -13,6 +13,7 @@ IDE, nor a request to restore the removed custom-language editor.
 | Stable feature ID | Existing source | Integration boundary |
 |---|---|---|
 | `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations; device execution/support must be demonstrated by the consuming target. |
+| `graphics-ui.raster` | [rendering_raster.h](../../src/buster/lib/rendering_raster.h) | Bounded CPU pixels and Linux/XCB presentation for the separate image-browser target; no GPU support claim. |
 | `graphics-ui.windows` | Window modules described in the [platform guide](../agents/platform.md) | Native lifecycle/event/surface boundary. Android/iOS lifecycle use does not demonstrate a complete desktop UI. |
 | `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType has a registered headless test consumer; the current headless compiler has no production font consumer. |
 | `graphics-ui.construction` | [ui_builder.h](../../src/buster/lib/ui_builder.h) | Retained UI construction API, not a supported end-user application by itself. |
@@ -109,3 +110,9 @@ reply sizes or cumulative transfer staging allocation.
 Required window-arena allocation failure releases native initialization and
 returns failure. The existing arena reservation fault seam exercises this
 recovery before subsequent successful native lifecycles.
+
+The separately registered [native image browser](image-browser.md) consumes
+window lifecycle/events/title updates and CPU raster presentation. Its first
+platform, file/decode ownership, loading policy and executable launch live in
+the application guide. Retained UI construction, fonts and Vulkan rendering
+remain independent components rather than unused application dependencies.
