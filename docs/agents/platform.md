@@ -52,6 +52,15 @@
   `tests/truetype_dependency_test.py` checks the generated split graphs,
   builds the tests-disabled split compiler in Debug and Release, and checks
   the actual Release unity preprocessing closure for tests on and off.
+- TrueType horizontal kerning uses the legacy version-0 `kern` table's
+  format-0 subtables. Matching pair values add in subtable order; the override
+  coverage bit replaces the accumulated value, and later subtables can add to
+  that replacement. Missing pairs leave the accumulation unchanged. Vertical,
+  minimum-distance, cross-stream and other-format subtables are ignored by
+  this advance-only API. Pair arrays must fit their declared subtable length;
+  malformed arrays contribute nothing. Registered `truetype_tests` cover
+  additive order, overrides, absent pairs and coverage filtering using
+  synthetic font bytes, with no dependency on installed fonts.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 

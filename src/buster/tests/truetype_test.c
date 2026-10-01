@@ -5,6 +5,7 @@
 #include <buster/tests/truetype_test.h>
 
 #if BUSTER_INCLUDE_TESTS
+// truetype_test_kerning covers subtable composition using synthetic cmap/kern bytes.
 #include <buster/lib/truetype_internal.h>
 
 BUSTER_GLOBAL_LOCAL void truetype_test_u16(u8* bytes, u32 offset, s32 value)
@@ -12,6 +13,115 @@ BUSTER_GLOBAL_LOCAL void truetype_test_u16(u8* bytes, u32 offset, s32 value)
     u16 bits = (u16)value;
     bytes[offset] = (u8)(bits >> 8u);
     bytes[offset + 1u] = (u8)bits;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_kerning(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Format-4 cmap maps A/B to glyphs 1/2. The version-0 kern table at 32
+    // holds up to three 20-byte format-0 subtables, each with one A/B pair.
+    u8 bytes[96] = {
+        0, 4, 0, 32, 0, 0, 0, 4, 0, 4, 0, 1, 0, 0,
+        0, 66, 255, 255, 0, 0, 0, 65, 255, 255,
+        255, 192, 0, 1, 0, 0, 0, 0,
+    };
+    u32 table_count_offset = 34;
+    u32 first_subtable = 36;
+    u32 second_subtable = 56;
+    s32 values[] = {-20, -30, 5};
+    truetype_test_u16(bytes, table_count_offset, 2);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        u32 subtable = first_subtable + index * 20u;
+        truetype_test_u16(bytes, subtable + 2u, 20); // length
+        truetype_test_u16(bytes, subtable + 4u, 1); // horizontal coverage
+        truetype_test_u16(bytes, subtable + 6u, 1); // pair count
+        truetype_test_u16(bytes, subtable + 8u, 6); // search range
+        truetype_test_u16(bytes, subtable + 14u, 1); // left glyph
+        truetype_test_u16(bytes, subtable + 16u, 2); // right glyph
+        truetype_test_u16(bytes, subtable + 18u, values[index]);
+    }
+    TTF_FontInformation font = {
+        .data = {.pointer = bytes, .length = sizeof(bytes)},
+        .kern = 32,
+        .cmap_format = 4,
+        .num_glyphs = 3,
+    };
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -50);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'A') == 0);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'B', 'A') == 0);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'B', 'B') == 0);
+
+    truetype_test_u16(bytes, first_subtable + 18u, -30);
+    truetype_test_u16(bytes, second_subtable + 18u, -20);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -50);
+    truetype_test_u16(bytes, first_subtable + 18u, -20);
+    truetype_test_u16(bytes, second_subtable + 18u, -30);
+
+    s32 signed_values[] = {32767, -32768};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signed_values); index += 1)
+    {
+        truetype_test_u16(bytes, first_subtable + 18u, signed_values[index]);
+        truetype_test_u16(bytes, second_subtable + 18u, signed_values[index]);
+        BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == signed_values[index] * 2);
+    }
+    truetype_test_u16(bytes, first_subtable + 18u, 40);
+    truetype_test_u16(bytes, second_subtable + 18u, -30);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == 10);
+    truetype_test_u16(bytes, first_subtable + 18u, -20);
+
+    truetype_test_u16(bytes, second_subtable + 4u, 9); // later override
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -30);
+    truetype_test_u16(bytes, table_count_offset, 3);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -25);
+    truetype_test_u16(bytes, table_count_offset, 2);
+    truetype_test_u16(bytes, second_subtable + 18u, 0);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == 0);
+    truetype_test_u16(bytes, second_subtable + 18u, -30);
+
+    truetype_test_u16(bytes, second_subtable + 14u, 2); // override has no A/B
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -20);
+    truetype_test_u16(bytes, second_subtable + 14u, 1);
+    truetype_test_u16(bytes, second_subtable + 4u, 1);
+    truetype_test_u16(bytes, first_subtable + 14u, 2); // only later table matches
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -30);
+    truetype_test_u16(bytes, first_subtable + 14u, 1);
+
+    // Vertical, minimum, cross-stream (including overrides), unsupported formats.
+    s32 ignored_coverages[] = {0, 3, 5, 7, 8, 11, 13, 15, 0x0101, 0x0201};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ignored_coverages); index += 1)
+    {
+        truetype_test_u16(bytes, second_subtable + 4u, ignored_coverages[index]);
+        BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -20);
+    }
+    truetype_test_u16(bytes, first_subtable + 4u, 3);
+    truetype_test_u16(bytes, second_subtable + 4u, 5);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == 0);
+    truetype_test_u16(bytes, first_subtable + 4u, 1);
+    truetype_test_u16(bytes, second_subtable + 4u, 1);
+
+    // Reject pair counts escaping their subtable, even with later bytes present.
+    truetype_test_u16(bytes, first_subtable + 6u, 2);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -30);
+    truetype_test_u16(bytes, first_subtable + 6u, 1);
+    truetype_test_u16(bytes, second_subtable + 6u, 2);
+    // The following bytes resemble A/B,+200, but lie outside the second table.
+    truetype_test_u16(bytes, second_subtable + 20u, 1);
+    truetype_test_u16(bytes, second_subtable + 22u, 2);
+    truetype_test_u16(bytes, second_subtable + 24u, 200);
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -20);
+    truetype_test_u16(bytes, second_subtable + 6u, 1);
+    font.data.length = second_subtable + 19u;
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -20);
+    font.data.length = sizeof(bytes);
+    truetype_test_u16(bytes, 32, 1); // unsupported table version
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == 0);
+    truetype_test_u16(bytes, 32, 0);
+    truetype_test_u16(bytes, second_subtable, 1); // unsupported subtable version
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == -20);
+    font.kern = 0;
+    BUSTER_TEST(arguments, truetype_get_codepoint_kern_advance(&font, 'A', 'B') == 0);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool truetype_test_empty(TTF_Bitmap bitmap)
@@ -613,6 +723,9 @@ UnitTestResult truetype_tests(UnitTestArguments* arguments)
         arena_set_position(arena, position);
     }
     BUSTER_TEST(arguments, sweep_valid);
+    UnitTestResult kerning_result = truetype_test_kerning(arguments);
+    result.test_count += kerning_result.test_count;
+    result.succeeded_test_count += kerning_result.succeeded_test_count;
     return result;
 }
 #endif
