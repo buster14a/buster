@@ -6027,11 +6027,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "    PadLong s = {7};\n"
         "    PadInt t = {9};\n"
         "    PadVec2 r = returning(v);\n"
-        "    int bad = floating(v, 100ll) != 104.0f || integer(s, 42ll) != 7042ll || aligned(t, 42ll) != 9042ll;\n"
-        "    bad |= boundary(1ll, 2ll, 3ll, 4ll, 5ll, s, 42ll) != 7057ll;\n"
-        "    bad |= exhausted(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, s, 42ll) != 7063ll;\n"
-        "    bad |= r.x != 2.5f || r.y != 1.5f;\n"
-        "    bad |= OTHER(pad_variadic)(17, v, 100ll, s, t, 42ll);\n"
+        "    int bad = floating(v, 100ll) != 104.0f;\n"
+        "    bad |= (integer(s, 42ll) != 7042ll) << 1;\n"
+        "    bad |= (aligned(t, 42ll) != 9042ll) << 2;\n"
+        "    bad |= (boundary(1ll, 2ll, 3ll, 4ll, 5ll, s, 42ll) != 7057ll) << 3;\n"
+        "    bad |= (exhausted(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, s, 42ll) != 7063ll) << 4;\n"
+        "    bad |= (r.x != 2.5f || r.y != 1.5f) << 5;\n"
+        "    bad |= OTHER(pad_variadic)(17, v, 100ll, s, t, 42ll) << 6;\n"
         "    return bad;\n"
         "}\n"
         "#ifdef SYSV_PADDING_HOST\n"
@@ -6045,8 +6047,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "int main(void)\n"
         "{\n"
         "    int bad = host_pad_calls(pad_float, pad_integer, pad_aligned, pad_boundary, pad_exhausted, pad_return);\n"
-        "    bad |= pad_calls(host_pad_float, host_pad_integer, host_pad_aligned, host_pad_boundary, host_pad_exhausted, host_pad_return) << 1;\n"
-        "    return bad;\n"
+        "    int other = pad_calls(host_pad_float, host_pad_integer, host_pad_aligned, host_pad_boundary, host_pad_exhausted, host_pad_return);\n"
+        "    return bad ? bad : (other ? 128 | other : 0);\n"
         "}\n"
         "#endif\n");
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-padding-eightbytes"), S8(".c"));
@@ -6058,6 +6060,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 host_compilers[2] = {S8(BUSTER_HOST_C_COMPILER)};
+    String8 host_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    String8 host_prefixes[2] = {S8("buster-sysv-padding-eightbytes-host"), S8("buster-sysv-padding-eightbytes-gcc")};
     String8 host_objects[2] = {0};
     bool host_compiled[2] = {0};
     u32 host_compiler_count = 1;
@@ -6072,11 +6076,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
 #endif
     for (u32 reference = 0; reference < host_compiler_count; reference += 1)
     {
-        host_objects[reference] = buster_test_temporary_path(arguments->arena, S8("buster-sysv-padding-eightbytes-host"), S8(".o"));
+        host_objects[reference] = buster_test_temporary_path(arguments->arena, host_prefixes[reference], S8(".o"));
         String8 host_command[12];
         u32 host_count = 0;
         host_command[host_count++] = host_compilers[reference];
-        if (reference == 0 && S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        if (reference == 0 && host_argument.length) { host_command[host_count++] = host_argument; }
         host_command[host_count++] = S8("-O0");
         host_command[host_count++] = S8("-fno-inline");
         host_command[host_count++] = S8("-DSYSV_PADDING_HOST=1");
@@ -6118,7 +6122,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
                             String8 link_command[10];
                             u32 link_count = 0;
                             link_command[link_count++] = host_compilers[reference];
-                            if (reference == 0 && S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                            if (reference == 0 && host_argument.length) { link_command[link_count++] = host_argument; }
 #if BUSTER_LINUX
                             link_command[link_count++] = S8("-no-pie");
 #endif
@@ -6130,7 +6134,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
                                 (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                             bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
                             BUSTER_TEST_RAW(arguments, link_ok, host_compilers[reference]);
-                            if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                            if (link_ok)
+                            {
+                                String8 run_command[] = {executable};
+                                ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command),
+                                    (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                if (BUSTER_REQUIRE(arguments, run.handle != 0))
+                                {
+                                    ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, run, 30000000);
+                                    String8 context = string_format(temporary.arena,
+                                        S8("SysV padding: {S8} {S8} PIC={u32} reference={S8}; status={u32} timeout={u32}; exit bits: float=1 integer=2 aligned=4 boundary=8 exhausted=16 return=32 variadic=64 Buster-caller=128"),
+                                        modes[mode], frontends[frontend], pic, host_compilers[reference],
+                                        waited.platform_status, (u32)waited.timed_out);
+                                    BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS, context);
+                                }
+                            }
                         }
                     }
 #endif
