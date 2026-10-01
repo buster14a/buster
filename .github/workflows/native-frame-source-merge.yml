@@ -1,0 +1,38 @@
+name: Native frame read-only source merge evidence
+on:
+  push:
+    branches: ['codex/1885-native-frame-diagnostic']
+    paths:
+      - '.github/workflows/native-frame-source-merge.yml'
+      - 'tools/driver-test/native_frame_source_merge.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  merge:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      BUSTER_FRAME_BASELINE: 'e424b387fcb51b00c1d19e87e2d369ae8a212792'
+      BUSTER_FRAME_FEATURE: 'ebfa529cdb7ba2ede9fce05f1579e1564d76db2a'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Read-only actual Git three-way source merge and immutable identities
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/driver-test/native_frame_source_merge.py
+          python3 tools/driver-test/native_frame_source_merge.py
+      - name: Retain merge inputs, diff and source identity evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-frame-source-merge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-frame-source-merge/
+          if-no-files-found: error
+          retention-days: 14
