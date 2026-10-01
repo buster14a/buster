@@ -131,10 +131,13 @@ class SchedulerTests(unittest.TestCase):
                         f"time.sleep({readiness_delay}); "
                         + ("sys.exit('readiness-failure-marker'); " if fail_readiness else "") +
                         "p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "Path('descendant.pid').write_text(str(p.pid)); time.sleep(60)")
+                        "Path('descendant.pid.tmp').write_text(str(p.pid)); "
+                        "Path('descendant.pid.tmp').replace('descendant.pid'); time.sleep(60)")
                 child = scheduler.bootstrap.WrapperProcess(self,
                     [sys.executable, "-c", code], directory.name, os.environ.copy())
                 children.append(child)
+                # The child publishes a closed PID file by atomic rename. File
+                # existence therefore certifies complete content before parsing.
                 marker = Path(directory.name) / "descendant.pid"
                 try:
                     deadline = child.started + scheduler.bootstrap.WRAPPER_TIMEOUT_SECONDS
