@@ -14352,6 +14352,11 @@ ObjectExecutable object_link_executable(ObjectFile* object)
         {
             allocation_size = page_size;
         }
+        if (allocation_size > SIZE_MAX)
+        {
+            result.error = OBJECT_ERROR_CAPACITY;
+            break;
+        }
         void* allocation = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
         if (!allocation)
         {
