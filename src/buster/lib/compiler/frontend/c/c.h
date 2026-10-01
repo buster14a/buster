@@ -277,6 +277,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+    C_DIAGNOSTIC_SOURCE_TOO_LARGE,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -820,6 +821,9 @@ struct CArrayBound
     // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
     // not modifiable although its elements are.
     bool is_const;
+    // Bounds made while parsing a parameter (nested prototypes included).
+    // Definition parameters receive the additional signature-scope check.
+    bool is_parameter_declarator;
 };
 
 typedef struct CType CType;

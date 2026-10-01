@@ -80,3 +80,21 @@ signed int. Semantic expression queries and lowering share the spelling policy;
 the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
+
+## Source translation limits
+
+The source translator accepts at most `UINT32_MAX - 2` raw bytes so its
+terminator, checkpoint count and original-source offsets remain representable.
+`c_source_allocation_plan` checks that bound before source reads or
+length-derived allocation counts. Root preprocessing rejects oversized input
+before phase setup with `C_DIAGNOSTIC_SOURCE_TOO_LARGE` (`c.source-too-large`),
+an error count and the root file's diagnostic path. Both lexer implementations
+and included-file lexing use the same bound. An include must also fit the
+remaining shared 32-bit spelling-offset space; its error retains the include's
+source-map anchor without allocating another byte in that space.
+
+`c_test_source_size_limit` queries the exact standalone allocation boundary,
+passes oversized sentinel lengths through preprocessing and all lexer entries,
+and checks bounded allocation, structured errors, shared-space exhaustion and
+valid empty/declaration controls. It never allocates or maps a multi-gigabyte
+source to exercise the limit.

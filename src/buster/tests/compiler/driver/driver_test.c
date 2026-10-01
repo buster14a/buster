@@ -2484,7 +2484,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         bool valid;
         bool gnu;
         String8 expected_diagnostic;
+        String8 dialect;
     } cases[] = {
+        {S8("int f()[3]; int recovered;\n"), false, false, S8("a function cannot return an array")},
+        {S8("int f()(void); int recovered;\n"), false, false, S8("a function cannot return a function")},
+        {S8("typedef int A[3]; A f(void);\n"), false, false, S8("a function cannot return an array")},
+        {S8("typedef int F(void); F f(void);\n"), false, false, S8("a function cannot return a function")},
+        {S8("typedef int A[3]; A (*f)(void);\n"), false, false, S8("a function cannot return an array")},
+        {S8("typedef int F(void); F (*f)(void);\n"), false, false, S8("a function cannot return a function")},
+        {S8("int (f())[3];\n"), false, false, S8("a function cannot return an array")},
+        {S8("int (f())(void);\n"), false, false, S8("a function cannot return a function")},
+        {S8("int (*f(void))[3]; int (*g(void))(int);\n"), true},
+        {S8("typedef int A[3]; typedef int F(void); A *f(void); F *g(void);\n"), true},
+        {S8("int f(void, int x); int recovered;\n"), false, false, S8("void must be the sole")},
+        {S8("int f(int x, void);\n"), false, false, S8("void must be the sole")},
+        {S8("int f(const void);\n"), false, false, S8("void must be the sole")},
+        {S8("int f(void named);\n"), false, false, S8("void must be the sole")},
+        {S8("typedef void V; int f(V, int);\n"), false, false, S8("void must be the sole")},
+        {S8("int (*f)(void, int);\n"), false, false, S8("void must be the sole")},
+        {S8("typedef int F(const void);\n"), false, false, S8("void must be the sole")},
+        {S8("typedef void V; int f(V); int (*g)(V);\n"), true},
+        {S8("int f(int x, ..., int y); int recovered;\n"), false, false, S8("ellipsis must terminate")},
+        {S8("int (*f)(int, ..., int);\n"), false, false, S8("ellipsis must terminate")},
+        {S8("typedef int F(int, ..., int);\n"), false, false, S8("ellipsis must terminate")},
+        {S8("void f(void) { int (*p)(int, ..., int); }\n"), false, false, S8("ellipsis must terminate")},
+        {S8("int f(void, ...);\n"), false, false, S8("void must be the sole")},
+        {S8("int f(...); int (*g)(...); typedef int F(...);\n"), true},
+        {S8("int f(...);\n"), false, false, S8("ellipsis requires a preceding"), S8("-std=c17")},
+        {S8("int (*f)(...);\n"), false, false, S8("ellipsis requires a preceding"), S8("-std=c17")},
+        {S8("int f(int, ...); int (*g)(int, ...);\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int a[static]); int recovered;\n"), false, false, S8("static array parameter bound requires an expression")},
+        {S8("int (*f)(int a[const static]);\n"), false, false, S8("static array parameter bound requires an expression")},
+        {S8("typedef int F(int a[static *]);\n"), false, false, S8("static array parameter bound requires an expression")},
+        {S8("int a[*];\n"), false, false, S8("star array bound is only allowed")},
+        {S8("typedef int A[*];\n"), false, false, S8("star array bound is only allowed")},
+        {S8("int f(void) { int a[*]; return 0; }\n"), false, false, S8("star array bound is only allowed")},
+        {S8("int f(int n, int a[*]) { return 0; }\n"), false, false, S8("star array bound is only allowed")},
+        {S8("int (f)(int n, int a[*]) { return 0; }\n"), false, false, S8("star array bound is only allowed")},
+        {S8("int f(int n, int (*a)[*]) { return 0; }\n"), false, false, S8("star array bound is only allowed")},
+        {S8("int f(int n, int a[*]); int (*g)(int n, int a[*]);\n"), true},
+        {S8("int f(int n, int a[static n]) { return a[0]; }\n"), true},
+        {S8("int f(int n, int a[const n]) { return a[0]; }\n"), true},
+        {S8("int f(int (*p)(int n, int a[*])) { return 0; }\n"), true},
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
@@ -2772,7 +2813,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             String8 input = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".c"));
             String8 output = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".o"));
             BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
-            String8 dialect = cases[index].gnu ? S8("-std=gnu23") : S8("-std=c23");
+            String8 dialect = cases[index].dialect.length ? cases[index].dialect : cases[index].gnu ? S8("-std=gnu23") : S8("-std=c23");
             String8 syntax_command[] = {S8("-g0"), dialect, forms[form], S8("-fsyntax-only"), input};
             String8 object_command[] = {S8("-g0"), dialect, forms[form], S8("-c"), S8("-o"), output, input};
 #if BUSTER_BENCH_ALLOCATIONS
@@ -2850,6 +2891,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, syntax.diagnostic);
         BUSTER_TEST(arguments, syntax.error == object.error);
         BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+        scratch_end(temporary);
+    }
+    // Rejected declarators must not erase the declarations that follow them.
+    String8 recovery[] = {
+        S8("int bad()[3]; int recovered;"),
+        S8("typedef int A[3]; A bad(void); int recovered;"),
+        S8("int bad(void, int); int recovered;"),
+        S8("int (*bad)(int, ..., int); int recovered;"),
+        S8("int bad(int a[static]); int recovered;"),
+        S8("int bad(int a[*]) { return 0; } int recovered;"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recovery); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        CPreprocessResult preprocess = c_preprocess(arena, recovery[index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        bool recovered = false;
+        for (u32 declaration = 0; declaration < analysis.declaration_count; declaration += 1)
+        {
+            CDeclaration value = analysis.declarations[declaration];
+            recovered |= string_equal(value.name, S8("recovered")) && value.kind == C_DECLARATION_OBJECT &&
+                         value.type.value < analysis.type_count && analysis.types[value.type.value].kind == C_TYPE_INT &&
+                         value.entity.value < analysis.entity_count;
+        }
+        BUSTER_TEST_RAW(arguments, analysis.diagnostic_count != 0 && recovered, recovery[index]);
         scratch_end(temporary);
     }
     return result;
