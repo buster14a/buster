@@ -306,8 +306,8 @@ tree's, and the phase plan records that edge as `after`. Builds are not
 serialized, so a test phase can still overlap the remaining compiles; that
 deliberately extends the bounded overlap above to the sanitized Release build
 (up to about twice the CPU count in nominal workers for its duration) in
-exchange for no idle CPUs during the long sanitized Debug test tail. Clang CI
-trees run `test_all` through the isolated-process runner
+exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
+Clang CI trees run `test_all` through the isolated-process runner
 (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
 two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while

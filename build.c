@@ -25006,9 +25006,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Clang trees run tests. Their test_all uses the isolated-process runner,
-    // which partitions only at four or more test workers and otherwise runs
-    // the ordinary invocation unchanged (tools/ci_unit_tests.c).
+    // Sanitized Clang trees own the serialized checks test phases. Their
+    // test_all uses the isolated-process runner, which partitions only at four
+    // or more test workers and otherwise runs the ordinary invocation unchanged
+    // (tools/ci_unit_tests.c). The unsanitized canonical Release producer keeps
+    // exactly the standard arguments (build_artifact_fanout_is_canonical).
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8_INITIALIZER("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
@@ -25058,7 +25060,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && tree_plan.sanitize ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
