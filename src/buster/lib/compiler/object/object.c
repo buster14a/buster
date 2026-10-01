@@ -14307,7 +14307,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 result.error = OBJECT_ERROR_INVALID_INPUT;
                 break;
             }
-            if (source->kind == OBJECT_SECTION_TEXT && text_section == UINT32_MAX) text_section = section;
+            if (source->kind == OBJECT_SECTION_TEXT && (source->data.length || source->virtual_size) && text_section == UINT32_MAX) text_section = section;
             u64 alignment = object->sections[section].alignment;
             alignment = BUSTER_MAX(alignment, page_size);
             maximum_alignment = BUSTER_MAX(maximum_alignment, alignment);

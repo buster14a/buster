@@ -2,7 +2,7 @@
 // queries, PC-relative and absolute addressing, zero-fill and aligned cleanup.
 #include <buster/lib/system_headers.h>
 #include <stdio.h>
-#if BUSTER_MACOS
+#if BUSTER_APPLE
 #include <mach/mach_vm.h>
 #endif
 
@@ -14,7 +14,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_mapping(void* pointer, ProtectionFlags expe
     SIZE_T queried = VirtualQuery(pointer, &information, sizeof(information));
     DWORD protection = expected.execute ? PAGE_EXECUTE_READ : expected.write ? PAGE_READWRITE : PAGE_READONLY;
     result = queried == sizeof(information) && information.State == MEM_COMMIT && information.Protect == protection;
-#elif BUSTER_MACOS
+#elif BUSTER_APPLE
     mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)pointer;
     mach_vm_size_t size = 0;
     vm_region_basic_info_data_64_t information = {0};
@@ -26,7 +26,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_mapping(void* pointer, ProtectionFlags expe
     result = status == KERN_SUCCESS && address <= (mach_vm_address_t)(uintptr_t)pointer &&
              (mach_vm_address_t)(uintptr_t)pointer - address < size && information.protection == protection;
     if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-#elif BUSTER_LINUX
+#elif BUSTER_LINUX || BUSTER_ANDROID
     FILE* maps = fopen("/proc/self/maps", "r");
     if (maps)
     {
@@ -161,5 +161,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_executable_sections(UnitTestArgum
             BUSTER_TEST(arguments, !object_test_mapping(leading.address, (ProtectionFlags){.read = true, .execute = true}));
         }
     }
+    ObjectSection data_only_sections[] = {
+        {.kind = OBJECT_SECTION_TEXT},
+        {.kind = OBJECT_SECTION_DATA, .data = {.pointer = (u8*)&initial, .length = sizeof(initial)}},
+    };
+    ObjectFile data_only = {.sections = data_only_sections, .section_count = BUSTER_ARRAY_LENGTH(data_only_sections)};
+    ObjectExecutable no_entry = object_link_executable(&data_only);
+    BUSTER_TEST(arguments, no_entry.error == OBJECT_ERROR_INVALID_INPUT && !no_entry.address && !no_entry.allocation_address);
+    object_release_executable(no_entry);
     return result;
 }

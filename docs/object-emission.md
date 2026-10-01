@@ -139,7 +139,7 @@ readonly/unwind/initializer/debug sections become R. No final page is both
 writable and executable. Section alignments greater than a host page remain
 absolute address constraints; padding stays readonly.
 
-`ObjectExecutable.address` names the first text section. Its
+`ObjectExecutable.address` names the first nonempty text section. Its
 `allocation_address` and `allocation_size` name the complete reservation,
 including any alignment prefix, and `object_release_executable` releases that
 reservation. Failed layout, relocation, protection or cache flushing publishes
