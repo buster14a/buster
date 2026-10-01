@@ -98,3 +98,10 @@ each event. That allowance includes the existing 16 MiB file-drop path budget,
 the slice array, alignment and event overhead. Library-internal native
 allocations and the separate XDND transfer arena are outside this allowance.
 The legacy full-drain API retains its existing contract.
+
+Linux/XCB consumers that do not accept drops may set
+`WmWindowCreate.disable_file_drop`. This omits XDND advertisement and ignores
+addressed XDND messages before source watching, property reads or transfer
+state changes. The default keeps existing behavior. The browser opts out:
+bounded event polling alone does not bound the existing default XDND property's
+reply sizes or cumulative transfer staging allocation.

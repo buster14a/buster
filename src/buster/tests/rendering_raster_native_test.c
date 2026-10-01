@@ -6,6 +6,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/window.h>
+#include <buster/lib/window/internal.h>
 #include <buster/lib/rendering/raster_internal.h>
 #include <stdio.h>
 
@@ -69,6 +70,94 @@ BUSTER_GLOBAL_LOCAL bool raster_native_close_message(WmNativeSurface surface)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL xcb_atom_t raster_native_atom(xcb_connection_t* connection, char const* name)
+{
+    xcb_generic_error_t* error = 0;
+    xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(connection, xcb_intern_atom(connection, 0, (u16)strlen(name), name), &error);
+    xcb_atom_t result = reply && !error ? reply->atom : XCB_ATOM_NONE;
+    free(reply);
+    free(error);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void raster_native_file_drop_opt_out(Arena* arena, WmHandle* windowing, WmWindowHandle* window, WmNativeSurface surface, bool disabled)
+{
+    xcb_connection_t* connection = (xcb_connection_t*)surface.display;
+    xcb_window_t native_window = (xcb_window_t)(uintptr_t)surface.window;
+    xcb_atom_t aware = raster_native_atom(connection, "XdndAware");
+    raster_native_check(aware != XCB_ATOM_NONE, "native drop advertisement atom available");
+    xcb_generic_error_t* error = 0;
+    xcb_get_property_reply_t* reply = xcb_get_property_reply(connection,
+        xcb_get_property(connection, 0, native_window, aware, XCB_GET_PROPERTY_TYPE_ANY, 0, 1), &error);
+    if (disabled)
+    {
+        raster_native_check(reply && !error && reply->type == XCB_ATOM_NONE && xcb_get_property_value_length(reply) == 0,
+                            "opted-out window has no XdndAware advertisement");
+    }
+    else
+    {
+        raster_native_check(reply && !error && reply->type == XCB_ATOM_ATOM && reply->format == 32 &&
+                            xcb_get_property_value_length(reply) == 4, "default window keeps native drop advertisement");
+    }
+    free(reply);
+    free(error);
+    if (disabled)
+    {
+        xcb_atom_t enter = raster_native_atom(connection, "XdndEnter");
+        xcb_atom_t drop = raster_native_atom(connection, "XdndDrop");
+        xcb_atom_t type_list = raster_native_atom(connection, "XdndTypeList");
+        xcb_atom_t uri_list = raster_native_atom(connection, "text/uri-list");
+        bool atoms_valid = enter != XCB_ATOM_NONE && drop != XCB_ATOM_NONE &&
+                           type_list != XCB_ATOM_NONE && uri_list != XCB_ATOM_NONE;
+        raster_native_check(atoms_valid, "native drop test atoms available");
+        if (atoms_valid)
+        {
+            // This first-party same-window source advertises URI through a property.
+            // Enter would read it and begin a transaction without the opt-out gate.
+            error = xcb_request_check(connection, xcb_change_property_checked(connection,
+                XCB_PROP_MODE_REPLACE, native_window, type_list, XCB_ATOM_ATOM, 32, 1, &uri_list));
+            raster_native_check(error == 0, "native source type property created");
+            free(error);
+            xcb_client_message_event_t message = {0};
+            message.response_type = XCB_CLIENT_MESSAGE;
+            message.format = 32;
+            message.window = native_window;
+            message.type = enter;
+            message.data.data32[0] = native_window;
+            message.data.data32[1] = (5u << 24) | 1u;
+            error = xcb_request_check(connection, xcb_send_event_checked(connection, 0,
+                native_window, XCB_EVENT_MASK_NO_EVENT, (char const*)&message));
+            raster_native_check(error == 0, "addressed native drop enter queued");
+            free(error);
+            WmEventList events = wm_poll_events(arena, windowing);
+            bool emitted_drop = false;
+            for (WmEvent* event = events.first; event; event = event->next)
+            {
+                emitted_drop = emitted_drop || (event->kind == WM_EVENT_FILE_DROP && event->window == window);
+            }
+            raster_native_check(!emitted_drop && !windowing->xdnd_active && !windowing->xdnd_drop_pending &&
+                                windowing->xdnd_transfer_data.length == 0, "opt-out ignores enter before transaction or payload acquisition");
+            arena_reset_to_start(arena);
+            message.type = drop;
+            message.data.data32[1] = 0;
+            message.data.data32[2] = XCB_CURRENT_TIME;
+            error = xcb_request_check(connection, xcb_send_event_checked(connection, 0,
+                native_window, XCB_EVENT_MASK_NO_EVENT, (char const*)&message));
+            raster_native_check(error == 0, "addressed native drop queued");
+            free(error);
+            events = wm_poll_events(arena, windowing);
+            emitted_drop = false;
+            for (WmEvent* event = events.first; event; event = event->next)
+            {
+                emitted_drop = emitted_drop || (event->kind == WM_EVENT_FILE_DROP && event->window == window);
+            }
+            raster_native_check(!emitted_drop && !windowing->xdnd_active && !windowing->xdnd_drop_pending &&
+                                windowing->xdnd_transfer_data.length == 0, "opt-out ignores drop before selection conversion");
+            arena_reset_to_start(arena);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void raster_native_bounded_poll(Arena* arena, WmHandle* windowing, WmWindowHandle* window, WmNativeSurface surface)
 {
     // Drain startup events before submitting two distinct native pointer moves.
@@ -123,6 +212,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
         WmWindowHandle* window = wm_window_create(windowing, (WmWindowCreate){
             .name = S8("Buster raster native validation"),
             .size = {.width = 32, .height = 24},
+            .disable_file_drop = cycle != 0,
         });
         raster_native_check(window != 0, "real wm window creation");
         if (window)
@@ -162,6 +252,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
                 }
 
                 raster_native_bounded_poll(arena, windowing, window, surface);
+                raster_native_file_drop_opt_out(arena, windowing, window, surface, cycle != 0);
                 xcb_connection_t* connection = (xcb_connection_t*)surface.display;
                 u32 values[] = {48, 40};
                 xcb_generic_error_t* error = xcb_request_check(connection,

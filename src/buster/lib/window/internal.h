@@ -130,6 +130,7 @@ struct WmWindowHandle
     u32 xim_input_style_attempt_index;
     bool focused;
     bool xim_create_ic_pending;
+    bool disable_file_drop;
 #elif defined(_WIN32)
     HWND handle;
     char16 pending_high_surrogate;

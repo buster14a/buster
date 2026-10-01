@@ -1689,7 +1689,7 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_set_metadata(WmWindowHandle* window, WmWi
         }
 
         xcb_atom_t xdnd_aware = wm_x11_atom(X11_ATOM_XDND_AWARE);
-        if (xdnd_aware)
+        if (xdnd_aware && !window->disable_file_drop)
         {
             u32 xdnd_version = 5;
             xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window->handle, xdnd_aware, XCB_ATOM_ATOM, 32, 1, &xdnd_version);
@@ -4092,7 +4092,20 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                     xcb_client_message_event_t* client_message_event = (xcb_client_message_event_t*)event;
                     xcb_atom_t message_type = client_message_event->type;
                     bool message_format_32 = client_message_event->format == 32;
-                    if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_WM_PROTOCOLS) &&
+                    WmWindowHandle* message_window = wm_x11_window_from_xcb(windowing, client_message_event->window);
+                    bool ignore_file_drop = message_window && message_window->disable_file_drop &&
+                                            (message_type == wm_x11_atom(X11_ATOM_XDND_ENTER) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_POSITION) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_LEAVE) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_DROP) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_STATUS) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_FINISHED));
+                    if (ignore_file_drop)
+                    {
+                        // Ignore even directly addressed XDND before source watching,
+                        // property/reply reads, selection conversion, or state changes.
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_WM_PROTOCOLS) &&
                         client_message_event->data.data32[0] == wm_x11_atom(X11_ATOM_WM_DELETE_WINDOW))
                     {
                         wm_event_push(windowing, (WmEvent){
@@ -4402,6 +4415,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
         *result = (WmWindowHandle){
             .handle = window_id,
             .owner = windowing,
+            .disable_file_drop = create.disable_file_drop,
         };
         wm_x11_window_set_metadata(result, create);
         xcb_map_window(connection, window_id);

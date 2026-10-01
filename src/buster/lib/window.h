@@ -295,7 +295,10 @@ struct WmWindowCreate
     String8 name;
     void* context;
     WmOffset size;
-    u8 reserved[4];
+    // Linux/XCB: omit native file-drop advertisement and ignore addressed XDND.
+    // Zero preserves the existing drop behavior. Other backends ignore this flag.
+    bool disable_file_drop;
+    u8 reserved[3];
 };
 
 // Native drag destinations use this small value type to pass ordered NSURL
