@@ -98,6 +98,7 @@ jobs:
           /bin/bash --version
           python3 ios/hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"
           bash ios/install_lifecycle_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"
+          /bin/bash ios/launch_diagnostics_mock_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-launch-diagnostics.log"
           bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"
       - name: Exercise Android monitor and batch status attribution
         id: android_status
@@ -139,6 +140,7 @@ jobs:
             ${{ runner.temp }}/mobile-lifecycle.log
             ${{ runner.temp }}/ios-signing-budget.log
             ${{ runner.temp }}/ios-install-lifecycle.log
+            ${{ runner.temp }}/ios-launch-diagnostics.log
             ${{ runner.temp }}/android-status.log
             ${{ runner.temp }}/android-summary.log
             ${{ runner.temp }}/mobile-lifecycle-evidence/

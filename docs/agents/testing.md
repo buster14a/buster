@@ -159,7 +159,8 @@
   process-table, unified-log and crash-report probes retain separate bounded
   lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
   native exit, timeout/helper status and capture completion distinguished.
-  Probe failure does not establish an app crash. The attached-monitor mocks
+  Probe failure does not establish an app crash. The additive
+  `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
   cover rejection, native exit 124, watchdog expiry, large output and cleanup.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
