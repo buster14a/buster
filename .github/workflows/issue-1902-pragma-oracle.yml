@@ -30,4 +30,4 @@ jobs:
                               return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
                           record = {"case": case["id"], "compiler": cc, "expected": case["expected"], "stdout": decode(error.stdout), "stderr": decode(error.stderr), "timed_out": True}
                       print(json.dumps(record), flush=True)
-                    PY
+          PY
