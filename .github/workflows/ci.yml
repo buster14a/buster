@@ -296,7 +296,7 @@ jobs:
 
       - name: Workflow tool regression tests
         id: workflow_tools
-        if: ${{ needs.reuse.outputs.reuse != 'true' && matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ matrix.shard == 'release' && needs.reuse.outputs.reuse != 'true' && steps.zig_cache_policy.outcome == 'success' }}
         # Native fixture builds and process launches; see docs/ci-bootstrap-wrapper.md.
         # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
         # exhausted 120s in run 35934837738 despite passing suite summaries.
