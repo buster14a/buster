@@ -111,6 +111,15 @@ Direct children retain the ten-second cleanup deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
 These are controlled fixture trees, not containment for detached programs.
 
+The cancellation control releases its coordinator when child readiness succeeds
+or fails. Readiness uses the existing child launch-relative deadline; the
+coordinator has no earlier timer that can silently skip cancellation during
+startup. Setup failures release and join the coordinator, reap owned children
+before removing fixtures, and retain the inner case output and summary in the
+assertion diagnostic. Controls cover readiness delayed beyond five seconds and
+a child exiting before publishing its descendant marker, without assertion
+retries or changes to the production child/suite deadlines.
+
 The retained log includes environment, test and child JSON, plus
 `BOOTSTRAP_LAUNCH`, `BOOTSTRAP_COLLECTION` and ordered `BOOTSTRAP_CASE_SUMMARY`
 records. It identifies Python/architecture, image, actual shell, child inventory,
