@@ -500,6 +500,36 @@ local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
 AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
 
+## Pass-through options
+
+`-Wl,a,b,c` produces three individual linker arguments, in order. Each
+`-Xlinker value` contributes exactly one argument; commas in that value are
+not split. Empty comma fields and missing operands fail with a diagnostic.
+The driver and native linker share `link_validate_linker_arguments`, and the
+linker checks the actual static/dynamic image before publishing output.
+
+The supported subset is:
+
+- Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
+  `--export-dynamic` export definitions. A static image refuses these options.
+- Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
+  two arguments `-z defs` require strong references to resolve. Executables
+  already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
+  `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
+
+Other linker values and unsupported targets/output modes fail rather than
+silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
+preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
+export validation. Unknown options, entry overrides, wrapping, archive-mode
+switches, runtime paths, version scripts, and other `-z` modes are refused.
+
+`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
+preprocessor macro/include operations and dependency requests. Direct `-D`,
+`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
+`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
+preserves any existing artifact instead of reporting a successful stale build.
+
 ## Object output (`-c`)
 
 `-c` writes the object through `object_write_borrowing`. The ELF64 writer

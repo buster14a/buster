@@ -44,3 +44,25 @@ not establish device rendering or a supported graphical application.
 
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
+
+## Slider input contract
+
+`ui_slider` reserves Left/Right for five-percent value adjustments while focused,
+including focus acquired through Tab or a pointer press. Values clamp to the
+supplied endpoints; Tab and vertical arrows remain focus-navigation inputs.
+`UI_BoxFlag_OwnsHorizontalArrows` gives other value widgets the same ownership
+policy without making them text editors. Disabled or active-focus-disabled
+sliders do not accept keyboard value changes.
+
+A completed slider click reads its own release coordinate from
+`UI_Signal.left_click_position`. Pointer moves later in the same event list
+still update hover state, but do not change that committed value. A slider with
+live left-button capture continues following the current pointer, including
+outside its bounds; an outside release ends capture without reporting a click.
+`./build.sh build --config Release -t test_ui_slider` runs the focused
+`ui_slider_tests` module against the real `ui_core`/`ui_builder` front doors and
+an inert native renderer boundary. Desktop `test_all` and `test_units` include
+this component when tests and libc are enabled; mobile and tests-disabled graphs
+omit it. It covers the completed hit tree and reordered widget builds without
+adding UI dependencies to the compiler. The broad retained `ui_tests` suite is
+unregistered; these component checks do not establish device rendering support.

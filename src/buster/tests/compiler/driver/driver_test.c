@@ -2538,7 +2538,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
         {S8("int g(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true},
         {S8("int g(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true},
-        {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), false},
+        {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), true},
+        {S8("int g(volatile int v) { return _Generic(v, int: 1, volatile int: 2); }\n"), true},
+        {S8("int g(void (*fp)(int *)) { return _Generic(fp, void (*)(int *): 1); }\n"), true},
+        {S8("int g(const char *p) { return _Generic(p, char *: 1); }\n"), false},
+        {S8("int g(void) { int a = 0; typeof(_Generic(a, default: (char)0)) c = 0; _Static_assert(sizeof c == 1, \"selected type\"); return c; }\n"), true},
+        {S8("volatile int v; _Static_assert(_Generic(v, int: 1, default: 0), \"conversion\");\n"), true},
+        {S8("const char *p; _Static_assert(!_Generic(p, char *: 1, default: 0), \"pointee\");\n"), true},
+        {S8("_Static_assert(!__builtin_types_compatible_p(const char *, char *), \"identity\");\n"), true},
         {S8("long long g(long long x) { switch (x) { case -1: return 1; case 4294967295LL: return 2; } return 0; }\n"), true},
         {S8("static int x; int *p = &x;\n"), true},
         {S8("int f(int x) { return x + 1; }\n"), true, true},
@@ -2574,7 +2581,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(void) { int *p = 0; return _Generic(p, int *: 1); }\n"), true, true},
         {S8("int f(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true, true},
         {S8("int f(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true, true},
-        {S8("int f(int); int g(void) { return _Generic(f, int (*)(int): 1); }\n"), false, true},
+        {S8("int f(int); int g(void) { return _Generic(f, int (*)(int): 1); }\n"), true},
         {S8("int f(int x) { switch(x) { case 1 ? 2 : 3: return 1; } return 0; }\n"), true, true},
         {S8("int f(double); int g(void) { int (*p)(int); p=f; return 0; }\n"), false, true},
         {S8("int f(double); int (*g(void))(int) { return f; }\n"), false, true},
@@ -7400,6 +7407,189 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_dynamic_stack(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "extern void *malloc(__SIZE_TYPE__);\n"
+        "extern void free(void *);\n"
+        "static int calls;\n"
+        "static int three(void) { calls++; return 3; }\n"
+        "static int one(void) { calls++; return 1; }\n"
+        "static unsigned long keep_size(unsigned long size) { return size; }\n"
+        "static void *keep_pointer(void *pointer) { return pointer; }\n"
+        "static int parameter_sizes(int n, int values[n])\n"
+        "{ return sizeof(values) != 8 || sizeof(__typeof__(values)) != 8; }\n"
+        "struct M { double d; int i; };\n"
+        "struct context { unsigned num; };\n"
+        "static int type_names(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3, m = 5;\n"
+        "    struct context c = { 3 }, *ctx = &c;\n"
+        "    fail |= sizeof(int[n]) != 12;\n"
+        "    fail |= sizeof(char[n]) != 3;\n"
+        "    fail |= sizeof(double[n][m]) != 120;\n"
+        "    fail |= sizeof(struct M[n]) != 48;\n"
+        "    fail |= _Alignof(struct M[n]) != 8;\n"
+        "    fail |= sizeof(int (*)[n]) != 8;\n"
+        "    fail |= sizeof(struct M[ctx->num + 1]) != 64;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(int[three()]) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(char[three()][three()]) != 9 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    fail |= keep_size(sizeof(int[three()])) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    fail |= _Alignof(struct M[three()]) != 8 || calls != 0;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(sizeof(int[three()])) != sizeof(sizeof(0)) || calls != 0;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int computed_operands(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3;\n"
+        "    int v[n], matrix[2][n], (*pv)[n] = &matrix[0];\n"
+        "    fail |= parameter_sizes(n, v);\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(*(pv + one())) != 12 || calls != 1;\n"
+        "    fail |= sizeof(*&v) != 12;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(__typeof__(*(pv + one()))) != 12 || calls != 1;\n"
+        "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
+        "    calls = 0;\n"
+        "    __typeof__(*(pv + one())) copy, other;\n"
+        "    fail |= sizeof copy != 12 || sizeof other != 12 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    __typeof__((one(), pv)) q = pv;\n"
+        "    fail |= sizeof(*q) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    typedef __typeof__(*(pv + one())) Row, SameRow;\n"
+        "    Row r; SameRow s;\n"
+        "    fail |= sizeof r != 12 || sizeof s != 12 || calls != 2;\n"
+        "    calls = 0;\n"
+        "    __typeof__(one()) no_eval[n];\n"
+        "    fail |= sizeof no_eval != 12 || calls != 0;\n"
+        "    n = 7;\n"
+        "    fail |= sizeof(__typeof__(matrix)) != 24;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(*(one() ? pv : pv)) != 12 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    fail |= sizeof(sizeof(*(pv + one()))) != sizeof(sizeof(0)) || calls != 0;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int typedef_bounds(void)\n"
+        "{\n"
+        "    int fail = 0, k = 3;\n"
+        "    typedef int T[k];\n"
+        "    k = 5;\n"
+        "    T x, y;\n"
+        "    fail |= sizeof x != 12 || sizeof y != 12 || sizeof(T) != 12;\n"
+        "    fail |= sizeof(T[2]) != 24;\n"
+        "    calls = 0;\n"
+        "    typedef double Row[three()];\n"
+        "    Row a[2];\n"
+        "    fail |= sizeof a != 48 || sizeof(Row) != 24 || calls != 1;\n"
+        "    calls = 0;\n"
+        "    typedef int (*P)[three()];\n"
+        "    P p = &x;\n"
+        "    fail |= sizeof(*p) != 12 || calls != 1;\n"
+        "    return fail;\n"
+        "}\n"
+        "static int heap_and_cast(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3, m = 5;\n"
+        "    double (*a)[m] = malloc(sizeof(double[n][m]));\n"
+        "    if (a)\n"
+        "    {\n"
+        "        for (int i = 0; i < n; i++)\n"
+        "        {\n"
+        "            for (int j = 0; j < m; j++) a[i][j] = i * m + j;\n"
+        "        }\n"
+        "        fail |= a[n - 1][m - 1] != 14;\n"
+        "        double (*b)[m] = (double (*)[m])a;\n"
+        "        b[1][2] = 37;\n"
+        "        fail |= a[1][2] != 37 || sizeof(*b) != 40;\n"
+        "        calls = 0;\n"
+        "        int (*p)[three()] = keep_pointer((int (*)[three()])a);\n"
+        "        fail |= calls != 2 || sizeof(*p) != 12;\n"
+        "        free(a);\n"
+        "    }\n"
+        "    else fail = 1;\n"
+        "    return fail;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int fail = type_names();\n"
+        "    fail |= computed_operands() << 1;\n"
+        "    fail |= typedef_bounds() << 2;\n"
+        "    fail |= heap_and_cast() << 3;\n"
+        "    return fail;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vla-runtime-types"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vla-runtime-types-run"), S8(".exe"));
+                    String8 command[] = {optimizations[optimization], modes[mode], frontends[frontend], S8("-fverify-codegen"),
+                                         S8("-o"), executable, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run_arguments[] = {executable};
+                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments),
+                            (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                        {
+                            ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                            String8 context = string_format(temporary.arena,
+                                S8("VLA runtime types: {S8} {S8} {S8}; native status={u32}, timeout={u32}; exit bits: type names=1, computed operands=2, typedef bounds=4, heap/casts=8"),
+                                optimizations[optimization], modes[mode], frontends[frontend], waited.platform_status, (u32)waited.timed_out);
+                            BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+        String8 unsupported = S8("int f(int n, void *p) { return (int (**)[n])p != 0; }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(unsupported))))
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object = buster_test_temporary_path(temporary.arena, S8("buster-vla-unsupported"), S8(".o"));
+                String8 command[] = {frontends[frontend], S8("-c"), S8("-o"), object, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic,
+                    S8("nested pointer-to-VLA casts are not supported")) < compiled.diagnostic.length, compiled.diagnostic);
+                scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_row_address(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9473,6 +9663,195 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
         else
         {
             arguments->show(arguments, S8("Wasm64 integer engine execution skipped: Node is not installed\n"));
+        }
+    }
+    return result;
+}
+
+// Recompile each frontend form for byte stability, then use Node's own Wasm
+// validator and engine for positive calls and ABI-negative traps.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table"), S8(".c"));
+    String8 script_path = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table"), S8(".cjs"));
+    String8 source = S8(
+        "// Function pointers use 64-bit handles, separate from Memory64 data addresses.\n"
+        "typedef int (*Unary)(int);\n"
+        "typedef int (*Binary)(int, int);\n"
+        "\n"
+        "extern int host_offset(int value);\n"
+        "\n"
+        "static int plus_three(int value)\n"
+        "{\n"
+        "    return value + 3;\n"
+        "}\n"
+        "\n"
+        "static int double_value(int value)\n"
+        "{\n"
+        "    return value * 2;\n"
+        "}\n"
+        "\n"
+        "static int add_pair(int left, int right)\n"
+        "{\n"
+        "    return left + right;\n"
+        "}\n"
+        "\n"
+        "Unary global_callback = plus_three;\n"
+        "Unary imported_callback = host_offset;\n"
+        "Unary callback_array[3] = {plus_three, double_value, host_offset};\n"
+        "\n"
+        "struct CallbackRecord\n"
+        "{\n"
+        "    int tag;\n"
+        "    Unary callback;\n"
+        "};\n"
+        "\n"
+        "struct CallbackRecord callback_record = {41, double_value};\n"
+        "\n"
+        "Unary get_plus_three(void)\n"
+        "{\n"
+        "    return plus_three;\n"
+        "}\n"
+        "\n"
+        "Unary get_double_value(void)\n"
+        "{\n"
+        "    return double_value;\n"
+        "}\n"
+        "\n"
+        "Binary get_add_pair(void)\n"
+        "{\n"
+        "    return add_pair;\n"
+        "}\n"
+        "\n"
+        "Unary get_imported(void)\n"
+        "{\n"
+        "    return host_offset;\n"
+        "}\n"
+        "\n"
+        "int apply(Unary callback, int value)\n"
+        "{\n"
+        "    return callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_global(int value)\n"
+        "{\n"
+        "    return global_callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_imported(int value)\n"
+        "{\n"
+        "    return imported_callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_array(int index, int value)\n"
+        "{\n"
+        "    return callback_array[index](value);\n"
+        "}\n"
+        "\n"
+        "int apply_record(int value)\n"
+        "{\n"
+        "    return callback_record.callback(value) + callback_record.tag;\n"
+        "}\n"
+        "\n"
+        "int apply_loop(int value)\n"
+        "{\n"
+        "    for (int index = 0; index < 3; index += 1)\n"
+        "    {\n"
+        "        value = callback_array[index](value);\n"
+        "    }\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "void set_global(Unary callback)\n"
+        "{\n"
+        "    global_callback = callback;\n"
+        "}\n");
+    String8 script = S8(
+        "// Validate and execute the emitted table and typed calls in an independent engine.\n"
+        "'use strict';\n"
+        "const fs = require('node:fs');\n"
+        "const assert = require('node:assert/strict');\n"
+        "\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "assert(WebAssembly.validate(bytes), 'invalid Wasm64 function-table module');\n"
+        "const imports = {env: {host_offset(value) { return value + 11; }}};\n"
+        "const functions = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports).exports;\n"
+        "const plus = functions.get_plus_three();\n"
+        "const twice = functions.get_double_value();\n"
+        "const imported = functions.get_imported();\n"
+        "const binary = functions.get_add_pair();\n"
+        "const handles = [plus, twice, imported, binary];\n"
+        "assert(handles.every(value => typeof value === 'bigint' && value > 0n));\n"
+        "assert.equal(new Set(handles).size, handles.length);\n"
+        "\n"
+        "let checks = 0;\n"
+        "const check = (actual, expected) => { assert.equal(actual, expected); checks += 1; };\n"
+        "for (let value = -4; value <= 4; value += 1) {\n"
+        "    check(functions.apply(plus, value), value + 3);\n"
+        "    check(functions.apply(twice, value), value * 2);\n"
+        "    check(functions.apply(imported, value), value + 11);\n"
+        "    check(functions.apply_global(value), value + 3);\n"
+        "    check(functions.apply_imported(value), value + 11);\n"
+        "    check(functions.apply_array(0, value), value + 3);\n"
+        "    check(functions.apply_array(1, value), value * 2);\n"
+        "    check(functions.apply_array(2, value), value + 11);\n"
+        "    check(functions.apply_record(value), value * 2 + 41);\n"
+        "    check(functions.apply_loop(value), ((value + 3) * 2) + 11);\n"
+        "}\n"
+        "functions.set_global(twice);\n"
+        "check(functions.apply_global(13), 26);\n"
+        "functions.set_global(plus);\n"
+        "check(functions.apply_global(13), 16);\n"
+        "\n"
+        "// These inputs are ABI-negative probes, not defined C executions. The high\n"
+        "// bits must trap before i32.wrap_i64, and call_indirect checks slot and type.\n"
+        "for (const handle of [0n, 0xffffffffn, (1n << 32n) | plus, binary]) {\n"
+        "    assert.throws(() => functions.apply(handle, 5), WebAssembly.RuntimeError);\n"
+        "    checks += 1;\n"
+        "}\n"
+        "console.log(`${checks}/${checks} Wasm64 function-table engine checks passed`);\n");
+    bool prepared = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)) &&
+                    file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+    bool ready = BUSTER_REQUIRE(arguments, prepared);
+    String8 frontend_options[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 frontend = 0; ready && frontend < BUSTER_ARRAY_LENGTH(frontend_options); frontend += 1)
+    {
+        String8 first_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table-first"),
+                                                         string_format(arguments->arena, S8("-{u32}.wasm"), frontend));
+        String8 second_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table-second"),
+                                                          string_format(arguments->arena, S8("-{u32}.wasm"), frontend));
+        String8 first_command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), frontend_options[frontend],
+                                   S8("-o"), first_output, source_path};
+        String8 second_command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), frontend_options[frontend],
+                                    S8("-o"), second_output, source_path};
+        CompilerDriverResult first = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(first_command)));
+        CompilerDriverResult second = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(second_command)));
+        if (first.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("Wasm64 function-table error: {S8}\n"), first.diagnostic);
+        }
+        if (BUSTER_REQUIRE(arguments, first.error == COMPILER_DRIVER_ERROR_NONE && first.has_wasm64 &&
+                                         second.error == COMPILER_DRIVER_ERROR_NONE && second.has_wasm64))
+        {
+            BUSTER_TEST(arguments, first.wasm64.bytes.length == second.wasm64.bytes.length &&
+                                       memcmp(first.wasm64.bytes.pointer, second.wasm64.bytes.pointer, first.wasm64.bytes.length) == 0);
+            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            if (node.length)
+            {
+                String8 node_arguments[] = {node, script_path, first_output};
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                    arguments, arguments->arena, S8("function-table"), frontend ? S8("frontend-ssa") : S8("frontend-memory"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("96/96 Wasm64 function-table engine checks passed"),
+                    compiler_driver_test_wasm_node_deadline_microseconds());
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+            }
+            else
+            {
+                arguments->show(arguments, S8("Wasm64 function-table engine execution skipped: Node is not installed\n"));
+            }
         }
     }
     return result;
@@ -11781,6 +12160,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/driver_pass_through_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 
@@ -14544,6 +14924,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
@@ -14581,6 +14964,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_alignment);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_runtime_types);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_dynamic_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_i128_divide);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aggregate_comma);
@@ -14592,6 +14976,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
@@ -15119,7 +15504,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-pthread"),
         S8("-L/sdk/lib"),
         S8("-l:libandroid.so"),
-        S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
         S8("-o"),
         S8("output.o"),
@@ -15159,7 +15543,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.library_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.library_paths[0], S8("/sdk/lib"));
     BUSTER_STRING_TEST(arguments, invocation.libraries[0], S8(":libandroid.so"));
-    BUSTER_TEST(arguments, invocation.linker_argument_count == 1);
+    BUSTER_TEST(arguments, invocation.linker_argument_count == 0);
     BUSTER_TEST(arguments, invocation.input_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
@@ -15340,7 +15724,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation uefi_linker_argument =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(uefi_linker_argument_command_line));
     BUSTER_TEST(arguments, uefi_linker_argument.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets"));
+    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets: --gc-sections"));
     String8 unsupported_uefi_command_line[] = {
         S8("--target=wasm64-unknown-uefi"), S8("source.c"),
     };
@@ -19052,7 +19436,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_generic_command_line[] = {
         S8("-o"),
         c_generic_path,
-        S8("tests/basic_c_generic.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
     };
     CompilerDriverResult c_generic = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_generic_command_line)));
@@ -22042,6 +22426,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // The declarator beside list_noreturn carries no marker of its own, so its
     // own call returns. Scanning the whole declarator list marked it too and
     // replaced the explicit return after this call with a noreturn terminator.
+    // The zero return value is the zero idiom: the flags are dead before RET.
     u64 sibling_body = string_first_sequence(noreturn_assembly.output, S8("through_list_sibling:\n"));
     BUSTER_TEST(arguments, sibling_body != BUSTER_STRING_NO_MATCH);
     if (sibling_body != BUSTER_STRING_NO_MATCH)
@@ -22052,7 +22437,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (sibling_call != BUSTER_STRING_NO_MATCH)
         {
             String8 after_sibling_call = string_slice(sibling_assembly, sibling_call + S8("call \"list_returns\"\n").length, sibling_assembly.length);
-            BUSTER_TEST(arguments, string_starts_with_sequence(after_sibling_call, S8("\tmov eax, 0x0")));
+            BUSTER_TEST(arguments, string_starts_with_sequence(after_sibling_call, S8("\txor eax, eax")));
         }
     }
     // SQLite compatibility reduced its own set of frontend, lowering and
@@ -22311,6 +22696,487 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             };
             CompilerDriverResult fixture = compiler_driver_execute_invocation(
                 fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
+    // Verified machine rewrites (docs/machine-rewrite-campaign.md): each
+    // fixture computes its own expectations and exits zero. The MIR
+    // allocators compile strictly, so a fallback cannot hide the rewritten
+    // encoder paths; NONE (index 1) is the direct-emitter control. The
+    // sources are embedded rather than added under tests/, which keeps the
+    // frozen native-retirement support inventory unchanged, and each literal
+    // stays below the C99 minimum supported string-literal length.
+    String8 c_machine_rewrites_parts[] = {S8(
+        "// Verified local machine rewrites (docs/machine-rewrite-campaign.md): zero\n"
+        "// materializations next to live and dead flags, spills and reloads around\n"
+        "// calls, small and large frames (disp8 and disp32 frame offsets), and\n"
+        "// epilogues with and without callee-saved registers. Every check computes\n"
+        "// its expectation independently; main returns the first failing check.\n"
+        "\n"
+        "typedef unsigned long long u64;\n"
+        "typedef long long s64;\n"
+        "\n"
+        "static volatile int sink;\n"
+        "\n"
+        "__attribute__((noinline)) static int opaque(int value)\n"
+        "{\n"
+        "    sink = value;\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static u64 opaque64(u64 value)\n"
+        "{\n"
+        "    sink = (int)value;\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "// A zero constant beside comparisons of every signedness and relation: the\n"
+        "// zero must not disturb the flags a following setcc/branch reads.\n"
+        "__attribute__((noinline)) static int compare_with_zero_between(int a, int b)\n"
+        "{\n"
+        "    int less = a < b;\n"
+        "    int zero = 0;\n"
+        "    int below = (unsigned)a < (unsigned)b;\n"
+        "    int equal = a == b;\n"
+        "    return less * 1 + below * 2 + equal * 4 + zero;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int zero_arguments(int a)\n"
+        "{\n"
+        "    return opaque(0) + opaque(a) + opaque(0);\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static s64 conditional_zero(s64 a, s64 b)\n"
+        "{\n"
+        "    return a < b ? 0 : a - b;\n"
+        "}\n"
+        "\n"
+        "// Enough simultaneously live values across calls to force spills and\n"
+        "// reloads through frame slots.\n"
+        "__attribute__((noinline)) static u64 spill_pressure(u64 seed)\n"
+        "{\n"
+        "    u64 a = opaque64(seed + 1), b = opaque64(seed + 2), c = opaque64(seed + 3), d = opaque64(seed + 4);\n"
+        "    u64 e = opaque64(seed + 5), f = opaque64(seed + 6), g = opaque64(seed + 7), h = opaque64(seed + 8);\n"
+        "    u64 i = opaque64(seed + 9), j = opaque64(seed + 10), k = opaque64(seed + 11), l = opaque64(seed + 12);\n"
+        "    u64 m = opaque64(seed + 13), n = opaque64(seed + 14), o = opaque64(seed + 15), p = opaque64(seed + 16);\n"
+        "    u64 total = opaque64(a * 3 + b) + opaque64(c * 5 + d) + opaque64(e * 7 + f) + opaque64(g * 11 + h);\n"
+        "    total += opaque64(i ^ j) + opaque64(k | l) + opaque64(m & n) + opaque64(o - p);\n"
+        "    return total + a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p;\n"
+        "}\n"
+        "\n"
+        "// A frame larger than a disp8 reach: locals at both displacement classes.\n"
+        "__attribute__((noinline)) static int large_frame(int seed)\n"
+        "{\n"
+        "    volatile int small[8];\n"
+        "    volatile int big[200];\n"
+        "    for (int index = 0; index < 8; index += 1)\n"
+        "    {\n"
+        "        small[index] = seed + index;\n"
+        "    }\n"
+        "    for (int index = 0; index < 200; index += 1)\n"
+        "    {\n"
+        "        big[index] = seed * index;\n"
+        "    }\n"
+        "    int total = 0;\n"
+        "    for (int index = 0; index < 8; index += 1)\n"
+        "    {\n"
+        "        total += small[index];\n"
+        "    }\n"
+        "    total += big[0] + big[99] + big[199];\n"
+        "    return total;\n"
+        "}\n"
+        "\n"
+        "static int returns_zero(void)\n"
+        "{\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int inputs[] = {-3, -1, 0, 1, 2, 0x7fffffff, (int)0x80000000};\n"
+        "    for (unsigned x = 0; x < sizeof(inputs) / sizeof(inputs[0]) && !result; x += 1)\n"
+        "    {\n"
+        "        for (unsigned y = 0; y < sizeof(inputs) / sizeof(inputs[0]) && !result; y += 1)\n"),
+        S8(
+        "        {\n"
+        "            int a = opaque(inputs[x]);\n"
+        "            int b = opaque(inputs[y]);\n"
+        "            int expected = (a < b) * 1 + ((unsigned)a < (unsigned)b) * 2 + (a == b) * 4;\n"
+        "            if (compare_with_zero_between(a, b) != expected) result = 1;\n"
+        "            s64 wide_a = (s64)a * 3;\n"
+        "            s64 wide_b = (s64)b * 5;\n"
+        "            s64 expected_zero = wide_a < wide_b ? 0 : wide_a - wide_b;\n"
+        "            if (!result && conditional_zero(wide_a, wide_b) != expected_zero) result = 2;\n"
+        "        }\n"
+        "    }\n"
+        "    if (!result && zero_arguments(41) != 41) result = 3;\n"
+        "    u64 seed = opaque64(1000);\n"
+        "    u64 expected_spill = 0;\n"
+        "    {\n"
+        "        u64 v[17];\n"
+        "        for (int index = 1; index <= 16; index += 1) v[index] = seed + (u64)index;\n"
+        "        expected_spill = (v[1] * 3 + v[2]) + (v[3] * 5 + v[4]) + (v[5] * 7 + v[6]) + (v[7] * 11 + v[8]);\n"
+        "        expected_spill += (v[9] ^ v[10]) + (v[11] | v[12]) + (v[13] & v[14]) + (v[15] - v[16]);\n"
+        "        for (int index = 1; index <= 16; index += 1) expected_spill += v[index];\n"
+        "    }\n"
+        "    if (!result && spill_pressure(seed) != expected_spill) result = 4;\n"
+        "    int expected_frame = 0;\n"
+        "    for (int index = 0; index < 8; index += 1) expected_frame += 7 + index;\n"
+        "    expected_frame += 7 * 0 + 7 * 99 + 7 * 199;\n"
+        "    if (!result && large_frame(7) != expected_frame) result = 5;\n"
+        "    if (!result && returns_zero() != 0) result = 6;\n"
+        "    return result;\n"
+        "}\n")};
+    String8 c_branch_layout_parts[] = {S8(
+        "// Branch layout (docs/machine-rewrite-campaign.md): a jump to the next block\n"
+        "// falls through, and a conditional branch whose taken target is the next\n"
+        "// block branches on the inverted condition to its fallthrough. Every signed\n"
+        "// and unsigned relation takes both directions here, through if/else ladders,\n"
+        "// loops, early exits and switches; main returns the first failing check.\n"
+        "\n"
+        "static volatile int sink;\n"
+        "\n"
+        "__attribute__((noinline)) static int opaque(int value)\n"
+        "{\n"
+        "    sink = value;\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int relations(int a, int b)\n"
+        "{\n"
+        "    int bits = 0;\n"
+        "    if (a < b) bits |= 1;\n"
+        "    if (a <= b) bits |= 2;\n"
+        "    if (a > b) bits |= 4;\n"
+        "    if (a >= b) bits |= 8;\n"
+        "    if (a == b) bits |= 16;\n"
+        "    if (a != b) bits |= 32;\n"
+        "    if ((unsigned)a < (unsigned)b) bits |= 64;\n"
+        "    if ((unsigned)a <= (unsigned)b) bits |= 128;\n"
+        "    if ((unsigned)a > (unsigned)b) bits |= 256;\n"
+        "    if ((unsigned)a >= (unsigned)b) bits |= 512;\n"
+        "    return bits;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int else_relations(long long a, long long b)\n"
+        "{\n"
+        "    int bits = 0;\n"
+        "    if (!(a < b)) bits |= 1; else bits |= 2;\n"
+        "    if (!(a <= b)) bits |= 4; else bits |= 8;\n"
+        "    if (!((unsigned long long)a > (unsigned long long)b)) bits |= 16; else bits |= 32;\n"
+        "    if (!((unsigned long long)a >= (unsigned long long)b)) bits |= 64; else bits |= 128;\n"
+        "    return bits;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int ladder(int value)\n"
+        "{\n"
+        "    int result;\n"
+        "    if (value < -10) result = 1;\n"
+        "    else if (value < 0) result = 2;\n"
+        "    else if (value == 0) result = 3;\n"
+        "    else if (value <= 10) result = 4;\n"
+        "    else if (value != 42) result = 5;\n"
+        "    else result = 6;\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int loops(int count)\n"
+        "{\n"
+        "    int total = 0;\n"
+        "    for (int outer = 0; outer < count; outer += 1)\n"
+        "    {\n"
+        "        int inner = outer;\n"
+        "        while (inner > 0)\n"
+        "        {\n"
+        "            if (inner & 1) total += inner;\n"
+        "            else total -= 1;\n"
+        "            inner -= 1;\n"
+        "        }\n"
+        "        do\n"
+        "        {\n"
+        "            total += 2;\n"
+        "        } while (total < outer);\n"
+        "        if (total > 1000) break;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int switched(int value)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    switch (value)\n"
+        "    {\n"
+        "        case 0: result = 10; break;\n"
+        "        case 1: result = 11;\n"
+        "        case 2: result += 12; break;\n"
+        "        case 5: result = 15; break;\n"
+        "        case 100: result = 20; break;\n"
+        "        default: result = -1; break;\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int nested(int a, int b, int c)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    if (a)\n"
+        "    {\n"
+        "        if (b) result = c ? 1 : 2;\n"
+        "        else result = c ? 3 : 4;\n"
+        "    }\n"
+        "    else if (b || c)\n"
+        "    {\n"
+        "        result = (b && c) ? 5 : 6;\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "static int expected_relations(int a, int b)\n"
+        "{\n"
+        "    int bits = 0;\n"
+        "    bits |= (a < b) ? 1 : 0;\n"
+        "    bits |= (a <= b) ? 2 : 0;\n"
+        "    bits |= (a > b) ? 4 : 0;\n"
+        "    bits |= (a >= b) ? 8 : 0;\n"
+        "    bits |= (a == b) ? 16 : 0;\n"
+        "    bits |= (a != b) ? 32 : 0;\n"
+        "    bits |= ((unsigned)a < (unsigned)b) ? 64 : 0;\n"),
+        S8(
+        "    bits |= ((unsigned)a <= (unsigned)b) ? 128 : 0;\n"
+        "    bits |= ((unsigned)a > (unsigned)b) ? 256 : 0;\n"
+        "    bits |= ((unsigned)a >= (unsigned)b) ? 512 : 0;\n"
+        "    return bits;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int inputs[] = {-11, -10, -1, 0, 1, 10, 11, 42, 0x7fffffff, (int)0x80000000};\n"
+        "    unsigned count = sizeof(inputs) / sizeof(inputs[0]);\n"
+        "    for (unsigned x = 0; x < count && !result; x += 1)\n"
+        "    {\n"
+        "        int a = opaque(inputs[x]);\n"
+        "        int expected_ladder = a < -10 ? 1 : a < 0 ? 2 : a == 0 ? 3 : a <= 10 ? 4 : a != 42 ? 5 : 6;\n"
+        "        if (ladder(a) != expected_ladder) result = 1;\n"
+        "        for (unsigned y = 0; y < count && !result; y += 1)\n"
+        "        {\n"
+        "            int b = opaque(inputs[y]);\n"
+        "            if (relations(a, b) != expected_relations(a, b)) result = 2;\n"
+        "            long long wa = (long long)a << 3;\n"
+        "            long long wb = (long long)b << 3;\n"
+        "            int expected_else = (wa < wb ? 2 : 1) | (wa <= wb ? 8 : 4) |\n"
+        "                                ((unsigned long long)wa > (unsigned long long)wb ? 32 : 16) |\n"
+        "                                ((unsigned long long)wa >= (unsigned long long)wb ? 128 : 64);\n"
+        "            if (!result && else_relations(wa, wb) != expected_else) result = 3;\n"
+        "        }\n"
+        "    }\n"
+        "    int expected_loops = 0;\n"
+        "    for (int outer = 0; outer < 30; outer += 1)\n"
+        "    {\n"
+        "        int inner = outer;\n"
+        "        while (inner > 0)\n"
+        "        {\n"
+        "            expected_loops += (inner & 1) ? inner : -1;\n"
+        "            inner -= 1;\n"
+        "        }\n"
+        "        do expected_loops += 2; while (expected_loops < outer);\n"
+        "        if (expected_loops > 1000) break;\n"
+        "    }\n"
+        "    if (!result && loops(opaque(30)) != expected_loops) result = 4;\n"
+        "    int switch_inputs[] = {0, 1, 2, 3, 5, 100, -7};\n"
+        "    int switch_expected[] = {10, 23, 12, -1, 15, 20, -1};\n"
+        "    for (unsigned index = 0; index < 7 && !result; index += 1)\n"
+        "    {\n"
+        "        if (switched(opaque(switch_inputs[index])) != switch_expected[index]) result = 5;\n"
+        "    }\n"
+        "    for (int bits = 0; bits < 8 && !result; bits += 1)\n"
+        "    {\n"
+        "        int a = bits & 1, b = (bits >> 1) & 1, c = (bits >> 2) & 1;\n"
+        "        int expected = a ? (b ? (c ? 1 : 2) : (c ? 3 : 4)) : ((b || c) ? ((b && c) ? 5 : 6) : 0);\n"
+        "        if (nested(opaque(a), opaque(b), opaque(c)) != expected) result = 6;\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n")};
+    String8 c_aggregate_copies_parts[] = {S8(
+        "// Aggregate copies move whole sixteen-byte chunks through XMM0\n"
+        "// (docs/machine-rewrite-campaign.md), then 8/4/2/1-byte tails. Every size\n"
+        "// class and every copy direction the machine rows cover is checked byte by\n"
+        "// byte: frame to frame, frame to pointer, pointer to frame, self-assignment,\n"
+        "// by-value arguments and results, and unaligned (packed) destinations.\n"
+        "// main returns the first failing check.\n"
+        "\n"
+        "typedef unsigned char u8;\n"
+        "\n"
+        "#define DEFINE_BLOB(size) \\\n"
+        "    typedef struct Blob##size { u8 bytes[size]; } Blob##size; \\\n"
+        "    __attribute__((noinline)) static Blob##size make##size(u8 seed) \\\n"
+        "    { \\\n"
+        "        Blob##size blob; \\\n"
+        "        for (int index = 0; index < size; index += 1) blob.bytes[index] = (u8)(seed + index * 7); \\\n"
+        "        return blob; \\\n"
+        "    } \\\n"
+        "    __attribute__((noinline)) static int check##size(Blob##size const* blob, u8 seed) \\\n"
+        "    { \\\n"
+        "        int ok = 1; \\\n"
+        "        for (int index = 0; index < size; index += 1) ok &= blob->bytes[index] == (u8)(seed + index * 7); \\\n"
+        "        return ok; \\\n"
+        "    } \\\n"
+        "    __attribute__((noinline)) static Blob##size pass##size(Blob##size blob) \\\n"
+        "    { \\\n"
+        "        Blob##size copy = blob; \\\n"
+        "        return copy; \\\n"
+        "    } \\\n"
+        "    __attribute__((noinline)) static void store##size(Blob##size* destination, Blob##size value) \\\n"
+        "    { \\\n"
+        "        *destination = value; \\\n"
+        "    } \\\n"
+        "    __attribute__((noinline)) static Blob##size load##size(Blob##size const* source) \\\n"
+        "    { \\\n"
+        "        Blob##size value = *source; \\\n"
+        "        return value; \\\n"
+        "    } \\\n"
+        "    __attribute__((noinline)) static int run##size(u8 seed) \\\n"
+        "    { \\\n"
+        "        Blob##size first = make##size(seed); \\\n"
+        "        Blob##size second = first; \\\n"
+        "        int ok = check##size(&second, seed); \\\n"
+        "        second = second; \\\n"
+        "        ok &= check##size(&second, seed); \\\n"
+        "        Blob##size third = pass##size(second); \\\n"
+        "        ok &= check##size(&third, seed); \\\n"
+        "        Blob##size heap[3]; \\\n"
+        "        heap[0] = make##size((u8)(seed + 1)); \\\n"
+        "        heap[2] = make##size((u8)(seed + 2)); \\\n"
+        "        store##size(&heap[1], third); \\\n"
+        "        ok &= check##size(&heap[0], (u8)(seed + 1)) & check##size(&heap[1], seed) & check##size(&heap[2], (u8)(seed + 2)); \\\n"
+        "        Blob##size fourth = load##size(&heap[1]); \\\n"
+        "        ok &= check##size(&fourth, seed); \\\n"
+        "        return ok; \\\n"
+        "    }\n"
+        "\n"
+        "DEFINE_BLOB(1)\n"
+        "DEFINE_BLOB(7)\n"
+        "DEFINE_BLOB(8)\n"
+        "DEFINE_BLOB(12)\n"
+        "DEFINE_BLOB(15)\n"
+        "DEFINE_BLOB(16)\n"
+        "DEFINE_BLOB(17)\n"
+        "DEFINE_BLOB(24)\n"
+        "DEFINE_BLOB(31)\n"
+        "DEFINE_BLOB(32)\n"
+        "DEFINE_BLOB(33)\n"
+        "DEFINE_BLOB(48)\n"
+        "DEFINE_BLOB(56)\n"
+        "DEFINE_BLOB(64)\n"
+        "DEFINE_BLOB(88)\n"
+        "DEFINE_BLOB(176)\n"
+        "DEFINE_BLOB(255)\n"
+        "DEFINE_BLOB(752)\n"
+        "\n"
+        "typedef struct Mixed\n"
+        "{\n"
+        "    long long a;\n"
+        "    double b;\n"
+        "    int c;\n"
+        "    short d;\n"
+        "    char e;\n"
+        "    long long f[3];\n"
+        "} Mixed;\n"
+        "\n"
+        "typedef struct __attribute__((packed)) Packed\n"
+        "{\n"
+        "    char lead;\n"
+        "    Mixed inner;\n"
+        "    char tail;\n"
+        "} Packed;\n"
+        "\n"
+        "__attribute__((noinline)) static Mixed mixed(long long seed)\n"
+        "{\n"
+        "    Mixed value;\n"
+        "    value.a = seed;\n"
+        "    value.b = (double)seed * 0.5;\n"
+        "    value.c = (int)seed + 3;\n"
+        "    value.d = (short)(seed - 9);\n"
+        "    value.e = (char)seed;\n"),
+        S8(
+        "    value.f[0] = seed * 11;\n"
+        "    value.f[1] = -seed;\n"
+        "    value.f[2] = seed ^ 0x5a5a;\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noinline)) static int mixed_equal(Mixed const* x, Mixed const* y)\n"
+        "{\n"
+        "    return x->a == y->a && x->b == y->b && x->c == y->c && x->d == y->d && x->e == y->e && x->f[0] == y->f[0] &&\n"
+        "           x->f[1] == y->f[1] && x->f[2] == y->f[2];\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int ok[18] = {run1(3), run7(5), run8(7), run12(11), run15(13), run16(17), run17(19), run24(23), run31(29), run32(31),\n"
+        "                  run33(37), run48(41), run56(43), run64(47), run88(53), run176(59), run255(61), run752(67)};\n"
+        "    for (int index = 0; index < 18 && !result; index += 1)\n"
+        "    {\n"
+        "        if (!ok[index]) result = 1 + index;\n"
+        "    }\n"
+        "    Packed packed;\n"
+        "    packed.lead = 'L';\n"
+        "    packed.tail = 'T';\n"
+        "    Mixed value = mixed(12345);\n"
+        "    packed.inner = value;\n"
+        "    Mixed back = packed.inner;\n"
+        "    if (!result && (!mixed_equal(&back, &value) || packed.lead != 'L' || packed.tail != 'T')) result = 30;\n"
+        "    Mixed array[4];\n"
+        "    for (int index = 0; index < 4; index += 1) array[index] = mixed(index + 100);\n"
+        "    array[1] = array[2];\n"
+        "    array[3] = array[3];\n"
+        "    Mixed expected_one = mixed(102);\n"
+        "    Mixed expected_three = mixed(103);\n"
+        "    if (!result && (!mixed_equal(&array[1], &expected_one) || !mixed_equal(&array[3], &expected_three))) result = 31;\n"
+        "    return result;\n"
+        "}\n")};
+    String8 c_machine_rewrite_sources[] = {
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_machine_rewrites_parts), false),
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_branch_layout_parts), false),
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_aggregate_copies_parts), false),
+    };
+    String8 c_machine_rewrite_names[] = {S8("buster-c-machine-rewrites"), S8("buster-c-branch-layout"), S8("buster-c-aggregate-copies")};
+    String8 c_machine_rewrite_paths[BUSTER_ARRAY_LENGTH(c_machine_rewrite_sources)];
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_machine_rewrite_sources); fixture_index += 1)
+    {
+        c_machine_rewrite_paths[fixture_index] = buster_test_temporary_path(arguments->arena, c_machine_rewrite_names[fixture_index], S8(".c"));
+        BUSTER_TEST(arguments, file_write(c_machine_rewrite_paths[fixture_index], BUSTER_SLICE_TO_BYTE_SLICE(c_machine_rewrite_sources[fixture_index])));
+    }
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_machine_rewrite_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-machine-rewrite"), S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_machine_rewrite_paths[fixture_index],
+                S8("-fno-machine-fallback"),
+            };
+            SliceString8 fixture_arguments_slice = {
+                .pointer = fixture_command_line,
+                .length = BUSTER_ARRAY_LENGTH(fixture_command_line) - (allocator_index == 1 ? 1u : 0u),
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, fixture_arguments_slice));
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
@@ -25055,8 +25921,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // that the call is followed by a trap rather than by a return sequence,
     // and the fixture supplies the control -- die_marked and die_plain differ
     // in nothing but the attribute.  0x0f 0x0b is ud2, which the emitter
-    // writes as raw bytes rather than as a mnemonic.  Pinning an explicit
-    // target keeps the assertion deterministic on any host.
+    // writes as raw bytes rather than as a mnemonic.  The plain call's return
+    // sequence opens with its zero result as the zero idiom (flags are dead
+    // before RET).  Pinning an explicit target keeps the assertion
+    // deterministic on any host.
     String8 c23_noreturn_assembly_command_line[] = {
         S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_c23_noreturn.c"),
     };
@@ -25066,7 +25934,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c23_noreturn_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_marked\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_scoped\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
-    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\tmov eax, 0x0")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\txor eax, eax")) != BUSTER_STRING_NO_MATCH);
     // The x86-64 byte rows of XCHG and CMPXCHG (#806). `xchg r/m8, r8` is
     // opcode 0x86 and `cmpxchg r/m8, r8` is 0x0F 0xB0 -- a different metadata
     // form from the 0x87 / 0x0F 0xB1 sibling each shares a recipe with, not an
@@ -25155,6 +26023,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
     String8 c_differential_regression_paths[] = {
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
@@ -25171,6 +26041,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_frontend_ssa.c"),
     };
     String8 c_differential_regression_names[] = {
+        S8("buster-c-generic-identity"),
+        S8("buster-c-generic-identity-reference"),
         S8("buster-c-ffs"),
         S8("buster-c-ffs-reference"),
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -25200,9 +26072,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // The promotion witness must not depend on the native selectors'
             // legacy local-to-mutable-register transformation.
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
+            bool generic_identity = string_equal(c_differential_regression_paths[fixture_index], S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"));
+            fixture_invocation.verify_codegen |= generic_identity;
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
-            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
+            fixture_invocation.disable_direct_ssa = (generic_identity && fixture_index == 1) || string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
                 string_equal(c_differential_regression_names[fixture_index], S8("buster-c-ffs-reference"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE, fixture.diagnostic);
