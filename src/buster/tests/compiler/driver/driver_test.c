@@ -5376,9 +5376,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         }
     }
 
-    for (u64 index = 0; arenas_ready && index < cell_count; index += 1)
+    for (u64 result_index = 0; arenas_ready && result_index < cell_count; result_index += 1)
     {
-        CompilerDriverTestFrameVectorCell* cell = cells + index;
+        CompilerDriverTestFrameVectorCell* cell = cells + result_index;
         u32 target = cell->target;
         u32 mode = cell->mode;
         u32 frontend = cell->frontend;

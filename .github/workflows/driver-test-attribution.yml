@@ -293,12 +293,14 @@ jobs:
     env:
       BUSTER_TEST_NATIVE_FRAME_BATCH: ${{ startsWith(matrix.sample, 'B') && '1' || '0' }}
       BUSTER_MATRIX_SHARD: all
-      BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/frame-full/coverage.json
-      BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/frame-full/phases
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Configure full-matrix evidence paths
+        shell: bash
+        run: |
+          printf '%s\n' "BUSTER_CI_COVERAGE_OUTPUT=$RUNNER_TEMP/frame-full/coverage.json" "BUSTER_MATRIX_PHASE_OUTPUT=$RUNNER_TEMP/frame-full/phases" >> "$GITHUB_ENV"
       - name: Install verified Zig
         shell: bash
         run: |
