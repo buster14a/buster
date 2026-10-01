@@ -1211,7 +1211,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_emit")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_instructions_emit")},
-        {S8_INITIALIZER("src/buster/lib/x86_64.c"), S8_INITIALIZER("x86_64_encode_register_operation")},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"), S8_INITIALIZER("x86_64_encode_register_operation")},
         {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_emit_thunks")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_emit")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_build_elf_entry_stub")},
@@ -1240,7 +1240,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     static MachineX64SourceFile const files[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
-        {S8_INITIALIZER("src/buster/lib/x86_64.c"), MACHINE_X64_SOURCE_ARCH_X86},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"), MACHINE_X64_SOURCE_ARCH_X86},
         {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
     };
