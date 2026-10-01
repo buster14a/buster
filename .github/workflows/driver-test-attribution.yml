@@ -279,7 +279,7 @@ jobs:
     needs: linux_census
     if: >-
       ${{ github.ref == 'refs/heads/codex/1885-native-frame-batching' &&
-          contains(github.event.head_commit.message, '[full-cohort]') &&
+          (contains(github.event.head_commit.message, '[full-cohort]') || contains(github.event.head_commit.message, '[baseline-cohort]')) &&
           vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Full matrix ${{ matrix.os }} ${{ matrix.sample }}
     runs-on: ${{ matrix.os == 'windows' && 'windows-2025' || 'ubuntu-26.04' }}
@@ -289,13 +289,16 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux, windows]
-        sample: [A1, B1, B2, A2, A3, B3]
+        sample: ${{ fromJSON(contains(github.event.head_commit.message, '[baseline-cohort]') && '["A1","A2","A3"]' || '["A1","B1","B2","A2","A3","B3"]') }}
     env:
       BUSTER_TEST_NATIVE_FRAME_BATCH: ${{ startsWith(matrix.sample, 'B') && '1' || '0' }}
       BUSTER_MATRIX_SHARD: all
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Arm A includes the complete current-main lifecycle without the
+          # candidate harness/control build and execution costs.
+          ref: ${{ startsWith(matrix.sample, 'A') && '23897cd26bc207dab23aeeefea31ddce7ea1a6ef' || github.sha }}
           persist-credentials: false
       - name: Configure full-matrix evidence paths
         shell: bash

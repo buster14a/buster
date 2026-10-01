@@ -61,8 +61,16 @@ be admitted; missing compilation or a failed link emits unexecuted case rows.
 The branch-only hosted census records image, CPU, source/tree, binary and
 compiler identities. Its three alternating uninstrumented isolated module
 samples per arm are pilot evidence, not full-matrix performance admission.
-Use the Windows full-matrix diagnostic and the controlled full-job protocol
-below before changing the default or claiming an accepted improvement.
+The full-job cohort checks out pinned main `23897cd26bc207dab23aeeefea31ddce7ea1a6ef`
+for each A arm and the candidate commit for each B arm, so added harness/control
+compilation and execution are charged to the candidate. `[full-cohort]` requests
+three A/B pairs per platform; `[baseline-cohort]` requests only the three A arms
+to complement retained candidate samples without rerunning them. Source/tree,
+image, toolchain, coverage and configuration identities must match the compared
+evidence contract. Earlier candidate-toggle A arms are runtime-reference samples,
+not the complete pre-change baseline. Use the Windows full-matrix diagnostic and
+the controlled full-job protocol below before changing the default or claiming
+an accepted improvement.
 
 ## What the archived run establishes
 
