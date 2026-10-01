@@ -6,7 +6,6 @@
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/window.h>
-#include <buster/lib/window/internal.h>
 #include <buster/lib/rendering/raster_internal.h>
 #include <stdio.h>
 
@@ -28,6 +27,10 @@ BUSTER_GLOBAL_LOCAL u32 raster_native_failures;
 #include <buster/lib/window.c>
 #include <buster/lib/rendering_raster.c>
 #endif
+
+// Owning-layer state assertions follow the unity implementation include so
+// internal linkage declarations keep the same scope in both build modes.
+#include <buster/lib/window/internal.h>
 
 BUSTER_GLOBAL_LOCAL void raster_native_check(bool condition, char const* description)
 {
