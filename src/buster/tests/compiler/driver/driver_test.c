@@ -3,6 +3,8 @@
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
+// compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
+// against native host-linked controls, including each scaled low12 form.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
@@ -3025,6 +3027,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scoped_constant_executio
     }
     BUSTER_TEST(arguments, os_file_delete(input));
     arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// An optimized foreign object must execute through both linkers. The two
+// fixtures pin the confirmed volatile-int failure and every low12 scale.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_ldst(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    for (u32 family = 0; family < 2; family += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-ldst"), S8(".o"));
+        String8 control_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-ldst-control"), S8(""));
+        String8 output_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-ldst-native"), S8(""));
+        String8 command[12];
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = S8("-O2");
+        command[count++] = S8("-fno-pie");
+        // Keep each volatile object as an independent symbol reference; GCC's
+        // section anchors can otherwise replace the direct low12 references.
+        if (string_equal(S8(BUSTER_HOST_C_COMPILER_ID), S8("GNU"))) { command[count++] = S8("-fno-section-anchors"); }
+        if (family) { command[count++] = S8("-DAARCH64_LDST_SCALE_FAMILY=1"); }
+        command[count++] = S8("-c");
+        command[count++] = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_ldst.c");
+        command[count++] = S8("-o");
+        command[count++] = object_path;
+        ProcessSpawnResult compiler = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+        ProcessWaitResult compiled = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+        bool compile_ok = compiler.handle && !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS;
+        if (BUSTER_REQUIRE(arguments, compile_ok))
+        {
+            // Link and run the exact input object through the host toolchain
+            // first: an import failure must not obscure a failing fixture.
+            count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-no-pie");
+            command[count++] = object_path;
+            command[count++] = S8("-o");
+            command[count++] = control_path;
+            ProcessSpawnResult host_link = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult host_linked = host_link.handle ? os_process_wait_deadline(arena, host_link, 30000000) : (ProcessWaitResult){0};
+            bool control_ok = host_link.handle && !host_linked.timed_out && host_linked.result == PROCESS_RESULT_SUCCESS;
+            if (BUSTER_REQUIRE(arguments, control_ok))
+            {
+                control_ok = compiler_driver_test_process_success(arena, control_path);
+                BUSTER_TEST(arguments, control_ok);
+            }
+            ByteSlice bytes = file_read(arena, object_path, (FileReadOptions){0});
+            ObjectFile imported = object_read(arena, bytes, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            u32 scale_mask = 0;
+            u32 load_count = 0;
+            u32 store_count = 0;
+            if (BUSTER_REQUIRE(arguments, imported.error == OBJECT_ERROR_NONE))
+            {
+                ObjectRelocationKind kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12,
+                    OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12};
+                for (u32 index = 0; index < imported.relocation_count; index += 1)
+                {
+                    ObjectRelocation* relocation = imported.relocations + index;
+                    for (u32 scale = 0; scale < BUSTER_ARRAY_LENGTH(kinds); scale += 1)
+                    {
+                        if (relocation->kind == kinds[scale])
+                        {
+                            scale_mask |= (u32)1 << scale;
+                            u32 word = 0;
+                            memcpy(&word, imported.sections[relocation->section].data.pointer + relocation->offset, sizeof(word));
+                            if (word & UINT32_C(0x00400000)) { load_count += 1; }
+                            else { store_count += 1; }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, scale_mask == (family ? 31u : 4u) && load_count >= (family ? 5u : 1u) && store_count >= (family ? 5u : 1u));
+                String8 link_command[] = {object_path, S8("-o"), output_path};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    bool executed = compiler_driver_test_process_success(arena, output_path);
+                    BUSTER_TEST(arguments, executed);
+                    if (control_ok && executed)
+                    {
+                        arguments->show(arguments, string_format(arena,
+                            S8("AARCH64_ELF_LDST_NATIVE_V1 case={S8} compiler={S8} scale_mask={u32} loads={u32} stores={u32} host_control=pass buster=pass\n"),
+                            family ? S8("all-scales-page-addends") : S8("volatile-int"), S8(BUSTER_HOST_C_COMPILER), scale_mask, load_count, store_count));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output_path));
+                }
+            }
+            BUSTER_TEST(arguments, os_file_delete(object_path));
+            if (host_link.handle && host_linked.result == PROCESS_RESULT_SUCCESS) { BUSTER_TEST(arguments, os_file_delete(control_path)); }
+        }
+        arena_set_position(arena, scope.position);
+    }
+    scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);
 #endif
@@ -8872,6 +8980,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
         .attempts = 1,
         .readiness_files_ok = true,
         .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")) ||
+                              string_equal(oracle, S8("unsigned-div-rem")) ||
                               string_equal(oracle, S8("bit-field-aggregate")),
     };
     SliceString8 keys = {0};
@@ -9331,18 +9440,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     CompilerDriverResult compiled = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
     BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64);
-    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64)
     {
         String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
         if (node.length)
         {
-            String8 node_arguments[] = {node, S8("tools/wasm_integer_execution_startup.js"), output};
-            u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
-            CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
-                arguments, arguments->arena, S8("integer"), S8("default"), S8("retry"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
-                S8("1504 frontend-to-Wasm integer checks passed"), deadline, deadline);
-            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+            ByteSlice artifact = file_read(arguments->arena, output, (FileReadOptions){0});
+            bool artifact_matches = compiled.wasm64.bytes.pointer != 0 && artifact.pointer != 0 &&
+                                    compiled.wasm64.bytes.length != 0 && artifact.length == compiled.wasm64.bytes.length &&
+                                    memcmp(artifact.pointer, compiled.wasm64.bytes.pointer, artifact.length) == 0;
+            if (BUSTER_REQUIRE(arguments, artifact_matches))
+            {
+                String8 node_arguments[] = {node, S8("tools/wasm_integer_execution_startup.js"), output};
+                u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
+                    arguments, arguments->arena, S8("integer"), S8("default"), S8("retry"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                    S8("1504 frontend-to-Wasm integer checks passed"), deadline, deadline);
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+                String8 unsigned_arguments[] = {node, S8("tools/wasm_unsigned_div_rem_execution.js"), output};
+                CompilerDriverWasmNodeRun unsigned_run = compiler_driver_test_wasm_node_run_with_retry(
+                    arguments, arguments->arena, S8("unsigned-div-rem"), S8("default"), S8("retry"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(unsigned_arguments),
+                    S8("4/4 unsigned high-bit div/rem checks and 4/4 signedness controls passed"), deadline, deadline);
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(unsigned_run));
+                // Both independent oracles must consume the original emitted bytes.
+                ByteSlice final_artifact = file_read(arguments->arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, final_artifact.pointer != 0 && final_artifact.length == compiled.wasm64.bytes.length &&
+                                       memcmp(final_artifact.pointer, compiled.wasm64.bytes.pointer, final_artifact.length) == 0);
+            }
         }
         else
         {
@@ -14434,6 +14560,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_ldst);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
