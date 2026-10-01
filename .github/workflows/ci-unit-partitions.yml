@@ -1,7 +1,7 @@
 name: Unit process partition experiment
 
-# Diagnostic only. Normal Buster CI retains its original test invocation until
-# same-binary measurements justify enabling the opt-in native command.
+# Same-binary diagnostic only. Normal CI already enables the partition runner
+# for sanitized Clang trees; this workflow retains independent A/B evidence.
 on:
   pull_request:
     paths:

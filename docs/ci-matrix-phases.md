@@ -2,7 +2,7 @@
 
 `build.c` owns the optional `buster-desktop-phases-v1` observation. Set
 `BUSTER_MATRIX_PHASE_OUTPUT` to a **fresh directory outside `build/`** before
-`test_all_combinations_ci`. The twelve existing desktop jobs set it to
+`test_all_combinations_ci`. The ten default desktop jobs set it to
 `RUNNER_TEMP/buster-ci/matrix-phases`; the ordinary desktop artifact retains
 all records, including failed and interrupted attempts. Unset it for compiler
 performance acceptance. Ordinary local builds and native/throughput jobs do
@@ -122,3 +122,20 @@ not recycle its timings as a matched baseline. Update #709 and choose exactly
 one #892 disposition from current evidence: focused Zig configuration work,
 focused sanitized-test-tail work, a separate scheduling candidate, or no change.
 The instrumentation PR alone is not that measured disposition.
+
+## Windows build barrier qualification (#2119)
+
+Native plans retain `test_admission=overlap|all-builds`. An absent setting means
+`overlap`, preserving historical journals. `BUSTER_MATRIX_TEST_ADMISSION=all-builds`
+is admitted only for pooled Windows x86-64 grouped `checks`. Its real Ninja test
+targets depend on the aggregate `buster_compile` target as well as their producer
+and preceding serialized test target. The phase consumer independently requires
+every build to finish before a test becomes eligible and binds an explicit
+current-job environment setting to the plan. CPU time and RSS remain unknown.
+
+Predictions honor compile dependencies, serialized test edges, and the barrier.
+Fixed-duration replay cannot predict changed CPU contention, so it cannot admit
+a production policy. Qualification uses three complete first attempts per policy,
+unchanged source/images/toolchains/cache and census, at least 10% median Windows
+checks improvement, and at most 5% growth in total workflow runner seconds.
+The accepted overlapping policy remains the production default.

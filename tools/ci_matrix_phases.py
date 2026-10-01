@@ -9,8 +9,10 @@ observations. collect() retains errors and integrates with ci_summary.py.
 from collections import Counter, defaultdict
 import itertools
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 
@@ -62,6 +64,10 @@ def task_id(tree, phase, config=""):
     return f"{tree}-{phase}-{config or 'all'}"
 
 
+def row_selected(row, shard):
+    return shard == "combinations" or (shard == "checks" and row.get("owner_shard") != "release") or row.get("owner_shard") == shard
+
+
 def validate_plan(plan, coverage, environment):
     require(plan.get("schema") == SCHEMA, "unknown phase schema")
     require(integer(plan.get("epoch_us")) and plan["epoch_us"] > 0, "invalid monotonic origin")
@@ -69,6 +75,12 @@ def validate_plan(plan, coverage, environment):
     require(isinstance(identity, dict) and isinstance(coverage, dict), "missing source/coverage identity")
     for key in ("lane_id", "source_revision", "source_hash", "driver_hash", "repository", "run_id", "run_attempt", "platform", "architecture", "shard"):
         require(identity.get(key) == coverage.get("identity", {}).get(key) and bool(identity.get(key)), f"coverage identity mismatch: {key}")
+    if "source_path" in coverage["identity"]:
+        paths = ntpath if identity["platform"] == "windows" else posixpath
+        source_path = coverage["identity"]["source_path"]
+        require(isinstance(source_path, str) and paths.isabs(source_path) and
+                (identity["platform"] != "windows" or bool(paths.splitdrive(source_path)[0])),
+                "source path must be absolute for the producer platform")
     require(re.fullmatch(r"[0-9a-f]{40}", identity.get("source_tree", "")), "missing exact source tree")
     for key, env in (("source_revision", "GITHUB_SHA"), ("run_id", "GITHUB_RUN_ID"), ("run_attempt", "GITHUB_RUN_ATTEMPT"),
                      ("repository", "GITHUB_REPOSITORY"), ("workflow", "GITHUB_WORKFLOW"), ("job", "GITHUB_JOB")):
@@ -76,6 +88,17 @@ def validate_plan(plan, coverage, environment):
         if env in environment:
             require(identity[key] == environment[env], f"current job mismatch: {key}")
     require(plan.get("scheduler") in ("direct", "pooled"), "unknown scheduler")
+    require(identity["shard"] in ("combinations", "release", "checks", "sanitized-debug", "sanitized-release", "portability"), "unknown desktop shard")
+    require(identity["platform"] != "macos" or identity["shard"] not in ("sanitized-debug", "sanitized-release"),
+            "Apple sanitizer trees require grouped checks")
+    admission = plan.get("test_admission", "overlap")
+    require(admission in ("overlap", "all-builds"), "unknown test admission policy")
+    if "BUSTER_MATRIX_TEST_ADMISSION" in environment:
+        require(admission == (environment["BUSTER_MATRIX_TEST_ADMISSION"] or "overlap"), "current job mismatch: test admission")
+    if admission == "all-builds":
+        require(plan["scheduler"] == "pooled" and identity["platform"] == "windows" and
+                identity["architecture"] == "x86_64" and identity["shard"] == "checks",
+                "all-builds admission is only valid for pooled Windows x86-64 checks")
     for key in ("outer_jobs", "logical_cpus", "cpu_budget"):
         require(integer(plan.get(key)) and plan[key] > 0, f"invalid quota: {key}")
     require(plan.get("cpu_time") == plan.get("peak_rss") == "unknown", "unmeasured resources must be unknown")
@@ -85,7 +108,7 @@ def validate_plan(plan, coverage, environment):
     require(0 < len(trees) <= 8 and len(tasks) <= 96, "invalid tree/task cardinality")
     expected_rows = coverage.get("expected", [])
     required = {row["id"]: row for row in expected_rows if row.get("state") == "required" and
-                (identity["shard"] == "combinations" or row.get("owner_shard") == identity["shard"])}
+                row_selected(row, identity["shard"])}
     detected = {row["id"]: row for row in coverage.get("detected", [])}
     owned = []
     expected_tasks = {task_id("matrix", "evidence", "coverage")}
@@ -181,6 +204,11 @@ def analyze(root, coverage, environment=None):
     environment = environment or {}
     plan = read(root / "plan.json")
     trees, tasks = validate_plan(plan, coverage, environment)
+    source_path = coverage["identity"].get("source_path")
+    paths = (ntpath if plan["identity"]["platform"] == "windows" else posixpath) if source_path else os.path
+    source_directory = paths.dirname(source_path) if source_path else os.getcwd()
+    def same_path(a, b):
+        return paths.normcase(paths.normpath(paths.join(source_directory, os.fspath(a)))) == paths.normcase(paths.normpath(paths.join(source_directory, os.fspath(b))))
     epoch = plan["epoch_us"]
     records = {}
     consumed = {"plan.json", "terminal.json", "summary.json", "summary.md"}
@@ -217,12 +245,10 @@ def analyze(root, coverage, environment=None):
             require(end.get("test_jobs") == str(task["inner_jobs"]), f"test-worker quota mismatch: {name}")
         tree = trees.get(task["tree"])
         if tree:
-            def same_path(a, b):
-                return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
             argv = end["argv"]
             if task["phase"] == "test":
                 executable = "ide.exe" if plan["identity"]["platform"] == "windows" else "ide"
-                expected = Path(tree["build_directory"]) / task["configuration"] / executable
+                expected = paths.join(tree["build_directory"], task["configuration"], executable)
                 # CI trees run test_all through the isolated-process runner
                 # (build driver test_units_partitioned <ide>), which falls back
                 # to the ordinary invocation below four test workers.
@@ -233,7 +259,7 @@ def analyze(root, coverage, environment=None):
                     parent = tasks[task_id(task["tree"], "validation", task["configuration"])]
                     require(end.get("test_jobs") == str(parent["inner_jobs"]), f"nested test-worker quota mismatch: {name}")
             elif task["phase"] == "census":
-                expected = Path(tree["build_directory"]) / "Release" / "ide"
+                expected = paths.join(tree["build_directory"], "Release", "ide")
                 require(same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "x86_64_completion_census", f"census executable/tree mismatch: {name}")
             elif task["phase"] in ("build", "validation", "post_test", "self_host", "clean"):
                 option = "--build-directory" if task["phase"] == "self_host" else "--build"
@@ -245,6 +271,7 @@ def analyze(root, coverage, environment=None):
                 if task["phase"] == "build" and plan["scheduler"] == "pooled":
                     require("--parallel" in argv and argv.index("--parallel") + 1 < len(argv) and argv[argv.index("--parallel") + 1] == str(task["inner_jobs"]), f"Ninja quota mismatch: {name}")
         records[name] = end
+    build_barrier_us = max((records[name]["end_us"] for name, task in tasks.items() if task["phase"] == "build"), default=0)
     for name, task in tasks.items():
         record = records[name]
         dep = task["dependency"]
@@ -258,6 +285,8 @@ def analyze(root, coverage, environment=None):
             record["ready_us"] = records[dep]["end_us"]
         if task.get("after", ""):
             record["ready_us"] = max(record["ready_us"], records[task["after"]]["end_us"])
+        if plan.get("test_admission", "overlap") == "all-builds" and task["phase"] == "validation":
+            record["ready_us"] = max(record["ready_us"], build_barrier_us)
         require(record["ready_us"] <= record["start_us"], f"dependency overlap: {name}")
         if task["phase"] != "configure" and task["tree"] in trees:
             require(records[task_id(task["tree"], "configure")]["end_us"] <= record["start_us"], f"build before configure: {name}")
@@ -303,6 +332,7 @@ def analyze(root, coverage, environment=None):
         previous = timestamp
     ranking = rank(plan, trees, tasks, records)
     return {"schema": SCHEMA, "complete": True, "identity": plan["identity"], "scheduler": plan["scheduler"],
+            "test_admission": plan.get("test_admission", "overlap"),
             "runner": {k: environment.get(k, environment.get(k.upper(), "unknown")) for k in ("RUNNER_OS", "RUNNER_ARCH", "RUNNER_NAME", "ImageOS", "ImageVersion", "BUSTER_CI_RUNNER", "BUSTER_CI_ZIG_CACHE_HIT")},
             "outer_jobs": plan["outer_jobs"], "logical_cpus": plan["logical_cpus"], "cpu_budget": plan["cpu_budget"],
             "max_observed_pool_overlap": maximum, "idle_gaps_us": idle, "trees": ranking,
@@ -349,12 +379,23 @@ def predict(plan, edges):
         return {"model": "serial direct tree execution; fixed durations; no predicted order benefit", "acceptance": False}
     tree_order = list(dict.fromkeys(edge["tree"] for edge in edges if edge["phase"] == "build"))
     require(len(tree_order) <= 8, "unbounded scheduling prediction")
+    tasks = {task["id"]: task for task in plan["tasks"]}
+    predecessors = {edge["id"]: set() for edge in edges}
+    build_edges = {edge["id"] for edge in edges if edge["phase"] == "build"}
+    for task in tasks.values():
+        edge = task["pool_edge"]
+        if edge:
+            for predecessor in (task["dependency"], task.get("after", "")):
+                if predecessor in tasks and tasks[predecessor]["pool_edge"] not in ("", edge):
+                    predecessors[edge].add(tasks[predecessor]["pool_edge"])
+            if plan.get("test_admission", "overlap") == "all-builds" and task["phase"] == "validation":
+                predecessors[edge].update(build_edges)
     def replay(order):
         priorities = {tree: i for i, tree in enumerate(order)}
         waiting = sorted(edges, key=lambda e: (priorities[e["tree"]], e["phase"] != "build", e["id"]))
-        running, built, now = [], set(), 0
+        running, completed, now = [], set(), 0
         while waiting or running:
-            ready = [edge for edge in waiting if edge["phase"] == "build" or edge["tree"] in built]
+            ready = [edge for edge in waiting if predecessors[edge["id"]] <= completed]
             for edge in ready[:max(0, plan["outer_jobs"] - len(running))]:
                 waiting.remove(edge)
                 running.append((now + edge["end_us"] - edge["start_us"], edge))
@@ -362,12 +403,12 @@ def predict(plan, edges):
             now = min(end for end, _ in running)
             finished = [edge for end, edge in running if end == now]
             running = [(end, edge) for end, edge in running if end != now]
-            built.update(edge["tree"] for edge in finished if edge["phase"] == "build")
+            completed.update(edge["id"] for edge in finished)
         return now
     # At most seven desktop compiler trees today; cap alternatives explicitly.
     alternatives = [(replay(order), list(order)) for order in itertools.islice(itertools.permutations(tree_order), 5040)]
     best = min(alternatives)
-    return {"model": "fixed measured edge durations, dependency-ready declaration priority, unchanged pool/inner quotas",
+    return {"model": "fixed measured edge durations, preserved dependency/after/admission policy, declaration priority, unchanged pool/inner quotas",
             "acceptance": False, "current_order": tree_order, "current_model_us": replay(tree_order),
             "best_order": best[1], "best_model_us": best[0], "orders_evaluated": len(alternatives),
             "observed_pool_span_us": max(e["end_us"] for e in edges) - min(e["start_us"] for e in edges)}
@@ -378,6 +419,7 @@ def markdown(report):
     if not report["complete"]:
         lines += ["- " + error for error in report["errors"]]
     else:
+        lines += ["Test admission: " + report.get("test_admission", "overlap"), ""]
         lines += ["| Tree | Configure s | Build s | Test s | Post-test s | Evidence s | Wait s | Admit / finish | Critical |", "|---|---:|---:|---:|---:|---:|---:|---|---|"]
         for tree in report["trees"]:
             duration = tree["elapsed_us"]

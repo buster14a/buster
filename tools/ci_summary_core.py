@@ -20,6 +20,8 @@ import sys
 
 
 COVERAGE_POLICY_VERSION = 1
+COVERAGE_PARTITION_VERSION = 2
+_COVERAGE_PARTITION_OWNERS = ("release", "sanitized-debug", "sanitized-release", "portability")
 _COVERAGE_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _COVERAGE_HEX16 = re.compile(r"^[0-9a-f]{16}$")
 _COVERAGE_CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
@@ -170,12 +172,23 @@ def _coverage_row_id(identity, row):
 def _coverage_row_owner(row):
     # Independently check the native driver's semantic partition. Never let
     # an evidence file choose its own ownership or shrink the full policy.
-    return "release" if row.get("compiler") == "clang" and not row.get("sanitize") and row.get("optimize") else "checks"
+    if row.get("compiler") == "clang" and row.get("sanitize"):
+        owner = "sanitized-release" if row.get("optimize") else "sanitized-debug"
+    elif row.get("compiler") == "clang" and row.get("optimize"):
+        owner = "release"
+    else:
+        owner = "portability"
+    return owner
+
+
+def _coverage_row_selected(row, shard):
+    owner = _coverage_row_owner(row)
+    return shard == "combinations" or owner == shard or (shard == "checks" and owner != "release")
 
 
 def _coverage_selected_ids(rows, shard):
     return {row_id for row_id, row in rows.items() if row.get("state") == "required" and
-            (shard == "combinations" or _coverage_row_owner(row) == shard)}
+            _coverage_row_selected(row, shard)}
 
 
 def _coverage_runner_identity(environment):
@@ -328,7 +341,7 @@ def _coverage_expected_obligations(identity, mode, environment, has_unity):
         reason = "coverage-manifest-self-test-only"
         return {name: ("not-applicable", reason) for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
 
-    if identity.get("shard") == "checks":
+    if identity.get("shard") in ("checks", "sanitized-debug", "sanitized-release", "portability"):
         return {name: ("not-applicable", "owned-by-release-shard")
                 for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
 
@@ -405,11 +418,11 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
     expected_shard = environment.get("BUSTER_MATRIX_SHARD") or "all"
     if expected_shard == "all":
         expected_shard = "combinations"
-    if expected_shard not in ("combinations", "release", "checks"):
+    if expected_shard not in ("combinations", "checks") + _COVERAGE_PARTITION_OWNERS:
         errors.append("coverage consumer shard is unsupported")
     if identity.get("suite") != "desktop" or identity.get("shard") != expected_shard:
         errors.append("coverage lane does not match the requested desktop shard")
-    if expected_shard != "combinations" and manifest.get("partition_version") != 1:
+    if type(manifest.get("partition_version")) is not int or manifest.get("partition_version") != COVERAGE_PARTITION_VERSION:
         errors.append("coverage partition version is unsupported")
     for name in ("source_hash", "driver_hash"):
         if not _coverage_strict_hash(identity.get(name), 64):
@@ -706,7 +719,7 @@ def _coverage_summary(manifest, errors):
                          if isinstance(record, dict) and isinstance(record.get("rows"), list))
     identity = manifest_data.get("identity", {})
     shard = identity.get("shard", "missing") if isinstance(identity, dict) else "missing"
-    selected_count = sum(row.get("state") == "required" and (shard == "combinations" or _coverage_row_owner(row) == shard)
+    selected_count = sum(row.get("state") == "required" and _coverage_row_selected(row, shard)
                          for row in expected if isinstance(row, dict))
     lines += ["", f"Selected shard: {html.escape(str(shard))}; required here: {selected_count}. "
               "Other shards' configurations remain visible below, not counted as executed.",

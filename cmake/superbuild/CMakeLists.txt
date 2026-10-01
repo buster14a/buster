@@ -21,6 +21,14 @@ if (BUSTER_SUPERBUILD_BUILD_DRIVER STREQUAL "" OR NOT IS_ABSOLUTE "${BUSTER_SUPE
     message(FATAL_ERROR "BUSTER_SUPERBUILD_BUILD_DRIVER must name an existing absolute build driver")
 endif()
 
+if (NOT DEFINED BUSTER_SUPERBUILD_TEST_ADMISSION)
+    set(BUSTER_SUPERBUILD_TEST_ADMISSION overlap)
+endif()
+if (NOT BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "overlap" AND
+    NOT BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "all-builds")
+    message(FATAL_ERROR "Unknown matrix test admission policy")
+endif()
+
 set_property(GLOBAL PROPERTY JOB_POOLS "buster_matrix_cpu=${BUSTER_SUPERBUILD_OUTER_JOBS}")
 
 add_custom_target(buster_compile)
@@ -143,6 +151,9 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         # compiler slot to its test command while other trees continue building.
         # The shared pool still bounds both kinds of command globally.
         add_dependencies(${BUSTER_TREE_TEST_TARGET} ${BUSTER_TREE_COMPILE_TARGET})
+        if (BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "all-builds")
+            add_dependencies(${BUSTER_TREE_TEST_TARGET} buster_compile)
+        endif()
         # Serialized test phases (build.c matrix_superbuild_allocate_jobs) each
         # take the whole CPU budget, so a tree's tests also wait for the
         # previous serialized tree's tests. Builds are unaffected.

@@ -23104,17 +23104,39 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_shard_valid(String8 shard)
 {
-    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks"));
+    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks")) ||
+                  string_equal(shard, S8("sanitized-debug")) || string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
     return result;
 }
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
 {
-    String8 result = row.compiler == BUILD_COMPILER_CLANG && !row.sanitize && row.optimize ? S8("release") : S8("checks");
+    String8 result = S8("portability");
+    if (row.compiler == BUILD_COMPILER_CLANG)
+    {
+        result = row.sanitize ? (row.optimize ? S8("sanitized-release") : S8("sanitized-debug")) :
+                               (row.optimize ? S8("release") : S8("portability"));
+    }
     return result;
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_row_selected(MatrixCoverageRow row, String8 shard)
 {
-    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, matrix_coverage_row_shard(row));
+    String8 owner = matrix_coverage_row_shard(row);
+    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, owner) ||
+                  (string_equal(shard, S8("checks")) && !string_equal(owner, S8("release")));
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_test_admission_current(void)
+{
+    String8 result = os_get_environment_variable(S8("BUSTER_MATRIX_TEST_ADMISSION"));
+    if (!result.length) { result = S8("overlap"); }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_test_admission_valid(String8 shard)
+{
+    String8 admission = matrix_coverage_test_admission_current();
+    bool result = string_equal(admission, S8("overlap")) ||
+                  (string_equal(admission, S8("all-builds")) && BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 &&
+                   string_equal(shard, S8("checks")) && !environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")));
     return result;
 }
 BUSTER_GLOBAL_LOCAL u32 matrix_coverage_selected_count(MatrixCoveragePlan* plan, String8 shard)
@@ -23448,7 +23470,10 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_partition_validate(MatrixCoveragePlan* 
         String8 owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[0]]);
         for (u32 row_i = 0; row_i < tree.row_count; row_i += 1)
         {
-            result = result && string_equal(owner, matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]));
+            String8 next_owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]);
+            // Apple multi-config sanitizer trees are retained in grouped checks.
+            bool same_group = !string_equal(owner, S8("release")) && !string_equal(next_owner, S8("release"));
+            result = result && (string_equal(owner, next_owner) || (tree.sanitize && tree.optimize_count == 2 && same_group));
         }
     }
     return result;
@@ -23495,7 +23520,7 @@ BUSTER_GLOBAL_LOCAL MatrixCoverageObligations matrix_coverage_obligations_for_la
     result.table_audit_state = has_unity ? S8("scheduled") : S8("not-applicable");
     result.table_audit_reason = has_unity ? (direct_matrix ? S8("direct-matrix-default-audit") : S8("canonical-superbuild-tree")) :
                                         S8("no-canonical-clang-release");
-    if (string_equal(shard, S8("checks")))
+    if (!string_equal(shard, S8("release")) && !string_equal(shard, S8("combinations")))
     {
         String8 reason = S8("owned-by-release-shard");
         result.self_host_reason = reason;
@@ -24014,7 +24039,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_manifest_write(Arena* arena, MatrixCove
     String8 phase = complete ? S8("complete") : S8("planned");
     string8_list_push(arena, &lines, S8("{"));
     string8_list_push(arena, &lines, S8("  \"schema\": 1,"));
-    string8_list_push(arena, &lines, S8("  \"partition_version\": 1,"));
+    string8_list_push(arena, &lines, S8("  \"partition_version\": 2,"));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"kind\": {S8},"), matrix_coverage_json_escape(arena, S8("desktop-matrix-coverage"))));
     string8_list_push(arena, &lines, S8("  \"hash_algorithm\": \"sha256\","));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"mode\": {S8},"), matrix_coverage_json_escape(arena, manifest->mode)));
@@ -24697,6 +24722,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[{S8}]==])\n"), build_driver));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_COUNT {u32})\n"), tree_count));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS {u32})\n"), outer_jobs));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TEST_ADMISSION {S8})\n"), matrix_coverage_test_admission_current()));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_VERBOSE {S8})\n"), verbose ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_QUIET {S8})\n"), quiet ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_ENABLED {u32})\n"), self_host.enabled));
@@ -24856,7 +24882,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     String8 shard = matrix_coverage_shard_current();
-    bool owns_preflight = !string_equal(shard, S8("checks"));
+    bool owns_preflight = string_equal(shard, S8("release")) || string_equal(shard, S8("combinations"));
     if (!matrix_coverage_ci_table_audit_override_allowed(ci, os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"))))
     {
         // Direct matrix trees inherit the process environment instead of the
@@ -41583,10 +41609,26 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     String8 matrix_shard = matrix_coverage_shard_current();
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !matrix_coverage_shard_valid(matrix_shard))
     {
-        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release or checks\n"));
+        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-debug, sanitized-release or portability\n"));
         result = PROCESS_RESULT_FAILED;
     }
-    if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !string_equal(matrix_shard, S8("checks")))
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix)
+    {
+        MatrixCoverageTarget target = matrix_coverage_target_current();
+        MatrixCoverageLane lane = {.suite = S8("desktop"), .shard = matrix_shard, .platform = target.platform, .architecture = target.architecture};
+        MatrixCoveragePlan plan = {0};
+        bool selected = matrix_coverage_plan_build_for_target(arena, &plan, lane, target) &&
+                        matrix_coverage_selected_count(&plan, matrix_shard) > 0;
+        bool shared_sanitizer = target.apple && (string_equal(matrix_shard, S8("sanitized-debug")) ||
+                                                string_equal(matrix_shard, S8("sanitized-release")));
+        if (!selected || shared_sanitizer || !matrix_coverage_test_admission_valid(matrix_shard))
+        {
+            string_print(S8("error: matrix selector or test admission is unavailable for this host; Apple sanitizer trees require grouped checks\n"));
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix &&
+        (string_equal(matrix_shard, S8("release")) || string_equal(matrix_shard, S8("combinations"))))
     {
         result = build_compiler_discovery_self_test(arena);
     }

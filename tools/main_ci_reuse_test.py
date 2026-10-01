@@ -119,6 +119,17 @@ class MainCIReuseTests(unittest.TestCase):
         self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
 
+    def test_dispatch_split_layout_cannot_change_the_main_reuse_inventory(self):
+        self.assertEqual(inventory.combination_jobs(), inventory.COMBINATION_JOBS)
+        self.assertEqual(len(inventory.combination_jobs()), 21)
+        self.assertEqual(len(inventory.combination_jobs("split")), 27)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        self.assertIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+        self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
+        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("split")]
+        with self.assertRaises(AdmissionError):
+            self.admit()
+
     def test_wrong_identity_policy_and_event_fall_back(self):
         cases = (("current", "head_sha", "d" * 40),
                  ("current", "event", "workflow_dispatch"),

@@ -2,8 +2,10 @@
 """Queue/runner-assignment tests for tools/github_ci_time.py (#1805) and the
 macOS runner demand of auxiliary workflows (#1825)."""
 from datetime import datetime, timezone
+import io
 from pathlib import Path
 import re
+import sys
 import textwrap
 import unittest
 from unittest import mock
@@ -12,6 +14,31 @@ import urllib.parse
 import github_ci_time
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class ChecksLayoutCLITests(unittest.TestCase):
+    def test_gate_cli_keeps_the_combined_default_and_accepts_explicit_split(self):
+        for arguments, expected in (([], "combined"), (["--checks-layout", "combined"], "combined"),
+                                    (["--checks-layout", "split"], "split")):
+            with self.subTest(arguments=arguments):
+                with mock.patch.object(sys, "argv", ["github_ci_time.py", "require-jobs", *arguments]), \
+                        mock.patch.object(github_ci_time, "require_jobs", return_value={"success": True}) as gate, \
+                        mock.patch.object(sys, "stdout", io.StringIO()):
+                    self.assertEqual(github_ci_time.main(), 0)
+                self.assertEqual(gate.call_args.args[0].checks_layout, expected)
+
+    def test_unknown_layout_cannot_relax_the_inventory_gate(self):
+        for layout in ("all", "mixed", "sanitized-debug", ""):
+            with self.subTest(layout=layout):
+                with self.assertRaises(ValueError):
+                    github_ci_time.combination_jobs(layout)
+                with mock.patch.object(sys, "argv", ["github_ci_time.py", "require-jobs", "--checks-layout", layout]), \
+                        mock.patch.object(github_ci_time, "require_jobs") as gate, \
+                        mock.patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit) as failure:
+                        github_ci_time.main()
+                self.assertEqual(failure.exception.code, 2)
+                gate.assert_not_called()
 
 
 class QueueTimingTests(unittest.TestCase):

@@ -2,7 +2,7 @@
 """Native partition/consumer controls and the exact Actions completion gate.
 
 The C fixture embeds the actual build driver: it exports all six full policy
-plans and all three selections, without running or claiming any matrix work.
+plans and all six selections, without running or claiming any matrix work.
 Synthetic completions below mock compiler re-probes only inside these tests;
 tools/coverage_manifest_test.py retains the real executable-binding controls.
 """
@@ -30,6 +30,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 import ci_summary
 import github_ci_time
 import mobile_coverage
+
+MATRIX_OWNERS = ("release", "sanitized-debug", "sanitized-release", "portability")
+MATRIX_SELECTIONS = ("combinations", "checks") + MATRIX_OWNERS
 
 
 class AppleCIPolicyTests(unittest.TestCase):
@@ -88,7 +91,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_fixture_export(Arena* arena)
         {.platform = S8("windows"), .architecture = S8("x86_64"), .windows = 1},
         {.platform = S8("windows"), .architecture = S8("aarch64"), .windows = 1, .aarch64 = 1},
     };
-    String8 shards[] = {S8("combinations"), S8("release"), S8("checks")};
+    String8 shards[] = {S8("combinations"), S8("checks"), S8("release"),
+        S8("sanitized-debug"), S8("sanitized-release"), S8("portability")};
     for (u32 target_i = 0; valid && target_i < BUSTER_ARRAY_LENGTH(targets); target_i += 1)
     {
         MatrixCoverageTarget target = targets[target_i];
@@ -202,29 +206,35 @@ class NativePartitionTests(unittest.TestCase):
             return ci_summary.validate_coverage_manifest(manifest, environment)
 
     def test_native_full_policy_and_all_shards_keep_original_anchors(self):
-        self.assertEqual(len(self.plans), 18)
+        self.assertEqual(len(self.plans), 36)
         for (platform, architecture), anchor in ci_summary._COVERAGE_POLICY_ANCHORS.items():
             unsharded = self.plans[platform, architecture, "combinations"]
             policy = unsharded["policy"]
             self.assertEqual((policy["row_count"], policy["required_count"], policy["excluded_count"], policy["fingerprint"]), anchor)
             full = set(unsharded["executed"][0]["rows"])
-            selections = []
-            for shard in github_ci_time.COMBINATION_SHARDS:
+            selections = {}
+            for shard in MATRIX_SELECTIONS:
                 plan = self.plans[platform, architecture, shard]
                 self.assertEqual(plan["expected"], unsharded["expected"])
                 self.assertEqual(plan["policy"], policy)
                 selected = set(plan["executed"][0]["rows"])
-                self.assertTrue(selected)
                 self.assertEqual(selected, {row["id"] for row in plan["expected"]
-                                           if row["state"] == "required" and row["owner_shard"] == shard})
-                selections.append(selected)
+                                           if row["state"] == "required" and
+                                           (shard == "combinations" or row["owner_shard"] == shard or
+                                            (shard == "checks" and row["owner_shard"] != "release"))})
+                selections[shard] = selected
                 if shard == "release":
                     self.assertEqual(len(selected), 1)
-                else:
+                elif shard != "combinations":
                     self.assertTrue(all(value == {"state": "not-applicable", "reason": "owned-by-release-shard"}
                                         for value in plan["obligations"].values()))
-            self.assertFalse(selections[0] & selections[1])
-            self.assertEqual(selections[0] | selections[1], full)
+            for left, right in itertools.combinations(MATRIX_OWNERS, 2):
+                self.assertFalse(selections[left] & selections[right])
+            self.assertEqual(set().union(*(selections[shard] for shard in MATRIX_OWNERS)), full)
+            self.assertEqual(selections["checks"], set().union(*(selections[shard] for shard in MATRIX_OWNERS[1:])))
+            self.assertFalse(selections["release"] & selections["checks"])
+            self.assertEqual(selections["release"] | selections["checks"], full)
+            self.assertTrue(selections["checks"])
 
     def test_windows_aarch64_policy_is_explicit_and_nonempty(self):
         expected_anchors = {
@@ -242,23 +252,37 @@ class NativePartitionTests(unittest.TestCase):
             excluded = [row for row in rows if row["state"] == "excluded"]
             self.assertEqual(len(required), anchor[1])
             self.assertEqual(len(excluded), anchor[2])
-            self.assertTrue(all(row["owner_shard"] in github_ci_time.COMBINATION_SHARDS for row in required))
+            self.assertTrue(all(row["owner_shard"] in MATRIX_OWNERS for row in required))
             self.assertTrue(all(row["exclusion"] for row in excluded))
         arm = self.plans["windows", "aarch64", "combinations"]
         self.assertEqual(Counter(row["compiler"] for row in arm["expected"] if row["state"] == "required"),
                          Counter(("clang", "cl")))
+        for shard in ("sanitized-debug", "sanitized-release"):
+            self.assertEqual(self.plans["windows", "aarch64", shard]["executed"][0]["rows"], [])
+        self.assertEqual(self.plans["windows", "aarch64", "checks"]["executed"][0]["rows"],
+                         self.plans["windows", "aarch64", "portability"]["executed"][0]["rows"])
 
     def test_consumer_accepts_each_complete_native_selection(self):
         for key, plan in self.plans.items():
             with self.subTest(lane=key):
                 manifest, environment, probes = self.completed_fixture(plan)
-                self.assertEqual(self.validate(manifest, environment, probes), [])
+                errors = self.validate(manifest, environment, probes)
+                self.assertEqual(errors, [] if manifest["executed"][0]["rows"] else ["coverage shard has no required configurations"])
                 # Export-only test data itself can never satisfy production CI.
                 self.assertTrue(ci_summary.validate_coverage_manifest(plan, environment))
 
+    def test_summary_counts_grouped_and_split_work_without_hiding_other_rows(self):
+        for key, plan in self.plans.items():
+            with self.subTest(lane=key):
+                summary = "\n".join(ci_summary._coverage_summary(plan, []))
+                selected = len(plan["executed"][0]["rows"])
+                self.assertIn(f"Selected shard: {key[2]}; required here: {selected}.", summary)
+                for row in plan["expected"]:
+                    self.assertIn(row["id"], summary)
+
     def test_consumer_rejects_missing_duplicate_foreign_and_shrunk_rows(self):
         for key, plan in self.plans.items():
-            if key[2] == "combinations":
+            if key[2] == "combinations" or not plan["executed"][0]["rows"]:
                 continue
             manifest, environment, probes = self.completed_fixture(plan)
             self.assertEqual(self.validate(manifest, environment, probes), [])
@@ -269,15 +293,21 @@ class NativePartitionTests(unittest.TestCase):
             bad = copy.deepcopy(manifest)
             bad["executed"][0]["rows"].append(bad["executed"][0]["rows"][0])
             damaged.append(bad)
-            foreign = next(row["id"] for row in manifest["expected"] if row["state"] == "required" and row["owner_shard"] != key[2])
+            selected = set(manifest["executed"][0]["rows"])
+            foreign = next(row["id"] for row in manifest["expected"] if row["state"] == "required" and row["id"] not in selected)
             bad = copy.deepcopy(manifest)
             bad["executed"][0]["rows"].append(foreign)
             damaged.append(bad)
-            bad = copy.deepcopy(manifest)
-            bad["partition_version"] = 2
-            damaged.append(bad)
+            for version in (0, 1, 3, True, 2.0, "2"):
+                bad = copy.deepcopy(manifest)
+                bad["partition_version"] = version
+                damaged.append(bad)
             bad = copy.deepcopy(manifest)
             bad["expected"][0]["owner_shard"] = "checks" if bad["expected"][0]["owner_shard"] == "release" else "release"
+            damaged.append(bad)
+            bad = copy.deepcopy(manifest)
+            original_owner = bad["expected"][0]["owner_shard"]
+            bad["expected"][0]["owner_shard"] = next(owner for owner in MATRIX_OWNERS if owner != original_owner)
             damaged.append(bad)
             bad = copy.deepcopy(manifest)
             bad["expected"] = [row for row in bad["expected"] if row["id"] != foreign]
@@ -289,7 +319,7 @@ class NativePartitionTests(unittest.TestCase):
             for number, bad in enumerate(damaged):
                 with self.subTest(lane=key, mutation=number):
                     self.assertTrue(self.validate(bad, environment, probes))
-            for expected_shard in ("all", "release" if key[2] == "checks" else "checks", "unknown"):
+            for expected_shard in ("all", "unknown") + tuple(shard for shard in MATRIX_SELECTIONS if shard != key[2]):
                 self.assertTrue(self.validate(manifest, dict(environment, BUSTER_MATRIX_SHARD=expected_shard), probes))
             unsharded, _, _ = self.completed_fixture(self.plans[key[0], key[1], "combinations"])
             self.assertTrue(self.validate(unsharded, environment, probes))
@@ -422,7 +452,8 @@ class WorkflowSetupTests(unittest.TestCase):
         selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
                       ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
         for platform, entry, argument in selections:
-            for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
+            noncanonical = tuple((shard, 7) for shard in MATRIX_SELECTIONS if shard not in ("combinations", "release"))
+            for shard, code in noncanonical + (("release", 0), ("release", 7)):
                 with self.subTest(platform=platform, shard=shard, exit_code=code):
                     marker = self.root / "wrapper-called"
                     if marker.exists():
@@ -431,9 +462,9 @@ class WorkflowSetupTests(unittest.TestCase):
                     self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code),
                                             RUNNER_OS=platform)
                     result = self.run_step("Bootstrap wrapper regression tests")
-                    self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, code if shard == "release" else 0, result.stdout + result.stderr)
                     self.assertEqual(marker.exists(), shard == "release")
-                    if shard == "checks":
+                    if shard != "release":
                         self.assertIn("owned-by-release-shard", result.stdout)
                         self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
                     else:
@@ -444,11 +475,13 @@ class WorkflowSetupTests(unittest.TestCase):
 
 
 class CompletionGateTests(unittest.TestCase):
-    def sample(self):
+    def sample(self, checks_layout="combined"):
         jobs = []
-        for number, name in enumerate(github_ci_time.COMBINATION_JOBS):
+        desktop_names = (github_ci_time.SPLIT_COMBINATION_PLATFORMS if checks_layout == "split"
+                         else github_ci_time.COMBINATION_PLATFORMS)
+        for number, name in enumerate(github_ci_time.combination_jobs(checks_layout)):
             steps = []
-            if name in github_ci_time.COMBINATION_PLATFORMS:
+            if name in desktop_names:
                 steps = ["Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
                          "Combination matrix (Windows)" if name.startswith("Windows") else "Combination matrix (Linux, macOS)"]
                 if name.endswith(" release"):
@@ -464,13 +497,80 @@ class CompletionGateTests(unittest.TestCase):
                          "steps": [{"name": step, "status": "completed", "conclusion": "success"} for step in steps]})
         return jobs
 
-    def check(self, jobs, attempt=1):
-        return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40)
+    def check(self, jobs, attempt=1, checks_layout="combined"):
+        return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40,
+                                                     expected_names=github_ci_time.combination_jobs(checks_layout))
 
     def test_all_twenty_one_jobs_and_exact_ten_desktop_shards(self):
         self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 21)
         self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 10)
         self.assertEqual(self.check(self.sample()), [])
+
+    def test_split_inventory_is_exact_and_cannot_mix_with_combined_checks(self):
+        jobs = self.sample("split")
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 27)
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 16)
+        self.assertEqual(self.check(jobs, checks_layout="split"), [])
+        self.assertTrue(self.check(jobs))
+        self.assertTrue(self.check(self.sample(), checks_layout="split"))
+        for name in github_ci_time.SPLIT_COMBINATION_PLATFORMS:
+            if name in github_ci_time.COMBINATION_PLATFORMS:
+                continue
+            with self.subTest(sibling=name):
+                index = next(i for i, job in enumerate(jobs) if job["name"] == name)
+                missing = copy.deepcopy(jobs)
+                missing.pop(index)
+                self.assertTrue(self.check(missing, checks_layout="split"))
+                duplicate = copy.deepcopy(jobs)
+                duplicate.append(copy.deepcopy(duplicate[index]))
+                self.assertTrue(self.check(duplicate, checks_layout="split"))
+                for conclusion in ("failure", "cancelled", "skipped", None):
+                    failed = copy.deepcopy(jobs)
+                    failed[index]["conclusion"] = conclusion
+                    self.assertTrue(self.check(failed, checks_layout="split"))
+                for step_index in range(len(jobs[index]["steps"])):
+                    incomplete = copy.deepcopy(jobs)
+                    incomplete[index]["steps"].pop(step_index)
+                    self.assertTrue(self.check(incomplete, checks_layout="split"))
+                hybrid = copy.deepcopy(jobs)
+                hybrid[index]["name"] = name.rsplit(" ", 1)[0] + " checks"
+                self.assertTrue(self.check(hybrid, checks_layout="split"))
+
+    def test_split_sibling_partial_reruns_use_the_latest_attempt(self):
+        jobs = self.sample("split")
+        for name in github_ci_time.SPLIT_COMBINATION_PLATFORMS:
+            if name in github_ci_time.COMBINATION_PLATFORMS:
+                continue
+            with self.subTest(sibling=name):
+                current_gate = dict(jobs[-1], run_attempt=2)
+                newer = copy.deepcopy(next(job for job in jobs if job["name"] == name))
+                newer.update(run_attempt=2, conclusion="failure")
+                history = jobs + [current_gate, newer]
+                latest = github_ci_time.latest_run_jobs(history, 123, 2, "a" * 40)
+                self.assertTrue(self.check(latest, attempt=2, checks_layout="split"))
+                newer["conclusion"] = "success"
+                latest = github_ci_time.latest_run_jobs(history, 123, 2, "a" * 40)
+                self.assertEqual(self.check(latest, attempt=2, checks_layout="split"), [])
+                with self.assertRaises(ValueError):
+                    github_ci_time.latest_run_jobs(history + [newer], 123, 2, "a" * 40)
+
+    def test_split_api_gate_accepts_only_explicit_dispatch_runs(self):
+        jobs = self.sample("split")
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+               "event": "workflow_dispatch", "head_branch": "codex/ci-checks-split-overlap"}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="split")
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(jobs), "jobs": jobs}]):
+            self.assertTrue(github_ci_time.require_jobs(args)["success"])
+        for event in ("push", "pull_request", "merge_group"):
+            with self.subTest(event=event), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, event=event)) as fetch:
+                with self.assertRaisesRegex(ValueError, "requires a workflow_dispatch"):
+                    github_ci_time.require_jobs(args)
+                self.assertEqual(fetch.call_count, 1)
+        for branch in (None, "main", "codex/ci-checks-combined-overlap", "codex/ci-checks-split-overlap-extra"):
+            with self.subTest(branch=branch), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, head_branch=branch)) as fetch:
+                with self.assertRaisesRegex(ValueError, "exact qualification branch"):
+                    github_ci_time.require_jobs(args)
+                self.assertEqual(fetch.call_count, 1)
 
     def test_missing_duplicate_failed_cancelled_and_skipped_jobs_fail(self):
         total = len(github_ci_time.COMBINATION_JOBS)
@@ -864,13 +964,27 @@ class CompletionGateTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         lanes = re.search(r"^        lane: \[([^]]+)\]$", desktop, re.M).group(1).split(", ")
-        shards = re.search(r"^        shard: \[([^]]+)\]$", desktop, re.M).group(1).split(", ")
+        shard_expression = re.search(r"^        shard: \$\{\{ fromJSON\((.+)\) \}\}$", desktop, re.M).group(1)
+        exclude_expression = re.search(r"^        exclude: \$\{\{ fromJSON\((.+)\) \}\}$", desktop, re.M).group(1)
+        shard_variants = [json.loads(value) for value in re.findall(r"'([^']*)'", shard_expression) if value.startswith("[")]
+        exclude_variants = [json.loads(value) for value in re.findall(r"'([^']*)'", exclude_expression) if value.startswith("[")]
+        self.assertEqual(len(shard_variants), 2)
+        self.assertEqual(len(exclude_variants), 2)
+        dispatch_guard = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap'"
+        self.assertIn(dispatch_guard, shard_expression)
+        self.assertIn(dispatch_guard, exclude_expression)
+        for expression in (shard_expression, exclude_expression):
+            self.assertRegex(expression, re.escape(dispatch_guard) + r" && '\[[^']*\]' \|\| '\[[^']*\]'\Z")
         includes = re.findall(r"^          - name: (.+)\n            lane: (.+)\n", desktop, re.M)
         self.assertEqual(Counter(lanes), Counter(f"{platform}-{arch}" for platform, arch in ci_summary._COVERAGE_POLICY_ANCHORS if (platform, arch) != ("macos", "x86_64")))
-        self.assertEqual(Counter(shards), Counter(github_ci_time.COMBINATION_SHARDS))
         self.assertEqual(Counter(lane for _, lane in includes), Counter(lanes))
-        expanded = [f"{name} {shard}" for name, _ in includes for shard in shards]
-        self.assertEqual(Counter(expanded), Counter(github_ci_time.COMBINATION_PLATFORMS))
+        self.assertEqual(Counter(shard_variants[1]), Counter(github_ci_time.COMBINATION_SHARDS))
+        self.assertEqual(exclude_variants[1], [])
+        for variant, expected in ((0, github_ci_time.SPLIT_COMBINATION_PLATFORMS),
+                                  (1, github_ci_time.COMBINATION_PLATFORMS)):
+            expanded = [f"{name} {shard}" for name, lane in includes for shard in shard_variants[variant]
+                        if {"lane": lane, "shard": shard} not in exclude_variants[variant]]
+            self.assertEqual(Counter(expanded), Counter(expected))
         self.assertIn("name: ${{ matrix.name }} ${{ matrix.shard }}", desktop)
         self.assertIn("BUSTER_MATRIX_SHARD: ${{ matrix.shard }}", desktop)
         self.assertIn("matrix.shard == 'release'", desktop)
@@ -886,9 +1000,22 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
         self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
-    def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
-        jobs = self.sample()
+    def test_candidate_layout_and_windows_admission_are_dispatch_branch_scoped(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        inputs = workflow.split("  workflow_dispatch:", 1)[1].split("\n# Supersede", 1)[0]
+        self.assertNotIn("      checks_layout:\n", inputs)
+        self.assertNotIn("      test_admission:\n", inputs)
+        self.assertIn("BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}", workflow)
+        desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        windows = desktop.split("      - name: Combination matrix (Windows)\n", 1)[1].split("      - name:", 1)[0]
+        admission = re.search(r"^          BUSTER_MATRIX_TEST_ADMISSION: (.+)$", windows, re.M).group(1)
+        self.assertEqual(workflow.count("BUSTER_MATRIX_TEST_ADMISSION:"), 1)
+        self.assertEqual(admission, "${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}")
+
+    def timing_sample(self, checks_layout="combined"):
+        jobs = self.sample(checks_layout)
         for job in jobs:
             job.update(status="completed", conclusion="success", labels=["fixture"],
                        created_at="2026-09-16T12:00:05Z", started_at="2026-09-16T12:00:10Z", completed_at="2026-09-16T12:01:10Z")
@@ -908,16 +1035,32 @@ class CompletionGateTests(unittest.TestCase):
             job["steps"] += [{"name": step, "conclusion": "success"} for step in required if step not in existing]
         run = {"id": 123, "head_sha": "a" * 40, "workflow_blob_sha": "b" * 40, "run_attempt": 1,
                "status": "completed", "conclusion": "success", "created_at": "2026-09-16T12:00:00Z", "jobs": jobs}
-        measurement, reason = github_ci_time.measure(run)
-        self.assertIsNone(reason)
-        self.assertEqual(measurement["runner_seconds"], 21 * 60)
-        self.assertEqual(measurement["elapsed_seconds"], 70)
-        self.assertEqual(set(measurement["job_queue_seconds"].values()), {5})
-        for index in range(len(jobs)):
-            bad = copy.deepcopy(run)
-            bad["jobs"].pop(index)
-            self.assertIsNone(github_ci_time.measure(bad)[0])
-        self.assertIsNone(github_ci_time.measure(dict(run, run_attempt=2))[0])
+        return run
+
+    def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
+        for layout, job_count in (("combined", 21), ("split", 27)):
+            with self.subTest(layout=layout):
+                run = self.timing_sample(layout)
+                measurement, reason = github_ci_time.measure(run)
+                self.assertIsNone(reason)
+                self.assertEqual(measurement["runner_seconds"], job_count * 60)
+                self.assertEqual(measurement["elapsed_seconds"], 70)
+                self.assertEqual(set(measurement["job_queue_seconds"].values()), {5})
+                for index in range(len(run["jobs"])):
+                    bad = copy.deepcopy(run)
+                    bad["jobs"].pop(index)
+                    self.assertIsNone(github_ci_time.measure(bad)[0])
+                self.assertIsNone(github_ci_time.measure(dict(run, run_attempt=2))[0])
+
+    def test_combined_and_split_timing_cohorts_stay_separate_on_the_same_workflow_blob(self):
+        combined = self.timing_sample()
+        split = self.timing_sample("split")
+        split["id"] = 124
+        summary = github_ci_time.summarize({"runs": [combined, split]})
+        self.assertEqual(summary["excluded"], {})
+        self.assertEqual(len(summary["cohorts"]), 2)
+        self.assertEqual({row["n"] for row in summary["cohorts"]}, {1})
+        self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]}, {21 * 60, 27 * 60})
 
 
 class DraftMacosDeferralTests(unittest.TestCase):

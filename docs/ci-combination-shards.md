@@ -256,3 +256,52 @@ four-CPU budget; builds may still overlap a test phase, which the
 [current observations and research](research/2026-09-30-ci-throughput.md),
 [#1826](https://github.com/buster14a/buster/issues/1826), and
 [#709](https://github.com/buster14a/buster/issues/709).
+
+## Further checks partition qualification (#2120)
+
+Partition version 2 assigns every original policy row to one of four owners:
+`release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
+and `portability`. `checks` selects the union of the three non-Release owners;
+`all` still selects the entire original policy. Excluded rows remain explicit.
+The original row IDs, policy version, counts and fingerprints are unchanged.
+The consumer independently derives owners and rejects missing, foreign,
+duplicated and empty completions.
+
+The default workflow retains ten desktop jobs. The split qualification replaces
+grouped checks on Linux x86-64, Linux AArch64 and Windows x86-64 with three
+independent jobs, giving sixteen desktop jobs and an exact 27-job required
+inventory (plus the main-reuse decision job). macOS retains its shared sanitizer
+tree and Windows AArch64 retains grouped MSVC portability checks. Individual
+Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
+before native build-tree mutation. Only Release owns preflight and canonical
+producer obligations. Each isolated sanitizer job receives its full host budget.
+
+Qualification uses manual dispatch of the existing `ci.yml` on three branches
+pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
+
+| Branch | Checks layout | Windows grouped-checks admission |
+| --- | --- | --- |
+| `codex/ci-checks-combined-overlap` | Combined | Overlap |
+| `codex/ci-checks-combined-all-builds` | Combined | All builds first |
+| `codex/ci-checks-split-overlap` | Split | Overlap |
+
+The original dispatch inputs and reviewed support ledger stay intact. Ordinary
+dispatches already bypass main-push reuse. Split completion additionally checks
+the exact API branch identity. Historical timing keeps combined and split job
+cohorts separate; admission A/B conclusions require native phase metadata.
+
+Each variant needs three complete first attempts with matching source, runner
+images, toolchains and cache conditions. Compare queue-inclusive whole-workflow
+wall time, total runner seconds, exact policy/module/assertion census and all
+required success results. Admit split jobs only after at least 15% improvement
+in median whole-workflow wall time with at most 5% runner-second growth. A smaller
+job duration alone does not meet the contract. The implementation and local
+controls do not assert a measured speedup or close either research issue.
+
+`python3 tools/ci_checks_qualification.py <campaign.json>` reads digest-bound
+retained evidence and emits an independent qualification verdict. Its module
+docstring defines the campaign format. Missing or incomparable observations
+remain `pending`; complete campaigns can meet or reject each issue's contract.
+The tool records invocation binary/driver hashes within each sample while
+comparing source/policy, toolchains, conditions and exact census across runs;
+it does not require independently linked executables to have identical bytes.
