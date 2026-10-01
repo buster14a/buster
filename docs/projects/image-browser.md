@@ -114,7 +114,9 @@ stops the process before releasing storage a live worker may still access.
 The browser opts out of native file drops; bounded
 polling alone would not cap the retained XDND negotiation path. It retains no
 event/path pointers after resetting the event arena. Leaf symlinks and special files
-are refused by the loader; source mutation during a read becomes an error.
+are refused by the loader. The loader rejects changes observed by its before/after
+file-stat checks and decodes an immutable byte copy; these checks do not guarantee
+an atomic filesystem snapshot.
 
 ## Validation
 
@@ -152,6 +154,8 @@ CPU/native/unavailable-display gates (99/99, 180/180 and 1/1). Release/unity
 also compiled the tests-OFF production target and checked its CLI. This is
 software XCB evidence under Xvfb; subsequent exact-head and merge-group
 validation is recorded on [the application PR](https://github.com/buster14a/buster/pull/2213).
+Hosted binaries use the build system's host CPU flags and are not a portable
+ISA promise; build the source target for the selected Linux/XCB host.
 
 ## Provenance and licenses
 
