@@ -1,0 +1,43 @@
+name: Native frame qualification failure evidence
+on:
+  push:
+    branches: ['codex/1885-native-frame-diagnostic']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  evidence:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Download the preserved failed first attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-frame-failure"
+          gh run download 36882144517 --repo buster14a/buster --name native-frame-qualification-windows-36882144517-1 --dir "$RUNNER_TEMP/native-frame-failure"
+      - name: Print only controller failure records
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "native-frame-failure"
+          selected = ("sample", "source_revision", "source_tree", "attempt", "complete", "success", "error", "evidence_error", "cleanup_error", "bootstrap", "matrix", "unexecuted_samples", "controller_wall_seconds", "first_attempts_only")
+          for relative in ("A1/result.json", "terminal.json"):
+              path = root / relative
+              if not path.is_file():
+                  print(json.dumps({"record": relative, "error": "missing retained record"}))
+                  continue
+              data = json.loads(path.read_text(encoding="utf-8"))
+              rows = data.get("samples")
+              if isinstance(rows, list):
+                  data["samples"] = [{key: row[key] for key in selected if key in row} for row in rows]
+              result = {key: data[key] for key in selected if key in data}
+              if rows is not None:
+                  result["samples"] = data["samples"]
+              print(json.dumps({"record": relative, "data": result}, ensure_ascii=True))
+          PY
