@@ -6508,29 +6508,36 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         // A backslash run is literal unless followed by a quote. Before a
         // quote, pairs decode to slashes and the odd slash escapes the quote;
         // an even run toggles quoting. Check both initial quote states.
+        enum { max_slash_count = 65 };
         for (u64 quoted = 0; quoted < 2; quoted += 1)
         {
             for (u64 quote_after = 0; quote_after < 2; quote_after += 1)
             {
-                for (u64 slash_count = 0; slash_count <= 65; slash_count += 1)
+                for (u64 slash_count = 0; slash_count <= max_slash_count; slash_count += 1)
                 {
-                    char16 command_line[80];
-                    char8 expected[80];
+                    // Input: opening quote, x, slashes, following quote, space,
+                    // y and NUL. Output reaches at most 65 + x + space + y;
+                    // reserve one extra byte for the independently bounded quote.
+                    char16 command_line[max_slash_count + 6];
+                    char8 expected[max_slash_count + 4];
                     u64 input_length = 0;
-                    u64 expected_length = 0;
+                    u64 expected_slash_count = quote_after ? slash_count / 2 : slash_count;
+                    u64 expected_length = 1 + expected_slash_count;
                     if (quoted)
                     {
                         command_line[input_length++] = '"';
                     }
                     command_line[input_length++] = 'x';
-                    expected[expected_length++] = 'x';
+                    expected[0] = 'x';
                     for (u64 i = 0; i < slash_count; i += 1)
                     {
                         command_line[input_length++] = '\\';
                     }
-                    for (u64 i = 0; i < (quote_after ? slash_count / 2 : slash_count); i += 1)
+                    // Index the slash span directly: GCC 13 must see that
+                    // every store stays within the fixed fixture bound.
+                    for (u64 i = 0; i < expected_slash_count; i += 1)
                     {
-                        expected[expected_length++] = '\\';
+                        expected[1 + i] = '\\';
                     }
                     if (quote_after)
                     {
