@@ -345,7 +345,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType image_browser_linux_decode(void* argument)
 {
     ImageBrowserDecodeWork* work = (ImageBrowserDecodeWork*)argument;
     work->result = image_browser_decode(work->request, work->encoded, work->output, work->scratch, IMAGE_FORMAT_UNKNOWN);
-    return 0;
+    return;
 }
 
 BUSTER_GLOBAL_LOCAL ImageBrowserResult image_browser_linux_load(ImageBrowserWorker* worker, ImageBrowserRequest request, String8 path)
@@ -557,7 +557,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType image_browser_worker_loop(void* argument)
             image_browser_worker_unlock(worker);
         }
     }
-    return 0;
+    return;
 }
 
 bool image_browser_worker_start(ImageBrowserWorker* worker, s32* error)
