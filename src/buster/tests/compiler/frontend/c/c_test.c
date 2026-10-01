@@ -6353,6 +6353,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
     return result;
 }
 
+// Deferred assertions have one translation-unit diagnostic owner, even when
+// their declaration is consumed again by a function-body walk (#1783).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 assertion_count;
+        u32 diagnostic_count;
+        CDiagnosticKind kind;
+    } const cases[] = {
+        {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == 4, \"file positive\");\n"),
+         1, 0, C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == 4, \"block positive\"); return 0; }\n"),
+         1, 0, C_DIAGNOSTIC_KIND_COUNT},
+        {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == 8, \"file false\");\n"),
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == 8, \"block false\"); return 0; }\n"),
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int runtime(void);\n"
+            "int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == runtime(), \"nonconstant\"); return 0; }\n"),
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        {S8("static int arr[2];\n"
+            "int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "{ _Static_assert(sizeof(arr) == 8, \"nested shadow\"); } return 0; }\n"),
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == 8, \"first false\");\n"
+            "_Static_assert(sizeof(arr) == 12, \"second false\"); return 0; }\n"),
+         2, 2, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                    });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("deferred-assert-ownership.c"), tokens, parse, target_native,
+                                                              (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parse.deferred_static_assert_count == cases[case_index].assertion_count, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, ir.diagnostic_count == cases[case_index].diagnostic_count, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, ir.canonical_ir_certified == (cases[case_index].diagnostic_count == 0), cases[case_index].source);
+            if (ir.diagnostic_count == cases[case_index].diagnostic_count && ir.diagnostic_count == parse.deferred_static_assert_count)
+            {
+                for (u32 diagnostic_index = 0; diagnostic_index < ir.diagnostic_count; diagnostic_index += 1)
+                {
+                    CDiagnostic diagnostic = ir.diagnostics[diagnostic_index];
+                    CSourceLocation location = c_preprocess_site_location(&tokens, parse.deferred_static_asserts[diagnostic_index].location);
+                    BUSTER_TEST(arguments, diagnostic.kind == cases[case_index].kind);
+                    BUSTER_TEST(arguments, diagnostic.location.file == location.file && diagnostic.location.offset == location.offset &&
+                                          diagnostic.location.map_offset == location.map_offset);
+                    BUSTER_STRING_TEST(arguments, diagnostic.message,
+                                       cases[case_index].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED
+                                           ? S8("static assertion expression is not a true integer constant expression")
+                                           : S8("static assertion expression is not an integer constant expression"));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14945,9 +15021,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
                                : refused_ir.diagnostic_count  ? refused_ir.diagnostics[0].kind
                                                               : C_DIAGNOSTIC_KIND_COUNT;
         BUSTER_TEST_RAW(arguments, refused_tokens.diagnostic_count == 0, refused[index].source);
-        // A block-scope assertion is reported by both the deferred pass and
-        // its function's lowering (#1783), so only the first kind is compared.
-        BUSTER_TEST_RAW(arguments, diagnostic_count >= 1, refused[index].source);
+        BUSTER_TEST_RAW(arguments, diagnostic_count == 1, refused[index].source);
         BUSTER_TEST_RAW(arguments, kind == refused[index].kind, refused[index].source);
         scratch_end(refused_temporary);
     }
@@ -29902,6 +29976,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
 
