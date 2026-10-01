@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Compile original and diagnostic harnesses
+      - name: Compile original-child and diagnostic-child stress harnesses
         shell: bash
         run: |
           set -euo pipefail
@@ -25,7 +25,20 @@ jobs:
           clang --version
           git rev-parse HEAD
           test "$(git hash-object tools/throughput/tests.c)" = 95dc53ba95f7c3e681bb3e818d74ef04ad9da6be
-          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/original
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/throughput/tests.c')
+          text = p.read_text()
+          old = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);\n        test_summaries(directory, 0);'
+          new = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK_CHILD_EXIT(child, 0, log);\n        test_summaries(directory, 0);'
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = '        test_summary_write_failure(executable, root);'
+          new = '        for (unsigned probe_index = 0; probe_index < 256; ++probe_index)\n            test_summary_write_failure(executable, root);'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          PY
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/original-child
           python3 - <<'PY'
           from pathlib import Path
           path = Path('tools/throughput/tests.c')
@@ -62,35 +75,28 @@ jobs:
                           got, get_error, (uintmax_t)saved.rlim_cur, (uintmax_t)saved.rlim_max,
                           signal_error, limit_status, limit_error, comparison, comparison_error, restored, restore_error);
                   result = got == 0 && !signal_error && limit_status == 0 && comparison == 2 && restored == 0 ? 0 : 1;'''
-          text = text[:start] + new + text[end:]
-          old = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);\n        test_summaries(directory, 0);'
-          new = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK_CHILD_EXIT(child, 0, log);\n        test_summaries(directory, 0);'
-          if text.count(old) != 1:
-              raise SystemExit('parent source mismatch')
-          path.write_text(text.replace(old, new))
+          path.write_text(text[:start] + new + text[end:])
           PY
           git diff --check
           git diff -- tools/throughput/tests.c > build/issue-2116/diagnostic.patch
-          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/diagnostic
-      - name: Record bounded original and instrumented attempts
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/diagnostic-child
+      - name: Record every fixed-population outcome
         shell: bash
         run: |
           set -euo pipefail
-          for mode in original diagnostic; do
-            for attempt in 1 2; do
-              root="$PWD/build/issue-2116/$mode-$attempt"
-              set +e
-              "build/issue-2116/$mode" "$root" > "build/issue-2116/$mode-$attempt.log" 2>&1
-              status=$?
-              set -e
-              printf 'PROBE_ATTEMPT mode=%s attempt=%s exit=%s\n' "$mode" "$attempt" "$status" | tee -a build/issue-2116/outcomes.txt
-              grep -E 'TEST failure|THROUGHPUT_INTEGRATION_TEST|SUMMARY_WRITE_PROBE' "build/issue-2116/$mode-$attempt.log" || true
-              if test -f "$root/summary-write-failure.log"; then
-                printf '\nCHILD_LOG mode=%s attempt=%s\n' "$mode" "$attempt"
-                cat "$root/summary-write-failure.log"
-                printf '\nEND_CHILD_LOG\n'
-              fi
-            done
+          for mode in original-child diagnostic-child; do
+            root="$PWD/build/issue-2116/$mode-root"
+            set +e
+            "build/issue-2116/$mode" "$root" > "build/issue-2116/$mode.log" 2>&1
+            status=$?
+            set -e
+            printf 'PROBE_POPULATION mode=%s children=256 exit=%s\n' "$mode" "$status" | tee -a build/issue-2116/outcomes.txt
+            grep -E 'TEST failure|THROUGHPUT_INTEGRATION_TEST|SUMMARY_WRITE_PROBE' "build/issue-2116/$mode.log" || true
+            if test -f "$root/summary-write-failure.log"; then
+              printf '\nLAST_CHILD_LOG mode=%s\n' "$mode"
+              cat "$root/summary-write-failure.log"
+              printf '\nEND_CHILD_LOG\n'
+            fi
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
