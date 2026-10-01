@@ -511,6 +511,224 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_legacy_layout(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+        TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ}, 7);
+
+    // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-evex-oracle.s.
+    u8 const expected[] = {
+        0x62, 0x41, 0x7e, 0x48, 0x6f, 0x7d, 0x00, 0x62, 0x81, 0x7c, 0x48, 0x10,
+        0x44, 0x8c, 0x7f, 0x62, 0x81, 0x7c, 0x48, 0x10, 0x84, 0x8c, 0x00, 0x20,
+        0x00, 0x00, 0x62, 0xc1, 0x6c, 0xc3, 0x58, 0x8d, 0x00, 0x00, 0x00, 0x00,
+        0x62, 0x61, 0x8d, 0x47, 0x58, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x62, 0xc1,
+        0x5c, 0x50, 0x59, 0x5d, 0x7f, 0x62, 0xc1, 0x5c, 0x50, 0x59, 0x9d, 0x00,
+        0x02, 0x00, 0x00, 0x62, 0xb1, 0x54, 0x40, 0xc2, 0xee, 0x07, 0x62, 0x93,
+        0x45, 0x40, 0x3f, 0xd8, 0x07, 0x62, 0x43, 0x7d, 0x48, 0x08, 0x8d, 0x00,
+        0x00, 0x00, 0x00, 0xff, 0x62, 0x01, 0x1c, 0x10, 0x58, 0xdd, 0x62, 0xc1,
+        0x74, 0x02, 0x58, 0x45, 0x7f, 0x62, 0xc1, 0x64, 0x24, 0x58, 0x95, 0x00,
+        0x10, 0x00, 0x00,
+    };
+    String8 const sources[] = {
+        S8("vmovdqu32 zmm31, zmmword ptr [r13]\n"
+           "vmovups zmm16, zmmword ptr [r12+r9*4+8128]\n"
+           "vmovups zmm16, zmmword ptr [r12+r9*4+8192]\n"
+           "vaddps zmm17{k3}{z}, zmm18, zmmword ptr [r13+external_evex]\n"
+           "vaddpd zmm31{k7}, zmm30, zmmword ptr [rip+external_packed]\n"
+           "vmulps zmm19, zmm20, dword ptr [r13+508]{1to16}\n"
+           "vmulps zmm19, zmm20, dword ptr [r13+512]{1to16}\n"
+           "vcmpps k5, zmm21, zmm22, 7\n"
+           "vpcmpb k3, zmm23, zmm24, 7\n"
+           "vrndscaleps zmm25, zmmword ptr [r13+external_round], 255\n"
+           "vaddps zmm27, zmm28, zmm29, {rn-sae}\n"
+           "vaddps xmm16{k2}, xmm17, xmmword ptr [r13+2032]\n"
+           "vaddps ymm18{k4}, ymm19, ymmword ptr [r13+4096]\n"),
+        S8("vmovdqu32 (%r13), %zmm31\n"
+           "vmovups 8128(%r12,%r9,4), %zmm16\n"
+           "vmovups 8192(%r12,%r9,4), %zmm16\n"
+           "vaddps external_evex(%r13), %zmm18, %zmm17{%k3}{z}\n"
+           "vaddpd external_packed(%rip), %zmm30, %zmm31{%k7}\n"
+           "vmulps 508(%r13){1to16}, %zmm20, %zmm19\n"
+           "vmulps 512(%r13){1to16}, %zmm20, %zmm19\n"
+           "vcmpps $7, %zmm22, %zmm21, %k5\n"
+           "vpcmpb $7, %zmm24, %zmm23, %k3\n"
+           "vrndscaleps $255, external_round(%r13), %zmm25\n"
+           "vaddps {rn-sae}, %zmm29, %zmm28, %zmm27\n"
+           "vaddps 2032(%r13), %xmm17, %xmm16{%k2}\n"
+           "vaddps 4096(%r13), %ymm19, %ymm18{%k4}\n"),
+    };
+    u64 const offsets[] = {32, 42, 83};
+    s64 const addends[] = {0, -4, 0};
+    AssemblyRelocationKind const kinds[] = {ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED};
+    String8 const symbols[] = {S8("external_evex"), S8("external_packed"), S8("external_round")};
+    for (u32 syntax = 0; syntax < BUSTER_ARRAY_LENGTH(sources); syntax += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, sources[syntax],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, expected, sizeof(expected)));
+        bool relocations_match = encoded.relocation_count == BUSTER_ARRAY_LENGTH(offsets);
+        for (u32 index = 0; relocations_match && index < encoded.relocation_count; index += 1)
+        {
+            AssemblyRelocation relocation = encoded.relocations[index];
+            relocations_match = relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                relocation.kind == kinds[index] && relocation.symbol < encoded.symbol_count &&
+                                string_equal(encoded.symbols[relocation.symbol].name, symbols[index]);
+        }
+        BUSTER_TEST(arguments, relocations_match);
+    }
+    AssemblyEncodeResult invalid = assembly_encode(arguments->arena,
+        S8("nop\n"
+           "vmovups zmm1{k0}{z}, zmm2\n"
+           "vaddps zmm1, zmm2, qword ptr [r13+invalid_width]\n"
+           "vaddps zmm1{k1}{z}, zmm2, dword ptr [r13+invalid_broadcast]{1to8}\n"
+           "vaddps zmm1, zmm2, zmm3, {invalid_rounding}\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const valid_prefix[] = {0x90};
+    BUSTER_TEST(arguments, invalid.diagnostic_count == 4 &&
+                               assembly_test_bytes_equal(invalid.bytes, valid_prefix, sizeof(valid_prefix)) &&
+                               invalid.relocation_count == 0 && invalid.symbol_count == 0);
+    s64 const displacements[] = {-8256, -8192, -64, 0, 8128, 8192, 0};
+    for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operands[3] = {
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 512,
+             .reg = {.index = 17, .width = 512, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM}},
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 512,
+             .reg = {.index = 18, .width = 512, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM}},
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 32,
+             .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                        .source_width = 512, .has_displacement = true, .displacement = displacements[displacement_index],
+                        .has_symbol = displacement_index == 6, .symbol = displacement_index == 6 ? S8("external_disp") : (String8){0}}},
+        };
+        String8 features[] = {S8("*")};
+        UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
+            .mnemonic = S8("VADDPS"), .operands = operands, .operand_count = BUSTER_ARRAY_LENGTH(operands),
+            .features = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)}, .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true});
+        result.test_count += agreement.test_count;
+        result.succeeded_test_count += agreement.succeeded_test_count;
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_apx_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF}, 3);
+
+    // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-apx-oracle.s.
+    u8 const expected[] = {
+        0xd5, 0x58, 0x89, 0xc8, 0xd5, 0x50, 0x01, 0xda, 0xd5, 0x78, 0x11, 0x74,
+        0xac, 0x80, 0x62, 0x0c, 0xc0, 0x10, 0x03, 0x44, 0xd1, 0x7f, 0x62, 0x4c,
+        0xa4, 0x10, 0x29, 0xec, 0x62, 0x6c, 0x8c, 0x14, 0x33, 0xb8, 0x00, 0x00,
+        0x00, 0x00, 0x62, 0xf4, 0x7c, 0x0c, 0x83, 0x05, 0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xd5, 0x58, 0x69, 0x8a, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
+        0x00, 0x62, 0xfc, 0xfc, 0x0c, 0xc1, 0xe3, 0xff, 0xd5, 0x78, 0x8d, 0xa4,
+        0xb5, 0x00, 0x00, 0x00, 0x00, 0xd5, 0xd1, 0xb6, 0x38, 0x62, 0xfc, 0x7c,
+        0x10, 0xff, 0xf1, 0x62, 0xdc, 0x0c, 0x10, 0x8f, 0xc7,
+    };
+    String8 const sources[] = {
+        S8("mov r16, r17\n"
+           "add r18d, r19d\n"
+           "adc qword ptr [r20+r21*4-128], r22\n"
+           "add r23, r24, qword ptr [r25+r26*8+127]\n"
+           "sub r27, r28, r29\n"
+           "{nf} xor r30, r31, qword ptr [r16+external_nf]\n"
+           "{nf} add dword ptr [rip+external_rip], 127\n"
+           "imul r17, qword ptr [r18+128], 128\n"
+           "{nf} shl r19, 255\n"
+           "lea r20, [r21+r22*4+external_lea]\n"
+           "movzx r23d, byte ptr [r24]\n"
+           "push2 r16, r17\n"
+           "pop2 r30, r31\n"),
+        S8("movq %r17, %r16\n"
+           "addl %r19d, %r18d\n"
+           "adcq %r22, -128(%r20,%r21,4)\n"
+           "addq 127(%r25,%r26,8), %r24, %r23\n"
+           "subq %r29, %r28, %r27\n"
+           "{nf} xorq external_nf(%r16), %r31, %r30\n"
+           "{nf} addl $127, external_rip(%rip)\n"
+           "imulq $128, 128(%r18), %r17\n"
+           "{nf} shlq $255, %r19\n"
+           "leaq external_lea(%r21,%r22,4), %r20\n"
+           "movzbl (%r24), %r23d\n"
+           "push2 %r17, %r16\n"
+           "pop2 %r31, %r30\n"),
+    };
+    u64 const offsets[] = {34, 44, 73};
+    s64 const addends[] = {0, -5, 0};
+    AssemblyRelocationKind const kinds[] = {ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED};
+    String8 const symbols[] = {S8("external_nf"), S8("external_rip"), S8("external_lea")};
+    for (u32 syntax = 0; syntax < BUSTER_ARRAY_LENGTH(sources); syntax += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, sources[syntax],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, expected, sizeof(expected)));
+        bool relocations_match = encoded.relocation_count == BUSTER_ARRAY_LENGTH(offsets);
+        for (u32 index = 0; relocations_match && index < encoded.relocation_count; index += 1)
+        {
+            AssemblyRelocation relocation = encoded.relocations[index];
+            relocations_match = relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                relocation.kind == kinds[index] && relocation.symbol < encoded.symbol_count &&
+                                string_equal(encoded.symbols[relocation.symbol].name, symbols[index]);
+        }
+        BUSTER_TEST(arguments, relocations_match);
+    }
+    AssemblyEncodeResult invalid = assembly_encode(arguments->arena,
+        S8("nop\n"
+           "mov r16b, ah\n"
+           "add r16, r17d, r18\n"
+           "lea r19, [r20+2147483648]\n"
+           "push2 r16, eax\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const valid_prefix[] = {0x90};
+    BUSTER_TEST(arguments, invalid.diagnostic_count == 4 &&
+                               assembly_test_bytes_equal(invalid.bytes, valid_prefix, sizeof(valid_prefix)) &&
+                               invalid.relocation_count == 0 && invalid.symbol_count == 0);
+    Target unavailable = target;
+    unavailable.cpu_features = target_cpu_features_remove(unavailable.cpu_features, TARGET_CPU_FEATURE_X86_APX);
+    AssemblyEncodeResult refused = assembly_encode(arguments->arena, S8("add r16, r17\n"),
+        (AssemblyEncodeOptions){.target = unavailable, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, refused.diagnostic_count == 1 && refused.bytes.length == 0 && refused.relocation_count == 0);
+    for (u32 mode = 0; mode < 3; mode += 1)
+    {
+        for (u32 symbolic = 0; symbolic < 2; symbolic += 1)
+        {
+            BusterX86MetadataPhysicalOperand operands[3] = {
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                 .reg = {.index = 31, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                 .reg = {.index = 17, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                 .memory = {.has_base = true, .base = {.index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                            .source_width = 64, .has_displacement = true, .displacement = symbolic ? 0 : 127,
+                            .has_symbol = symbolic != 0, .symbol = symbolic ? S8("external_disp") : (String8){0}}},
+            };
+            if (mode == 0) operands[1] = operands[2];
+            String8 features[] = {S8("*")};
+            UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
+                .mnemonic = S8("ADD"), .operands = operands, .operand_count = mode == 0 ? 2u : 3u,
+                .attributes = {.apx_flags = mode == 0 ? 0 : mode == 1 ? BUSTER_X86_METADATA_APX_NDD
+                                                                                    : BUSTER_X86_METADATA_APX_NDD | BUSTER_X86_METADATA_APX_NF,
+                               .no_flags = mode == 2},
+                .features = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)}, .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true});
+            result.test_count += agreement.test_count;
+            result.succeeded_test_count += agreement.succeeded_test_count;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
 {
     bool result = false;
@@ -3173,6 +3391,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_shift_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_scalar_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_legacy_layout);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_evex_layout);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_apx_layout);
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;
@@ -12484,6 +12704,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    metadata_vex_ymm_address32.bytes.length == sizeof(expected_vex_ymm_address32) &&
                                    memcmp(metadata_vex_ymm_address32.bytes.pointer, expected_vex_ymm_address32,
                                           sizeof(expected_vex_ymm_address32)) == 0);
+
+        // VEX packed comparisons read the aggregate dq/qq width published
+        // by the selected schema, even though the encoder records f32/f64.
+        // The address-size prefix changes the address, never that extent.
+        typedef struct VexCompareMemoryCase
+        {
+            String8 source;
+            String8 invalid_source;
+            u8 expected[6];
+            u8 byte_count;
+        } VexCompareMemoryCase;
+        VexCompareMemoryCase const vex_compare_memory_cases[] = {
+            {S8("vcmppd xmm0, xmm0, xmmword ptr [rax], 0\n"), S8("vcmppd xmm0, xmm0, qword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xf9, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmppd ymm0, ymm0, ymmword ptr [rax], 0\n"), S8("vcmppd ymm0, ymm0, qword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xfd, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmpps xmm0, xmm0, xmmword ptr [rax], 0\n"), S8("vcmpps xmm0, xmm0, dword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xf8, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmpps ymm0, ymm0, ymmword ptr [rax], 0\n"), S8("vcmpps ymm0, ymm0, dword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xfc, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmppd xmm0, xmm0, xmmword ptr [ebx], 0\n"), S8("vcmppd xmm0, xmm0, qword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xf9, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmppd ymm0, ymm0, ymmword ptr [ebx], 0\n"), S8("vcmppd ymm0, ymm0, qword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xfd, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmpps xmm0, xmm0, xmmword ptr [ebx], 0\n"), S8("vcmpps xmm0, xmm0, dword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xf8, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmpps ymm0, ymm0, ymmword ptr [ebx], 0\n"), S8("vcmpps ymm0, ymm0, dword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xfc, 0xc2, 0x03, 0x00}, 6},
+        };
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(vex_compare_memory_cases); case_index += 1)
+        {
+            VexCompareMemoryCase const* test = vex_compare_memory_cases + case_index;
+            AssemblyEncodeResult qualified = assembly_encode(
+                arguments->arena, test->source, (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, qualified.diagnostic_count == 0 && qualified.bytes.length == test->byte_count &&
+                                       qualified.symbol_count == 0 && qualified.relocation_count == 0 &&
+                                       memcmp(qualified.bytes.pointer, test->expected, test->byte_count) == 0);
+            AssemblyEncodeResult rejected = assembly_encode(
+                arguments->arena, test->invalid_source, (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, rejected.diagnostic_count == 1 &&
+                                       rejected.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                       rejected.bytes.length == 0 && rejected.symbol_count == 0 && rejected.relocation_count == 0);
+        }
 
         u8 expected_evex_zmm_memory[] = {0x62, 0xf9, 0x74, 0x48, 0x58, 0x00};
         AssemblyEncodeResult metadata_evex_zmm_qualified = assembly_encode(
