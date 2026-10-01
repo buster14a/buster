@@ -535,6 +535,24 @@ requires the live started row, forbids the completed row, and checks the fatal
 stderr message. This harness regression changes neither assertion totals nor
 `TEST_MODULE_TIMING` rows.
 
+## AArch64 ELF direct memory references
+
+`compiler_driver_test_aarch64_elf_ldst` runs on desktop Linux AArch64 with
+the configured host compiler. Its host-only input is
+`src/buster/tests/compiler/driver/fixtures/aarch64_elf_ldst.c`, outside the
+frozen `tests/*.c` native-retirement census. The default fixture is the
+volatile-int store/load from GitHub #2077; `AARCH64_LDST_SCALE_FAMILY=1`
+checks byte, halfword, word, doubleword and 128-bit SIMD stores/loads with
+nonzero addends past one page. Each input is compiled at `-O2 -fno-pie`,
+with GNU's section anchors disabled to keep independent symbol references,
+linked and executed independently with the host toolchain, then imported,
+linked and executed through Buster. The test requires the expected scaled
+relocation kinds, loads and stores, and reports `AARCH64_ELF_LDST_NATIVE_V1`
+only after both executions succeed. Compiler/linker children and executions
+have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
+classes, scale mismatches and malformed sites; `link_tests` derives patched
+addresses from static/dynamic section tables and imported-data copy slots.
+
 ## Node-backed Wasm oracle deadlines
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
