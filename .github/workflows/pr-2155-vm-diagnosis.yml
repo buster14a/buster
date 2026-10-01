@@ -14,12 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 447935fe886f32d8ce6c0bf680ba4a445e447428
+          ref: 0b1fdfea003551a20f8588f1b18f4d75d747e653
           persist-credentials: false
       - name: Build the inspected source compiler on the hosted runner
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 447935fe886f32d8ce6c0bf680ba4a445e447428
+          test "$(git rev-parse HEAD)" = 0b1fdfea003551a20f8588f1b18f4d75d747e653
           mkdir -p diagnostic
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
@@ -38,13 +38,50 @@ jobs:
           #define OFFSET(type, member) ((unsigned long)((char *)&(((type *)0)->member) - (char *)0))
           static char sized[OFFSET(struct Simple, third)];
           EOF
+          cat > diagnostic/case-0-gnu17-valid.c <<'EOF'
+          int a[sizeof(int (*)[4])]; int b[sizeof(int (*)(void))];
+          EOF
+          cat > diagnostic/case-1-gnu17-valid.c <<'EOF'
+          
+          EOF
+          cat > diagnostic/case-2-gnu17-valid.c <<'EOF'
+          struct S { char lead; long tail; }; static char a[(unsigned long)((char *)&(((struct S *)0)->tail) - (char *)0)];
+          EOF
+          cat > diagnostic/case-3-gnu23-valid.c <<'EOF'
+          struct S { char lead; int a[4]; }; struct T { char lead; struct S s; }; static char a[(unsigned long)((char *)&(((struct T *)0)->s.a[(unsigned char)258]) - (char *)0)];
+          EOF
+          cat > diagnostic/case-4-gnu23-valid.c <<'EOF'
+          struct S { char lead; long tail; }; static char a[(unsigned long)((char *)&(((struct S *)(unsigned char)256)->tail) - (char *)0)];
+          EOF
+          cat > diagnostic/case-5-gnu23-invalid.c <<'EOF'
+          struct S { int x; long y; }; char a[(unsigned long)((char *)&(((struct S *)((unsigned char)256 - 256))->y) - (char *)0)];
+          EOF
+          cat > diagnostic/case-6-gnu17-invalid.c <<'EOF'
+          int n; int a[n ?: 2];
+          EOF
+          cat > diagnostic/case-7-gnu17-invalid.c <<'EOF'
+          struct S { int x; long y; }; struct S *p; char a[(unsigned long)((char *)&p->y - (char *)0)];
+          EOF
+          cat > diagnostic/case-8-gnu17-invalid.c <<'EOF'
+          int n; struct S { int a[4]; }; char a[(unsigned long)((char *)&(((struct S *)0)->a[n]) - (char *)0)];
+          EOF
+          cat > diagnostic/case-9-gnu23-invalid.c <<'EOF'
+          void f(int n) { struct S { int a[4]; }; extern char a[(unsigned long)((char *)&(((struct S *)0)->a[n]) - (char *)0)]; }
+          EOF
+          failures=0
           for source in diagnostic/*.c; do
             printf '\nSOURCE %s\n' "$source"
-            build/Release/ide cc -fsyntax-only -std=gnu17 "$source" > "$source.stdout" 2> "$source.stderr"
+            dialect=gnu17
+            [[ "$source" == *-gnu23-* ]] && dialect=gnu23
+            expected=0
+            [[ "$source" == *-invalid.c ]] && expected=1
+            build/Release/ide cc -fsyntax-only -std="$dialect" "$source" > "$source.stdout" 2> "$source.stderr"
             result=$?
             printf 'syntax_status=%s\n' "$result"
             cat "$source.stdout" "$source.stderr"
+            [[ "$result" == "$expected" ]] || failures=1
           done
+          exit "$failures"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
