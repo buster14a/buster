@@ -26,7 +26,9 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p "$RUNNER_TEMP/icu-lists/partial"
-          echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $MIRROR jammy main" > "$RUNNER_TEMP/icu.list"
+          for suite in jammy jammy-updates jammy-security; do
+            echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $MIRROR $suite main"
+          done > "$RUNNER_TEMP/icu.list"
           options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/icu.list" -o 'Dir::Etc::sourceparts=-' -o "Dir::State::lists=$RUNNER_TEMP/icu-lists" -o 'Dir::Cache::pkgcache=' -o 'Dir::Cache::srcpkgcache=' -o 'APT::Update::Error-Mode=any' -o 'Acquire::Retries=3')
           sudo apt-get "${options[@]}" update
-          apt-cache "${options[@]}" show libicu70=70.1-2
+          apt-cache "${options[@]}" show libicu70
