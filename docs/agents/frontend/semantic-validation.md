@@ -17,6 +17,37 @@ Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
 
+## Declaration constraints
+
+Declaration-specifier parsing rejects repeated or conflicting storage classes
+before publishing an entity. `c_parse_storage_classes_valid` normalizes GNU
+thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
+thread-local combinations. A typed `auto` declaration at file scope or with
+another storage class still requires type inference under C23 6.7.1p4.
+
+`c_type_parse_root_finish` validates restrict applicability on the type rows a
+query appended, after parenthesized function-pointer declarators settle. Direct
+pointer construction and GNU `__auto_type` inference use the same object-pointer
+predicate. Scalar, void, and function-pointer restrict qualifiers fail; object
+pointers, typedef-mediated pointers, and arrays of object pointers remain valid.
+
+`c_parse_type_is_variably_modified` follows array and pointer derivations, so
+file-scope identifiers and block-scope identifiers with linkage cannot acquire
+variably modified types through typedefs or pointer-to-VLA declarations. The
+separate array-only duration check still permits a static pointer to a VLA while
+rejecting a VLA object with static duration. Function prototype parameter types
+retain their existing rules; the VM walk stops at function types.
+
+`c_parse_tag_lookup` chooses the nearest visible spelling across the existing
+struct, union, and enum indexes. A conflicting kind reports `wrong kind of tag`;
+an inner tag body or standalone tag declaration can introduce a new identity.
+Ordinary identifiers and typedef names retain their separate namespace.
+
+`c_test_declaration_constraints` pins accepted and rejected neighbors for
+issues #1854, #1855, #1856, and #1859 through semantics-only analysis and both
+canonical lowering forms. Rejected inputs must have source diagnostics and may
+not become successful partial programs.
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including

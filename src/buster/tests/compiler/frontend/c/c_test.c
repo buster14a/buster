@@ -4722,6 +4722,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
     return result;
 }
 
+// Frozen acceptance covers the same source through semantics-only and both
+// canonical lowering forms, including valid neighboring declarations.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        String8 message;
+        CPreprocessDialect dialect;
+        bool valid;
+    } cases[] = {
+        {S8("static extern int x; int get(void) { return x; }"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(void) { auto static int x; x++; }"), S8("requires type inference"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(void) { auto static int x; }"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("static auto _Atomic(int) x = 1;"), S8("requires type inference"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("static auto typeof(int) x = 1;"), S8("requires type inference"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("static static int x;"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("typedef extern int T;"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("typedef _Thread_local int T;"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("_Thread_local __thread int x;"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("static extern int f(void);"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("extern static int f(void) { return 0; }"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int f(register static int x);"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(void) { register extern int x; }"), S8("multiple storage-class"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("extern constexpr int x = 1;"), S8("constexpr cannot be combined"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("static _Thread_local int x; extern _Thread_local int y;"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("static __thread int x; extern __thread int y;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("static thread_local int x; extern thread_local int y;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("static constexpr int x = 1;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("void f(void) { register constexpr int x = 1; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(register int x) { auto int y = x; return y; }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("int f(int a[static 3]) { return a[0]; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(void) { int x = ({ static int y; y; }); return x; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("restrict int x;"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int f(void restrict);"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("restrict int *p;"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("typedef restrict int T;"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("typedef int F(void); restrict F f;"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("typedef int F(void); F *restrict p;"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int (*restrict p)(void);"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int (*restrict *p)(void);"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int f(void) { return sizeof(restrict int); }"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int f(void) { return (restrict int)0; }"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int f(restrict int x);"), S8("restrict qualifier requires"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void *restrict p; int *const volatile restrict q;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("typedef int *P; restrict P p; const restrict P q;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("typedef int *A[2]; restrict A a; int *restrict b[2];"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(int *restrict p) { return *p; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(int a[restrict static 3]) { return a[0]; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(int a[restrict 3]);"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(int a[const volatile restrict static 3]) { return a[0]; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int f(int a[const volatile restrict 3]);"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("int n; int a[n];"), S8("variably modified type is not permitted at file scope"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int n; typedef int A[n];"), S8("variably modified type is not permitted at file scope"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int n; int (*p)[n];"), S8("variably modified type is not permitted at file scope"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("int n; extern int a[n];"), S8("variably modified type is not permitted at file scope"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { extern int a[n]; }"), S8("must have no linkage"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { extern int (*p)[n]; }"), S8("must have no linkage"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { typedef int A[n]; extern A *p; }"), S8("must have no linkage"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { static int a[n]; }"), S8("cannot have static storage duration"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { static _Thread_local int a[n]; }"), S8("cannot have static storage duration"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(int n) { static thread_local int a[n]; }"), S8("cannot have static storage duration"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("void f(void) { static thread_local int x; x++; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("void f(int n) { int a[n]; a[0] = 1; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("void f(int n) { typedef int A[n]; A a; a[0] = 1; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("void f(int n) { static int (*p)[n] = 0; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("typedef void (*F)(int n, int a[n]); F f;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("void f(int n, int a[n]);"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("struct S; union S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S; enum S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("union S; struct S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("union S; enum S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("enum S { A }; struct S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("enum S { A }; union S;"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S { char x; }; union S { long x; };"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S; void f(void) { union S *p; }"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S; void f(void) { union S; struct S *p; }"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S; void f(void) { union S { int x; }; sizeof(struct S *); }"), S8("wrong kind of tag"), C_PREPROCESS_DIALECT_GNU23, false},
+        {S8("struct S; struct S; struct S { int x; }; struct S s;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("struct S; typedef int S; S x;"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("struct S; void f(void) { union S; union S *p; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+        {S8("struct S { int x; }; void f(void) { union S { int x; }; union S s; }"), {0}, C_PREPROCESS_DIALECT_GNU23, true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = cases[case_index].dialect});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].valid, cases[case_index].source);
+            bool message_found = cases[case_index].valid;
+            for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                message_found |= string_first_sequence(semantic.diagnostics[diagnostic].message, cases[case_index].message) != BUSTER_STRING_NO_MATCH;
+            BUSTER_TEST_RAW(arguments, message_found, cases[case_index].source);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("declaration-constraints.c"), tokens, syntax,
+                                                             target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid, cases[case_index].source);
+            BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+            for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                BUSTER_TEST(arguments, semantic.diagnostics[diagnostic].kind == lowered.diagnostics[diagnostic].kind);
+                BUSTER_STRING_TEST(arguments, semantic.diagnostics[diagnostic].message, lowered.diagnostics[diagnostic].message);
+            }
+            if (cases[case_index].valid && BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29311,6 +29428,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
