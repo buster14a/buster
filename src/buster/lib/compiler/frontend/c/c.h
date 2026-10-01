@@ -318,6 +318,8 @@ struct CSourceMetrics
 {
     // Lexed aggregates count one per inclusion, unique aggregates one per
     // distinct path; a single lex reports 1.
+    // Raw cache hits preserve these conceptual counts; CSourceCacheStats
+    // reports physically avoided translation/lexing separately.
     u64 files;
     u64 bytes;
     u64 translated_bytes;

@@ -1100,6 +1100,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          target_cpu_features_to_string(arena, invocation.target));
         }
     }
+    if (invocation.verbose && (invocation.enable_source_cache || invocation.source_cache))
+    {
+        CSourceCacheStats cache = compile.source_cache;
+        string_print(S8("SOURCE_CACHE version=1 hits={u64} misses={u64} bypasses={u64} resets={u64} reused_bytes={u64} "
+                        "reused_tokens={u64} retained_bytes={u64} byte_limit={u64} entries={u32}\n"),
+                     cache.hits, cache.misses, cache.bypasses, cache.resets, cache.reused_bytes,
+                     cache.reused_tokens, cache.retained_bytes, cache.byte_limit, cache.entry_count);
+    }
     if (compile.source_lexed.files && (invocation.verbose || invocation.source_metrics_path.length))
     {
         String8 unit = invocation.input_count == 1 ? invocation.input_paths[0] : string_format(arena, S8("{u32} inputs"), invocation.input_count);

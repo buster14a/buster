@@ -3271,8 +3271,14 @@ struct CSourceCache
 CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit)
 {
     CSourceCache* result = 0;
-    if (owner && byte_limit && byte_limit <= BUSTER_MB(64))
+    u64 metadata_position;
+    bool fits = owner && owner->position >= arena_minimum_position && owner->position <= owner->reserved_size &&
+                align_forward_checked(owner->position, BUSTER_ALIGN_OF(CSourceCache), &metadata_position) &&
+                metadata_position <= owner->reserved_size && sizeof(CSourceCache) <= owner->reserved_size - metadata_position;
+    if (fits && byte_limit && byte_limit <= BUSTER_MB(64))
     {
+        u64 owner_start = owner->position;
+        CSourceCache* metadata = arena_allocate_zeroed(owner, CSourceCache, 1);
         // Commit at creation: a failed optional reservation returns null;
         // subsequent admitted captures cannot require a failing growth commit.
         u64 reservation = byte_limit + BUSTER_KB(64);
@@ -3284,10 +3290,14 @@ CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit)
         });
         if (storage)
         {
-            result = arena_allocate_zeroed(owner, CSourceCache, 1);
+            result = metadata;
             result->storage = storage;
             result->start = storage->position;
             result->stats.byte_limit = byte_limit;
+        }
+        else
+        {
+            arena_release_to_position(owner, owner_start);
         }
     }
     return result;
@@ -3359,15 +3369,23 @@ BUSTER_C_INTERNAL CLexResult c_source_cache_lex(Arena* arena, CSpellingSpace* sp
 {
     CLexResult result;
     CSourceAllocationPlan plan;
+    TemporalArena snapshot_scope = {0};
     bool eligible = cache && cache->storage && arena && space && (!source.length || source.pointer) &&
                     c_source_allocation_plan(source.length, &plan) &&
                     space->used <= UINT32_MAX && plan.translated_capacity <= UINT32_MAX - space->used &&
                     source.length <= cache->stats.byte_limit;
     if (eligible)
     {
+        Arena* conflicts[] = {arena, cache->storage};
+        snapshot_scope = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        eligible = snapshot_scope.arena && snapshot_scope.arena->position <= snapshot_scope.arena->reserved_size &&
+                   source.length <= snapshot_scope.arena->reserved_size - snapshot_scope.arena->position;
+    }
+    if (eligible)
+    {
         // One owned byte snapshot feeds lookup, cold lexing and capture alike.
         // A mutable file mapping must never be compared and then lexed separately.
-        char8* snapshot = arena_allocate(arena, char8, source.length);
+        char8* snapshot = arena_allocate(snapshot_scope.arena, char8, source.length);
         if (source.length)
         {
             memcpy(snapshot, source.pointer, source.length);
@@ -3434,6 +3452,10 @@ BUSTER_C_INTERNAL CLexResult c_source_cache_lex(Arena* arena, CSpellingSpace* sp
             cache->stats.bypasses += 1;
         }
         result = c_lex_space(arena, space, source);
+    }
+    if (snapshot_scope.arena)
+    {
+        scratch_end(snapshot_scope);
     }
     return result;
 }
