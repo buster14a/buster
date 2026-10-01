@@ -5451,9 +5451,11 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     last = C_TYPE_ID_INVALID;
                     break;
                 }
+                bool condition_operand = machine->validate_expression_constraints ||
+                                         (c_preprocess_dialect_is_gnu(preprocess.dialect) && colon == question + 1);
                 tasks[task_count++] = (CParseExpressionTypeTask){
-                    .start = machine->validate_expression_constraints ? task->start : question + 1,
-                    .end = machine->validate_expression_constraints ? question : colon,
+                    .start = condition_operand ? task->start : question + 1,
+                    .end = condition_operand ? question : colon,
                 };
                 continue;
             }
@@ -21715,11 +21717,22 @@ BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value)
                           : value.integer != 0 || value.integer_high != 0;
 }
 
-BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, Target target, CParseConstant value, CTypeId destination)
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, Target target, CParseConstant value, CTypeId destination,
+                                                           CConstantEvaluationMode mode)
 {
     IR_SEMANTIC_RECORD(PARSE_CONVERSIONS, 1);
     IrType source = c_parse_constant_scalar_type(result, target, value.type);
     IrType scalar = c_parse_constant_scalar_type(result, target, destination);
+    if (mode == C_CONSTANT_EVALUATION_NORMAL)
+    {
+        // Derived pointers have no scalar-table row. Numeric pointer casts
+        // need the target width here; protected type/enum folds still refuse.
+        u32 width = target_data_layout(target).pointer.bit_width;
+        if (value.type.value < result->type_count && result->types[value.type.value].kind == C_TYPE_POINTER)
+            source = (IrType){.kind = IR_TYPE_POINTER, .bit_width = width};
+        if (destination.value < result->type_count && result->types[destination.value].kind == C_TYPE_POINTER)
+            scalar = (IrType){.kind = IR_TYPE_POINTER, .bit_width = width};
+    }
     CIrConstantValue numeric = c_parse_constant_numeric_value(value);
     bool integer = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN || scalar.kind == IR_TYPE_POINTER;
     if (destination.value >= result->type_count || !scalar.bit_width)
@@ -21826,8 +21839,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
                              ? c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, right.type)))
                              : C_TYPE_ID_INVALID;
         }
-        left = c_parse_constant_convert(result, target, left, common);
-        right = c_parse_constant_convert(result, target, right, count_type);
+        left = c_parse_constant_convert(result, target, left, common, mode);
+        right = c_parse_constant_convert(result, target, right, count_type, mode);
         value.valid &= left.valid && right.valid && !(shift && (left.is_float || right.is_float));
         value.type = common;
         value.is_float = left.is_float;
@@ -21878,7 +21891,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
             }
             else
             {
-                value = c_parse_constant_convert(result, target, value, common);
+                value = c_parse_constant_convert(result, target, value, common, mode);
             }
         }
         else
@@ -21907,7 +21920,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
             }
             else
             {
-                value = c_parse_constant_convert(result, target, value, common);
+                value = c_parse_constant_convert(result, target, value, common, mode);
             }
         }
     }
@@ -22187,11 +22200,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
                                    ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[operand_start])
                                    : C_ENTITY_ID_INVALID;
             bool shadowed_object = shadow.value < result->entity_count && result->entities[shadow.value].kind != C_ENTITY_TYPEDEF;
-            if (machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && !shadowed_object)
+            if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && !shadowed_object)
+            {
+                // Read the full abstract declarator, including a pointer
+                // grouped before array or function suffixes.
+                type = c_parse_identity_type_name(machine, result, preprocess, scope, operand_start, operand_end);
+                cursor = operand_end;
+            }
+            else if (machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && !shadowed_object)
             {
                 type = c_parse_constant_type_name(machine, result, preprocess, scope, operand_start, operand_end, &cursor);
             }
-            if (type.value < result->type_count)
+            if (type.value < result->type_count && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_NORMAL)
             {
                 type = c_parse_pointer_chain(result, preprocess, type, &cursor, operand_end);
                 type = c_parse_array_suffixes(result, preprocess, type, &cursor, operand_end);
@@ -22457,7 +22477,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             }
             else if (task->state == 3)
             {
-                last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type);
+                last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
             }
             else if (task->state == 4)
             {
@@ -22477,7 +22497,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     CTypeKind kind = c_parse_expression_value_kind(result, last.type);
                     last = c_parse_constant_convert(result, preprocess.target, last,
-                                                    c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(kind)));
+                                                    c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(kind)), machine->constant_evaluation_mode);
                     bool minus = c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS);
                     bool complement = c_token_is_punctuator(&operation, C_PUNCTUATOR_TILDE);
                     if (last.is_float && minus)
@@ -22505,7 +22525,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         last.integer = computed.bits.low;
                         last.integer_high = computed.bits.high;
                     }
-                    last = c_parse_constant_convert(result, preprocess.target, last, last.type);
+                    last = c_parse_constant_convert(result, preprocess.target, last, last.type, machine->constant_evaluation_mode);
                 }
             }
             else if (task->state == 6 || task->state == 7)
@@ -22549,7 +22569,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 CTypeId type = C_TYPE_ID_INVALID;
                 if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, task->start, task->end, &type))
                 {
-                    last = c_parse_constant_convert(result, preprocess.target, last, type);
+                    last = c_parse_constant_convert(result, preprocess.target, last, type, machine->constant_evaluation_mode);
                 }
             }
             count -= 1;
@@ -22638,7 +22658,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
                   (ir_kind == IR_TYPE_INTEGER || ir_kind == IR_TYPE_BOOLEAN) && bit_width && bit_width <= 128;
     if (value.valid && !value.is_float && scalar)
     {
-        value = c_parse_constant_convert(result, preprocess.target, value, value.type);
+        value = c_parse_constant_convert(result, preprocess.target, value, value.type, machine->constant_evaluation_mode);
     }
     if (value.valid && !value.is_float && scalar)
     {
@@ -24566,7 +24586,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     else if (numeric || unknown)
     {
         CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
-        CParseConstant converted = c_parse_constant_convert(result, preprocess.target, value, destination);
+        CParseConstant converted = c_parse_constant_convert(result, preprocess.target, value, destination, machine->constant_evaluation_mode);
         if (!converted.valid || unknown)
         {
             diagnostic.message = string_format(result->arena, S8("cannot fold '{S8}' in a static initializer"),

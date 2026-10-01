@@ -4780,6 +4780,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         // constant bounds as VLAs; the runtime-base neighbors remain invalid.
         {S8("int a[1 ?: 2]; int b[0 ?: 3];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("_Static_assert(sizeof(1 ?: 2.5) == sizeof(double), \"conditional common type\"); int a[sizeof(1 ?: 2.5)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("int a[sizeof(int (*)[4])]; int b[sizeof(int (*)(void))]; _Static_assert(sizeof(int (*)[4]) == sizeof(void *), \"array pointer\"); _Static_assert(sizeof(int (*)(void)) == sizeof(void *), \"function pointer\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("int a[sizeof(void)]; int b[sizeof(int(void))]; _Static_assert(sizeof(void) == 1, \"GNU void\"); _Static_assert(_Alignof(void) == 1, \"GNU void alignment\"); _Static_assert(sizeof(int(void)) == 1, \"GNU function\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct S { char c; int x; }; int a[(unsigned long)((char *)&(((struct S *)0)->x) - (char *)0)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct I { char c; int x[3]; }; struct S { char c; struct I i; }; int a[(unsigned long)((char *)&(((struct S *)0)->i.x[2]) - (char *)0)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("union U { long x; char c[3]; }; int a[1 + (unsigned long)((char *)&(((union U *)0)->c[2]) - (char *)0)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -4832,6 +4834,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
             BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
             CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
             BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].valid, cases[case_index].source);
+            for (u32 diagnostic = 0; cases[case_index].valid && diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                BUSTER_TEST_RAW(arguments, false, string_format(temporary.arena, S8("unexpected diagnostic at {u32}:{u32}: {S8}"),
+                    semantic.diagnostics[diagnostic].location.line, semantic.diagnostics[diagnostic].location.column,
+                    semantic.diagnostics[diagnostic].message));
             bool message_found = cases[case_index].valid;
             for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
                 message_found |= string_first_sequence(semantic.diagnostics[diagnostic].message, cases[case_index].message) != BUSTER_STRING_NO_MATCH;
@@ -15174,6 +15180,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && parsed.diagnostic_count == 0, valid[valid_index]);
+        for (u32 diagnostic = 0; diagnostic < parsed.diagnostic_count; diagnostic += 1)
+            BUSTER_TEST_RAW(arguments, false, string_format(temporary.arena, S8("unexpected diagnostic at {u32}:{u32}: {S8}"),
+                parsed.diagnostics[diagnostic].location.line, parsed.diagnostics[diagnostic].location.column,
+                parsed.diagnostics[diagnostic].message));
         scratch_end(temporary);
     }
     return result;
