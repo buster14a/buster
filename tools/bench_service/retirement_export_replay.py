@@ -9,7 +9,9 @@ Map: ``archive_source`` checks the pinned export receipt; ``publish_test_copy``
 and ``retrieve_test_copy`` make the immutable test publication and the fresh
 consumer copy; ``replay`` unpacks with the reviewed service utility, runs the
 production binding validator over lane F's final binding
-(``lane_f_import``, ``final_binding_check``) and ``authenticated_attempt_join``.
+(``lane_f_import``, ``final_binding_check``, then lane F's own
+``evidence_layout`` and ``lay_out_evidence`` for the flat
+``retirement-evidence-*`` entries) and ``authenticated_attempt_join``.
 ``copy_ledger``/``capacity_ledger`` give the receipt-derived six-copy ledger;
 ``a1_export_ledger`` maps the A1 campaign model (metrics shards, untimed
 records) onto the export limits, printed by the ``a1-capacity`` subcommand.
@@ -631,7 +633,12 @@ def replay(args):
         fail("downloaded result lacks a regular binding record")
     # The composed record is pending; lane F's final binding is validated.
     record_path = lane_f_import(args.lane_f, args.destination)
-    final_binding_check(args.destination, record_path)
+    final = final_binding_check(args.destination, record_path)
+    # The flat evidence entries go to the paths the binding names, by lane
+    # F's own rule; lane F imports this module, so it is imported here.
+    import retirement_lane_f as lane_f
+    entries, _layout_sha256 = lane_f.evidence_layout(args.destination, final)
+    lane_f.lay_out_evidence(args.destination, entries)
     validation = subprocess.run(
         [sys.executable, str(Path(binding.__file__).resolve()), str(record_path),
          "--evidence-root", str(args.destination),

@@ -5,8 +5,10 @@ Ownership: lane F of the native-retirement performance recipe (#881, #1024).
 Its input is an unpacked, sealed and composed retirement export: the service
 result the worker-unit producer finalized, reconstructed by `bench_service
 unpack-export` (see EXPORT.md). It writes lane F's directory, which
-`retirement_export_replay.py --lane-f` imports into the clean replay, and it
-runs the production binding validator over the result and that directory.
+`retirement_export_replay.py --lane-f` imports into the clean replay (laying
+out the flat evidence with ``evidence_layout`` and ``lay_out_evidence`` from
+here), and it runs the production binding validator over the result and that
+directory.
 
 The composed record (``replay.COMPOSER_BINDING_PATH``) names its two late
 phases with the composer's pending descriptor. Lane F fills them from bytes,

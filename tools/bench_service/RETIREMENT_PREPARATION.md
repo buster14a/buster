@@ -1624,7 +1624,9 @@ for that record's digest) and its header names `allocator=none` and
 `target=x86_64-linux` whatever the batch (2,928 timed batches of the other
 three allocators and 576 untimed batches of the untimed contract's
 cross-target `aarch64-unknown-linux-gnu` groups, waived only when every other
-header field matches); and the fixture's stand-in composer adapter (1). The copy is
+header field matches); and the fixture's stand-in composer adapter (1).
+Lane D records a runtime launch's executable as the program it ran (#2019),
+so runtime invocations need no waiver. The copy is
 laid out as lane F's replay lays out the result (`_lane_f_layout`), so the
 validator finds `docs/native-retirement-support-v1.tsv` and
 `tools/throughput/retirement_stats.h` at their pinned paths. Unwaived, it
