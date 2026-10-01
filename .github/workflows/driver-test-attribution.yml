@@ -3,6 +3,8 @@ name: Windows driver fixture attribution
 # A diagnostic companion, not a replacement for Buster CI or an acceptance
 # timing sample. No ordinary PR pays for a second Windows combination matrix.
 on:
+  push:
+    branches: ['codex/1885-native-frame-batching']
   workflow_dispatch:
   pull_request:
     paths:
@@ -24,6 +26,7 @@ jobs:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
           (github.event_name == 'workflow_dispatch' ||
+           (github.ref == 'refs/heads/codex/1885-native-frame-batching' && contains(github.event.head_commit.message, '[windows-census]')) ||
            github.head_ref == 'diagnostics/708-driver-fixture-timing' ||
            github.head_ref == 'diagnostics/949-driver-operations') }}
     name: Windows x86-64 fixture attribution
@@ -199,4 +202,232 @@ jobs:
           name: driver-attribution-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: warn
+          retention-days: 14
+
+  linux_census:
+    if: ${{ github.ref == 'refs/heads/codex/1885-native-frame-batching' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Linux native frame census
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Record identity and build the diagnostic compiler
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/frame-census" build
+          git rev-parse HEAD | tee "$RUNNER_TEMP/frame-census/source.txt"
+          git rev-parse HEAD:src | tee -a "$RUNNER_TEMP/frame-census/source.txt"
+          printf '%s\n' "ImageOS=$ImageOS ImageVersion=$ImageVersion" > "$RUNNER_TEMP/frame-census/image.txt"
+          lscpu > "$RUNNER_TEMP/frame-census/cpu.txt"
+          clang --version > "$RUNNER_TEMP/frame-census/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/frame-driver
+          build/frame-driver generate --build-directory build/frame-census --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+          build/frame-driver build --build-directory build/frame-census --config Release -t ide
+          sha256sum build/frame-census/Release/ide > "$RUNNER_TEMP/frame-census/binary.txt"
+          cp build/frame-census/compile_commands.json "$RUNNER_TEMP/frame-census/"
+      - name: Operation census
+        env:
+          BUSTER_TEST_FIXTURE_TIMING: compiler_driver_tests
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '1'
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/census.log"
+      - name: Uninstrumented isolated arm A1
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '0'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/A1.log"
+      - name: Uninstrumented isolated arm B1
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '1'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/B1.log"
+      - name: Uninstrumented isolated arm B2
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '1'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/B2.log"
+      - name: Uninstrumented isolated arm A2
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '0'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/A2.log"
+      - name: Uninstrumented isolated arm A3
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '0'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/A3.log"
+      - name: Uninstrumented isolated arm B3
+        env:
+          BUSTER_TEST_JOBS: '1'
+          BUSTER_TEST_NATIVE_FRAME_BATCH: '1'
+        run: /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/B3.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: frame-census-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frame-census/
+          retention-days: 14
+
+  full_cohort:
+    needs: linux_census
+    if: >-
+      ${{ github.ref == 'refs/heads/codex/1885-native-frame-batching' &&
+          (contains(github.event.head_commit.message, '[full-cohort]') || contains(github.event.head_commit.message, '[baseline-cohort]')) &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Full matrix ${{ matrix.os }} ${{ matrix.sample }}
+    runs-on: ${{ matrix.os == 'windows' && 'windows-2025' || 'ubuntu-26.04' }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [linux, windows]
+        sample: ${{ fromJSON(contains(github.event.head_commit.message, '[baseline-cohort]') && '["A1","A2","A3"]' || '["A1","B1","B2","A2","A3","B3"]') }}
+    env:
+      BUSTER_TEST_NATIVE_FRAME_BATCH: ${{ startsWith(matrix.sample, 'B') && '1' || '0' }}
+      BUSTER_MATRIX_SHARD: all
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Arm A includes the complete current-main lifecycle without the
+          # candidate harness/control build and execution costs.
+          ref: ${{ startsWith(matrix.sample, 'A') && '23897cd26bc207dab23aeeefea31ddce7ea1a6ef' || github.sha }}
+          persist-credentials: false
+      - name: Configure full-matrix evidence paths
+        shell: bash
+        run: |
+          printf '%s\n' "BUSTER_CI_COVERAGE_OUTPUT=$RUNNER_TEMP/frame-full/coverage.json" "BUSTER_MATRIX_PHASE_OUTPUT=$RUNNER_TEMP/frame-full/phases" >> "$GITHUB_ENV"
+      - name: Install verified Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/frame-full"
+          python tools/ci_zig.py --target '${{ matrix.os == 'windows' && 'x86_64-windows' || 'x86_64-linux' }}' --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig"
+      - name: Install Linux linker
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Uninstrumented full Linux matrix
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The coverage/phase tools bind source_revision to GITHUB_SHA.
+          # Use the actual checkout for the pinned baseline subprocesses.
+          GITHUB_SHA="$(git rev-parse HEAD)"
+          export GITHUB_SHA
+          git rev-parse HEAD > "$RUNNER_TEMP/frame-full/source.txt"
+          git rev-parse HEAD:src >> "$RUNNER_TEMP/frame-full/source.txt"
+          printf '%s\n' "ImageOS=$ImageOS ImageVersion=$ImageVersion workflow_source=${{ github.sha }} sample=${{ matrix.sample }} batch=$BUSTER_TEST_NATIVE_FRAME_BATCH" > "$RUNNER_TEMP/frame-full/image.txt"
+          lscpu > "$RUNNER_TEMP/frame-full/cpu.txt"
+          clang --version > "$RUNNER_TEMP/frame-full/clang.txt"
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          sha256sum build/build > "$RUNNER_TEMP/frame-full/driver.txt"
+          /usr/bin/time -v build/build test_all_combinations_ci --verbose=1 2>&1 | tee "$RUNNER_TEMP/frame-full/matrix.log"
+      - name: Uninstrumented full Windows matrix
+        if: ${{ matrix.os == 'windows' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'frame-full'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools unavailable' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          foreach ($Name in @('PATH', 'LIB', 'INCLUDE', 'LIBPATH', 'VSCMD_ARG_TGT_ARCH')) {
+            $Value = [Environment]::GetEnvironmentVariable($Name)
+            if ($Value) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "$Name=$Value" }
+          }
+          # Bind baseline coverage/phase receipts to the actual checkout.
+          $env:GITHUB_SHA = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git rev-parse HEAD | Set-Content (Join-Path $Logs 'source.txt')
+          git rev-parse HEAD:src | Add-Content (Join-Path $Logs 'source.txt')
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion workflow_source=${{ github.sha }} sample=${{ matrix.sample }} batch=$env:BUSTER_TEST_NATIVE_FRAME_BATCH" | Set-Content (Join-Path $Logs 'image.txt')
+          Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer, NumberOfLogicalProcessors, Family, Stepping | Format-List | Out-File (Join-Path $Logs 'cpu.txt')
+          clang --version | Set-Content (Join-Path $Logs 'clang.txt')
+          New-Item -ItemType Directory -Force build | Out-Null
+          cmd /c 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o build/build.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash build/build.exe -Algorithm SHA256 | Format-List | Out-File (Join-Path $Logs 'driver.txt')
+          $Clock = [Diagnostics.Stopwatch]::StartNew()
+          cmd /c 'build\build.exe test_all_combinations_ci --verbose=1 2>&1' | Tee-Object -FilePath (Join-Path $Logs 'matrix.log')
+          $MatrixExit = $LASTEXITCODE
+          $Clock.Stop()
+          "wall_seconds=$($Clock.Elapsed.TotalSeconds) exit_status=$MatrixExit descendant_cpu=unavailable descendant_peak_rss=unavailable" | Set-Content (Join-Path $Logs 'matrix-resources.txt')
+          if ($MatrixExit -ne 0) { exit $MatrixExit }
+      - name: Isolated exact sanitized Debug diagnostic
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, re, subprocess, sys
+          from pathlib import Path
+          output = Path(os.environ['RUNNER_TEMP']) / 'frame-full'
+          filename = 'ide.exe' if os.name == 'nt' else 'ide'
+          candidates = [p for p in Path('build').glob('*cc_clang-sanitize_on*') if (p / 'Debug' / filename).is_file()]
+          assert len(candidates) == 1, candidates
+          tree = candidates[0]
+          binary = (tree / 'Debug' / filename).resolve()
+          text = (tree / 'CMakeFiles' / 'impl-Debug.ninja').read_text()
+          commands = [line for line in text.splitlines() if 'COMMAND = ' in line and '-E env' in line and '/Debug/' + filename in line.replace('\\', '/') and 'matrix_phase_run' not in line and 'test --verbose=1 --ci=1' in line]
+          assert len(commands) == 1, commands
+          command = commands[0]
+          policy = {}
+          for quoted, plain in re.findall(r'"([A-Z_]+=[^"]*)"|(?<![\w"])([A-Z_]+=[^\s"]+)', command):
+              key, value = (quoted or plain).split('=', 1)
+              policy[key] = value.replace('$$', '$')
+          expected = 'unsupported' if os.name == 'nt' else 'fatal'
+          assert policy.get('BUSTER_SANITIZER_POLICY_MODE') == expected, policy
+          if os.name != 'nt':
+              assert all(key in policy for key in ('ASAN_OPTIONS', 'UBSAN_OPTIONS', 'LSAN_OPTIONS')), policy
+          environment = dict(os.environ, **policy)
+          environment['BUSTER_TEST_JOBS'] = '1'
+          environment['BUSTER_TEST_FIXTURE_TIMING'] = 'compiler_driver_tests'
+          argv = [str(binary), 'test', '--module=compiler_driver_tests', '--verbose=1', '--ci=1']
+          identity = {'binary': str(binary), 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'generated_command': command, 'policy': policy, 'argv': argv, 'batch': environment['BUSTER_TEST_NATIVE_FRAME_BATCH']}
+          (output / 'isolated-debug-identity.json').write_text(json.dumps(identity, indent=2) + '\n')
+          if os.name != 'nt':
+              argv = ['/usr/bin/time', '-v', *argv]
+          with (output / 'isolated-debug.log').open('w') as log:
+              result = subprocess.run(argv, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False)
+          sys.exit(result.returncode)
+          PY
+      - name: Retain build identities
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          root = Path('build')
+          output = Path(os.environ['RUNNER_TEMP']) / 'frame-full' / 'build-identities.json'
+          rows = []
+          for path in sorted(root.rglob('*')):
+              if path.is_file() and (path.name in ('ide', 'ide.exe', 'compile_commands.json', 'CMakeCache.txt', 'configure.log') or path.suffix == '.ninja'):
+                  rows.append({'path': path.as_posix(), 'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+                  if path.name in ('compile_commands.json', 'CMakeCache.txt', 'configure.log', 'impl-Debug.ninja'):
+                      destination = output.parent / 'build-evidence' / path
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copyfile(path, destination)
+          output.write_text(json.dumps(rows, indent=2) + '\n')
+          PY
+      - name: Retain complete attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frame-full-${{ matrix.os }}-${{ matrix.sample }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frame-full/
+          if-no-files-found: error
           retention-days: 14

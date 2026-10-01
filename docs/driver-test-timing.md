@@ -5,6 +5,73 @@ not a driver optimization or a claim that the Windows tail has been reduced.
 The current-source operation split for [#949](https://github.com/buster14a/buster/issues/949)
 uses the same opt-in environment variable and Windows diagnostic workflow.
 
+## Native-frame batching pilot
+
+`BUSTER_TEST_NATIVE_FRAME_BATCH=1` enables the bounded #1885 experiment;
+the default remains standalone execution pending performance admission.
+Only native x86-64 baseline-CPU cells participate. Each allocator/frontend/PIC
+configuration forms one eight-case batch: fixtures 0, 1, 2, 4, 5, 7, 8 and 9
+in `compiler_driver_test_native_frame_vectors`. The existing compile gang owns
+one immutable object path per cell; the serial result walk retains each batch
+member until its ordered group is linked and executed. Entry renames are cell
+inputs prepared before the gang starts. Compilation still visits all
+3,456 primary cells and the conditional positive controls. Foreign targets
+remain compilation/diagnostic checks. AArch64, higher CPU profiles, signbit's
+floating-point-state checks, and the compile-only fallback signature keep
+their existing classification and standalone behavior.
+
+The fixture bodies and independent observers stay in separate translation
+units. Only participating `main` symbols are named `native_frame_case_N`;
+provider and reverse-call symbols retain their original names. No LTO or
+cross-boundary inlining is enabled. The four observers still compile once;
+the experiment adds a Clang batch adapter and a single-entry adapter for the
+higher-CPU arithmetic observer. The existing hash/length/full-byte link cache
+keys every ordered object in a batch. Every eligible cell executes, including
+cache hits; no runtime result is reused. A batch never combines configuration
+boundaries even when linked artifacts are byte-identical.
+
+The audited bodies have no constructors/destructors, signal handling, process
+exit, mutable shared globals or symbol/source-location-dependent assertions.
+Initializer globals are read-only during execution; lane-edge `seed` is read
+without mutation. Floating-point state is restored to the child's initial
+environment before each entry and after the batch. Independent ABI calls,
+indirect calls, vector images and guard checks remain in the original bodies.
+
+The child flushes ordered `NATIVE_FRAME_BATCH_V1 start ID` and
+`complete ID RESULT` records. The parent requires the exact unique manifest,
+zero results, successful process exit, no stderr, complete bounded capture,
+and proven process-tree cleanup. A crash, timeout, missing/duplicate/malformed
+record or extra output fails the batch; later cases remain unexecuted. No
+isolated replay can repair its status. Grouped links and execution each have
+a 30-second deadline and use the existing contained-process implementation.
+One child runs at a time within the existing test worker quota.
+
+Verbose/timing runs emit `NATIVE_FRAME_VECTOR_COMPILE_V1` for each primary
+cell and `NATIVE_FRAME_VECTOR_CASE_V1` for runtime results. Stable IDs include
+target, allocator, frontend, PIC, CPU and fixture indices. Indices refer to
+the arrays in the fixture. Additional `batch_prepare` and `batch_parse` rows
+reuse `DRIVER_OPERATION_TIMING_V1`; the body includes retained storage and
+complete preparation/link/run/parse work. Regression fixtures check passing
+and failing payloads, symbol collisions, state leakage, crashes, deadlines,
+partial and malformed output, and duplicate/missing result records. POSIX
+cancellation kills a deliberately nonterminating child and verifies reaping.
+Uncertain process-group ownership stops the runner before another child can
+be admitted; missing compilation or a failed link emits unexecuted case rows.
+
+The branch-only hosted census records image, CPU, source/tree, binary and
+compiler identities. Its three alternating uninstrumented isolated module
+samples per arm are pilot evidence, not full-matrix performance admission.
+The full-job cohort checks out pinned main `23897cd26bc207dab23aeeefea31ddce7ea1a6ef`
+for each A arm and the candidate commit for each B arm, so added harness/control
+compilation and execution are charged to the candidate. `[full-cohort]` requests
+three A/B pairs per platform; `[baseline-cohort]` requests only the three A arms
+to complement retained candidate samples without rerunning them. Source/tree,
+image, toolchain, coverage and configuration identities must match the compared
+evidence contract. Earlier candidate-toggle A arms are runtime-reference samples,
+not the complete pre-change baseline. Use the Windows full-matrix diagnostic and
+the controlled full-job protocol below before changing the default or claiming
+an accepted improvement.
+
 ## What the archived run establishes
 
 Run `35145639100`, attempt 1, commit
