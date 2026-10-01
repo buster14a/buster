@@ -928,6 +928,97 @@ validator binds the same record into the execution plan (`campaign_budget`:
 record and digest) and requires every object group's `metrics_bytes_max` to
 equal header + inputs * per-input from it.
 
+**Writing the record.** `retirement_budget_tool.h` holds the production
+writer and checker, `tp_retirement_budget_evaluate`, which works over bytes.
+`tp_retirement_budget_cli`, over files and streams, is only the self-test's
+seam: it has neither the exclusive `OUTPUT` nor preflight's stale-counts
+check. The service binary runs the checker as
+`retirement-records budget-encode|budget-preflight`,
+beside the other authority generators
+([RETIREMENT_PREPARATION.md](../bench_service/RETIREMENT_PREPARATION.md#generating-the-campaign-authorities-881)).
+That entry publishes the record to a new `OUTPUT` file exclusively and
+checks the counts against the census. It needs no `build.c` change.
+
+The tool is deliberately not a `throughput` subcommand. `throughput.c`'s
+include closure is the trusted #619 adapter that the binding validator
+compiles and pins. That closure must not grow the budget writer, and it may
+not contain a `..` include, which `systemd_runtime.h` would need.
+
+```sh
+service retirement-records budget-encode REVIEWED_INPUT COUNTS OUTPUT
+service retirement-records budget-preflight INSTALLED PROFILE DECLARATION BUDGET COUNTS
+```
+
+The reviewed input starts with `schema=tp-retirement-campaign-budget-input-v1`.
+It then gives each of the 16 scalar keys exactly once, in any order, and the
+table lines: `batch=<max_inputs>:<ns>` classes in ascending order,
+`singleton=link:<ns>`, `singleton=self-host-stage1:<ns>`, and the same lines
+prefixed with `untimed-`. Blank lines and `#` comments may appear anywhere
+after the schema, for example to record which measurement or policy each value
+came from. The comments never reach the record.
+
+`COUNTS` holds the frozen counts in the strict
+`tp-retirement-budget-counts-v1` form, which the service's
+`retirement-records budget-counts` writes from the pinned census:
+
+```text
+schema=tp-retirement-budget-counts-v1
+population=<census population seal>
+declaration=<SHA-256 of the row-plan declaration>
+pairs=<P>                                         (the profile's campaign-pairs=)
+runtime-rows=<U>
+timed-groups=<n>
+timed=<object|link|self-host-stage1> <inputs>     (n lines, in campaign order)
+untimed-groups=<m>
+untimed=<object|link|self-host-stage1> <inputs>   (m lines, in untimed-partition order)
+```
+
+An object group's inputs are its members plus its controls; a singleton has
+exactly one input. No profile pin binds the counts, since production
+recomputes them from the sealed gate. `budget-preflight` regenerates them
+from `INSTALLED`, `PROFILE` and `DECLARATION` and refuses a `COUNTS` file
+that differs, so stale counts cannot pass it.
+
+`encode` accepts the record only when every rule holds:
+
+- every bound is nonzero;
+- the classes ascend by input count, with bounds that never decrease;
+- there are 1 to 16 classes, and none holds more than 1,024 inputs;
+- both singleton stages have a bound in both tables;
+- the metrics header plus one input fits the 64 MiB artifact cap;
+- `reviewed-ns`, floored to whole seconds as the coordinator and systemd
+  enforce it (`bq_worker_retirement_runtime`), lies within
+  `systemd_runtime.h`'s [60 s, 72 h];
+- the fixed phases, with settling and export counted per stage, fit within
+  that floor;
+- every counted group is covered by a class of its table (so the largest
+  timed and untimed object groups are covered) and by the metrics cap;
+- the derivation's required time fits within the same whole-second floor,
+  not merely within `reviewed-ns`.
+
+`preflight` strictly decodes an existing record and applies the same rules.
+It then prints `budget-sha256=` (the value to pin as
+`campaign-budget-sha256=`), `fits=`, `required-ns=`, `remaining-ns=`
+(measured from the enforced floor) and every term of
+`TpRetirementBudgetPreflight`. On any failure both commands print one
+diagnostic line (`retirement-budget: ...` or `retirement-records: ...`),
+write nothing to stdout or `OUTPUT`, and exit nonzero.
+
+The tool chooses no value. The production bounds still need these inputs:
+
+- **9700X measurements (#422):** every `*-ns` phase bound, both tables'
+  batch classes and singleton bounds (the untimed table measured on the
+  slowest untimed target), and `runtime-process-ns`. Each includes launcher
+  and collector work.
+- **Reviewed policy values:** `reviewed-ns` (the whole-job ceiling),
+  `metrics-header-bytes`, `metrics-input-bytes`, and the pair count.
+
+The `bench_throughput` self-test (`retirement_budget_tool_test.h`) covers
+every rule with fixture values only, each case isolating its rule and
+asserting its diagnostic. That includes the ceiling floor boundary: 62.8 s
+required with `reviewed-ns` 62.999999999 s is refused. The preparation
+fixture covers the service entry.
+
 (A1) Untimed code-artifact batches: `retirement_untimed.h` runs, per untimed
 group and variant, at most one production batch and exactly one reproduction
 batch, in (group, variant, purpose) order, each a fresh process on the admitted

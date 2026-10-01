@@ -1035,7 +1035,9 @@ or control-status mismatch, and changed row evidence.
 
 **Remaining work.** The blocked profile pins neither authority, so the
 public entry refuses before either directory exists or any child starts.
-Integration must install and pin a reviewed row plan for the real corpus;
+Integration must install and pin a reviewed row plan for the real corpus,
+written by `retirement-records row-plan`
+([generators](#generating-the-campaign-authorities-881));
 the fixture plan and stand-in compilers prove mechanics only. The row steps
 and the required checks share one sandbox (Landlock plus a seccomp socket
 filter) but still run as the service user. Running them as the broker's separate
@@ -1982,6 +1984,201 @@ Tests:
   poisoned failed job at CLEANING without its failure record reconciles
   `BQ_CORRUPT` and is left unchanged.
   `bq_test_export` checks the export refusal on a bound, finished result.
+
+## Generating the campaign authorities (#881)
+
+The admitted profile pins three campaign authorities:
+
+- the row plan (`row-plan-sha256=`);
+- the untimed-command contract (`untimed-commands-sha256=`);
+- the campaign budget (`campaign-budget-sha256=`).
+
+The budget is checked against frozen counts. No pin binds the counts:
+production recomputes them from the sealed gate
+(`tp_retirement_campaign_freeze`). The counts file below is only the
+reviewable input of the budget writer and its preflight.
+
+`retirement-records` in the service binary (`retirement_records.c`) writes
+all three records and the counts. Its `budget-encode` and `budget-preflight`
+subcommands run lane D's budget checker, `tp_retirement_budget_evaluate` in
+`../throughput/retirement_budget_tool.h`
+([throughput README](../throughput/README.md), "Writing the record"). The
+tool admits nothing, picks no value and needs no `build.c` change.
+
+```sh
+service retirement-records budget-counts INSTALLED PROFILE DECLARATION PAIRS counts
+service retirement-records budget-encode REVIEWED_INPUT counts campaign-budget
+service retirement-records budget-preflight INSTALLED PROFILE DECLARATION campaign-budget counts
+service retirement-records row-plan INSTALLED PROFILE DECLARATION campaign-budget CPU_MODEL_SHA256 CPU row-plan
+service retirement-records untimed-commands INSTALLED PROFILE DECLARATION row-plan untimed-commands
+```
+
+Run them in that order.
+
+- **Output.** The last argument, `OUTPUT`, is the file each generator
+  creates. The generator writes an unnamed `O_TMPFILE` in `OUTPUT`'s
+  directory, or a new `.<leaf>.tmp-<pid>` sibling (`O_CREAT | O_EXCL`) on a
+  filesystem without it, with mode `0444`, fsynced. It then links that file
+  to `OUTPUT` with `linkat`, which never replaces an existing name. An
+  existing `OUTPUT` is refused and left untouched. `-` writes to stdout
+  instead, which the tests use.
+- **Failures around the link.** Before the link, a failure leaves nothing
+  behind. After it, the record is complete and durable under its name. A
+  later failure to remove a named temporary or to fsync the directory is
+  then only a `warning:` line, and the command succeeds.
+- **Preflight.** `budget-preflight` regenerates the counts from the census,
+  the declaration and the profile's pair count, and requires the `counts`
+  file to be exactly those counts. Stale counts, from another census,
+  declaration or pair count, are refused. It then prints the budget's
+  derivation.
+- **Refusals.** On a refusal a command prints one `retirement-records:` or
+  `retirement-budget:` diagnostic line. It writes nothing to `OUTPUT` or
+  stdout.
+- **Inputs.** Every input file must be a regular file. A final symlink, a
+  FIFO or any other file type is refused without blocking.
+
+**Inputs.**
+
+- `INSTALLED` is the absolute path of a staged installed root. Its
+  `recipes/native-retirement-performance-v1.census/` holds the nine census
+  files, read-only, single-link and owned by the caller or root, as the unit
+  reads them.
+- `PROFILE` is the candidate profile text. It carries at least the census
+  pins (`support-declaration-sha256=`, `census-rows-sha256=`,
+  `performance-rows-sha256=` and the validator pins). The files must hash to
+  those pins.
+- The census goes through the unit's own derivation.
+  `bq_retirement_census_population`, factored out of
+  `bq_retirement_correctness_project_profile`, is shared by both. The
+  validator report must declare `full-census`.
+- `bq_retirement_documents_population` supplies the fixtures and
+  `bq_retirement_documents_partition` supplies the validator's timed and
+  untimed partitions. The generators therefore read exactly the rows, fixtures
+  and population seal the gate later seals.
+
+**The declaration.** `DECLARATION` is the reviewed row-plan policy. It is
+canonical LF-terminated text:
+
+```text
+BQ-RETIREMENT-ROW-PLAN-DECLARATION-V1
+templates=<t>                                  (template blocks exactly as the row plan has them)
+compile-rules=<n>
+compile=<object|link|self-host-stage1> <target> <compile-template> <-|runtime-template>
+timed-groups=<n>
+timed=<timed-partition-group> <batch-template> <allocator> <exit-status> <controls>
+control=<row|-> <status> <error> <-|fixture>   (controls lines)
+untimed-groups=<m>
+untimed=<untimed-partition-group> <batch-template> <target-word> <allocator>
+```
+
+- **Templates** are copied verbatim into the plan and checked with the plan's
+  own template decoder.
+- **Compile rules** ascend by stage, then target, with the rule without a
+  runtime template before the one with it. Every compiler-eligible row
+  outside the timed batches takes the rule for its stage and target. A row
+  with a native generated-runtime obligation takes the rule that names a
+  runtime template; any other row takes the rule that names none.
+- **Timed groups** list the timed partition's object groups, exactly once
+  each and in order. Each group names a batch template and an allocator,
+  which together form its batch key. It also names its exit status, which
+  must be nonzero exactly when a control fails, and its status-checked
+  controls.
+- **Controls.** A control names a native, compiler-ineligible object row,
+  whose fixture comes from the census, or `-` with its own fixture.
+- **Untimed groups** list the untimed partition's object groups the same
+  way.
+
+The generator derives the leaves:
+
+| Leaf | Name |
+|---|---|
+| Timed group metrics | `b<first member row>.metrics` |
+| Untimed group metrics | `u<first member row>.metrics` |
+| Member or row-naming control object | `r<row>.o` |
+| Passing control that names no row | `c<group>-<slot>.o` |
+
+**Row plan.** `row-plan` writes `BQ-RETIREMENT-ROW-PLAN-V1`. Its header
+comes from the census and from the host facts `CPU_MODEL_SHA256` and `CPU`:
+the `bq_retirement_row_cpu_model` digest and the logical CPU of the service
+host. The rows follow the A1 contract:
+
+- timed object rows and declared controls are `batch`;
+- other compiler-eligible rows take their rule;
+- all other rows are `-`.
+
+Each group's `metrics-bytes-max` is the budget's header plus the group's
+inputs times its per-input bound. The generator takes that bound from the
+reviewed budget record, so it matches what `tp_retirement_campaign_freeze`
+requires. Before writing, the generator runs the importer's own decode, bind
+and derive on its output (`bq_retirement_row_plan_parse`, also used by
+`bq_retirement_row_plan_import`). This covers the batch contracts, the
+population seal and the command digests. The generator then requires
+distinct batch keys itself, sorted as the correctness gate sorts its frozen
+groups. The generator refuses:
+
+- an undeclared or singleton group;
+- a row without a rule;
+- a control on an eligible row;
+- an exit status that disagrees with the controls;
+- two groups with one key;
+- malformed host facts.
+
+**Untimed-command contract.** `untimed-commands` writes
+`BQ-RETIREMENT-UNTIMED-COMMANDS-V1`. It binds the row plan's SHA-256
+(`row-plan=`) and has one `group=` line per untimed object group, with an
+`input=` line per member. The row plan must import against the same census,
+so a plan with another support, census or population digest is refused. The
+plan's templates must be the declaration's. The generator parses its output
+with the campaign's parser (`bq_retirement_worker_untimed_parse`, which
+`bq_retirement_worker_untimed_import` also uses) before writing it.
+
+**Counts.** `budget-counts` writes `tp-retirement-budget-counts-v1`. It
+does not re-parse its own output; the fixture parses it, and
+`budget-encode` and `budget-preflight` parse it strictly. The format is:
+
+- `population=` is the census population seal the counts were derived from;
+- `declaration=` is the SHA-256 of the declaration;
+- `pairs=` is the frozen pair count. The profile must carry `campaign-pairs=`
+  (once, an even count in 60..254, as `bq_retirement_unit_campaign_pins`
+  requires), and `PAIRS` must equal it;
+- `runtime-rows=` counts the native generated-runtime rows;
+- the timed partition follows in campaign order, each object group counted
+  with its declared controls;
+- then the untimed partition.
+
+Every singleton must be a link or self-host row; any other stage is refused.
+
+**What still needs the 9700X host or review.**
+
+- **Host facts (#422):** the CPU model digest and the logical CPU in
+  `cpu=`, measured on the qualified service host.
+- **9700X measurements (#422):** every nanosecond bound of the budget.
+- **Reviewed policy:** the declaration (templates, rules, allocators,
+  controls and untimed target words), the budget's ceiling and metrics
+  bounds, and the pair count.
+- **Integration:** the real census.
+
+The fixture proves only the mechanics. In the worker-unit preparation
+fixture (`retirement_records_tests.h`), the declaration equivalent to the
+fixture's hand-written authorities regenerates the row plan and the
+untimed-command contract byte for byte, and the whole campaign then runs on
+them. Both generated records import through
+`bq_retirement_row_plan_import_profile` and
+`bq_retirement_worker_untimed_import` from their pinned files. The generated
+counts preflight the fixture budget through `tp_retirement_budget_review`.
+The fixture also runs the following, asserting each refusal's diagnostic
+and that nothing is written:
+
+- every refusal above, and a forged census digest;
+- a declared control, whose group's `metrics-bytes-max` counts it;
+- the CLI seam, including `budget-encode` and `budget-preflight`, with
+  stale counts and a pair count other than the profile's;
+- the exclusive `OUTPUT`: created read-only, never replaced, and no
+  temporary file left behind, through both the `O_TMPFILE` and the
+  named-temporary paths;
+- a simulated failure after the link, which succeeds with its warning;
+- each `campaign-pairs=` guard: missing, odd, 58, 256, `060` and a
+  repeated line.
 
 ## Production context generators (#881)
 

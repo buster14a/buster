@@ -53,7 +53,8 @@
  * bq_retirement_worker_untimed_import (the untimed-command contract, pinned
  * by untimed-commands-sha256=: the untimed object groups' batch templates,
  * metrics words and artifact leaves, which lane B's row plan does not
- * carry); BqRetirementWorkerUntimed and bq_retirement_worker_untimed_build;
+ * carry; bq_retirement_worker_untimed_parse is its byte parser, which the
+ * offline generator in retirement_records.c also runs); BqRetirementWorkerUntimed and bq_retirement_worker_untimed_build;
  * BqRetirementWorkerLayout and bq_retirement_worker_layout_build (the timed
  * sample layout and runtime rows from the sealed gate);
  * BqRetirementWorkerStage and bq_retirement_worker_stages_open (arena
@@ -264,29 +265,17 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_worker_untimed_group(BqRetirementCheckCur
     }
 }
 
-/* The pinned contract for this attempt's row plan and untimed partition:
- * exactly one entry per untimed object group, in partition order, each
- * member the partition's. Refused before anything runs: no pin
- * (BQ_RECIPE_MISMATCH), an unreadable or unowned file
- * (BQ_CONFIGURATION_MISMATCH), or any other bytes (BQ_RECIPE_MISMATCH). */
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_untimed_import(Arena* arena, int installed, String8 profile,
+/* The contract's canonical bytes for plan and the untimed partition, into
+ * contract (whose authority digest the caller has set; every string points
+ * into an arena copy): exactly one entry per untimed object group, in
+ * partition order, each member the partition's. The offline generator
+ * (retirement_records.c) parses its own output with it before emitting.
+ * BQ_RECIPE_MISMATCH for any other bytes, BQ_IO without arena room. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_untimed_parse(Arena* arena, u8 const* bytes, u32 length,
     BqRetirementRowPlan const* plan, BqRetirementDocumentPartition const* untimed,
     BqRetirementWorkerUntimedContract* contract)
 {
-    char pin[SHA256_HEX_CAPACITY] = {0};
-    BqError result = arena && installed >= 0 && plan && plan->owned && untimed && contract &&
-                     bq_retirement_profile_sha(profile, S8(BQ_RETIREMENT_WORKER_UNTIMED_PIN), pin) ?
-                     BQ_OK : BQ_RECIPE_MISMATCH;
-    if (contract) *contract = (BqRetirementWorkerUntimedContract){0};
-    int recipes = result == BQ_OK ? openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    u8* bytes = NULL;
-    u32 length = 0;
-    if (result == BQ_OK)
-        result = recipes >= 0 && bq_owned_directory(recipes, false, true) &&
-                 bq_retirement_reference_read_installed(recipes, BQ_RETIREMENT_WORKER_UNTIMED_NAME,
-                     BQ_RETIREMENT_WORKER_UNTIMED_BYTES_CAP, &bytes, &length, contract->authority_sha256, NULL) ?
-                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
-    if (result == BQ_OK && memcmp(contract->authority_sha256, pin, SHA256_HEX_CAPACITY)) result = BQ_RECIPE_MISMATCH;
+    BqError result = arena && bytes && length && plan && untimed && contract ? BQ_OK : BQ_RECIPE_MISMATCH;
     char* text = result == BQ_OK ? bq_retirement_worker_allocate(arena, (u64)length + 1u, 1) : NULL;
     if (result == BQ_OK)
     {
@@ -318,6 +307,32 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_untimed_import(Arena* arena, in
         cursor.ok = cursor.ok && cursor.offset == cursor.bytes.length;
         if (!cursor.ok) result = BQ_RECIPE_MISMATCH;
     }
+    return result;
+}
+
+/* The pinned contract for this attempt's row plan and untimed partition
+ * (bq_retirement_worker_untimed_parse). Refused before anything runs: no pin
+ * (BQ_RECIPE_MISMATCH), an unreadable or unowned file
+ * (BQ_CONFIGURATION_MISMATCH), or any other bytes (BQ_RECIPE_MISMATCH). */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_untimed_import(Arena* arena, int installed, String8 profile,
+    BqRetirementRowPlan const* plan, BqRetirementDocumentPartition const* untimed,
+    BqRetirementWorkerUntimedContract* contract)
+{
+    char pin[SHA256_HEX_CAPACITY] = {0};
+    BqError result = arena && installed >= 0 && plan && plan->owned && untimed && contract &&
+                     bq_retirement_profile_sha(profile, S8(BQ_RETIREMENT_WORKER_UNTIMED_PIN), pin) ?
+                     BQ_OK : BQ_RECIPE_MISMATCH;
+    if (contract) *contract = (BqRetirementWorkerUntimedContract){0};
+    int recipes = result == BQ_OK ? openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    u8* bytes = NULL;
+    u32 length = 0;
+    if (result == BQ_OK)
+        result = recipes >= 0 && bq_owned_directory(recipes, false, true) &&
+                 bq_retirement_reference_read_installed(recipes, BQ_RETIREMENT_WORKER_UNTIMED_NAME,
+                     BQ_RETIREMENT_WORKER_UNTIMED_BYTES_CAP, &bytes, &length, contract->authority_sha256, NULL) ?
+                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK && memcmp(contract->authority_sha256, pin, SHA256_HEX_CAPACITY)) result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK) result = bq_retirement_worker_untimed_parse(arena, bytes, length, plan, untimed, contract);
     free(bytes);
     if (recipes >= 0 && close(recipes) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;
     if (result != BQ_OK && contract) *contract = (BqRetirementWorkerUntimedContract){0};
