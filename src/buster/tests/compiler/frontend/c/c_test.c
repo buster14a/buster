@@ -7013,11 +7013,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArg
 // measurement struct and the diagnostic kinds and locations are compared
 // field by field, because those are what the window pipeline reconstructs
 // from masks rather than from the branches it replaced.
-BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
+BUSTER_GLOBAL_LOCAL bool c_test_lex_results_agree(CLexResult dispatched, CLexResult reference)
 {
-    u64 position = arena->position;
-    CLexResult dispatched = c_lex(arena, source);
-    CLexResult reference = c_lex_reference(arena, source);
     bool result = dispatched.token_count == reference.token_count && dispatched.diagnostic_count == reference.diagnostic_count &&
                   memcmp(&dispatched.metrics, &reference.metrics, sizeof(dispatched.metrics)) == 0 &&
                   dispatched.translated_source.length == reference.translated_source.length &&
@@ -7050,6 +7047,15 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
         result = left.kind == right.kind && left.severity == right.severity && string_equal(left.message, right.message) &&
                  left.location.offset == right.location.offset && left.location.line == right.location.line && left.location.column == right.location.column;
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
+{
+    u64 position = arena->position;
+    CLexResult dispatched = c_lex(arena, source);
+    CLexResult reference = c_lex_reference(arena, source);
+    bool result = c_test_lex_results_agree(dispatched, reference);
     arena_set_position(arena, position);
     return result;
 }
@@ -8395,6 +8401,135 @@ BUSTER_GLOBAL_LOCAL bool c_test_source_region_equal(IrSourceRegion left, IrSourc
            left.base == right.base && left.line_delta == right.line_delta && left.stamp.source == right.stamp.source &&
            left.stamp.offset == right.stamp.offset && left.stamp.line == right.stamp.line && left.stamp.column == right.stamp.column &&
            left.kind == right.kind && left.origin_plus_one == right.origin_plus_one;
+}
+
+// Phase one is dialect-owned and precedes splicing. The scalar reference
+// and dispatched path also agree on token rows, metrics and original positions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    char8 thirds[] = {'=', '/', '\'', '(', ')', '!', '<', '>', '-'};
+    char8 replacements[] = {'#', '\\', '^', '[', ']', '|', '{', '}', '~'};
+    for (u32 dialect = 0; dialect < C_PREPROCESS_DIALECT_COUNT; dialect += 1)
+    {
+        bool enabled = dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+        for (u32 glyph = 0; glyph < BUSTER_ARRAY_LENGTH(thirds); glyph += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            char8 input[] = {'"', '?', '?', thirds[glyph], 'a', '"', '\n'};
+            char8 expected[] = {'"', replacements[glyph], 'a', '"', '\n'};
+            String8 source = {.pointer = input, .length = sizeof(input)};
+            CLexResult dispatched = c_test_lex_dialect(temporary.arena, source, (CPreprocessDialect)dialect, false);
+            CLexResult reference = c_test_lex_dialect(temporary.arena, source, (CPreprocessDialect)dialect, true);
+            BUSTER_TEST(arguments, c_test_lex_results_agree(dispatched, reference));
+            BUSTER_STRING_TEST(arguments, dispatched.translated_source,
+                               enabled ? ((String8){.pointer = expected, .length = sizeof(expected)}) : source);
+            BUSTER_TEST(arguments, dispatched.diagnostic_count == 0);
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        String8 translated;
+    } cases[] = {
+        {S8("\"?" "?(" "?" "?)" "?" "?<" "?" "?>" "?" "?=" "?" "?/n" "?" "?'" "?" "?!" "?" "?-\"\n"),
+         S8("\"[]{}#\\n^|~\"\n")},
+        {S8("\"?" "?=\"\n"), S8("\"#\"\n")},
+        {S8("'?" "?/n'\n"), S8("'\\n'\n")},
+        {S8("ma?" "?/\nin\n"), S8("main\n")},
+        {S8("ma?" "?/\rin\r"), S8("main\n")},
+        {S8("ma?" "?/\r\nin\r\n"), S8("main\n")},
+        {S8("/?" "?/\n* hidden */ kept\n"), S8("/* hidden */ kept\n")},
+        {S8("// hidden ?" "?/\nmore\nkept\n"), S8("// hidden more\nkept\n")},
+        {S8("\"? ?" "?x ?" "?\"\n"), S8("\"? ?" "?x ?" "?\"\n")},
+        {S8("\"??" "?=\"\n"), S8("\"?#\"\n")},
+        {S8("\"????" "?=\"\n"), S8("\"???#\"\n")},
+        {S8("\"?\\\n?=\"\n"), S8("\"?" "?=\"\n")},
+        {S8("\"?" "?/?" "?/\n\"\n"), S8("\"\\\"\n")},
+        {S8("?" "?"), S8("?" "?")},
+        {S8("?"), S8("?")},
+    };
+    for (u32 phase = 0; phase < 64; phase += 1)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(cases); test += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 source_length = phase + cases[test].source.length;
+            u64 expected_length = phase + cases[test].translated.length;
+            char8* source_bytes = arena_allocate(temporary.arena, char8, source_length);
+            char8* expected_bytes = arena_allocate(temporary.arena, char8, expected_length);
+            memset(source_bytes, ' ', phase);
+            memset(expected_bytes, ' ', phase);
+            memcpy(source_bytes + phase, cases[test].source.pointer, cases[test].source.length);
+            memcpy(expected_bytes + phase, cases[test].translated.pointer, cases[test].translated.length);
+            String8 source = {.pointer = source_bytes, .length = source_length};
+            CLexResult dispatched = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, false);
+            CLexResult reference = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, true);
+            String8 diagnostic = string_format(temporary.arena, S8("trigraph case={u32} phase={u32}"), test, phase);
+            BUSTER_TEST_RAW(arguments, c_test_translate_plain_run_paths_agree(source), diagnostic);
+            BUSTER_TEST_RAW(arguments, c_test_lex_results_agree(dispatched, reference), diagnostic);
+            BUSTER_TEST_RAW(arguments, string_equal(dispatched.translated_source,
+                (String8){.pointer = expected_bytes, .length = expected_length}), diagnostic);
+            scratch_end(temporary);
+        }
+    }
+
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 located = S8("a?" "?=b ?" "?/\r\nc ?" "?<d\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, located,
+        (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_C17, .source_path = S8("trigraph-map.c")});
+    String8 spellings[] = {S8("a"), S8("#"), S8("b"), S8("c"), S8("{"), S8("d")};
+    u32 offsets[] = {0, 1, 4, 11, 13, 16};
+    u32 lines[] = {1, 1, 1, 2, 2, 2};
+    u32 columns[] = {1, 2, 5, 1, 3, 6};
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, preprocess.tokens && preprocess.spelling_base &&
+                       preprocess.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1))
+    {
+        for (u32 token = 0; token < BUSTER_ARRAY_LENGTH(spellings); token += 1)
+        {
+            CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[token]);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]), spellings[token]);
+            BUSTER_TEST(arguments, location.offset == offsets[token] && location.line == lines[token] && location.column == columns[token]);
+            if (BUSTER_REQUIRE(arguments, preprocess.files && location.file < preprocess.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, preprocess.files[location.file], S8("trigraph-map.c"));
+            }
+        }
+    }
+    if (preprocess.recovery)
+    {
+        arena_destroy(preprocess.recovery->spelling_arena, 1);
+        arena_destroy(preprocess.recovery->token_arena, 1);
+        arena_destroy(preprocess.recovery->token_shape_arena, 1);
+    }
+
+    // Neither phase-three command replacement text nor already-preprocessed
+    // input repeats phase one on newly available question-mark sequences.
+    String8 preserved = S8("\"?" "?=\"");
+    CPreprocessorDefinition definition = {S8("COMMAND"), preserved};
+    CPreprocessOptions options[] = {
+        {.dialect = C_PREPROCESS_DIALECT_C17, .definitions = &definition, .definition_count = 1},
+        {.dialect = C_PREPROCESS_DIALECT_C17, .already_preprocessed = true},
+    };
+    for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(options); boundary += 1)
+    {
+        CPreprocessResult unchanged = c_preprocess(temporary.arena, boundary ? preserved : S8("COMMAND"), options[boundary]);
+        BUSTER_TEST(arguments, unchanged.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, unchanged.token_count == 2))
+        {
+            c_test_preprocessed_token(arguments, &result, unchanged, 0, C_TOKEN_STRING_LITERAL, preserved);
+        }
+        if (unchanged.recovery)
+        {
+            arena_destroy(unchanged.recovery->spelling_arena, 1);
+            arena_destroy(unchanged.recovery->token_arena, 1);
+            arena_destroy(unchanged.recovery->token_shape_arena, 1);
+        }
+    }
+    scratch_end(temporary);
+    return result;
 }
 
 // Exercise rejected sentinel lengths without materializing their imaginary
@@ -30326,6 +30461,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
     BUSTER_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_trigraph_translation);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_size_limit);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);

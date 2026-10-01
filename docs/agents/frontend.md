@@ -107,6 +107,29 @@ the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
 
+## Trigraph translation policy
+
+Raw root and included source in strict C99, C11 and C17 modes replaces all
+nine trigraphs during phase one, including within comments and literals.
+A trigraph backslash participates in the following line-splice phase for
+LF, CR and CRLF. Scanning consumes raw input only, so a question-mark
+sequence formed by splicing is not translated again. Checkpoints retain
+original byte offsets and columns after each three-byte replacement.
+
+GNU modes (including GNU89) and C23/GNU23 leave trigraphs unchanged.
+This matches [GCC's pre-C23 standard-mode policy](https://gcc.gnu.org/onlinedocs/cpp/Initial-processing.html)
+and [Clang's GNU-mode defaults](https://clang.llvm.org/docs/UsersManual.html#differences-between-various-standard-modes);
+C23 follows [N2940's removal implemented in Clang 18](https://releases.llvm.org/18.1.1/tools/clang/docs/ReleaseNotes.html).
+No separate trigraph override option is exposed. Command definitions,
+synthesized spellings and already-preprocessed input do not repeat phase one.
+Public standalone lexers retain their GNU17 translation policy.
+
+`c_test_trigraph_translation` pins substitutions, partial/overlapping input,
+all 64 scanner phases, splice ordering, original positions and phase boundaries.
+Registered `c_trigraph_preprocess_tests` checks directives, literals, comments,
+stringizing and included source, and compares fixed semantic token expectations
+with both GCC and Clang on hosted Linux x86-64 in C99/C11/C17/GNU17 modes.
+
 ## Source translation limits
 
 The source translator accepts at most `UINT32_MAX - 2` raw bytes so its
