@@ -3,6 +3,17 @@
 #include <buster/lib/base.h>
 
 BUSTER_F_DECL u64 buster_hash_64(u8* pointer, u64 length);
+#if BUSTER_BENCH_ALLOCATIONS
+// Calling-thread buster_hash_64 traffic for the frontend source-fact census
+// (compiler/frontend/c/c_census.h). Cumulative; reporting never resets it.
+typedef struct BusterHashCensus BusterHashCensus;
+struct BusterHashCensus
+{
+    u64 calls;
+    u64 bytes;
+};
+BUSTER_F_DECL BusterHashCensus buster_hash_census(void);
+#endif
 
 // Streaming SHA-256. init begins a message, add accepts arbitrary chunking
 // (including null with zero length), finish_hex consumes the state and writes

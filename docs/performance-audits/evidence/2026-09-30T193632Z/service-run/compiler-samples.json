@@ -1,0 +1,54 @@
+{
+  "platform": "Linux-7.0.0-1012-azure-x86_64-with-glibc2.43",
+  "cpu": 0,
+  "pairs": 6,
+  "source_revision": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+  "same_source_root": "/home/runner/work/buster/buster/baseline",
+  "common_argv": [
+    "cc",
+    "-Isrc",
+    "-Ibuild/generated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-g0",
+    "-march=baseline",
+    "-fregister-allocator=fast",
+    "-c",
+    "src/buster/apps/ide/ide.c"
+  ],
+  "binary_sha256": {
+    "baseline": "276d9a63c1f1988e1e4cfccc6176372c8ecf6c1f0f65ad8366e43eda65813b50",
+    "candidate": "142e466c9ddf199c4fcc4efcd89bb25ec16c2ef75b38e03fa468993cfe2d7c18"
+  },
+  "samples": [
+    {
+      "pair": -1,
+      "version": "candidate",
+      "argv": [
+        "/usr/bin/time",
+        "-f",
+        "%e %U %S %M",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/compiler--1-candidate.time",
+        "/home/runner/work/buster/buster/candidate/build/Release/ide",
+        "cc",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g0",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-c",
+        "src/buster/apps/ide/ide.c",
+        "-o",
+        "/home/runner/work/buster/buster/evidence/compiler--1-candidate.o"
+      ],
+      "returncode": 1,
+      "wall_seconds": 2.82,
+      "user_seconds": 2.33,
+      "system_seconds": 0.48,
+      "peak_rss_kib": 910576
+    }
+  ]
+}

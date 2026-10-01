@@ -127,6 +127,9 @@ APPLE_CI_SUPPORT_CONTRACT_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a9
 # #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
 # byte/hash row updated; corpus and target axes are unchanged.
 PROPOSED_SUPPORT_CONTRACT_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
+# #1808 successor: the #1007 declaration with only the tests/ci_tools_test.py
+# byte/hash row updated; corpus and target axes are unchanged.
+MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256 = "434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -890,7 +893,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
     contract_sha256 = hashlib.sha256(contract_data).hexdigest()
     if not contract_data or contract_sha256 not in (
             SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256,
-            APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256):
+            APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256,
+            MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:

@@ -167,7 +167,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
     BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 sentinel = S8("existing image must survive a refused static export");
     BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
-    String8 static_command[] = {S8("-g0"), S8("-nostdlib"), S8("-Wl,--export-dynamic"), S8("-o"), output, source};
+    String8 static_command[] = {S8("-g0"), S8("-Wl,--export-dynamic"), S8("-o"), output, source};
     CompilerDriverResult static_image = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(static_command)));
     BUSTER_TEST(arguments, static_image.error == COMPILER_DRIVER_ERROR_LINK && compiler_driver_test_string_contains(static_image.diagnostic, S8("--export-dynamic")));
     ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});

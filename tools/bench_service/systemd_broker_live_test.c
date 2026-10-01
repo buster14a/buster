@@ -42,8 +42,8 @@
  * it. Only an actual framed status on that same connection proves refusal. */
 typedef struct BqTestBrokerRequest
 {
-    uint32_t magic, version, operation, stage, signal_number, reserved;
-    uint64_t job, attempt;
+    uint32_t magic, version, operation, stage, signal_number, recipe;
+    uint64_t job, attempt, runtime_max_usec;
     char base[65], candidate[65];
 } BqTestBrokerRequest;
 
@@ -61,7 +61,7 @@ typedef struct BqTestRejectionResult
     bool valid;
 } BqTestRejectionResult;
 
-_Static_assert(sizeof(BqTestBrokerRequest) == 176, "broker request envelope changed");
+_Static_assert(sizeof(BqTestBrokerRequest) == 184, "broker request envelope changed");
 _Static_assert(sizeof(BqTestBrokerStatus) == 12, "broker status envelope changed");
 
 typedef struct BqTestIdentity
@@ -319,7 +319,7 @@ static bool bq_test_root_rejected(char const* job, char const* attempt)
     unsigned long long attempt_number = strtoull(attempt, &attempt_end, 10);
     ok = ok && errno == 0 && attempt_end != attempt && *attempt_end == 0 && attempt_number != 0 &&
          getuid() == 0 && geteuid() == 0;
-    BqTestBrokerRequest request = {.magic = 0x42515344u, .version = 1, .operation = 2,
+    BqTestBrokerRequest request = {.magic = 0x42515344u, .version = 2, .operation = 2,
                                    .signal_number = 3, .job = job_number, .attempt = attempt_number};
     int fd = ok ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
     struct sockaddr_un address = {.sun_family = AF_UNIX};
