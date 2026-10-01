@@ -523,6 +523,30 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
+// Optional raw translation/lex reuse, below all context-dependent preprocessing.
+// Metadata lives in owner; destroy releases the private payload reservation.
+// Limits are 1..64 MiB of retained payload plus fixed metadata/arena overhead.
+// Use exclusively on the creating thread. A null cache preserves the ordinary
+// path. Results own their copies and remain valid after clear/destroy.
+typedef struct CSourceCache CSourceCache;
+typedef struct CSourceCacheStats CSourceCacheStats;
+struct CSourceCacheStats
+{
+    u64 hits;
+    u64 misses;
+    u64 bypasses;
+    u64 resets;
+    u64 reused_bytes;
+    u64 reused_tokens;
+    u64 retained_bytes;
+    u64 byte_limit;
+    u32 entry_count;
+};
+BUSTER_F_DECL CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit);
+BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
+BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
+BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -571,6 +595,8 @@ struct CPreprocessOptions
     // committed pages. The result never references it (c_preprocess_seal).
     // Null gives the call a private phase arena of its own.
     Arena* phase_arena;
+    // Optional exclusive caller-owned raw lexical cache; never retained by results.
+    CSourceCache* source_cache;
 };
 
 

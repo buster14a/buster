@@ -40,6 +40,8 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   CSourceCache, c_source_cache_lex            bounded raw lex templates before
+//                                              fresh symbol interning
 //   c_token_preceded_by_space,                 source spacing: the `#` white-
 //   c_token_requires_separator                 space test and the lexical-
 //                                              join guard -E and quoting
@@ -3245,6 +3247,195 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
 BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source)
 {
     return c_lex_dispatch(arena, space, source, false);
+}
+
+// Bounded process-local raw lexical templates. Entries are captured before
+// symbol interning; no path, macro, target, source-map or IR identity is retained.
+// Every import owns its copies, so eviction cannot invalidate a compilation.
+enum { C_SOURCE_CACHE_ENTRY_LIMIT = 64 };
+typedef struct CSourceCacheEntry CSourceCacheEntry;
+struct CSourceCacheEntry
+{
+    String8 source;
+    CLexResult lex;
+};
+
+struct CSourceCache
+{
+    Arena* storage;
+    u64 start;
+    CSourceCacheStats stats;
+    CSourceCacheEntry entries[C_SOURCE_CACHE_ENTRY_LIMIT];
+};
+
+CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit)
+{
+    CSourceCache* result = 0;
+    if (owner && byte_limit && byte_limit <= BUSTER_MB(64))
+    {
+        // Commit at creation: a failed optional reservation returns null;
+        // subsequent admitted captures cannot require a failing growth commit.
+        u64 reservation = byte_limit + BUSTER_KB(64);
+        Arena* storage = arena_create((ArenaCreation){
+            .reserved_size = reservation,
+            .initial_size = reservation,
+            .granularity = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        });
+        if (storage)
+        {
+            result = arena_allocate_zeroed(owner, CSourceCache, 1);
+            result->storage = storage;
+            result->start = storage->position;
+            result->stats.byte_limit = byte_limit;
+        }
+    }
+    return result;
+}
+
+void c_source_cache_clear(CSourceCache* cache)
+{
+    if (cache && cache->storage)
+    {
+        cache->stats.entry_count = 0;
+        cache->stats.retained_bytes = 0;
+        cache->stats.resets += 1;
+        arena_release_to_position(cache->storage, cache->start);
+    }
+}
+
+void c_source_cache_destroy(CSourceCache* cache)
+{
+    if (cache && cache->storage)
+    {
+        c_source_cache_clear(cache);
+        arena_destroy(cache->storage, 1);
+        cache->storage = 0;
+    }
+}
+
+CSourceCacheStats c_source_cache_stats(CSourceCache const* cache)
+{
+    CSourceCacheStats result = {0};
+    if (cache)
+    {
+        result = cache->stats;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CLexResult c_source_cache_copy(Arena* arena, CSpellingSpace* space, CLexResult const* source)
+{
+    CLexResult result = *source;
+    u64 size = source->translated_source.length + 1;
+    char8* text = space ? c_space_allocate(space, size) : arena_allocate(arena, char8, size);
+    memcpy(text, source->translated_source.pointer, size);
+    result.translated_source.pointer = text;
+    result.translated_offset = space ? c_space_offset(space, text) : 0;
+    result.spelling_base = space ? space->base : text;
+    result.tokens = arena_allocate(arena, CToken, source->token_count);
+    result.token_shapes = arena_allocate(arena, CTokenShape, source->token_count);
+    for (u64 index = 0; index < source->token_count; index += 1)
+    {
+        CToken token = source->tokens[index];
+        token.offset = token.offset - source->translated_offset + result.translated_offset;
+        token.symbol = 0;
+        result.tokens[index] = token;
+    }
+    memcpy(result.token_shapes, source->token_shapes, source->token_count * sizeof(*result.token_shapes));
+    result.checkpoints = arena_allocate(arena, IrSourceCheckpoint, source->checkpoint_count);
+    result.checkpoint_offsets = arena_allocate(arena, u32, source->checkpoint_count);
+    result.checkpoint_pages = arena_allocate(arena, u32, source->checkpoint_page_count);
+    memcpy(result.checkpoints, source->checkpoints, source->checkpoint_count * sizeof(*result.checkpoints));
+    memcpy(result.checkpoint_offsets, source->checkpoint_offsets, source->checkpoint_count * sizeof(*result.checkpoint_offsets));
+    memcpy(result.checkpoint_pages, source->checkpoint_pages, source->checkpoint_page_count * sizeof(*result.checkpoint_pages));
+    result.diagnostics = 0;
+    result.diagnostic_count = 0;
+    result.location_cursor = 0;
+    return result;
+}
+
+BUSTER_C_INTERNAL CLexResult c_source_cache_lex(Arena* arena, CSpellingSpace* space, String8 source, CSourceCache* cache)
+{
+    CLexResult result;
+    CSourceAllocationPlan plan;
+    bool eligible = cache && cache->storage && arena && space && (!source.length || source.pointer) &&
+                    c_source_allocation_plan(source.length, &plan) &&
+                    space->used <= UINT32_MAX && plan.translated_capacity <= UINT32_MAX - space->used &&
+                    source.length <= cache->stats.byte_limit;
+    if (eligible)
+    {
+        // One owned byte snapshot feeds lookup, cold lexing and capture alike.
+        // A mutable file mapping must never be compared and then lexed separately.
+        char8* snapshot = arena_allocate(arena, char8, source.length);
+        if (source.length)
+        {
+            memcpy(snapshot, source.pointer, source.length);
+        }
+        String8 captured = {.pointer = snapshot, .length = source.length};
+        CSourceCacheEntry const* found = 0;
+        for (u32 index = 0; index < cache->stats.entry_count && !found; index += 1)
+        {
+            CSourceCacheEntry const* entry = &cache->entries[index];
+            // Sixty-four entries bound the scan. No hash collision or metadata
+            // shortcut can admit a hit: equality always reads the captured bytes.
+            if (string_equal(captured, entry->source))
+            {
+                found = entry;
+            }
+        }
+        if (found)
+        {
+            result = c_source_cache_copy(arena, space, &found->lex);
+            cache->stats.hits += 1;
+            cache->stats.reused_bytes += source.length;
+            cache->stats.reused_tokens += result.token_count;
+        }
+        else
+        {
+            cache->stats.misses += 1;
+            result = c_lex_space(arena, space, captured);
+            // Source bounds make every product and sum representable in u64.
+            // Seven allocations below each need less than eight padding bytes.
+            u64 needed = source.length + result.translated_source.length + 1 +
+                         result.token_count * (sizeof(CToken) + sizeof(CTokenShape)) +
+                         (u64)result.checkpoint_count * (sizeof(IrSourceCheckpoint) + sizeof(u32)) +
+                         (u64)result.checkpoint_page_count * sizeof(u32) + 64;
+            if (!result.diagnostic_count && result.token_count && needed <= cache->stats.byte_limit)
+            {
+                if (cache->stats.entry_count == C_SOURCE_CACHE_ENTRY_LIMIT ||
+                    needed > cache->stats.byte_limit - cache->stats.retained_bytes)
+                {
+                    c_source_cache_clear(cache);
+                }
+                CSourceCacheEntry* entry = &cache->entries[cache->stats.entry_count];
+                char8* raw = arena_allocate(cache->storage, char8, captured.length);
+                if (captured.length)
+                {
+                    memcpy(raw, captured.pointer, captured.length);
+                }
+                *entry = (CSourceCacheEntry){
+                    .source = {.pointer = raw, .length = captured.length},
+                    .lex = c_source_cache_copy(cache->storage, 0, &result),
+                };
+                cache->stats.entry_count += 1;
+                cache->stats.retained_bytes = cache->storage->position - cache->start;
+            }
+            else
+            {
+                cache->stats.bypasses += 1;
+            }
+        }
+    }
+    else
+    {
+        if (cache && cache->storage)
+        {
+            cache->stats.bypasses += 1;
+        }
+        result = c_lex_space(arena, space, source);
+    }
+    return result;
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -9265,7 +9456,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                   .start = 0,
                                   .kind = IR_SOURCE_REGION_STAMP,
                               });
-    CLexResult root_lex = c_lex_space(arena, space, source);
+    CLexResult root_lex = c_source_cache_lex(arena, space, source, options.source_cache);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
@@ -10179,7 +10370,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                     include_once = guard_macro && guard_macro->definition.defined;
                                 }
                                 include_file->included = true;
-                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
+                                CLexResult include_lex = include_once ? (CLexResult){0} : c_source_cache_lex(arena, space, include_source, options.source_cache);
                                 // A suppressed include lexed nothing and adds
                                 // zeroes; its path was already counted by the
                                 // inclusion that did the lexing, and its
