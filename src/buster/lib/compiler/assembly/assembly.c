@@ -10123,7 +10123,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
-                bool conversion_source_width = false;
+                bool schema_source_width = false;
+                bool vex_vector_source = vector_memory_width && vector_memory_width <= 256;
+                for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+                {
+                    vex_vector_source &= !operands[operand_index].has_mask && !operands[operand_index].zeroing &&
+                                         !operands[operand_index].broadcast &&
+                                         (physical[operand_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                                          physical[operand_index].reg.index < 16);
+                }
                 BusterX86MetadataCandidateRange conversion_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
                 for (u32 candidate_index = 0; candidate_index < conversion_candidates.count; candidate_index += 1)
                 {
@@ -10131,16 +10139,28 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                     BusterX86MetadataForm form = {0};
                     if (buster_x86_metadata_candidate_at(conversion_candidates, candidate_index, &form_id) &&
                         buster_x86_metadata_form(form_id, &form) &&
-                        assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")))
+                        (assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) ||
+                         (vex_vector_source && form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX)))
                     {
-                        conversion_source_width = true;
+                        schema_source_width = assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT"));
+                        for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+                        {
+                            BusterX86MetadataOperand metadata = {0};
+                            if (buster_x86_metadata_operand(form.id, metadata_index, &metadata) && metadata.visible &&
+                                metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                                buster_x86_metadata_form_memory_source_width(form, metadata.atom))
+                                schema_source_width = true;
+                        }
+                    }
+                    if (schema_source_width)
+                    {
                         break;
                     }
                 }
-                if (conversion_source_width)
+                if (schema_source_width)
                 {
                     // The selector projects and validates this qualifier from
-                    // each compatible conversion row. Do not compare it with
+                    // each compatible conversion/VEX row. Do not compare it with
                     // the destination vector width in the syntax adapter.
                     continue;
                 }

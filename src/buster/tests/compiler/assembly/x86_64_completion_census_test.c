@@ -2802,9 +2802,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // maps to the sse2 feature. The AT&T share is the larger one because the
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5754 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3819 &&
-                             source.intel_byte_mismatch_count == 780 && source.intel_relocation_mismatch_count == 0 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5769 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3805 &&
+                             source.intel_byte_mismatch_count == 779 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
     // The legacy migration changes exactly 175 rows relative to the scalar
     // parent: 122 Intel and 54 AT&T invalid-operands witnesses become encodable,
@@ -3079,6 +3079,59 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.intel_byte_count == 5 && record.att_byte_count == 5 &&
                                  record.intel_relocation_count == 0 && record.att_relocation_count == 0);
     }
+    // VEX schema source-width projection changes 25 complete outcomes.
+    // All formerly exact outcome/byte/relocation tuples are preserved;
+    // remaining encoding differences stay strict mismatch controls.
+    static struct {
+        u32 form_id;
+        u64 stable_hash;
+        u8 intel_class;
+        u8 att_class;
+        u8 intel_reason;
+        u8 att_reason;
+        u8 intel_byte_count;
+        u8 att_byte_count;
+    } const vex_source_outcomes[] = {
+        {3368, UINT64_C(0x89a1163a7c79248e), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {3370, UINT64_C(0xd37edb0a46cd4ab8), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {3372, UINT64_C(0x44ba2ebf5d70eb15), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {3384, UINT64_C(0xbeb32740397f1f5c), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
+        {3390, UINT64_C(0xe309c0d42f20c02a), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
+        {3767, UINT64_C(0x27055e80121575d8), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {5641, UINT64_C(0x1053802238bbbd9c), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {5642, UINT64_C(0x5ee6cadbafbd71be), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {8062, UINT64_C(0x1275af81219ccfe7), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {8068, UINT64_C(0x9de9f21edec85ed2), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {8074, UINT64_C(0x5cadecd2473918a6), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {8080, UINT64_C(0x84e2a74b1192d114), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 5, 5},
+        {8090, UINT64_C(0x9028f50c32d0b23c), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8092, UINT64_C(0xaf12046f103a06fe), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8094, UINT64_C(0x3143fbbbaae9cf41), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8096, UINT64_C(0x00ee52cc8f1cb2c0), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8337, UINT64_C(0x584f86708eab0478), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
+        {8343, UINT64_C(0xb439dccb20724440), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
+        {8540, UINT64_C(0x96823fa24ac37ea9), legacy_exact, legacy_exact, legacy_none, legacy_none, 6, 6},
+        {8542, UINT64_C(0x8d39ee5ed53d1b75), legacy_exact, legacy_exact, legacy_none, legacy_none, 6, 6},
+        {8552, UINT64_C(0x60887a0f3bd9c114), legacy_exact, legacy_exact, legacy_none, legacy_none, 6, 6},
+        {8585, UINT64_C(0xde620fa85c4574bd), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8606, UINT64_C(0xdf20c6069e70e066), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {8700, UINT64_C(0x71c921cf34daa255), legacy_exact, legacy_exact, legacy_none, legacy_none, 6, 6},
+        {8702, UINT64_C(0xe98415fe8039e343), legacy_exact, legacy_exact, legacy_none, legacy_none, 6, 6},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(vex_source_outcomes) == 25);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(vex_source_outcomes); index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[vex_source_outcomes[index].form_id];
+        BUSTER_TEST(arguments, record.form_id == vex_source_outcomes[index].form_id &&
+                                 record.stable_hash == vex_source_outcomes[index].stable_hash &&
+                                 record.intel_class == vex_source_outcomes[index].intel_class &&
+                                 record.att_class == vex_source_outcomes[index].att_class &&
+                                 record.intel_source_reason == vex_source_outcomes[index].intel_reason &&
+                                 record.att_source_reason == vex_source_outcomes[index].att_reason &&
+                                 record.intel_byte_count == vex_source_outcomes[index].intel_byte_count &&
+                                 record.att_byte_count == vex_source_outcomes[index].att_byte_count &&
+                                 record.intel_relocation_count == 0 && record.att_relocation_count == 0);
+    }
     // #280 changes exactly this census row: VMOVNTDQA zmm0, dword ptr
     // [rax] is an invalid explicit tuple, not permission to emit another
     // width. Pin its key and rejection; every formerly exact Intel/AT&T
@@ -3108,9 +3161,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
                                  record.att_byte_count == 0);
     }
-    BUSTER_TEST(arguments, source.att_exact_count == 5807 && source.att_normalized_relocation_count == 26 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5816 && source.att_normalized_relocation_count == 26 &&
                              source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 3669 &&
-                             source.att_byte_mismatch_count == 1063 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_byte_mismatch_count == 1054 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 551 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
@@ -3118,8 +3171,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6805 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3124 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6819 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3110 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);

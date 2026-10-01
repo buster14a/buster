@@ -12705,6 +12705,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    memcmp(metadata_vex_ymm_address32.bytes.pointer, expected_vex_ymm_address32,
                                           sizeof(expected_vex_ymm_address32)) == 0);
 
+        // VEX packed comparisons read the aggregate dq/qq width published
+        // by the selected schema, even though the encoder records f32/f64.
+        // The address-size prefix changes the address, never that extent.
+        typedef struct VexCompareMemoryCase
+        {
+            String8 source;
+            String8 invalid_source;
+            u8 expected[6];
+            u8 byte_count;
+        } VexCompareMemoryCase;
+        VexCompareMemoryCase const vex_compare_memory_cases[] = {
+            {S8("vcmppd xmm0, xmm0, xmmword ptr [rax], 0\n"), S8("vcmppd xmm0, xmm0, qword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xf9, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmppd ymm0, ymm0, ymmword ptr [rax], 0\n"), S8("vcmppd ymm0, ymm0, qword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xfd, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmpps xmm0, xmm0, xmmword ptr [rax], 0\n"), S8("vcmpps xmm0, xmm0, dword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xf8, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmpps ymm0, ymm0, ymmword ptr [rax], 0\n"), S8("vcmpps ymm0, ymm0, dword ptr [rax + wrong_vcmp], 0\n"),
+             {0xc5, 0xfc, 0xc2, 0x00, 0x00}, 5},
+            {S8("vcmppd xmm0, xmm0, xmmword ptr [ebx], 0\n"), S8("vcmppd xmm0, xmm0, qword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xf9, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmppd ymm0, ymm0, ymmword ptr [ebx], 0\n"), S8("vcmppd ymm0, ymm0, qword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xfd, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmpps xmm0, xmm0, xmmword ptr [ebx], 0\n"), S8("vcmpps xmm0, xmm0, dword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xf8, 0xc2, 0x03, 0x00}, 6},
+            {S8("vcmpps ymm0, ymm0, ymmword ptr [ebx], 0\n"), S8("vcmpps ymm0, ymm0, dword ptr [ebx + wrong_vcmp], 0\n"),
+             {0x67, 0xc5, 0xfc, 0xc2, 0x03, 0x00}, 6},
+        };
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(vex_compare_memory_cases); case_index += 1)
+        {
+            VexCompareMemoryCase const* test = vex_compare_memory_cases + case_index;
+            AssemblyEncodeResult qualified = assembly_encode(
+                arguments->arena, test->source, (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, qualified.diagnostic_count == 0 && qualified.bytes.length == test->byte_count &&
+                                       qualified.symbol_count == 0 && qualified.relocation_count == 0 &&
+                                       memcmp(qualified.bytes.pointer, test->expected, test->byte_count) == 0);
+            AssemblyEncodeResult rejected = assembly_encode(
+                arguments->arena, test->invalid_source, (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, rejected.diagnostic_count == 1 &&
+                                       rejected.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                       rejected.bytes.length == 0 && rejected.symbol_count == 0 && rejected.relocation_count == 0);
+        }
+
         u8 expected_evex_zmm_memory[] = {0x62, 0xf9, 0x74, 0x48, 0x58, 0x00};
         AssemblyEncodeResult metadata_evex_zmm_qualified = assembly_encode(
             arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [r16]\n"),
