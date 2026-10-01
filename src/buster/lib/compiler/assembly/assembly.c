@@ -12856,6 +12856,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
         }
     }
+    AssemblyInstructionInfo source_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+        assembly_instruction_lookup(target, syntax, mnemonic, &source_info) &&
+        assembly_x86_source_layout_uses_metadata((AssemblyInstruction){.opcode = source_info.opcode}))
+    {
+        // Disabled shadow forms must not turn malformed migrated source into
+        // a missing-feature diagnostic. This read-only probe publishes no
+        // instruction and does not authorize the feature-disabled encoding.
+        String8 structural_features[] = {S8("*")};
+        BusterX86MetadataPhysicalQuery structural_query = query;
+        structural_query.operands = physical;
+        structural_query.features = (BusterX86MetadataFeatureInput){.names = structural_features, .count = 1};
+        String8 structural_mnemonic = mnemonic;
+        BusterX86MetadataSelectResult structural = assembly_x86_metadata_select_source_form(
+            structural_query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width,
+            operands, physical, operand_count, &structural_mnemonic);
+        if (structural.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+            structural.status != BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+            selection = structural;
+    }
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
         BusterX86MetadataForm failure_form = {0};
@@ -13459,6 +13479,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                 builder->result.diagnostic_count = diagnostic_count;
                 builder->output_count = output_count;
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
+                if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                    assembly_x86_source_layout_uses_metadata(builder->instructions[instruction_count]))
+                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
                 assembly_x86_metadata_diagnostic(builder, status, line, column, length);
                 return;
             }

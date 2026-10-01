@@ -304,3 +304,9 @@ LLVM's [target description and code generation](https://llvm.org/docs/CodeGenera
 and [generated backend views](https://llvm.org/docs/TableGen/BackEnds.html).
 They inform the separation of concerns; neither library is added as a Buster
 runtime or build dependency by this change.
+
+Migrated source-layout families preserve the source diagnostic policy: malformed
+operands, illegal prefixes and immediate limits are invalid operands. If a
+disabled metadata alternative hides such a rejection, the adapter performs a
+diagnostic-only structural query; it publishes no bytes and cannot enable the
+missing feature. Valid forms on unsupported targets retain the feature diagnostic.
