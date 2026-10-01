@@ -3106,10 +3106,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         if (operand_resolved && object_operand && bound_word_is_alignof &&
                             (object_entity->kind == C_ENTITY_OBJECT || object_entity->kind == C_ENTITY_LOCAL))
                         {
-                            u32 cursor = 0;
+                            u32 alignment_cursor = 0;
                             u32 run_start = 0;
                             u32 run_count = 0;
-                            while (operand_resolved && c_alignof_object_next_run(result, object, object_start, &cursor, &run_start, &run_count))
+                            while (operand_resolved && c_alignof_object_next_run(result, object, object_start, &alignment_cursor, &run_start, &run_count))
                             {
                                 // This layout reader's legacy integer evaluator
                                 // reads identifiers as zero. Keep unsupported
