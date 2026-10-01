@@ -14,13 +14,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: e787f648a3eeb08d717ba1f4382a170905944087
+          ref: 625445ea9d67674722f7358bbd06e5f355d3b189
           persist-credentials: false
       - name: Record the exact candidate
         run: git rev-parse HEAD HEAD^{tree}
       - name: Validate concurrency, bounded queues, failure aggregation and action policy
         run: |
           python3 -B tests/ci_tools_test.py -v
+          python3 -B tools/ci_workflow_concurrency_test.py -v
           python3 -B tools/compiler_throughput_workflow_test.py -v
           python3 -B tests/action_pins_test.py -v
           python3 -B tools/check_action_pins.py
