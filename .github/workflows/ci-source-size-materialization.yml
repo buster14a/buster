@@ -1,0 +1,36 @@
+name: CI source baseline materialization
+on:
+  push:
+    branches: [codex/2119-source-size-materialization]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8f173cd9831e94357b340ba0d9d9b25d439b0e0d
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate native baseline and retain immutable source bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/source-size-driver"
+          "$RUNNER_TEMP/source-size-driver" source_size --rev 8f173cd9831e94357b340ba0d9d9b25d439b0e0d --write-baseline
+          mkdir -p "$RUNNER_TEMP/ci-main-materialization"
+          cp docs/source-size-baseline.txt "$RUNNER_TEMP/ci-main-materialization/source-size-baseline.txt"
+          cp docs/performance-audits/evidence/2026-09-29T231839Z/raw-compile-evidence.tar.gz "$RUNNER_TEMP/ci-main-materialization/raw-compile-evidence.tar.gz"
+          cp docs/performance-audits/evidence/2026-09-30T193227Z/evidence.zip "$RUNNER_TEMP/ci-main-materialization/evidence.zip"
+          git hash-object docs/performance-audits/evidence/2026-09-29T231839Z/raw-compile-evidence.tar.gz
+          git hash-object docs/performance-audits/evidence/2026-09-30T193227Z/evidence.zip
+          cat docs/source-size-baseline.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-main-materialization-8f173cd9831e94357b340ba0d9d9b25d439b0e0d
+          path: ${{ runner.temp }}/ci-main-materialization/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
