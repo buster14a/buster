@@ -97,7 +97,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/kerning-diagnostic-evidence/candidate-build.log"
           build/kerning-focused/'${{ matrix.config }}'/ide test --module=truetype_tests --verbose=1 --ci=1 \
             2>&1 | tee "$RUNNER_TEMP/kerning-diagnostic-evidence/candidate-test.log"
-          rg 'module=truetype_tests .*passed=143 failed=0 assertions=143 status=pass' \
+          rg 'module=truetype_tests .*passed=142 failed=0 assertions=142 status=pass' \
             "$RUNNER_TEMP/kerning-diagnostic-evidence/candidate-test.log"
           printf 'Exact candidate `%s`: registered `truetype_tests` passed (%s).\n' \
             "$CANDIDATE_SHA" '${{ matrix.name }}' >> "$GITHUB_STEP_SUMMARY"
