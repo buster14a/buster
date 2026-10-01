@@ -408,6 +408,27 @@ answers the type's alignment. Member operands (`_Alignof(s.x)` with an
 `_Alignas` member, or a `packed` one) still answer the member type's alignment
 where Clang answers the member's (issue #1249).
 
+## Array bounds over named objects
+
+An array bound such as `sizeof(g)`, `sizeof g` or `_Alignof(g)` reads the named
+object's layout in the same parse-side solve as the array (#1782). Recorded
+identifier uses retain declaration-point binding; a missing use falls back to
+the token's enclosing scope and source position. Redundant parentheses preserve
+that identity, and array/function parameters use their adjusted pointer layout.
+An unresolved object type becomes an ordinary agenda dependency; the reader
+does not start another layout solve or add a whole-table pass. A runtime VLA
+therefore remains nonconstant.
+
+Object alignment consumes the same declaration runs as standalone `_Alignof`,
+including literal requests, type-naming requests and completed redeclarations.
+The legacy layout reader still cannot evaluate identifier-bearing alignment
+expressions such as `_Alignas(A)` for an enumerator `A`; a bound using that
+object's alignment stays unresolved rather than treating the identifier as
+zero. The typed constant authority migration in #1247 owns that remaining
+boundary. `c_test_array_bound_object_layout` checks semantic-only analysis,
+both frontend SSA forms, enum and static-assert constants, canonical array
+sizes/counts, shadowing, parameter adjustment, false assertions and refusals.
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their

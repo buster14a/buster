@@ -14926,6 +14926,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArg
     return result;
 }
 
+// Named-object array bounds must have the same constant layout in semantic
+// queries and canonical IR. Runtime bounds remain variable (#1782).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u64 size;
+        u64 count;
+    } const cases[] = {
+        {S8("int g; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16 && sizeof(arr) == 16, \"sizeof object bound\");\n"), 16, 4},
+        {S8("int g; int arr[sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"unary sizeof object bound\");\n"), 16, 4},
+        {S8("int g; int arr[sizeof (g) + sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"two object operands\");\n"), 32, 8},
+        {S8("int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"alignof object bound\");\n"), 16, 4},
+        {S8("_Alignas(32) int g; int arr[__alignof__((g))]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 128, \"declared object alignment\");\n"), 128, 32},
+        {S8("_Alignas(double) int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"type-naming object alignment\");\n"), 32, 8},
+        {S8("extern int g; _Alignas(32) int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 128, \"redeclared object alignment\");\n"), 128, 32},
+        {S8("struct S { int x; int y; } g; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"aggregate object layout dependency\");\n"), 32, 8},
+        {S8("int g; int observe(void) { char g = 0; int arr[sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 4, \"block shadow\"); return g; }\n"), 4, 1},
+        {S8("int observe(void) { int g = 0; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"block object\"); return g; }\n"), 16, 4},
+        {S8("int observe(int p[2]) { int arr[sizeof(p)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == sizeof(void *) * sizeof(int), \"adjusted parameter\"); return 0; }\n"), 32, 8},
+        {S8("int arr[sizeof(int)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"type-name control\");\n"), 16, 4},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                    });
+            CParseResult parse;
+            if (!mode)
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0, cases[case_index].source);
+                parse = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST(arguments, parse.analysis_complete);
+            }
+            else parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[case_index].source);
+            bool enumerator = false;
+            for (u32 index = 0; index < parse.entity_count; index += 1)
+            {
+                CEntity* entity = parse.entities + index;
+                enumerator |= entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, S8("E")) &&
+                              !entity->constant_is_negative && entity->constant_value == cases[case_index].size;
+            }
+            BUSTER_TEST_RAW(arguments, enumerator, cases[case_index].source);
+            if (mode && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("array-bound-object.c"), tokens, parse, target_native,
+                                                                  (CIRLowerOptions){.disable_direct_ssa = mode == 2});
+                if (BUSTER_REQUIRE(arguments, ir.program && ir.program->module_count && ir.diagnostic_count == 0))
+                {
+                    IrModule* module = ir.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+                    IrType* array = 0;
+                    for (u32 index = 0; index < module->global_count; index += 1)
+                    {
+                        IrGlobal* global = module->globals + index;
+                        IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+                        if (symbol && string_equal(symbol->link_name, S8("arr"))) array = ir_type_from_id(&ir.program->types, global->type);
+                    }
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        for (u32 local = 0; local < function->debug_local_count; local += 1)
+                        {
+                            IrDebugLocal* debug = function->debug_locals + local;
+                            if (string_equal(debug->name, S8("arr"))) array = ir_type_from_id(&ir.program->types, debug->type);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, array && array->kind == IR_TYPE_ARRAY && array->layout.resolved &&
+                                               array->layout.size == cases[case_index].size && array->element_count == cases[case_index].count,
+                                    cases[case_index].source);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } const refused[] = {
+        {S8("int g; int arr[sizeof(g)]; _Static_assert(sizeof(arr) == 8, \"false sizeof\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Alignas(32) int g; int arr[_Alignof(g)]; _Static_assert(sizeof(arr) == 16, \"false alignment\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int observe(int n) { int g[n]; int arr[sizeof(g)];\n"
+            "_Static_assert(sizeof(arr) == 16, \"runtime VLA\"); return 0; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        // Valid GNU source remains unsupported by the legacy layout reader
+        // until #1247 replaces its identifier-as-zero alignment evaluator.
+        {S8("enum { A = 32 }; _Alignas(A) int g; int arr[_Alignof(g)];\n"
+            "_Static_assert(sizeof(arr) == 128, \"unsupported alignment request\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, refused[index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, refused[index].source);
+        BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 1, refused[index].source);
+        if (analysis.diagnostic_count == 1) BUSTER_TEST(arguments, analysis.diagnostics[0].kind == refused[index].kind);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // GNU `_Alignof`/`__alignof__` over an object answers the object's
 // alignment, `_Alignas` and `aligned` included, and it is an integer constant
 // expression wherever GCC and Clang fold it (#1704). Both layout engines must
@@ -29823,6 +29958,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
+    BUSTER_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
