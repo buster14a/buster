@@ -29,5 +29,8 @@ jobs:
                           def decode(value):
                               return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
                           record = {"case": case["id"], "compiler": cc, "expected": case["expected"], "stdout": decode(error.stdout), "stderr": decode(error.stderr), "timed_out": True}
-                      print(json.dumps(record), flush=True)
+                      for stream in ("stdout", "stderr"):
+                record[stream + "_bytes"] = len(record[stream].encode())
+                record[stream] = record[stream][:4096]
+            print(json.dumps(record), flush=True)
           PY
