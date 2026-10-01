@@ -2368,7 +2368,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
         {
             u32 actual = 0;
             memcpy(&actual, (u8*)executable.address + 4, sizeof(actual));
-            u64 address = (u64)(uintptr_t)executable.address + os_get_page_size();
+            u64 address = (u64)(uintptr_t)executable.address + os_get_page_size() + symbols[relocation.symbol].value + (u64)relocation.addend;
             BUSTER_TEST(arguments, (actual & ~(UINT32_C(0xfff) << 10)) == bases[case_index]);
             BUSTER_TEST(arguments, ((u64)((actual >> 10) & 4095) << scale) == (address & 4095));
         }
