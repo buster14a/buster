@@ -4,6 +4,7 @@ import hashlib
 import io
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -164,6 +165,103 @@ class FetchReleasesTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not list LLVM releases: stalled"):
                 ci_llvm.fetch_releases(None)
         self.assertEqual(urlopen.call_count, ci_llvm.DOWNLOAD_ATTEMPTS)
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_verifies_package_before_extraction_and_preserves_soname_links(self):
+        for target, triplet in (("x86_64-linux", "x86_64-linux-gnu"),
+                                ("aarch64-linux", "aarch64-linux-gnu")):
+            with tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                install = work / "install"
+                events = []
+
+                def download(chosen, package, token):
+                    self.assertEqual(chosen, ci_llvm.ICU_RUNTIME_ASSETS[target])
+                    events.append("verified")
+                    package.write_bytes(b"verified package")
+
+                def extract(command, **kwargs):
+                    self.assertEqual(events, ["verified"])
+                    self.assertEqual(command[:2], ["dpkg-deb", "--extract"])
+                    staging = Path(command[-1])
+                    libraries = staging / "usr/lib" / triplet
+                    libraries.mkdir(parents=True)
+                    for name in ("libicui18n", "libicuuc", "libicudata"):
+                        (libraries / (name + ".so.70.1")).write_bytes(b"runtime")
+                        (libraries / (name + ".so.70")).symlink_to(name + ".so.70.1")
+                    notices = staging / "usr/share/doc/libicu70"
+                    notices.mkdir(parents=True)
+                    (notices / "copyright").write_text("upstream notices")
+                    events.append("extracted")
+
+                with mock.patch.object(ci_llvm, "download", side_effect=download), \
+                        mock.patch.object(ci_llvm.subprocess, "run", side_effect=extract):
+                    ci_llvm.provision_linux_runtime(target, work, install, None)
+                self.assertEqual(events, ["verified", "extracted"])
+                self.assertTrue((install / "lib/libicui18n.so.70").is_symlink())
+                self.assertEqual((install / "lib/libicui18n.so.70").read_bytes(), b"runtime")
+                self.assertEqual((install / "share/licenses/icu70/copyright").read_text(), "upstream notices")
+                self.assertFalse((work / "icu-runtime").exists())
+
+    def test_bad_runtime_digest_never_reaches_extractor(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(ci_llvm, "download", side_effect=ValueError("checksum mismatch")), \
+                mock.patch.object(ci_llvm.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                ci_llvm.provision_linux_runtime("x86_64-linux", Path(temporary), Path(temporary) / "install", None)
+            run.assert_not_called()
+
+    def test_windows_does_not_download_linux_runtime(self):
+        with mock.patch.object(ci_llvm, "download") as download:
+            ci_llvm.provision_linux_runtime("aarch64-windows", Path("/unused"), Path("/unused"), None)
+        download.assert_not_called()
+
+
+class ReadinessTests(unittest.TestCase):
+    def test_requires_native_linker_and_archiver_on_both_platform_families(self):
+        for target, suffix, linker in (("x86_64-linux", "", "ld.lld"),
+                                       ("aarch64-linux", "", "ld.lld"),
+                                       ("x86_64-windows", ".exe", "lld-link"),
+                                       ("aarch64-windows", ".exe", "lld-link")):
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                with mock.patch.object(ci_llvm.subprocess, "run", return_value=
+                                       subprocess.CompletedProcess([], 0, "clang version 23.1.2\n", "")) as run:
+                    ci_llvm.validate_tools(target, directory, (23, 1, 2))
+                self.assertEqual([call.args[0][0] for call in run.call_args_list],
+                                 [str(directory / (tool + suffix)) for tool in ("clang", "llvm-ar", linker)])
+                self.assertTrue(all(call.kwargs["timeout"] == 30 for call in run.call_args_list))
+
+    def test_healthy_clang_cannot_hide_missing_linker_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            linker = str(Path(temporary) / "ld.lld")
+            outcomes = [subprocess.CompletedProcess([], 0, "clang version 23.1.2\n", ""),
+                        subprocess.CompletedProcess([], 0, "LLVM version 23.1.2\n", ""),
+                        subprocess.CalledProcessError(127, [linker, "--version"],
+                                                      stderr="libicui18n.so.70: cannot open shared object file")]
+            with mock.patch.object(ci_llvm.subprocess, "run", side_effect=outcomes):
+                with self.assertRaisesRegex(RuntimeError, "ld.lld.*libicui18n.so.70"):
+                    ci_llvm.validate_tools("x86_64-linux", Path(temporary), (23, 1, 2))
+
+    def test_missing_executable_timeout_and_wrong_clang_version_fail(self):
+        for outcome in (FileNotFoundError("missing tool"), subprocess.TimeoutExpired("clang", 30),
+                        subprocess.CompletedProcess([], 0, "clang version 22.1.0\n", "")):
+            with mock.patch.object(ci_llvm.subprocess, "run", side_effect=
+                                   [outcome] if isinstance(outcome, BaseException) else None,
+                                   return_value=outcome):
+                with self.assertRaises(RuntimeError):
+                    ci_llvm.validate_tools("x86_64-linux", Path("/unused/bin"), (23, 1, 2))
+
+    def test_installed_extra_linker_frontends_are_probed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for tool in ("ld64.lld", "lld-link", "wasm-ld"):
+                (directory / tool).touch()
+            with mock.patch.object(ci_llvm.subprocess, "run", return_value=
+                                   subprocess.CompletedProcess([], 0, "clang version 23.1.2\n", "")) as run:
+                ci_llvm.validate_tools("x86_64-linux", directory, (23, 1, 2))
+            self.assertEqual(len(run.call_args_list), 6)
 
 
 class WorkflowTests(unittest.TestCase):

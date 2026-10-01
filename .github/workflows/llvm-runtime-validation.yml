@@ -1,0 +1,44 @@
+name: LLVM runtime and ELF unwind validation
+on:
+  push:
+    branches: [codex/2122-llvm-unwind-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: ${{ github.server_url == 'https://github.com' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            target: x86_64-linux
+          - runner: ubuntu-26.04-arm
+            target: aarch64-linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Validate installer controls
+        run: python3 tools/ci_llvm_test.py -v
+      - name: Install and probe selected upstream tools with verified runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.target }}
+        run: python3 tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"
+      - name: Execute real Clang LLD and GNU BFD links
+        run: |
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/link.c"
+          clang -fuse-ld=lld -Wl,-v "$RUNNER_TEMP/link.c" -o "$RUNNER_TEMP/lld-linked"
+          "$RUNNER_TEMP/lld-linked"
+          clang -fuse-ld=bfd "$RUNNER_TEMP/link.c" -o "$RUNNER_TEMP/bfd-linked"
+          "$RUNNER_TEMP/bfd-linked"
+      - name: Build and run issue 2059 independent unwind controls
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-driver"
+          "$RUNNER_TEMP/buster-driver" generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+          "$RUNNER_TEMP/buster-driver" build --config Release -t ide
+          build/Release/ide test --module=compiler_driver_tests,object_tests,link_tests --verbose=1 --ci=1
