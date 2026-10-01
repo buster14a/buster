@@ -220,14 +220,25 @@ def limits(address_limit):
     if address_limit:
         resource.setrlimit(resource.RLIMIT_AS, (address_limit, address_limit))
 
-def rss(pid):
-    try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) * 1024
-    except (FileNotFoundError, ProcessLookupError):
-        pass
-    return 0
+def process_tree(pid):
+    result = []
+    pending = [pid]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            fields = Path(f"/proc/{current}/status").read_text().splitlines()
+            resident = next((int(line.split()[1]) * 1024 for line in fields if line.startswith("VmRSS:")), 0)
+            command = Path(f"/proc/{current}/comm").read_text().strip()
+            result.append({"pid": current, "pgid": os.getpgid(current), "rss_bytes": resident, "command": command})
+            children = Path(f"/proc/{current}/task/{current}/children").read_text()
+            pending.extend(int(child) for child in children.split())
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return result
 
 def execute(command, label, directory, deadline, rss_limit, address_limit=0, environment=None):
     stdout_path = directory / (label + ".stdout")
@@ -237,13 +248,18 @@ def execute(command, label, directory, deadline, rss_limit, address_limit=0, env
           "address_limit_bytes": address_limit}), flush=True)
     started = time.monotonic()
     peak = 0
+    peak_tree = []
     cause = None
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         process = subprocess.Popen(command, stdout=out, stderr=err,
             start_new_session=True, preexec_fn=lambda: limits(address_limit),
             env=environment)
         while process.poll() is None:
-            peak = max(peak, rss(process.pid))
+            tree = process_tree(process.pid)
+            resident = sum(item["rss_bytes"] for item in tree)
+            if resident > peak:
+                peak = resident
+                peak_tree = tree
             elapsed = time.monotonic() - started
             if elapsed > deadline or peak > rss_limit:
                 cause = "deadline" if elapsed > deadline else "rss-limit"
@@ -251,9 +267,13 @@ def execute(command, label, directory, deadline, rss_limit, address_limit=0, env
                 break
             time.sleep(0.02)
         return_code = process.wait(timeout=5)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     receipt = {"label": label, "return_code": return_code,
         "termination": cause, "elapsed_seconds": time.monotonic() - started,
-        "peak_observed_rss_bytes": peak, "stdout": stdout_path.name,
+        "peak_observed_tree_rss_bytes": peak, "peak_process_tree": peak_tree, "process_group": process.pid, "stdout": stdout_path.name,
         "stderr": stderr_path.name, "diagnostic_head": HEAD}
     (directory / (label + ".json")).write_text(json.dumps(receipt, indent=2) + "\n")
     print("DIAGNOSTIC_RESULT", json.dumps(receipt), flush=True)
@@ -282,8 +302,9 @@ def main():
                 failures += 1
                 continue
             if options.references:
-                version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=5)
-                print("DIAGNOSTIC_TOOL", tool_name, version.stdout.splitlines()[0], flush=True)
+                version_receipt, version_stdout, version_stderr = execute([executable, "--version"], tool_name + "-version", directory, 15, 512 * 1024 * 1024, 768 * 1024 * 1024)
+                print("DIAGNOSTIC_TOOL", tool_name, version_stdout.splitlines()[0] if version_stdout else "unavailable", flush=True)
+                failures += version_receipt["return_code"] != 0 or bool(version_receipt["termination"])
             for dialect in ["gnu17", "c17"]:
                 for name, source, expected in CASES:
                     print("DIAGNOSTIC_CASE", json.dumps({"name": name, "source": source, "sha256": hashlib.sha256(source.encode()).hexdigest()}), flush=True)
