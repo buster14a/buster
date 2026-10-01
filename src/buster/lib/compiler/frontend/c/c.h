@@ -346,10 +346,12 @@ struct CSourceMetrics
 };
 
 // One distinct path of a unit's include closure, with how many times its
-// bytes were actually lexed and the scanned size of one lex. A `lex_count`
-// above one attributes the unit's include amplification — nothing suppressed
-// that file's re-inclusion — and `(lex_count - 1) * translated_bytes` of the
-// lexed aggregate is what re-reading it cost. Suppressed re-inclusions
+// bytes supplied a logical lex input and the translated size of that input.
+// Cache hits preserve these counts; CSourceCacheStats reports skipped physical
+// translation/scanning. A `lex_count` above one attributes include amplification:
+// nothing suppressed that file's re-inclusion. `(lex_count - 1) * translated_bytes`
+// of the lexed aggregate is repeated logical input, not measured reread/scan cost.
+// Suppressed re-inclusions
 // (#pragma once, #import, a recognized include guard) do not count: the rows
 // sum to the lexed aggregate, not to the #include directives reached. This
 // is deliberately not the token-carrying file table next to `map_entry`
@@ -527,7 +529,8 @@ typedef enum CPreprocessDialect
 
 // Optional raw translation/lex reuse, below all context-dependent preprocessing.
 // Metadata lives in owner; destroy releases the private payload reservation.
-// Limits are 1..64 MiB of retained payload plus fixed metadata/arena overhead.
+// Any nonzero byte limit up to 64 MiB bounds retained payload; fixed
+// metadata/arena overhead is additional.
 // Use exclusively on the creating thread. A null cache preserves the ordinary
 // path. Results own their copies and remain valid after clear/destroy.
 typedef struct CSourceCache CSourceCache;
@@ -538,9 +541,9 @@ struct CSourceCacheStats
     u64 misses;
     u64 bypasses;
     u64 resets;
-    u64 reused_bytes;
-    u64 reused_tokens;
-    u64 retained_bytes;
+    u64 reused_bytes;   // Raw bytes whose translation/lexing was skipped.
+    u64 reused_tokens;  // Raw rows, including newline and EOF markers.
+    u64 retained_bytes; // Charged payload, including allocation padding.
     u64 byte_limit;
     u32 entry_count;
 };

@@ -79,12 +79,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult source_cache_test_pair(UnitTestArguments* arg
             c_source_cache_destroy(cache);
         }
         BUSTER_TEST_RAW(arguments, (cached.error == COMPILER_DRIVER_ERROR_NONE) == succeeds, cached.diagnostic);
+        if (!succeeds)
+        {
+            BUSTER_TEST(arguments, file_read_checked(arena, output, (FileReadOptions){0}).status != OS_FILE_READ_OK);
+        }
         ByteSlice cached_bytes = cached.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
         BUSTER_TEST(arguments, os_file_delete(output));
         invocation.source_cache = 0;
         invocation.enable_source_cache = false;
         CompilerDriverResult fresh = compiler_driver_execute_invocation(arena, invocation);
         BUSTER_TEST_RAW(arguments, source_cache_test_diagnostics_equal(cached, fresh), fresh.diagnostic);
+        if (!succeeds)
+        {
+            BUSTER_TEST(arguments, file_read_checked(arena, output, (FileReadOptions){0}).status != OS_FILE_READ_OK);
+        }
         BUSTER_TEST(arguments, cached.has_object == fresh.has_object && cached.codegen_error == fresh.codegen_error && cached.object_error == fresh.object_error);
         BUSTER_TEST(arguments, memcmp(&cached.source_lexed, &fresh.source_lexed, sizeof(CSourceMetrics)) == 0 &&
                                memcmp(&cached.source_unique, &fresh.source_unique, sizeof(CSourceMetrics)) == 0 &&
@@ -343,6 +351,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_source_cache_replay(Unit
                         BUSTER_TEST(arguments, memcmp(cached_objects[index].pointer, actual.pointer, actual.length) == 0);
                     }
                 }
+            }
+            String8 native_output = string_format_z(arena, S8("{S8}/native-link{S8}"), root,
+                target_native.os == OPERATING_SYSTEM_WINDOWS ? S8(".exe") : (String8){0});
+            BUSTER_CACHE_WRITE(first, S8("#include \"shared.h\"\nextern int second(void);\nint main(void) { return second() != VALUE; }\n"));
+            BUSTER_CACHE_WRITE(second, S8("#include \"shared.h\"\nint second(void) { return VALUE; }\n"));
+            CSourceCache* link_cache = c_source_cache_create(arena, BUSTER_MB(4));
+            if (BUSTER_REQUIRE(arguments, link_cache != 0))
+            {
+                String8 link_args[] = {S8("-fsource-cache"), S8("-fcompile-jobs=4"),
+                    S8("-g0"), S8("-nostdinc"), S8("-o"), native_output, first, second};
+                CompilerDriverInvocation link_invocation = compiler_driver_parse_arguments(arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(link_args));
+                if (BUSTER_REQUIRE(arguments, link_invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    link_invocation.source_cache = link_cache;
+                    BUSTER_TEST(arguments, os_file_delete(native_output));
+                    CompilerDriverResult cached_link = compiler_driver_execute_invocation(arena, link_invocation);
+                    BUSTER_TEST_RAW(arguments, cached_link.error == COMPILER_DRIVER_ERROR_NONE, cached_link.diagnostic);
+                    BUSTER_TEST(arguments, cached_link.compilation_workers == 1 && cached_link.source_cache.hits &&
+                        cached_link.source_cache.reused_bytes && cached_link.source_cache.reused_tokens);
+                    ByteSlice expected_link = cached_link.error == COMPILER_DRIVER_ERROR_NONE
+                        ? file_read(arena, native_output, (FileReadOptions){0}) : (ByteSlice){0};
+                    BUSTER_TEST(arguments, os_file_delete(native_output));
+                    link_invocation.source_cache = 0;
+                    link_invocation.enable_source_cache = false;
+                    CompilerDriverResult fresh_link = compiler_driver_execute_invocation(arena, link_invocation);
+                    BUSTER_TEST_RAW(arguments, source_cache_test_diagnostics_equal(cached_link, fresh_link), fresh_link.diagnostic);
+                    if (BUSTER_REQUIRE(arguments, cached_link.error == COMPILER_DRIVER_ERROR_NONE &&
+                        fresh_link.error == COMPILER_DRIVER_ERROR_NONE))
+                    {
+                        ByteSlice actual_link = file_read(arena, native_output, (FileReadOptions){0});
+                        if (BUSTER_REQUIRE(arguments, expected_link.pointer && actual_link.pointer &&
+                            expected_link.length && expected_link.length == actual_link.length))
+                        {
+                            BUSTER_TEST(arguments, memcmp(expected_link.pointer, actual_link.pointer, actual_link.length) == 0);
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(native_output));
+                }
+                c_source_cache_destroy(link_cache);
             }
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(objects); index += 1)
             {

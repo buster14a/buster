@@ -141,7 +141,9 @@ compilation is the oracle for incremental behavior.
 The registered driver replay fixture runs edit sequences through a shared
 cache and through fresh compilation with identical input/output paths, flags
 and stable fixture files. It compares status, structured diagnostic fields
-and rendered text, warnings, and object bytes. Cached bytes are read before
+and rendered text, warnings, and object/executable bytes; failed steps must leave outputs absent. A native
+link explicitly requests four workers and asserts cache ownership clamps it
+to one. Cached bytes are read before
 the fresh invocation overwrites the same path. No artifact or diagnostic
 field is waived as nondeterministic; only cache-work counters differ.
 
