@@ -66,3 +66,46 @@ this component when tests and libc are enabled; mobile and tests-disabled graphs
 omit it. It covers the completed hit tree and reordered widget builds without
 adding UI dependencies to the compiler. The broad retained `ui_tests` suite is
 unregistered; these component checks do not establish device rendering support.
+
+## CPU raster image presentation
+
+The separately registered `rendering_raster` component borrows caller-owned
+RGBA8 source and canvas storage only for a draw/present call. It uses nearest
+sampling, all eight reported Exif orientations, and straight-alpha composition
+over a checkerboard. Canvas admission is capped at 4096 per axis and 64 MiB;
+rejected admission leaves the canvas unchanged. It applies no ICC/gamma
+conversion. Native presentation currently admits Linux XCB TrueColor visuals
+with 16-, 24- or 32-bit pixels; other native surfaces fail explicitly.
+
+`test_rendering_raster` checks independent headless orientation, alpha, pan,
+zoom and admission goldens. `test_rendering_raster_native` requires a real
+X server (Xvfb qualifies for this software backend), reads server pixels back,
+and exercises window events, resize and repeated shutdown. The separate
+unavailable-display invocation validates recoverable connection failure.
+Headless raster checks do not prove native transfer; XCB readback proves CPU
+presentation and native lifecycle, with no GPU-rendering claim. These targets
+do not add graphics dependencies to `ide`.
+
+XCB initialization rejects error-bearing connections before native setup.
+Shutdown consumes and clears the connection; repeated shutdown is safe.
+
+`wm_window_set_title` admits validated UTF-8 metadata titles up to 4096 bytes
+through checked XCB requests. Other native backends report unsupported.
+`wm_poll_events_bounded` currently admits Linux XCB batches of 1–32 native
+events, retaining unread events for a later call. It requires at least the
+reported minimum remaining, already committed event-arena space before removing
+each event. That allowance includes the existing 16 MiB file-drop path budget,
+the slice array, alignment and event overhead. Library-internal native
+allocations and the separate XDND transfer arena are outside this allowance.
+The legacy full-drain API retains its existing contract.
+
+Linux/XCB consumers that do not accept drops may set
+`WmWindowCreate.disable_file_drop`. This omits XDND advertisement and ignores
+addressed XDND messages before source watching, property reads or transfer
+state changes. The default keeps existing behavior. The browser opts out:
+bounded event polling alone does not bound the existing default XDND property's
+reply sizes or cumulative transfer staging allocation.
+
+Required window-arena allocation failure releases native initialization and
+returns failure. The existing arena reservation fault seam exercises this
+recovery before subsequent successful native lifecycles.
