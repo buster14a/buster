@@ -317,6 +317,11 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
+// Search the environment captured at entry. Windows names use ordinal Unicode
+// case-insensitive comparison; POSIX names compare exactly. The first matching
+// entry wins, including an empty value, and its original value slice is returned
+// without modification.
+// Missing and empty names return a null-empty slice.
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
 typedef struct OsDirectoryCreateResult OsDirectoryCreateResult;

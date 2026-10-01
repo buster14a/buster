@@ -384,6 +384,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
 
+- Direct AArch64 ELF unsigned-immediate memory references use distinct
+  `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`
+  and `ELF_LDST128_LO12` kinds (AAELF64 types 278/284/285/286/299). The
+  relocation's access size must match the instruction's encoding, including
+  sign-extending scalar, SIMD and Q-register forms; scale-three PRFM is
+  accepted too. Reserved, unscaled and register-offset forms fail. The reader
+  clears imm12, keeps RELA's explicit signed addend and sign-extends REL's
+  imm12 before access-size scaling. The shared ELF page helper applies only
+  bits `[11:scale]` of `S+A`, checks arithmetic and final-address alignment,
+  and preserves operation/register bits in object, in-memory and static or
+  dynamic native links. Dynamic imported data uses its copy slot, including
+  aliases. These direct memory references remain separate from GOT relaxation,
+  TLS, Mach-O and PE contracts. See
+  [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst).
+
 - Ordinary Windows ARM64 address pairs use the PE-specific
   `PAGEBASE_REL21`/`PAGEOFFSET_12A` object kinds (COFF types 4/6), never the
   loader-owned TLS kinds. COFF's ADRP field is a signed, unscaled imm21 byte

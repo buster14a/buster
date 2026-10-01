@@ -1,0 +1,716 @@
+{
+  "schema": "buster-phase-order-worklist-v1",
+  "logical_sweep_cap": 4,
+  "incidence": {
+    "calls_with_incoming_index": 3653,
+    "calls_with_parameters": 3653,
+    "cap_hit_calls": 1,
+    "cap_hit_with_remaining_parameters_calls": 1,
+    "changed_calls": 3,
+    "fifo_different_final_state_calls": 0,
+    "functions": 6196,
+    "functions_without_parameter_call": 0,
+    "mismatching_calls": 0,
+    "modeled_functions": 6196,
+    "no_match_calls": 6193,
+    "no_match_functions": 6193,
+    "parameter_calls": 6196,
+    "parameter_free_calls": 2543,
+    "parameter_free_functions": 2543
+  },
+  "totals": {
+    "dense": {
+      "block_visits": 186870,
+      "cap_hit": 1,
+      "empty_block_visits": 158007,
+      "incoming_visits": 80281,
+      "logical_sweeps": 6201,
+      "parameter_visits": 38412,
+      "removed_parameters": 7,
+      "root_hops": 4,
+      "root_queries": 80281
+    },
+    "fifo": {
+      "budget_exhausted": 0,
+      "construction_block_visits": 186850,
+      "construction_empty_block_visits": 157990,
+      "construction_parameter_visits": 38400,
+      "incoming_visits": 80265,
+      "index_creation_incoming_visits": 84716,
+      "index_creation_occurrences": 84716,
+      "index_creation_roots": 74700,
+      "index_retarget_occurrences": 4,
+      "index_root_pop_operations": 7,
+      "notification_live_occurrences": 4,
+      "notification_occurrences": 4,
+      "parameter_check_budget": 153600,
+      "parameter_visits": 38404,
+      "queue_enqueue_attempts": 38404,
+      "queue_enqueues": 38404,
+      "queue_peak_entries": 1411,
+      "queue_pending_at_exit": 0,
+      "queue_pops": 38404,
+      "removed_parameters": 7,
+      "root_hops": 4,
+      "root_queries": 80265
+    },
+    "ordered_agenda": {
+      "cap_hit": 1,
+      "construction_block_visits": 186850,
+      "construction_empty_block_visits": 157990,
+      "construction_parameter_visits": 38400,
+      "incoming_visits": 80265,
+      "index_creation_incoming_visits": 84716,
+      "index_creation_occurrences": 84716,
+      "index_creation_roots": 74700,
+      "index_retarget_occurrences": 4,
+      "index_root_pop_operations": 7,
+      "logical_sweeps": 6201,
+      "notification_live_occurrences": 4,
+      "notification_occurrences": 4,
+      "parameter_visits": 38404,
+      "queue_current_enqueues": 38401,
+      "queue_enqueue_attempts": 38404,
+      "queue_enqueues": 38404,
+      "queue_next_enqueues": 3,
+      "queue_peak_entries": 1411,
+      "queue_pending_at_exit": 0,
+      "queue_pops": 38404,
+      "queue_round_transfers": 5,
+      "removed_parameters": 7,
+      "root_hops": 4,
+      "root_queries": 80265
+    }
+  },
+  "errors": [],
+  "unavailable": [],
+  "logs": [
+    {
+      "path": "/home/runner/work/buster/buster/original/results/backend_pressure/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "63fb5366a35fb936506025cda57135da4251aa8e64a86a39b7775f72c1340b97",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/canonical_fast/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "0eab4508d5a54ce39fea6d6fee5ac21ec398e7ed2c84849792210f54f16829cb",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/cjson/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "669a2969a869ace17416f9b901572f007a2f2a633d3479fb3d3d0cdbe8c282dc",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/control_flow/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "251742b039ad06ab31bf65528c4e1ef97d8a9af7fcb78cafbe91db41d12f6e28",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/integer/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "92e8ded700e6466a13a3335013f40f1811611a2f9aac5955ee96ae8ac512929b",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/interactions/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "21b6048b5e16c6b824509c82c45a7fc88d8a746da2c4e64dc40df82b09575130",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/large_function/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "6a12ff80611bb7b813e06b6f8310649a7288d07b31d2d1832b31249f93d7bf2c",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/many_functions/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "949c5ae418eee17327430f65b062f2dd58d24e796cf021ffa4ac46cf864786a9",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/string/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "3325379996ac2b7561b1556497e9a2318b33ff509afd43b0dc3d452215d02d6f",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/symbol_table/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "b2eca604a140e3d39ed78f2329efe11020a8d6bf3abbb7867917f6aefb813c92",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/tiny_startup/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "7d063d02b9175cf5bcc9717e6473e251c0ba092ddcbe159da127866288ee0091",
+      "trace_known": true
+    },
+    {
+      "path": "/home/runner/work/buster/buster/original/results/unity/direct-ssa/fast/FADP/compile.stdout.log",
+      "sha256": "0f046ccb7067be98e02c6c2acc771c5b165ccc32ae20b2033a871089c0b40ccb",
+      "trace_known": true
+    }
+  ],
+  "changed_snapshots": [
+    {
+      "blocks": 4,
+      "call_ordinal": 0,
+      "dense": {
+        "counts": {
+          "block_visits": 8,
+          "cap_hit": 0,
+          "empty_block_visits": 7,
+          "incoming_visits": 2,
+          "logical_sweeps": 2,
+          "parameter_visits": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              7,
+              0
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              7,
+              0
+            ]
+          ]
+        }
+      },
+      "fifo": {
+        "counts": {
+          "budget_exhausted": 0,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 1,
+          "incoming_visits": 2,
+          "index_creation_incoming_visits": 2,
+          "index_creation_occurrences": 2,
+          "index_creation_roots": 1,
+          "index_root_pop_operations": 1,
+          "parameter_check_budget": 4,
+          "parameter_visits": 1,
+          "queue_enqueue_attempts": 1,
+          "queue_enqueues": 1,
+          "queue_peak_entries": 1,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              7,
+              0
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              7,
+              0
+            ]
+          ]
+        }
+      },
+      "fifo_same_final_state_as_dense": true,
+      "function": "phi_identity",
+      "function_ordinal": 0,
+      "initial_incoming_occurrences": 2,
+      "initial_parameters": 1,
+      "line": 6,
+      "log": "/home/runner/work/buster/buster/original/results/interactions/direct-ssa/fast/FADP/compile.stdout.log",
+      "measured": {
+        "block_visits": 8,
+        "changes": 1,
+        "function": "phi_identity",
+        "ordinal": 3,
+        "pass": 3,
+        "seed_rows": 0,
+        "setup_values": 0,
+        "sweeps": 2,
+        "visits": 3
+      },
+      "mismatches": [],
+      "ordered_agenda": {
+        "counts": {
+          "cap_hit": 0,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 1,
+          "incoming_visits": 2,
+          "index_creation_incoming_visits": 2,
+          "index_creation_occurrences": 2,
+          "index_creation_roots": 1,
+          "index_root_pop_operations": 1,
+          "logical_sweeps": 2,
+          "parameter_visits": 1,
+          "queue_current_enqueues": 1,
+          "queue_enqueue_attempts": 1,
+          "queue_enqueues": 1,
+          "queue_peak_entries": 1,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 1,
+          "queue_round_transfers": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              7,
+              0
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              7,
+              0
+            ]
+          ]
+        }
+      },
+      "step_ordinal": 3
+    },
+    {
+      "blocks": 4,
+      "call_ordinal": 0,
+      "dense": {
+        "counts": {
+          "block_visits": 8,
+          "cap_hit": 0,
+          "empty_block_visits": 7,
+          "incoming_visits": 2,
+          "logical_sweeps": 2,
+          "parameter_visits": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              9,
+              3
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              9,
+              3
+            ]
+          ]
+        }
+      },
+      "fifo": {
+        "counts": {
+          "budget_exhausted": 0,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 1,
+          "incoming_visits": 2,
+          "index_creation_incoming_visits": 2,
+          "index_creation_occurrences": 2,
+          "index_creation_roots": 1,
+          "index_root_pop_operations": 1,
+          "parameter_check_budget": 4,
+          "parameter_visits": 1,
+          "queue_enqueue_attempts": 1,
+          "queue_enqueues": 1,
+          "queue_peak_entries": 1,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              9,
+              3
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              9,
+              3
+            ]
+          ]
+        }
+      },
+      "fifo_same_final_state_as_dense": true,
+      "function": "dead_phi",
+      "function_ordinal": 5,
+      "initial_incoming_occurrences": 2,
+      "initial_parameters": 1,
+      "line": 39,
+      "log": "/home/runner/work/buster/buster/original/results/interactions/direct-ssa/fast/FADP/compile.stdout.log",
+      "measured": {
+        "block_visits": 8,
+        "changes": 1,
+        "function": "dead_phi",
+        "ordinal": 3,
+        "pass": 3,
+        "seed_rows": 0,
+        "setup_values": 0,
+        "sweeps": 2,
+        "visits": 3
+      },
+      "mismatches": [],
+      "ordered_agenda": {
+        "counts": {
+          "cap_hit": 0,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 1,
+          "incoming_visits": 2,
+          "index_creation_incoming_visits": 2,
+          "index_creation_occurrences": 2,
+          "index_creation_roots": 1,
+          "index_root_pop_operations": 1,
+          "logical_sweeps": 2,
+          "parameter_visits": 1,
+          "queue_current_enqueues": 1,
+          "queue_enqueue_attempts": 1,
+          "queue_enqueues": 1,
+          "queue_peak_entries": 1,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 1,
+          "queue_round_transfers": 1,
+          "removed_parameters": 1,
+          "root_hops": 0,
+          "root_queries": 2
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              9,
+              3
+            ]
+          ],
+          "remaining_incoming": [],
+          "remaining_values": [],
+          "removal_events": [
+            [
+              1,
+              9,
+              3
+            ]
+          ]
+        }
+      },
+      "step_ordinal": 3
+    },
+    {
+      "blocks": 4,
+      "call_ordinal": 0,
+      "dense": {
+        "counts": {
+          "block_visits": 16,
+          "cap_hit": 1,
+          "empty_block_visits": 12,
+          "incoming_visits": 36,
+          "logical_sweeps": 4,
+          "parameter_visits": 18,
+          "removed_parameters": 5,
+          "root_hops": 4,
+          "root_queries": 36
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              2,
+              2
+            ],
+            [
+              19,
+              1
+            ],
+            [
+              20,
+              1
+            ],
+            [
+              21,
+              1
+            ],
+            [
+              22,
+              1
+            ],
+            [
+              23,
+              1
+            ]
+          ],
+          "remaining_incoming": [
+            [
+              2,
+              [
+                0,
+                5
+              ]
+            ]
+          ],
+          "remaining_values": [
+            2
+          ],
+          "removal_events": [
+            [
+              1,
+              22,
+              1
+            ],
+            [
+              2,
+              21,
+              1
+            ],
+            [
+              3,
+              20,
+              1
+            ],
+            [
+              4,
+              19,
+              1
+            ],
+            [
+              4,
+              23,
+              1
+            ]
+          ]
+        }
+      },
+      "fifo": {
+        "counts": {
+          "budget_exhausted": 0,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 6,
+          "incoming_visits": 20,
+          "index_creation_incoming_visits": 12,
+          "index_creation_occurrences": 12,
+          "index_creation_roots": 7,
+          "index_retarget_occurrences": 4,
+          "index_root_pop_operations": 5,
+          "notification_live_occurrences": 4,
+          "notification_occurrences": 4,
+          "parameter_check_budget": 24,
+          "parameter_visits": 10,
+          "queue_enqueue_attempts": 10,
+          "queue_enqueues": 10,
+          "queue_peak_entries": 6,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 10,
+          "removed_parameters": 5,
+          "root_hops": 4,
+          "root_queries": 20
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              2,
+              2
+            ],
+            [
+              19,
+              1
+            ],
+            [
+              20,
+              1
+            ],
+            [
+              21,
+              1
+            ],
+            [
+              22,
+              1
+            ],
+            [
+              23,
+              1
+            ]
+          ],
+          "remaining_incoming": [
+            [
+              2,
+              [
+                0,
+                5
+              ]
+            ]
+          ],
+          "remaining_values": [
+            2
+          ],
+          "removal_events": [
+            [
+              5,
+              22,
+              1
+            ],
+            [
+              7,
+              21,
+              1
+            ],
+            [
+              8,
+              20,
+              1
+            ],
+            [
+              9,
+              19,
+              1
+            ],
+            [
+              10,
+              23,
+              1
+            ]
+          ]
+        }
+      },
+      "fifo_same_final_state_as_dense": true,
+      "function": "parameter_cap",
+      "function_ordinal": 6,
+      "initial_incoming_occurrences": 12,
+      "initial_parameters": 6,
+      "line": 51,
+      "log": "/home/runner/work/buster/buster/original/results/interactions/direct-ssa/fast/FADP/compile.stdout.log",
+      "measured": {
+        "block_visits": 16,
+        "changes": 5,
+        "function": "parameter_cap",
+        "ordinal": 3,
+        "pass": 3,
+        "seed_rows": 0,
+        "setup_values": 0,
+        "sweeps": 4,
+        "visits": 54
+      },
+      "mismatches": [],
+      "ordered_agenda": {
+        "counts": {
+          "cap_hit": 1,
+          "construction_block_visits": 4,
+          "construction_empty_block_visits": 3,
+          "construction_parameter_visits": 6,
+          "incoming_visits": 20,
+          "index_creation_incoming_visits": 12,
+          "index_creation_occurrences": 12,
+          "index_creation_roots": 7,
+          "index_retarget_occurrences": 4,
+          "index_root_pop_operations": 5,
+          "logical_sweeps": 4,
+          "notification_live_occurrences": 4,
+          "notification_occurrences": 4,
+          "parameter_visits": 10,
+          "queue_current_enqueues": 7,
+          "queue_enqueue_attempts": 10,
+          "queue_enqueues": 10,
+          "queue_next_enqueues": 3,
+          "queue_peak_entries": 6,
+          "queue_pending_at_exit": 0,
+          "queue_pops": 10,
+          "queue_round_transfers": 3,
+          "removed_parameters": 5,
+          "root_hops": 4,
+          "root_queries": 20
+        },
+        "state": {
+          "parameter_roots": [
+            [
+              2,
+              2
+            ],
+            [
+              19,
+              1
+            ],
+            [
+              20,
+              1
+            ],
+            [
+              21,
+              1
+            ],
+            [
+              22,
+              1
+            ],
+            [
+              23,
+              1
+            ]
+          ],
+          "remaining_incoming": [
+            [
+              2,
+              [
+                0,
+                5
+              ]
+            ]
+          ],
+          "remaining_values": [
+            2
+          ],
+          "removal_events": [
+            [
+              1,
+              22,
+              1
+            ],
+            [
+              2,
+              21,
+              1
+            ],
+            [
+              3,
+              20,
+              1
+            ],
+            [
+              4,
+              19,
+              1
+            ],
+            [
+              4,
+              23,
+              1
+            ]
+          ]
+        }
+      },
+      "step_ordinal": 3
+    }
+  ]
+}

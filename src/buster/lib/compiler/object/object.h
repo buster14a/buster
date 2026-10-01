@@ -186,6 +186,13 @@ typedef enum ObjectRelocationKind
     // ELF data differences: S + A - P over a full 64-bit field.
     OBJECT_RELOCATION_X86_64_PC64,
     OBJECT_RELOCATION_AARCH64_PREL64,
+    // Direct ELF unsigned-immediate memory references. Keep the access-size
+    // family contiguous: its index is the immediate's scaling exponent.
+    OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -198,8 +205,8 @@ BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 // forms, four for every other field this model carries.
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
-// The four AArch64 ELF page-address kinds object_aarch64_elf_page_relocate
-// accepts: the direct ADRP/ADD pair and the GOT ADRP/LDR pair.
+// AArch64 ELF page-address kinds object_aarch64_elf_page_relocate accepts:
+// direct ADRP with ADD or scaled LD/ST, and the GOT ADRP/LDR pair.
 BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
