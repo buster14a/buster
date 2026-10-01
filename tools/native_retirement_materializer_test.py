@@ -380,11 +380,40 @@ class ArchivedReplayTests(unittest.TestCase):
                        materializer.NEXT_SUPPORT_CONTRACT_SHA256,
                        materializer.APPLE_CI_SUPPORT_CONTRACT_SHA256,
                        materializer.PROPOSED_SUPPORT_CONTRACT_SHA256,
-                       materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256))
+                       materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+                       materializer.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+                       materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
         self.assertEqual(list(self.root.glob(".wrong-contract.*")), [])
+
+    def test_bootstrap_workflow_successor_changes_only_one_dependency_row(self):
+        data = (Path(__file__).resolve().parents[1] /
+                "docs/native-retirement-support-v1.tsv").read_bytes()
+        bridge = b"tests/github_runner_bridge_test.py\t"
+        archived = b"tests/retired/github_runner_bridge_test.py.txt\t"
+        data = data.replace(archived, bridge)
+        lines = data.splitlines()
+        data = b"\n".join([lines[0], *sorted(lines[1:])]) + b"\n"
+        prefix = b"tests/bootstrap_wrapper_test.py\tsupport-file\tdependency-only\t"
+        rows = [row for row in data.splitlines() if row.startswith(prefix)]
+        self.assertEqual(len(rows), 1)
+        predecessor = prefix + b"22359\tdd082faa22b7daaa836d779f68267b45fea03515d0c058484bb27c1ce7bb7a09"
+        successor = prefix + b"19588\te03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862"
+        self.assertIn(rows[0], (predecessor, successor))
+        before = data.replace(rows[0], predecessor)
+        after = data.replace(rows[0], successor)
+        self.assertEqual(digest(before), materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256)
+        self.assertEqual(digest(after), materializer.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256)
+        self.assertEqual(len(before), len(after))
+        self.assertEqual(before.count(b"\n"), after.count(b"\n"))
+        self.assertEqual(after.count(bridge), 1)
+        retired = after.replace(bridge, archived)
+        lines = retired.splitlines()
+        retired = b"\n".join([lines[0], *sorted(lines[1:])]) + b"\n"
+        self.assertEqual(digest(retired), materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256)
+        self.assertEqual(after.count(b"\n"), retired.count(b"\n"))
 
     def test_fixture_drift_rejects_publication(self):
         pin = digest(self.contract.read_bytes())
