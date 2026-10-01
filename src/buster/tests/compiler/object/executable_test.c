@@ -5,7 +5,8 @@
 #include <stdio.h>
 #endif
 #if BUSTER_APPLE
-#include <mach/mach_vm.h>
+#include <mach/mach.h>
+#include <mach/vm_region.h>
 #endif
 
 BUSTER_GLOBAL_LOCAL bool object_test_mapping(void* pointer, ProtectionFlags expected)
@@ -17,16 +18,16 @@ BUSTER_GLOBAL_LOCAL bool object_test_mapping(void* pointer, ProtectionFlags expe
     DWORD protection = expected.execute ? PAGE_EXECUTE_READ : expected.write ? PAGE_READWRITE : PAGE_READONLY;
     result = queried == sizeof(information) && information.State == MEM_COMMIT && information.Protect == protection;
 #elif BUSTER_APPLE
-    mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)pointer;
-    mach_vm_size_t size = 0;
+    vm_address_t address = (vm_address_t)(uintptr_t)pointer;
+    vm_size_t size = 0;
     vm_region_basic_info_data_64_t information = {0};
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
     mach_port_t object = MACH_PORT_NULL;
-    kern_return_t status = mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
+    kern_return_t status = vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
                                          (vm_region_info_t)&information, &count, &object);
     vm_prot_t protection = VM_PROT_READ | (expected.write ? VM_PROT_WRITE : 0) | (expected.execute ? VM_PROT_EXECUTE : 0);
-    result = status == KERN_SUCCESS && address <= (mach_vm_address_t)(uintptr_t)pointer &&
-             (mach_vm_address_t)(uintptr_t)pointer - address < size && information.protection == protection;
+    result = status == KERN_SUCCESS && address <= (vm_address_t)(uintptr_t)pointer &&
+             (vm_address_t)(uintptr_t)pointer - address < size && information.protection == protection;
     if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
 #elif BUSTER_LINUX || BUSTER_ANDROID
     FILE* maps = fopen("/proc/self/maps", "r");
