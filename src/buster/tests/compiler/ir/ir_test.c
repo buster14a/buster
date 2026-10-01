@@ -302,7 +302,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_binary_fixture(IrBinary
          .immediates = argument_indices, .immediate_count = 1, .next = {.value = 1}},
         {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = operand_type}, .result = {.value = 1},
          .immediates = argument_indices + 1, .immediate_count = 1, .next = {.value = 2}},
-        {.opcode = IR_OPCODE_BINARY, .binary_operation = operation, .canonical_type = {.value = result_type},
+        {.opcode = IR_OPCODE_BINARY, .binary_operation = (u8)operation, .canonical_type = {.value = result_type},
          .result = {.value = 2}, .operands = operands, .operand_count = 2, .next = {.value = 3}},
         {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = result_type}, .result = IR_VALUE_ID_INVALID,
          .operands = operands + 2, .operand_count = 1, .next = IR_INSTRUCTION_ID_INVALID},
