@@ -1,14 +1,25 @@
 // Production Clang PGO/LTO workflow, included by build.c.
 //
 // The workflow deliberately stays outside ordinary generate/build defaults:
-// it creates fresh, named trees, trains one instrumented Release compiler on
-// the deterministic native throughput corpus, seals the merged profile with a
+// it creates fresh, named trees, trains instrumented Release compilers on the
+// deterministic native throughput corpus, seals each merged profile with a
 // source/tool/workload manifest, and only then admits PGO-use builds.
+//
+// Clang's IR PGO hashes each function's control flow where instrumentation
+// runs, and the ThinLTO pre-link pipeline reaches that point with different
+// simplification than a non-LTO build (for example, it skips IPSCCP function
+// specialization). A profile therefore only matches use builds in its own LTO
+// mode. Each ProductionProfileTraining in production_profile_main owns one
+// mode's instrumented tree and profile: the ThinLTO one seals the production
+// pgo-lto compiler and the non-LTO one seals the pgo comparison.
+// production_profile_training_contract puts the mode in the fingerprint,
+// production_profile_seal repeats it in the manifest, and CMake rejects a
+// PGO-use tree whose BUSTER_LTO differs.
 #define BUSTER_PRODUCTION_PROFILE_TIMEOUT_SECONDS_DEFAULT 3600ull
 #define BUSTER_PRODUCTION_PROFILE_TRAINING_PAIRS 1ull
 #define BUSTER_PRODUCTION_PROFILE_TRAINING_WARMUPS 1ull
-#define BUSTER_PRODUCTION_PROFILE_MANIFEST_VERSION "BUSTER_PGO_PROFILE_V1"
-#define BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "BUSTER_PGO_TRAINING_V1"
+#define BUSTER_PRODUCTION_PROFILE_MANIFEST_VERSION "BUSTER_PGO_PROFILE_V2"
+#define BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "BUSTER_PGO_TRAINING_V2"
 
 typedef struct ProductionProfileOptions ProductionProfileOptions;
 struct ProductionProfileOptions
@@ -49,15 +60,27 @@ struct ProductionProfileContext
     String8 llvm_readobj;
     String8 revision;
     String8 tree;
+};
+
+// One instrumented tree, its training run and the profile it seals. A use
+// variant may only consume the training whose lto matches its own.
+typedef struct ProductionProfileTraining ProductionProfileTraining;
+struct ProductionProfileTraining
+{
+    String8 instrumented;
+    String8 directory;
+    String8 label;
     String8 fingerprint;
     String8 profile;
     String8 manifest;
+    bool lto;
 };
 
 typedef struct ProductionProfileVariant ProductionProfileVariant;
 struct ProductionProfileVariant
 {
     String8 name;
+    ProductionProfileTraining* training;
     bool debug_info;
     bool lto;
     bool generate;
@@ -541,15 +564,21 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_binary(Arena* arena, String8 buil
 BUSTER_GLOBAL_LOCAL bool production_profile_build_variant(ProductionProfileContext* context, ProductionProfileVariant variant)
 {
     Arena* arena = context->arena;
+    ProductionProfileTraining* training = variant.training;
+    BUSTER_CHECK((variant.generate || variant.use) == (training != 0));
+    BUSTER_CHECK(!training || training->lto == variant.lto);
     String8 directory = path_join(arena, context->output, variant.name);
-    String8 raw = path_join(arena, context->output, S8("profile/raw"));
+    String8 raw = variant.generate ? path_join(arena, training->directory, S8("raw")) : S8("");
+    String8 profile = variant.use ? training->profile : S8("");
+    String8 manifest = variant.use ? training->manifest : S8("");
+    String8 fingerprint = variant.use ? training->fingerprint : S8("");
     String8 debug = string_format(arena, S8("-DBUSTER_DEBUG_INFO={S8}"), variant.debug_info ? S8("ON") : S8("OFF"));
     String8 production = string_format(arena, S8("-DBUSTER_PRODUCTION_PROFILE={S8}"), variant.debug_info ? S8("OFF") : S8("ON"));
     String8 compiler = string_format(arena, S8("-DCMAKE_C_COMPILER:FILEPATH={S8}"), context->clang);
-    String8 pgo_generate = string_format(arena, S8("-DBUSTER_PGO_GENERATE:PATH={S8}"), variant.generate ? raw : S8(""));
-    String8 pgo_use = string_format(arena, S8("-DBUSTER_PGO_USE:FILEPATH={S8}"), variant.use ? context->profile : S8(""));
-    String8 pgo_manifest = string_format(arena, S8("-DBUSTER_PGO_MANIFEST:FILEPATH={S8}"), variant.use ? context->manifest : S8(""));
-    String8 pgo_fingerprint = string_format(arena, S8("-DBUSTER_PGO_FINGERPRINT:STRING={S8}"), variant.use ? context->fingerprint : S8(""));
+    String8 pgo_generate = string_format(arena, S8("-DBUSTER_PGO_GENERATE:PATH={S8}"), raw);
+    String8 pgo_use = string_format(arena, S8("-DBUSTER_PGO_USE:FILEPATH={S8}"), profile);
+    String8 pgo_manifest = string_format(arena, S8("-DBUSTER_PGO_MANIFEST:FILEPATH={S8}"), manifest);
+    String8 pgo_fingerprint = string_format(arena, S8("-DBUSTER_PGO_FINGERPRINT:STRING={S8}"), fingerprint);
 
     String8 generate[40];
     u64 count = 0;
@@ -599,11 +628,12 @@ BUSTER_GLOBAL_LOCAL bool production_profile_build_variant(ProductionProfileConte
     return built.success && path_exists(arena, production_profile_binary(arena, directory));
 }
 
-BUSTER_GLOBAL_LOCAL bool production_profile_train(ProductionProfileContext* context, String8 instrumented)
+BUSTER_GLOBAL_LOCAL bool production_profile_train(ProductionProfileContext* context, ProductionProfileTraining* profile_training)
 {
     Arena* arena = context->arena;
-    String8 raw = path_join(arena, context->output, S8("profile/raw"));
-    String8 training = path_join(arena, context->output, S8("training"));
+    String8 instrumented = production_profile_binary(arena, path_join(arena, context->output, profile_training->instrumented));
+    String8 raw = path_join(arena, profile_training->directory, S8("raw"));
+    String8 training = path_join(arena, path_join(arena, context->output, S8("training")), profile_training->label);
     make_directory_recursive(arena, raw);
     String8 profile_pattern = path_join(arena, raw, S8("%4m.profraw"));
     String8 timeout = string_format(arena, S8("{u64}"), context->options.timeout_seconds);
@@ -618,10 +648,11 @@ BUSTER_GLOBAL_LOCAL bool production_profile_train(ProductionProfileContext* cont
     };
     String8 keys[] = {S8("LLVM_PROFILE_FILE")};
     String8 values[] = {profile_pattern};
+    String8 label = string_format(arena, S8("train-{S8}"), profile_training->label);
     ProductionProfileCommandResult trained = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
         (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values),
-        context->evidence, S8("train"), context->options.timeout_seconds, false);
+        context->evidence, label, context->options.timeout_seconds, false);
     return trained.success;
 }
 
@@ -634,11 +665,11 @@ BUSTER_GLOBAL_LOCAL int production_profile_path_compare(const void* left_pointer
     return result ? result : (left->length > right->length) - (left->length < right->length);
 }
 
-BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* context)
+BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* context, ProductionProfileTraining* training)
 {
 #if BUSTER_LINUX || BUSTER_APPLE
     Arena* arena = context->arena;
-    String8 raw = path_join(arena, context->output, S8("profile/raw"));
+    String8 raw = path_join(arena, training->directory, S8("raw"));
     String8 raw_z = string_duplicate_arena(arena, raw, true);
     DIR* directory = opendir((const char*)raw_z.pointer);
     if (!directory)
@@ -682,7 +713,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* cont
     }
 
     qsort(files, (size_t)file_count, sizeof(files[0]), production_profile_path_compare);
-    String8 output_argument = string_format(arena, S8("-output={S8}"), context->profile);
+    String8 output_argument = string_format(arena, S8("-output={S8}"), training->profile);
     String8* command = arena_allocate(arena, String8, file_count + 3);
     command[0] = context->llvm_profdata;
     command[1] = S8("merge");
@@ -691,12 +722,14 @@ BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* cont
     {
         command[index + 3] = files[index];
     }
+    String8 label = string_format(arena, S8("merge-profile-{S8}"), training->label);
     ProductionProfileCommandResult merged = production_profile_command(
         arena, (SliceString8){.pointer = command, .length = file_count + 3}, (SliceString8){0}, (SliceString8){0},
-        context->evidence, S8("merge-profile"), context->options.timeout_seconds, true);
-    return merged.success && path_exists(arena, context->profile);
+        context->evidence, label, context->options.timeout_seconds, true);
+    return merged.success && path_exists(arena, training->profile);
 #else
     BUSTER_UNUSED(context);
+    BUSTER_UNUSED(training);
     return false;
 #endif
 }
@@ -762,6 +795,51 @@ BUSTER_GLOBAL_LOCAL bool production_profile_benchmark_one(
     return production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compare), (SliceString8){0}, (SliceString8){0},
         context->evidence, label, context->options.timeout_seconds, false).success;
+}
+
+// The shared identity/workload contract plus the one policy line that differs
+// per training. build_lto is part of the fingerprint so a profile can never be
+// mistaken for the other mode's, and it is repeated in the manifest for CMake.
+BUSTER_GLOBAL_LOCAL String8 production_profile_training_contract(Arena* arena, String8 shared, bool lto)
+{
+    return string_format(arena, S8("{S8}build_lto={S8}\n"), shared, lto ? S8("ON") : S8("OFF"));
+}
+
+BUSTER_GLOBAL_LOCAL bool production_profile_seal(ProductionProfileContext* context, ProductionProfileTraining* training,
+                                                 String8 clang_sha, String8 profdata_sha)
+{
+    Arena* arena = context->arena;
+    String8 profile_sha = production_profile_sha256_file(arena, training->profile);
+    bool result = profile_sha.length == 64;
+    if (!result)
+    {
+        string_print(S8("error: merged {S8} profile is missing or empty\n"), training->label);
+    }
+    else
+    {
+        String8 manifest = string_format(arena, S8(
+            BUSTER_PRODUCTION_PROFILE_MANIFEST_VERSION "\n"
+            "fingerprint={S8}\n"
+            "profile_sha256={S8}\n"
+            "source_revision={S8}\n"
+            "source_tree={S8}\n"
+            "clang_sha256={S8}\n"
+            "llvm_profdata_sha256={S8}\n"
+            "training_contract_sha256={S8}\n"
+            "training_profile=ci\n"
+            "training_mode=all\n"
+            "training_pairs=1\n"
+            "training_warmups=1\n"
+            "build_lto={S8}\n"),
+            training->fingerprint, profile_sha, context->revision, context->tree, clang_sha, profdata_sha,
+            training->fingerprint, training->lto ? S8("ON") : S8("OFF"));
+        result = production_profile_write(training->manifest, manifest);
+        if (!result)
+        {
+            string_print(S8("error: could not write the {S8} profile manifest\n"), training->label);
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceString8 arguments, String8 driver)
@@ -849,7 +927,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
     make_directory_recursive(arena, context.output);
     context.evidence = path_join(arena, context.output, S8("evidence"));
     make_directory_recursive(arena, context.evidence);
-    make_directory_recursive(arena, path_join(arena, context.output, S8("profile")));
 
     String8 clang_version_command[] = {context.clang, S8("--version")};
     String8 clang_target_command[] = {context.clang, S8("-dumpmachine")};
@@ -876,7 +953,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 contract = string_format(arena, S8(
+    String8 shared_contract = string_format(arena, S8(
         BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "\n"
         "source_revision={S8}\n"
         "source_tree={S8}\n"
@@ -891,25 +968,40 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         "training_warmups=1\n"
         "training_artifact=object\n"
         "build_debug_info=OFF\n"
-        "build_frame_pointers=ON\n"
-        "build_lto=OFF\n"),
+        "build_frame_pointers=ON\n"),
         context.revision, context.tree, clang_sha, clang_identity_sha, clang_target_sha,
         profdata_sha, profdata_identity_sha);
-    context.fingerprint = production_profile_sha256_text(arena, contract);
-    if (!production_profile_write(path_join(arena, context.output, S8("profile/training-contract.txt")), contract))
-    {
-        string_print(S8("error: could not write the training contract\n"));
-        return PROCESS_RESULT_FAILED;
-    }
 
-    context.profile = path_join(arena, context.output, S8("profile/merged.profdata"));
-    context.manifest = path_join(arena, context.output, S8("profile/manifest.txt"));
+    // The production profile keeps the profile/ root; the non-LTO profile only
+    // seals the pgo comparison tree.
+    ProductionProfileTraining trainings[] = {
+        {.instrumented = S8("instrumented"), .directory = path_join(arena, context.output, S8("profile-no-lto")), .label = S8("no-lto")},
+        {.instrumented = S8("instrumented-lto"), .directory = path_join(arena, context.output, S8("profile")), .label = S8("lto"), .lto = true},
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(trainings); index += 1)
+    {
+        ProductionProfileTraining* training = trainings + index;
+        BUSTER_CHECK(training->lto == (index != 0));
+        String8 contract = production_profile_training_contract(arena, shared_contract, training->lto);
+        training->fingerprint = production_profile_sha256_text(arena, contract);
+        training->profile = path_join(arena, training->directory, S8("merged.profdata"));
+        training->manifest = path_join(arena, training->directory, S8("manifest.txt"));
+        make_directory_recursive(arena, training->directory);
+        if (!production_profile_write(path_join(arena, training->directory, S8("training-contract.txt")), contract))
+        {
+            string_print(S8("error: could not write the training contract\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    ProductionProfileTraining* training_no_lto = trainings + 0;
+    ProductionProfileTraining* training_lto = trainings + 1;
 
     ProductionProfileVariant variants_before_profile[] = {
         {.name = S8("release"), .debug_info = true},
         {.name = S8("g0")},
         {.name = S8("lto"), .lto = true},
-        {.name = S8("instrumented"), .generate = true},
+        {.name = training_no_lto->instrumented, .training = training_no_lto, .generate = true},
+        {.name = training_lto->instrumented, .training = training_lto, .lto = true, .generate = true},
     };
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(variants_before_profile); index += 1)
     {
@@ -919,41 +1011,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         }
     }
 
-    String8 instrumented = production_profile_binary(arena, path_join(arena, context.output, S8("instrumented")));
-    if (!production_profile_train(&context, instrumented) || !production_profile_merge(&context))
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(trainings); index += 1)
     {
-        return PROCESS_RESULT_FAILED;
-    }
-
-    String8 profile_sha = production_profile_sha256_file(arena, context.profile);
-    if (profile_sha.length != 64)
-    {
-        string_print(S8("error: merged profile is missing or empty\n"));
-        return PROCESS_RESULT_FAILED;
-    }
-    String8 manifest = string_format(arena, S8(
-        BUSTER_PRODUCTION_PROFILE_MANIFEST_VERSION "\n"
-        "fingerprint={S8}\n"
-        "profile_sha256={S8}\n"
-        "source_revision={S8}\n"
-        "source_tree={S8}\n"
-        "clang_sha256={S8}\n"
-        "llvm_profdata_sha256={S8}\n"
-        "training_contract_sha256={S8}\n"
-        "training_profile=ci\n"
-        "training_mode=all\n"
-        "training_pairs=1\n"
-        "training_warmups=1\n"),
-        context.fingerprint, profile_sha, context.revision, context.tree, clang_sha, profdata_sha, context.fingerprint);
-    if (!production_profile_write(context.manifest, manifest))
-    {
-        string_print(S8("error: could not write the profile manifest\n"));
-        return PROCESS_RESULT_FAILED;
+        ProductionProfileTraining* training = trainings + index;
+        if (!production_profile_train(&context, training) || !production_profile_merge(&context, training) ||
+            !production_profile_seal(&context, training, clang_sha, profdata_sha))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
     }
 
     ProductionProfileVariant variants_after_profile[] = {
-        {.name = S8("pgo"), .use = true},
-        {.name = S8("pgo-lto"), .lto = true, .use = true},
+        {.name = S8("pgo"), .training = training_no_lto, .use = true},
+        {.name = S8("pgo-lto"), .training = training_lto, .lto = true, .use = true},
     };
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(variants_after_profile); index += 1)
     {
@@ -1003,14 +1073,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         "profile={S8}\n"
         "profile_sha256={S8}\n"
         "manifest={S8}\n"
+        "comparison_profile_no_lto={S8}\n"
+        "comparison_manifest_no_lto={S8}\n"
         "production_compiler={S8}\n"
         "production_compiler_sha256={S8}\n"
         "debug_sections=absent\n"
         "correctness=test_all\n"
         "deterministic_outputs=throughput-require-identical-output\n"
         "benchmarks={S8}\n"),
-        context.revision, context.tree, context.fingerprint, context.profile, profile_sha, context.manifest,
-        pgo_lto, final_sha, options.benchmark ? S8("complete") : S8("skipped"));
+        context.revision, context.tree, training_lto->fingerprint, training_lto->profile,
+        production_profile_sha256_file(arena, training_lto->profile), training_lto->manifest,
+        training_no_lto->profile, training_no_lto->manifest, pgo_lto, final_sha, options.benchmark ? S8("complete") : S8("skipped"));
     if (!production_profile_write(path_join(arena, context.output, S8("summary.txt")), summary))
     {
         string_print(S8("error: could not write the production-profile summary\n"));
@@ -1018,7 +1091,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
     }
 
     string_print(S8("PRODUCTION_PROFILE result=pass compiler={S8} manifest={S8} summary={S8}\n"),
-        pgo_lto, context.manifest, path_join(arena, context.output, S8("summary.txt")));
+        pgo_lto, training_lto->manifest, path_join(arena, context.output, S8("summary.txt")));
     return PROCESS_RESULT_SUCCESS;
 #endif
 }
@@ -1040,6 +1113,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_self_test(Arena* arena)
     String8 second = production_profile_sha256_text(arena, contract);
     String8 third = production_profile_sha256_text(arena, S8(BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "\nsource_revision=abd\n"));
     failures += first.length != 64 || !string_equal(first, second) || string_equal(first, third);
+    String8 contract_lto = production_profile_training_contract(arena, contract, true);
+    String8 contract_no_lto = production_profile_training_contract(arena, contract, false);
+    failures += !string_ends_with_sequence(contract_lto, S8("\nbuild_lto=ON\n"));
+    failures += !string_ends_with_sequence(contract_no_lto, S8("\nbuild_lto=OFF\n"));
+    failures += string_equal(production_profile_sha256_text(arena, contract_lto), production_profile_sha256_text(arena, contract_no_lto));
     failures += !production_profile_path_is_child(S8("/checkout"), S8("/checkout/build/profile"));
     failures += production_profile_path_is_child(S8("/checkout"), S8("/checkout-other"));
     failures += !production_profile_path_components_safe(S8("/checkout/build/profile"));

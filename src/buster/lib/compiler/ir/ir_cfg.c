@@ -5,6 +5,9 @@
 // Instruction spans use one explicit remap and an in-place row permutation;
 // source/extras/definitions follow it. Value/block/label IDs and relocation
 // ownership remain stable. Operand pools reuse contiguous construction data.
+// Publication is the one termination check every producer passes: each tail
+// must be a terminator (ir_instruction_is_terminator) and no terminator may
+// have a successor in its chain.
 
 void ir_function_invalidate_cfg(IrFunction* function)
 {
@@ -269,7 +272,16 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
                 remap[id.value].value = cursor;
                 inverse[cursor++] = id.value;
                 last = id;
-                id = function->instructions[id.value].next;
+                // The walk already holds the row: a terminator with a successor
+                // in its chain is the one termination fault the tail check
+                // above cannot see.
+                IrInstruction* row = function->instructions + id.value;
+                IR_CONSTRUCTION_RECORD(CFG_TERMINATOR_CHECKS, 1);
+                id = row->next;
+                if (id.value != IR_ID_UNDERLYING_INVALID && ir_instruction_is_terminator(row))
+                {
+                    result = ir_validation_error(IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR, function, block->id, id);
+                }
             }
         }
         blocks[index].instruction_count = cursor - blocks[index].first_instruction;
@@ -481,13 +493,22 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
         for (u32 source = 0; source < count && result.error == IR_VALIDATION_NONE; source += 1)
         {
             IrBlock* block = function->blocks + source;
-            if (block->id.value != source || block->last_instruction.value >= function->instruction_count)
+            u32 tail = block->last_instruction.value;
+            IR_CONSTRUCTION_RECORD(CFG_TERMINATOR_CHECKS, 1);
+            if (block->id.value != source || (tail >= function->instruction_count && tail != IR_ID_UNDERLYING_INVALID))
             {
                 result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, block->last_instruction);
             }
+            else if (tail == IR_ID_UNDERLYING_INVALID || !ir_instruction_is_terminator(function->instructions + tail))
+            {
+                // Edges come from the tail, so an open block would publish as
+                // one that falls off its end. Every producer passes here,
+                // including those that never ran the canonical validator.
+                result = ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
+            }
             else
             {
-                IrInstruction* terminator = function->instructions + block->last_instruction.value;
+                IrInstruction* terminator = function->instructions + tail;
                 if (terminator->target_count && !terminator->targets)
                 {
                     result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, block->last_instruction);

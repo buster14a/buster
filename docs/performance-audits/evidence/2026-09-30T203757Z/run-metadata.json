@@ -1,0 +1,4335 @@
+{
+  "timed_source": "880c4321e8b5ae7b4dc492cdb31320af4d4ece87",
+  "review_source": "45106e9ea68fbd1010b3e76f0a8895deb80325d9",
+  "qualification_run": {
+    "id": 36769037120,
+    "name": "Analyzer worker budget qualification",
+    "node_id": "WFR_kwLOP-FZBc8AAAAIj5r7QA",
+    "head_branch": "codex/2033-analyzer-worker-budget",
+    "head_sha": "880c4321e8b5ae7b4dc492cdb31320af4d4ece87",
+    "path": ".github/workflows/analyzer-worker-budget.yml",
+    "display_title": "ci(analyzer): add opt-in counterbalanced worker qualification (#2033)",
+    "run_number": 1,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "success",
+    "workflow_id": 371528391,
+    "check_suite_id": 99587399537,
+    "check_suite_node_id": "CS_kwDOP-FZBc8AAAAXL98fcQ",
+    "url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120",
+    "html_url": "https://github.com/buster14a/buster/actions/runs/36769037120",
+    "pull_requests": [
+      {
+        "url": "https://api.github.com/repos/buster14a/buster/pulls/2046",
+        "id": 4695345776,
+        "number": 2046,
+        "head": {
+          "ref": "codex/2033-analyzer-worker-budget",
+          "sha": "45106e9ea68fbd1010b3e76f0a8895deb80325d9",
+          "repo": {
+            "id": 1071732997,
+            "url": "https://api.github.com/repos/buster14a/buster",
+            "name": "buster"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "1be6fd8a0a5c138c1d0db87bc216c9a21bf04617",
+          "repo": {
+            "id": 1071732997,
+            "url": "https://api.github.com/repos/buster14a/buster",
+            "name": "buster"
+          }
+        }
+      }
+    ],
+    "created_at": "2026-09-30T19:55:34Z",
+    "updated_at": "2026-09-30T20:36:25Z",
+    "actor": {
+      "login": "davidgmbb",
+      "id": 39247043,
+      "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/davidgmbb",
+      "html_url": "https://github.com/davidgmbb",
+      "followers_url": "https://api.github.com/users/davidgmbb/followers",
+      "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+      "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+      "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+      "repos_url": "https://api.github.com/users/davidgmbb/repos",
+      "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "run_attempt": 1,
+    "referenced_workflows": [],
+    "run_started_at": "2026-09-30T19:55:34Z",
+    "triggering_actor": {
+      "login": "davidgmbb",
+      "id": 39247043,
+      "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/davidgmbb",
+      "html_url": "https://github.com/davidgmbb",
+      "followers_url": "https://api.github.com/users/davidgmbb/followers",
+      "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+      "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+      "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+      "repos_url": "https://api.github.com/users/davidgmbb/repos",
+      "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "jobs_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120/jobs",
+    "logs_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120/logs",
+    "check_suite_url": "https://api.github.com/repos/buster14a/buster/check-suites/99587399537",
+    "artifacts_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120/artifacts",
+    "cancel_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120/cancel",
+    "rerun_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120/rerun",
+    "previous_attempt_url": null,
+    "workflow_url": "https://api.github.com/repos/buster14a/buster/actions/workflows/371528391",
+    "head_commit": {
+      "id": "880c4321e8b5ae7b4dc492cdb31320af4d4ece87",
+      "tree_id": "f7fdee42660d12eb02d926b69625b3170c9bd295",
+      "message": "ci(analyzer): add opt-in counterbalanced worker qualification (#2033)",
+      "timestamp": "2026-09-30T19:55:30Z",
+      "author": {
+        "name": "David",
+        "email": "davidgmbb@gmail.com"
+      },
+      "committer": {
+        "name": "David",
+        "email": "davidgmbb@gmail.com"
+      }
+    },
+    "repository": {
+      "id": 1071732997,
+      "node_id": "R_kgDOP-FZBQ",
+      "name": "buster",
+      "full_name": "buster14a/buster",
+      "private": false,
+      "owner": {
+        "login": "buster14a",
+        "id": 139068652,
+        "node_id": "O_kgDOCEoE7A",
+        "avatar_url": "https://avatars.githubusercontent.com/u/139068652?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/buster14a",
+        "html_url": "https://github.com/buster14a",
+        "followers_url": "https://api.github.com/users/buster14a/followers",
+        "following_url": "https://api.github.com/users/buster14a/following{/other_user}",
+        "gists_url": "https://api.github.com/users/buster14a/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/buster14a/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/buster14a/subscriptions",
+        "organizations_url": "https://api.github.com/users/buster14a/orgs",
+        "repos_url": "https://api.github.com/users/buster14a/repos",
+        "events_url": "https://api.github.com/users/buster14a/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/buster14a/received_events",
+        "type": "Organization",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "html_url": "https://github.com/buster14a/buster",
+      "description": "Buster monorepository",
+      "fork": false,
+      "url": "https://api.github.com/repos/buster14a/buster",
+      "forks_url": "https://api.github.com/repos/buster14a/buster/forks",
+      "keys_url": "https://api.github.com/repos/buster14a/buster/keys{/key_id}",
+      "collaborators_url": "https://api.github.com/repos/buster14a/buster/collaborators{/collaborator}",
+      "teams_url": "https://api.github.com/repos/buster14a/buster/teams",
+      "hooks_url": "https://api.github.com/repos/buster14a/buster/hooks",
+      "issue_events_url": "https://api.github.com/repos/buster14a/buster/issues/events{/number}",
+      "events_url": "https://api.github.com/repos/buster14a/buster/events",
+      "assignees_url": "https://api.github.com/repos/buster14a/buster/assignees{/user}",
+      "branches_url": "https://api.github.com/repos/buster14a/buster/branches{/branch}",
+      "tags_url": "https://api.github.com/repos/buster14a/buster/tags",
+      "blobs_url": "https://api.github.com/repos/buster14a/buster/git/blobs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/buster14a/buster/git/tags{/sha}",
+      "git_refs_url": "https://api.github.com/repos/buster14a/buster/git/refs{/sha}",
+      "trees_url": "https://api.github.com/repos/buster14a/buster/git/trees{/sha}",
+      "statuses_url": "https://api.github.com/repos/buster14a/buster/statuses/{sha}",
+      "languages_url": "https://api.github.com/repos/buster14a/buster/languages",
+      "stargazers_url": "https://api.github.com/repos/buster14a/buster/stargazers",
+      "contributors_url": "https://api.github.com/repos/buster14a/buster/contributors",
+      "subscribers_url": "https://api.github.com/repos/buster14a/buster/subscribers",
+      "subscription_url": "https://api.github.com/repos/buster14a/buster/subscription",
+      "commits_url": "https://api.github.com/repos/buster14a/buster/commits{/sha}",
+      "git_commits_url": "https://api.github.com/repos/buster14a/buster/git/commits{/sha}",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/comments{/number}",
+      "issue_comment_url": "https://api.github.com/repos/buster14a/buster/issues/comments{/number}",
+      "contents_url": "https://api.github.com/repos/buster14a/buster/contents/{+path}",
+      "compare_url": "https://api.github.com/repos/buster14a/buster/compare/{base}...{head}",
+      "merges_url": "https://api.github.com/repos/buster14a/buster/merges",
+      "archive_url": "https://api.github.com/repos/buster14a/buster/{archive_format}{/ref}",
+      "downloads_url": "https://api.github.com/repos/buster14a/buster/downloads",
+      "issues_url": "https://api.github.com/repos/buster14a/buster/issues{/number}",
+      "pulls_url": "https://api.github.com/repos/buster14a/buster/pulls{/number}",
+      "milestones_url": "https://api.github.com/repos/buster14a/buster/milestones{/number}",
+      "notifications_url": "https://api.github.com/repos/buster14a/buster/notifications{?since,all,participating}",
+      "labels_url": "https://api.github.com/repos/buster14a/buster/labels{/name}",
+      "releases_url": "https://api.github.com/repos/buster14a/buster/releases{/id}",
+      "deployments_url": "https://api.github.com/repos/buster14a/buster/deployments"
+    },
+    "head_repository": {
+      "id": 1071732997,
+      "node_id": "R_kgDOP-FZBQ",
+      "name": "buster",
+      "full_name": "buster14a/buster",
+      "private": false,
+      "owner": {
+        "login": "buster14a",
+        "id": 139068652,
+        "node_id": "O_kgDOCEoE7A",
+        "avatar_url": "https://avatars.githubusercontent.com/u/139068652?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/buster14a",
+        "html_url": "https://github.com/buster14a",
+        "followers_url": "https://api.github.com/users/buster14a/followers",
+        "following_url": "https://api.github.com/users/buster14a/following{/other_user}",
+        "gists_url": "https://api.github.com/users/buster14a/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/buster14a/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/buster14a/subscriptions",
+        "organizations_url": "https://api.github.com/users/buster14a/orgs",
+        "repos_url": "https://api.github.com/users/buster14a/repos",
+        "events_url": "https://api.github.com/users/buster14a/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/buster14a/received_events",
+        "type": "Organization",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "html_url": "https://github.com/buster14a/buster",
+      "description": "Buster monorepository",
+      "fork": false,
+      "url": "https://api.github.com/repos/buster14a/buster",
+      "forks_url": "https://api.github.com/repos/buster14a/buster/forks",
+      "keys_url": "https://api.github.com/repos/buster14a/buster/keys{/key_id}",
+      "collaborators_url": "https://api.github.com/repos/buster14a/buster/collaborators{/collaborator}",
+      "teams_url": "https://api.github.com/repos/buster14a/buster/teams",
+      "hooks_url": "https://api.github.com/repos/buster14a/buster/hooks",
+      "issue_events_url": "https://api.github.com/repos/buster14a/buster/issues/events{/number}",
+      "events_url": "https://api.github.com/repos/buster14a/buster/events",
+      "assignees_url": "https://api.github.com/repos/buster14a/buster/assignees{/user}",
+      "branches_url": "https://api.github.com/repos/buster14a/buster/branches{/branch}",
+      "tags_url": "https://api.github.com/repos/buster14a/buster/tags",
+      "blobs_url": "https://api.github.com/repos/buster14a/buster/git/blobs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/buster14a/buster/git/tags{/sha}",
+      "git_refs_url": "https://api.github.com/repos/buster14a/buster/git/refs{/sha}",
+      "trees_url": "https://api.github.com/repos/buster14a/buster/git/trees{/sha}",
+      "statuses_url": "https://api.github.com/repos/buster14a/buster/statuses/{sha}",
+      "languages_url": "https://api.github.com/repos/buster14a/buster/languages",
+      "stargazers_url": "https://api.github.com/repos/buster14a/buster/stargazers",
+      "contributors_url": "https://api.github.com/repos/buster14a/buster/contributors",
+      "subscribers_url": "https://api.github.com/repos/buster14a/buster/subscribers",
+      "subscription_url": "https://api.github.com/repos/buster14a/buster/subscription",
+      "commits_url": "https://api.github.com/repos/buster14a/buster/commits{/sha}",
+      "git_commits_url": "https://api.github.com/repos/buster14a/buster/git/commits{/sha}",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/comments{/number}",
+      "issue_comment_url": "https://api.github.com/repos/buster14a/buster/issues/comments{/number}",
+      "contents_url": "https://api.github.com/repos/buster14a/buster/contents/{+path}",
+      "compare_url": "https://api.github.com/repos/buster14a/buster/compare/{base}...{head}",
+      "merges_url": "https://api.github.com/repos/buster14a/buster/merges",
+      "archive_url": "https://api.github.com/repos/buster14a/buster/{archive_format}{/ref}",
+      "downloads_url": "https://api.github.com/repos/buster14a/buster/downloads",
+      "issues_url": "https://api.github.com/repos/buster14a/buster/issues{/number}",
+      "pulls_url": "https://api.github.com/repos/buster14a/buster/pulls{/number}",
+      "milestones_url": "https://api.github.com/repos/buster14a/buster/milestones{/number}",
+      "notifications_url": "https://api.github.com/repos/buster14a/buster/notifications{?since,all,participating}",
+      "labels_url": "https://api.github.com/repos/buster14a/buster/labels{/name}",
+      "releases_url": "https://api.github.com/repos/buster14a/buster/releases{/id}",
+      "deployments_url": "https://api.github.com/repos/buster14a/buster/deployments"
+    }
+  },
+  "qualification_jobs": {
+    "total_count": 2,
+    "jobs": [
+      {
+        "id": 110070412981,
+        "run_id": 36769037120,
+        "workflow_name": "Analyzer worker budget qualification",
+        "head_branch": "codex/2033-analyzer-worker-budget",
+        "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120",
+        "run_attempt": 1,
+        "node_id": "CR_kwDOP-FZBc8AAAAZoLU2tQ",
+        "head_sha": "880c4321e8b5ae7b4dc492cdb31320af4d4ece87",
+        "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110070412981",
+        "html_url": "https://github.com/buster14a/buster/actions/runs/36769037120/job/110070412981",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T19:55:35Z",
+        "started_at": "2026-09-30T19:55:38Z",
+        "completed_at": "2026-09-30T20:33:24Z",
+        "name": "Hosted worker budget trial 2",
+        "steps": [
+          {
+            "name": "Set up job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 1,
+            "started_at": "2026-09-30T19:55:39Z",
+            "completed_at": "2026-09-30T19:55:39Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 2,
+            "started_at": "2026-09-30T19:55:39Z",
+            "completed_at": "2026-09-30T19:55:45Z"
+          },
+          {
+            "name": "Record source and bootstrap the native build driver",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 3,
+            "started_at": "2026-09-30T19:55:45Z",
+            "completed_at": "2026-09-30T19:55:48Z"
+          },
+          {
+            "name": "Exercise ordinary fail-closed analyzer controls",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 4,
+            "started_at": "2026-09-30T19:55:48Z",
+            "completed_at": "2026-09-30T19:55:51Z"
+          },
+          {
+            "name": "Configure one authoritative complete split database",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 5,
+            "started_at": "2026-09-30T19:55:51Z",
+            "completed_at": "2026-09-30T19:55:52Z"
+          },
+          {
+            "name": "Run sequential counterbalanced candidate-only inventories",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 6,
+            "started_at": "2026-09-30T19:55:52Z",
+            "completed_at": "2026-09-30T20:33:22Z"
+          },
+          {
+            "name": "Independently verify inventories, diagnostics and worker samples",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 7,
+            "started_at": "2026-09-30T20:33:22Z",
+            "completed_at": "2026-09-30T20:33:22Z"
+          },
+          {
+            "name": "Retain complete qualification evidence",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 8,
+            "started_at": "2026-09-30T20:33:22Z",
+            "completed_at": "2026-09-30T20:33:23Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 16,
+            "started_at": "2026-09-30T20:33:23Z",
+            "completed_at": "2026-09-30T20:33:23Z"
+          },
+          {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 17,
+            "started_at": "2026-09-30T20:33:23Z",
+            "completed_at": "2026-09-30T20:33:23Z"
+          }
+        ],
+        "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110070412981",
+        "labels": [
+          "ubuntu-26.04"
+        ],
+        "runner_id": 1000165127,
+        "runner_name": "GitHub Actions 1000165127",
+        "runner_group_id": 0,
+        "runner_group_name": "GitHub Actions"
+      },
+      {
+        "id": 110070413351,
+        "run_id": 36769037120,
+        "workflow_name": "Analyzer worker budget qualification",
+        "head_branch": "codex/2033-analyzer-worker-budget",
+        "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36769037120",
+        "run_attempt": 1,
+        "node_id": "CR_kwDOP-FZBc8AAAAZoLU4Jw",
+        "head_sha": "880c4321e8b5ae7b4dc492cdb31320af4d4ece87",
+        "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110070413351",
+        "html_url": "https://github.com/buster14a/buster/actions/runs/36769037120/job/110070413351",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T19:55:35Z",
+        "started_at": "2026-09-30T19:55:37Z",
+        "completed_at": "2026-09-30T20:36:25Z",
+        "name": "Hosted worker budget trial 1",
+        "steps": [
+          {
+            "name": "Set up job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 1,
+            "started_at": "2026-09-30T19:55:38Z",
+            "completed_at": "2026-09-30T19:55:39Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 2,
+            "started_at": "2026-09-30T19:55:39Z",
+            "completed_at": "2026-09-30T19:55:42Z"
+          },
+          {
+            "name": "Record source and bootstrap the native build driver",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 3,
+            "started_at": "2026-09-30T19:55:42Z",
+            "completed_at": "2026-09-30T19:55:50Z"
+          },
+          {
+            "name": "Exercise ordinary fail-closed analyzer controls",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 4,
+            "started_at": "2026-09-30T19:55:50Z",
+            "completed_at": "2026-09-30T19:55:52Z"
+          },
+          {
+            "name": "Configure one authoritative complete split database",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 5,
+            "started_at": "2026-09-30T19:55:52Z",
+            "completed_at": "2026-09-30T19:55:53Z"
+          },
+          {
+            "name": "Run sequential counterbalanced candidate-only inventories",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 6,
+            "started_at": "2026-09-30T19:55:53Z",
+            "completed_at": "2026-09-30T20:36:22Z"
+          },
+          {
+            "name": "Independently verify inventories, diagnostics and worker samples",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 7,
+            "started_at": "2026-09-30T20:36:22Z",
+            "completed_at": "2026-09-30T20:36:22Z"
+          },
+          {
+            "name": "Retain complete qualification evidence",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 8,
+            "started_at": "2026-09-30T20:36:22Z",
+            "completed_at": "2026-09-30T20:36:24Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 16,
+            "started_at": "2026-09-30T20:36:24Z",
+            "completed_at": "2026-09-30T20:36:24Z"
+          },
+          {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 17,
+            "started_at": "2026-09-30T20:36:24Z",
+            "completed_at": "2026-09-30T20:36:24Z"
+          }
+        ],
+        "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110070413351",
+        "labels": [
+          "ubuntu-26.04"
+        ],
+        "runner_id": 1000165128,
+        "runner_name": "GitHub Actions 1000165128",
+        "runner_group_id": 0,
+        "runner_group_name": "GitHub Actions"
+      }
+    ]
+  },
+  "historical_run": {
+    "id": 36759465982,
+    "name": "Buster CI",
+    "node_id": "WFR_kwLOP-FZBc8AAAAIjwjv_g",
+    "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+    "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+    "path": ".github/workflows/ci.yml",
+    "display_title": "Buster CI",
+    "run_number": 5970,
+    "event": "merge_group",
+    "status": "completed",
+    "conclusion": "success",
+    "workflow_id": 197051687,
+    "check_suite_id": 99560001704,
+    "check_suite_node_id": "CS_kwDOP-FZBc8AAAAXLj0QqA",
+    "url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+    "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982",
+    "pull_requests": [],
+    "created_at": "2026-09-30T18:33:49Z",
+    "updated_at": "2026-09-30T18:55:48Z",
+    "actor": {
+      "login": "davidgmbb",
+      "id": 39247043,
+      "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/davidgmbb",
+      "html_url": "https://github.com/davidgmbb",
+      "followers_url": "https://api.github.com/users/davidgmbb/followers",
+      "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+      "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+      "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+      "repos_url": "https://api.github.com/users/davidgmbb/repos",
+      "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "run_attempt": 1,
+    "referenced_workflows": [],
+    "run_started_at": "2026-09-30T18:33:49Z",
+    "triggering_actor": {
+      "login": "davidgmbb",
+      "id": 39247043,
+      "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/davidgmbb",
+      "html_url": "https://github.com/davidgmbb",
+      "followers_url": "https://api.github.com/users/davidgmbb/followers",
+      "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+      "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+      "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+      "repos_url": "https://api.github.com/users/davidgmbb/repos",
+      "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "jobs_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982/jobs",
+    "logs_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982/logs",
+    "check_suite_url": "https://api.github.com/repos/buster14a/buster/check-suites/99560001704",
+    "artifacts_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982/artifacts",
+    "cancel_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982/cancel",
+    "rerun_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982/rerun",
+    "previous_attempt_url": null,
+    "workflow_url": "https://api.github.com/repos/buster14a/buster/actions/workflows/197051687",
+    "head_commit": {
+      "id": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "tree_id": "fab2381abc99c565a47e93c7f9eac54f16b64ff0",
+      "message": "Merge pull request #1278 from buster14a/claude/intelligent-fermat-xsi815\n\nEvaluate bit-field widths once at declaration point",
+      "timestamp": "2026-09-30T18:10:02Z",
+      "author": {
+        "name": "David",
+        "email": "davidgmbb@gmail.com"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com"
+      }
+    },
+    "repository": {
+      "id": 1071732997,
+      "node_id": "R_kgDOP-FZBQ",
+      "name": "buster",
+      "full_name": "buster14a/buster",
+      "private": false,
+      "owner": {
+        "login": "buster14a",
+        "id": 139068652,
+        "node_id": "O_kgDOCEoE7A",
+        "avatar_url": "https://avatars.githubusercontent.com/u/139068652?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/buster14a",
+        "html_url": "https://github.com/buster14a",
+        "followers_url": "https://api.github.com/users/buster14a/followers",
+        "following_url": "https://api.github.com/users/buster14a/following{/other_user}",
+        "gists_url": "https://api.github.com/users/buster14a/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/buster14a/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/buster14a/subscriptions",
+        "organizations_url": "https://api.github.com/users/buster14a/orgs",
+        "repos_url": "https://api.github.com/users/buster14a/repos",
+        "events_url": "https://api.github.com/users/buster14a/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/buster14a/received_events",
+        "type": "Organization",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "html_url": "https://github.com/buster14a/buster",
+      "description": "Buster monorepository",
+      "fork": false,
+      "url": "https://api.github.com/repos/buster14a/buster",
+      "forks_url": "https://api.github.com/repos/buster14a/buster/forks",
+      "keys_url": "https://api.github.com/repos/buster14a/buster/keys{/key_id}",
+      "collaborators_url": "https://api.github.com/repos/buster14a/buster/collaborators{/collaborator}",
+      "teams_url": "https://api.github.com/repos/buster14a/buster/teams",
+      "hooks_url": "https://api.github.com/repos/buster14a/buster/hooks",
+      "issue_events_url": "https://api.github.com/repos/buster14a/buster/issues/events{/number}",
+      "events_url": "https://api.github.com/repos/buster14a/buster/events",
+      "assignees_url": "https://api.github.com/repos/buster14a/buster/assignees{/user}",
+      "branches_url": "https://api.github.com/repos/buster14a/buster/branches{/branch}",
+      "tags_url": "https://api.github.com/repos/buster14a/buster/tags",
+      "blobs_url": "https://api.github.com/repos/buster14a/buster/git/blobs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/buster14a/buster/git/tags{/sha}",
+      "git_refs_url": "https://api.github.com/repos/buster14a/buster/git/refs{/sha}",
+      "trees_url": "https://api.github.com/repos/buster14a/buster/git/trees{/sha}",
+      "statuses_url": "https://api.github.com/repos/buster14a/buster/statuses/{sha}",
+      "languages_url": "https://api.github.com/repos/buster14a/buster/languages",
+      "stargazers_url": "https://api.github.com/repos/buster14a/buster/stargazers",
+      "contributors_url": "https://api.github.com/repos/buster14a/buster/contributors",
+      "subscribers_url": "https://api.github.com/repos/buster14a/buster/subscribers",
+      "subscription_url": "https://api.github.com/repos/buster14a/buster/subscription",
+      "commits_url": "https://api.github.com/repos/buster14a/buster/commits{/sha}",
+      "git_commits_url": "https://api.github.com/repos/buster14a/buster/git/commits{/sha}",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/comments{/number}",
+      "issue_comment_url": "https://api.github.com/repos/buster14a/buster/issues/comments{/number}",
+      "contents_url": "https://api.github.com/repos/buster14a/buster/contents/{+path}",
+      "compare_url": "https://api.github.com/repos/buster14a/buster/compare/{base}...{head}",
+      "merges_url": "https://api.github.com/repos/buster14a/buster/merges",
+      "archive_url": "https://api.github.com/repos/buster14a/buster/{archive_format}{/ref}",
+      "downloads_url": "https://api.github.com/repos/buster14a/buster/downloads",
+      "issues_url": "https://api.github.com/repos/buster14a/buster/issues{/number}",
+      "pulls_url": "https://api.github.com/repos/buster14a/buster/pulls{/number}",
+      "milestones_url": "https://api.github.com/repos/buster14a/buster/milestones{/number}",
+      "notifications_url": "https://api.github.com/repos/buster14a/buster/notifications{?since,all,participating}",
+      "labels_url": "https://api.github.com/repos/buster14a/buster/labels{/name}",
+      "releases_url": "https://api.github.com/repos/buster14a/buster/releases{/id}",
+      "deployments_url": "https://api.github.com/repos/buster14a/buster/deployments"
+    },
+    "head_repository": {
+      "id": 1071732997,
+      "node_id": "R_kgDOP-FZBQ",
+      "name": "buster",
+      "full_name": "buster14a/buster",
+      "private": false,
+      "owner": {
+        "login": "buster14a",
+        "id": 139068652,
+        "node_id": "O_kgDOCEoE7A",
+        "avatar_url": "https://avatars.githubusercontent.com/u/139068652?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/buster14a",
+        "html_url": "https://github.com/buster14a",
+        "followers_url": "https://api.github.com/users/buster14a/followers",
+        "following_url": "https://api.github.com/users/buster14a/following{/other_user}",
+        "gists_url": "https://api.github.com/users/buster14a/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/buster14a/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/buster14a/subscriptions",
+        "organizations_url": "https://api.github.com/users/buster14a/orgs",
+        "repos_url": "https://api.github.com/users/buster14a/repos",
+        "events_url": "https://api.github.com/users/buster14a/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/buster14a/received_events",
+        "type": "Organization",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "html_url": "https://github.com/buster14a/buster",
+      "description": "Buster monorepository",
+      "fork": false,
+      "url": "https://api.github.com/repos/buster14a/buster",
+      "forks_url": "https://api.github.com/repos/buster14a/buster/forks",
+      "keys_url": "https://api.github.com/repos/buster14a/buster/keys{/key_id}",
+      "collaborators_url": "https://api.github.com/repos/buster14a/buster/collaborators{/collaborator}",
+      "teams_url": "https://api.github.com/repos/buster14a/buster/teams",
+      "hooks_url": "https://api.github.com/repos/buster14a/buster/hooks",
+      "issue_events_url": "https://api.github.com/repos/buster14a/buster/issues/events{/number}",
+      "events_url": "https://api.github.com/repos/buster14a/buster/events",
+      "assignees_url": "https://api.github.com/repos/buster14a/buster/assignees{/user}",
+      "branches_url": "https://api.github.com/repos/buster14a/buster/branches{/branch}",
+      "tags_url": "https://api.github.com/repos/buster14a/buster/tags",
+      "blobs_url": "https://api.github.com/repos/buster14a/buster/git/blobs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/buster14a/buster/git/tags{/sha}",
+      "git_refs_url": "https://api.github.com/repos/buster14a/buster/git/refs{/sha}",
+      "trees_url": "https://api.github.com/repos/buster14a/buster/git/trees{/sha}",
+      "statuses_url": "https://api.github.com/repos/buster14a/buster/statuses/{sha}",
+      "languages_url": "https://api.github.com/repos/buster14a/buster/languages",
+      "stargazers_url": "https://api.github.com/repos/buster14a/buster/stargazers",
+      "contributors_url": "https://api.github.com/repos/buster14a/buster/contributors",
+      "subscribers_url": "https://api.github.com/repos/buster14a/buster/subscribers",
+      "subscription_url": "https://api.github.com/repos/buster14a/buster/subscription",
+      "commits_url": "https://api.github.com/repos/buster14a/buster/commits{/sha}",
+      "git_commits_url": "https://api.github.com/repos/buster14a/buster/git/commits{/sha}",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/comments{/number}",
+      "issue_comment_url": "https://api.github.com/repos/buster14a/buster/issues/comments{/number}",
+      "contents_url": "https://api.github.com/repos/buster14a/buster/contents/{+path}",
+      "compare_url": "https://api.github.com/repos/buster14a/buster/compare/{base}...{head}",
+      "merges_url": "https://api.github.com/repos/buster14a/buster/merges",
+      "archive_url": "https://api.github.com/repos/buster14a/buster/{archive_format}{/ref}",
+      "downloads_url": "https://api.github.com/repos/buster14a/buster/downloads",
+      "issues_url": "https://api.github.com/repos/buster14a/buster/issues{/number}",
+      "pulls_url": "https://api.github.com/repos/buster14a/buster/pulls{/number}",
+      "milestones_url": "https://api.github.com/repos/buster14a/buster/milestones{/number}",
+      "notifications_url": "https://api.github.com/repos/buster14a/buster/notifications{?since,all,participating}",
+      "labels_url": "https://api.github.com/repos/buster14a/buster/labels{/name}",
+      "releases_url": "https://api.github.com/repos/buster14a/buster/releases{/id}",
+      "deployments_url": "https://api.github.com/repos/buster14a/buster/deployments"
+    }
+  },
+  "historical_jobs": [
+    {
+      "id": 110038019910,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbvRg",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038019910",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038019910",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:52Z",
+      "completed_at": "2026-09-30T18:34:58Z",
+      "name": "Workflow lint",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:53Z"
+        },
+        {
+          "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:34:09Z"
+        },
+        {
+          "name": "Test merge-parent preservation guard",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:34:09Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Check candidate merge history",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Validate approved action references",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Validate retired Vulkan installer boundary",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Validate the performance audit index",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Compile the build driver with GCC",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:39Z"
+        },
+        {
+          "name": "Validate every GitHub workflow",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:34:39Z",
+          "completed_at": "2026-09-30T18:34:56Z"
+        },
+        {
+          "name": "Lint result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:34:56Z",
+          "completed_at": "2026-09-30T18:34:56Z"
+        },
+        {
+          "name": "Retain lint log",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:34:56Z",
+          "completed_at": "2026-09-30T18:34:57Z"
+        },
+        {
+          "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:34:57Z",
+          "completed_at": "2026-09-30T18:34:57Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 23,
+          "started_at": "2026-09-30T18:34:57Z",
+          "completed_at": "2026-09-30T18:34:57Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038019910",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000161861,
+      "runner_name": "GitHub Actions 1000161861",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020121,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwGQ",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020121",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020121",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:53Z",
+      "completed_at": "2026-09-30T18:55:31Z",
+      "name": "Clang analyzer shards",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:54Z"
+        },
+        {
+          "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:34:10Z"
+        },
+        {
+          "name": "Bootstrap candidate and select reference build driver",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:34:10Z",
+          "completed_at": "2026-09-30T18:34:17Z"
+        },
+        {
+          "name": "Exercise analyzer failure and coverage controls",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:17Z",
+          "completed_at": "2026-09-30T18:34:19Z"
+        },
+        {
+          "name": "Configure the authoritative split-source database",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:19Z",
+          "completed_at": "2026-09-30T18:34:20Z"
+        },
+        {
+          "name": "Compare reference analysis and aggregate all module shards",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:20Z",
+          "completed_at": "2026-09-30T18:55:29Z"
+        },
+        {
+          "name": "Retain analyzer inventory, results and measurements",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:55:29Z",
+          "completed_at": "2026-09-30T18:55:30Z"
+        },
+        {
+          "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:55:30Z",
+          "completed_at": "2026-09-30T18:55:30Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:55:30Z",
+          "completed_at": "2026-09-30T18:55:30Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020121",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000161871,
+      "runner_name": "GitHub Actions 1000161871",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020167,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwRw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020167",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020167",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:51Z",
+      "completed_at": "2026-09-30T18:36:11Z",
+      "name": "UEFI firmware boot",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:52Z",
+          "completed_at": "2026-09-30T18:33:52Z"
+        },
+        {
+          "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:52Z",
+          "completed_at": "2026-09-30T18:33:56Z"
+        },
+        {
+          "name": "Install pinned QEMU and reference firmware",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:56Z",
+          "completed_at": "2026-09-30T18:34:33Z"
+        },
+        {
+          "name": "Build driver and validate the boot oracle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:33Z",
+          "completed_at": "2026-09-30T18:34:36Z"
+        },
+        {
+          "name": "Build compiler and boot both architectures in all allocators",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:36Z",
+          "completed_at": "2026-09-30T18:36:07Z"
+        },
+        {
+          "name": "Retain firmware execution evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:36:07Z",
+          "completed_at": "2026-09-30T18:36:09Z"
+        },
+        {
+          "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:36:09Z",
+          "completed_at": "2026-09-30T18:36:10Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-09-30T18:36:10Z",
+          "completed_at": "2026-09-30T18:36:10Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020167",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000161860,
+      "runner_name": "GitHub Actions 1000161860",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020210,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwcg",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020210",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020210",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:57Z",
+      "completed_at": "2026-09-30T18:43:43Z",
+      "name": "iOS AArch64",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:34:03Z"
+        },
+        {
+          "name": "Install coreutils",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:03Z",
+          "completed_at": "2026-09-30T18:34:06Z"
+        },
+        {
+          "name": "Grant the runner access to KVM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:06Z",
+          "completed_at": "2026-09-30T18:34:06Z"
+        },
+        {
+          "name": "Install the emulator system image",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:06Z",
+          "completed_at": "2026-09-30T18:34:06Z"
+        },
+        {
+          "name": "Test (Android)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:34:06Z",
+          "completed_at": "2026-09-30T18:34:06Z"
+        },
+        {
+          "name": "Test (iOS simulator)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:34:06Z",
+          "completed_at": "2026-09-30T18:43:26Z"
+        },
+        {
+          "name": "Mobile result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:43:26Z",
+          "completed_at": "2026-09-30T18:43:34Z"
+        },
+        {
+          "name": "Retain mobile logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:43:34Z",
+          "completed_at": "2026-09-30T18:43:36Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:43:36Z",
+          "completed_at": "2026-09-30T18:43:37Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:43:37Z",
+          "completed_at": "2026-09-30T18:43:42Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020210",
+      "labels": [
+        "macos-26"
+      ],
+      "runner_id": 1000161859,
+      "runner_name": "GitHub Actions 1000161859",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020256,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwoA",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020256",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020256",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:52Z",
+      "completed_at": "2026-09-30T18:38:39Z",
+      "name": "Windows x86-64 native",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:33:55Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:55Z",
+          "completed_at": "2026-09-30T18:33:55Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:55Z",
+          "completed_at": "2026-09-30T18:34:06Z"
+        },
+        {
+          "name": "Initialize native observation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:06Z",
+          "completed_at": "2026-09-30T18:34:08Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:08Z",
+          "completed_at": "2026-09-30T18:34:24Z"
+        },
+        {
+          "name": "Execution-mode matrix",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:24Z",
+          "completed_at": "2026-09-30T18:34:24Z"
+        },
+        {
+          "name": "Execution-mode matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:34:24Z",
+          "completed_at": "2026-09-30T18:37:14Z"
+        },
+        {
+          "name": "Native MSVC reference differential",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:37:14Z",
+          "completed_at": "2026-09-30T18:38:25Z"
+        },
+        {
+          "name": "Native configuration differential matrix",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9,
+          "started_at": "2026-09-30T18:38:25Z",
+          "completed_at": "2026-09-30T18:38:25Z"
+        },
+        {
+          "name": "Native result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:38:25Z",
+          "completed_at": "2026-09-30T18:38:25Z"
+        },
+        {
+          "name": "Pack native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:38:25Z",
+          "completed_at": "2026-09-30T18:38:31Z"
+        },
+        {
+          "name": "Retain native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:38:31Z",
+          "completed_at": "2026-09-30T18:38:34Z"
+        },
+        {
+          "name": "Record native packaging failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:38:34Z",
+          "completed_at": "2026-09-30T18:38:34Z"
+        },
+        {
+          "name": "Retain unpacked native logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-30T18:38:34Z",
+          "completed_at": "2026-09-30T18:38:34Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-09-30T18:38:34Z",
+          "completed_at": "2026-09-30T18:38:36Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-09-30T18:38:36Z",
+          "completed_at": "2026-09-30T18:38:36Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020256",
+      "labels": [
+        "windows-2025"
+      ],
+      "runner_id": 1000161863,
+      "runner_name": "GitHub Actions 1000161863",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020264,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwqA",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020264",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020264",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:52Z",
+      "completed_at": "2026-09-30T18:43:11Z",
+      "name": "Android x86-64",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:53Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:53Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:57Z"
+        },
+        {
+          "name": "Install coreutils",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:33:57Z"
+        },
+        {
+          "name": "Grant the runner access to KVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:33:57Z"
+        },
+        {
+          "name": "Install the emulator system image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:34:40Z"
+        },
+        {
+          "name": "Test (Android)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:34:40Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        },
+        {
+          "name": "Test (iOS simulator)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-30T18:43:07Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        },
+        {
+          "name": "Mobile result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:43:07Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        },
+        {
+          "name": "Retain mobile logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:43:07Z",
+          "completed_at": "2026-09-30T18:43:09Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:43:09Z",
+          "completed_at": "2026-09-30T18:43:09Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:43:09Z",
+          "completed_at": "2026-09-30T18:43:09Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020264",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000161869,
+      "runner_name": "GitHub Actions 1000161869",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020271,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbwrw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020271",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020271",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:54Z",
+      "completed_at": "2026-09-30T18:38:47Z",
+      "name": "Linux AArch64 native",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:55Z",
+          "completed_at": "2026-09-30T18:33:56Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:56Z",
+          "completed_at": "2026-09-30T18:33:56Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:56Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Initialize native observation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Execution-mode matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:35:41Z"
+        },
+        {
+          "name": "Execution-mode matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:41Z",
+          "completed_at": "2026-09-30T18:35:41Z"
+        },
+        {
+          "name": "Native MSVC reference differential",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:41Z",
+          "completed_at": "2026-09-30T18:35:41Z"
+        },
+        {
+          "name": "Native configuration differential matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:41Z",
+          "completed_at": "2026-09-30T18:38:36Z"
+        },
+        {
+          "name": "Native result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:38:36Z",
+          "completed_at": "2026-09-30T18:38:36Z"
+        },
+        {
+          "name": "Pack native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:38:36Z",
+          "completed_at": "2026-09-30T18:38:42Z"
+        },
+        {
+          "name": "Retain native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:38:42Z",
+          "completed_at": "2026-09-30T18:38:43Z"
+        },
+        {
+          "name": "Record native packaging failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:38:43Z",
+          "completed_at": "2026-09-30T18:38:43Z"
+        },
+        {
+          "name": "Retain unpacked native logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-30T18:38:43Z",
+          "completed_at": "2026-09-30T18:38:43Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-09-30T18:38:43Z",
+          "completed_at": "2026-09-30T18:38:44Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-09-30T18:38:44Z",
+          "completed_at": "2026-09-30T18:38:44Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020271",
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "runner_id": 1000161857,
+      "runner_name": "GitHub Actions 1000161857",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020322,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbw4g",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020322",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020322",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:57Z",
+      "completed_at": "2026-09-30T18:41:59Z",
+      "name": "macOS AArch64 native",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:33:58Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:58Z",
+          "completed_at": "2026-09-30T18:34:03Z"
+        },
+        {
+          "name": "Initialize native observation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:03Z",
+          "completed_at": "2026-09-30T18:34:04Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:04Z",
+          "completed_at": "2026-09-30T18:34:04Z"
+        },
+        {
+          "name": "Execution-mode matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:04Z",
+          "completed_at": "2026-09-30T18:35:56Z"
+        },
+        {
+          "name": "Execution-mode matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:56Z",
+          "completed_at": "2026-09-30T18:35:56Z"
+        },
+        {
+          "name": "Native MSVC reference differential",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:56Z",
+          "completed_at": "2026-09-30T18:35:56Z"
+        },
+        {
+          "name": "Native configuration differential matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:56Z",
+          "completed_at": "2026-09-30T18:41:32Z"
+        },
+        {
+          "name": "Native result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:41:32Z",
+          "completed_at": "2026-09-30T18:41:33Z"
+        },
+        {
+          "name": "Pack native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:41:33Z",
+          "completed_at": "2026-09-30T18:41:45Z"
+        },
+        {
+          "name": "Retain native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:41:45Z",
+          "completed_at": "2026-09-30T18:41:47Z"
+        },
+        {
+          "name": "Record native packaging failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:41:47Z",
+          "completed_at": "2026-09-30T18:41:47Z"
+        },
+        {
+          "name": "Retain unpacked native logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-30T18:41:47Z",
+          "completed_at": "2026-09-30T18:41:47Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-09-30T18:41:47Z",
+          "completed_at": "2026-09-30T18:41:48Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-09-30T18:41:48Z",
+          "completed_at": "2026-09-30T18:41:51Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020322",
+      "labels": [
+        "macos-26"
+      ],
+      "runner_id": 1000161873,
+      "runner_name": "GitHub Actions 1000161873",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020328,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbw6A",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020328",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020328",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:52Z",
+      "completed_at": "2026-09-30T18:40:09Z",
+      "name": "Windows AArch64 native",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:54Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:33:54Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:34:12Z"
+        },
+        {
+          "name": "Initialize native observation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:34:12Z",
+          "completed_at": "2026-09-30T18:34:15Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:34:15Z",
+          "completed_at": "2026-09-30T18:34:32Z"
+        },
+        {
+          "name": "Execution-mode matrix",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:32Z",
+          "completed_at": "2026-09-30T18:34:32Z"
+        },
+        {
+          "name": "Execution-mode matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:34:32Z",
+          "completed_at": "2026-09-30T18:37:57Z"
+        },
+        {
+          "name": "Native MSVC reference differential",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:37:57Z",
+          "completed_at": "2026-09-30T18:39:55Z"
+        },
+        {
+          "name": "Native configuration differential matrix",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9,
+          "started_at": "2026-09-30T18:39:55Z",
+          "completed_at": "2026-09-30T18:39:55Z"
+        },
+        {
+          "name": "Native result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:39:55Z",
+          "completed_at": "2026-09-30T18:39:56Z"
+        },
+        {
+          "name": "Pack native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:39:56Z",
+          "completed_at": "2026-09-30T18:40:01Z"
+        },
+        {
+          "name": "Retain native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:40:01Z",
+          "completed_at": "2026-09-30T18:40:03Z"
+        },
+        {
+          "name": "Record native packaging failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:40:03Z",
+          "completed_at": "2026-09-30T18:40:03Z"
+        },
+        {
+          "name": "Retain unpacked native logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-30T18:40:03Z",
+          "completed_at": "2026-09-30T18:40:03Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-09-30T18:40:03Z",
+          "completed_at": "2026-09-30T18:40:06Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-09-30T18:40:06Z",
+          "completed_at": "2026-09-30T18:40:06Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020328",
+      "labels": [
+        "windows-11-arm"
+      ],
+      "runner_id": 1000161864,
+      "runner_name": "GitHub Actions 1000161864",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038020362,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZnsbxCg",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038020362",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038020362",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:33:49Z",
+      "started_at": "2026-09-30T18:33:52Z",
+      "completed_at": "2026-09-30T18:43:39Z",
+      "name": "Linux x86-64 native",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:33:53Z",
+          "completed_at": "2026-09-30T18:33:54Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:33:54Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:33:54Z",
+          "completed_at": "2026-09-30T18:33:57Z"
+        },
+        {
+          "name": "Initialize native observation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:33:57Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:33:57Z",
+          "completed_at": "2026-09-30T18:34:23Z"
+        },
+        {
+          "name": "Execution-mode matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:34:23Z",
+          "completed_at": "2026-09-30T18:36:09Z"
+        },
+        {
+          "name": "Execution-mode matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:36:09Z",
+          "completed_at": "2026-09-30T18:36:09Z"
+        },
+        {
+          "name": "Native MSVC reference differential",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-30T18:36:09Z",
+          "completed_at": "2026-09-30T18:36:09Z"
+        },
+        {
+          "name": "Native configuration differential matrix",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:36:09Z",
+          "completed_at": "2026-09-30T18:43:23Z"
+        },
+        {
+          "name": "Native result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:43:23Z",
+          "completed_at": "2026-09-30T18:43:23Z"
+        },
+        {
+          "name": "Pack native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:43:23Z",
+          "completed_at": "2026-09-30T18:43:33Z"
+        },
+        {
+          "name": "Retain native logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-09-30T18:43:33Z",
+          "completed_at": "2026-09-30T18:43:35Z"
+        },
+        {
+          "name": "Record native packaging failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:43:35Z",
+          "completed_at": "2026-09-30T18:43:35Z"
+        },
+        {
+          "name": "Retain unpacked native logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-30T18:43:35Z",
+          "completed_at": "2026-09-30T18:43:35Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-09-30T18:43:35Z",
+          "completed_at": "2026-09-30T18:43:35Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-09-30T18:43:35Z",
+          "completed_at": "2026-09-30T18:43:35Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038020362",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000161870,
+      "runner_name": "GitHub Actions 1000161870",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480316,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns31vA",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480316",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480316",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:06Z",
+      "completed_at": "2026-09-30T18:47:42Z",
+      "name": "macOS AArch64 checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:08Z",
+          "completed_at": "2026-09-30T18:35:09Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:09Z",
+          "completed_at": "2026-09-30T18:35:09Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:09Z",
+          "completed_at": "2026-09-30T18:35:13Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:13Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:17Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:17Z",
+          "completed_at": "2026-09-30T18:35:18Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:18Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:30Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:35:30Z",
+          "completed_at": "2026-09-30T18:47:33Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:47:33Z",
+          "completed_at": "2026-09-30T18:47:33Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:47:33Z",
+          "completed_at": "2026-09-30T18:47:33Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:47:33Z",
+          "completed_at": "2026-09-30T18:47:34Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:47:34Z",
+          "completed_at": "2026-09-30T18:47:34Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:47:34Z",
+          "completed_at": "2026-09-30T18:47:37Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:47:37Z",
+          "completed_at": "2026-09-30T18:47:37Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:47:37Z",
+          "completed_at": "2026-09-30T18:47:39Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480316",
+      "labels": [
+        "macos-26"
+      ],
+      "runner_id": 1000162047,
+      "runner_name": "GitHub Actions 1000162047",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480374,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns319g",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480374",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480374",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:04Z",
+      "completed_at": "2026-09-30T18:52:28Z",
+      "name": "Linux AArch64 checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:05Z",
+          "completed_at": "2026-09-30T18:35:06Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:06Z",
+          "completed_at": "2026-09-30T18:35:06Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:06Z",
+          "completed_at": "2026-09-30T18:35:07Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:07Z",
+          "completed_at": "2026-09-30T18:35:08Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:08Z",
+          "completed_at": "2026-09-30T18:35:08Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:08Z",
+          "completed_at": "2026-09-30T18:35:08Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:08Z",
+          "completed_at": "2026-09-30T18:35:17Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:17Z",
+          "completed_at": "2026-09-30T18:35:17Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:17Z",
+          "completed_at": "2026-09-30T18:35:18Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:18Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:34Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:35:34Z",
+          "completed_at": "2026-09-30T18:35:34Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:35:34Z",
+          "completed_at": "2026-09-30T18:52:23Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:52:23Z",
+          "completed_at": "2026-09-30T18:52:23Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:52:23Z",
+          "completed_at": "2026-09-30T18:52:23Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:52:23Z",
+          "completed_at": "2026-09-30T18:52:24Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:52:24Z",
+          "completed_at": "2026-09-30T18:52:24Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:52:24Z",
+          "completed_at": "2026-09-30T18:52:25Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:52:25Z",
+          "completed_at": "2026-09-30T18:52:25Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:52:25Z",
+          "completed_at": "2026-09-30T18:52:25Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480374",
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "runner_id": 1000162068,
+      "runner_name": "GitHub Actions 1000162068",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480384,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns32AA",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480384",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480384",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:03Z",
+      "completed_at": "2026-09-30T18:43:15Z",
+      "name": "Linux AArch64 release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:05Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:05Z",
+          "completed_at": "2026-09-30T18:35:06Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:06Z",
+          "completed_at": "2026-09-30T18:35:06Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:06Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:34Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:34Z",
+          "completed_at": "2026-09-30T18:35:45Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:45Z",
+          "completed_at": "2026-09-30T18:35:45Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:45Z",
+          "completed_at": "2026-09-30T18:35:45Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:45Z",
+          "completed_at": "2026-09-30T18:35:48Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:48Z",
+          "completed_at": "2026-09-30T18:35:48Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:48Z",
+          "completed_at": "2026-09-30T18:35:48Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:48Z",
+          "completed_at": "2026-09-30T18:35:48Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:48Z",
+          "completed_at": "2026-09-30T18:35:48Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:48Z",
+          "completed_at": "2026-09-30T18:36:04Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:36:04Z",
+          "completed_at": "2026-09-30T18:36:04Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:36:04Z",
+          "completed_at": "2026-09-30T18:43:11Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:43:11Z",
+          "completed_at": "2026-09-30T18:43:11Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:43:11Z",
+          "completed_at": "2026-09-30T18:43:11Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:43:11Z",
+          "completed_at": "2026-09-30T18:43:11Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:43:11Z",
+          "completed_at": "2026-09-30T18:43:11Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:43:11Z",
+          "completed_at": "2026-09-30T18:43:12Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:43:12Z",
+          "completed_at": "2026-09-30T18:43:13Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:43:13Z",
+          "completed_at": "2026-09-30T18:43:13Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480384",
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "runner_id": 1000162055,
+      "runner_name": "GitHub Actions 1000162055",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480439,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns32Nw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480439",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480439",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:00Z",
+      "completed_at": "2026-09-30T18:50:05Z",
+      "name": "Linux x86-64 checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:01Z",
+          "completed_at": "2026-09-30T18:35:02Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:02Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:28Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:28Z",
+          "completed_at": "2026-09-30T18:35:29Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:29Z",
+          "completed_at": "2026-09-30T18:35:29Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:29Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:32Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:32Z",
+          "completed_at": "2026-09-30T18:35:51Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:35:51Z",
+          "completed_at": "2026-09-30T18:35:51Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:35:51Z",
+          "completed_at": "2026-09-30T18:50:01Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:50:01Z",
+          "completed_at": "2026-09-30T18:50:01Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:50:01Z",
+          "completed_at": "2026-09-30T18:50:01Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:50:01Z",
+          "completed_at": "2026-09-30T18:50:01Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:50:01Z",
+          "completed_at": "2026-09-30T18:50:01Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:50:01Z",
+          "completed_at": "2026-09-30T18:50:03Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:50:03Z",
+          "completed_at": "2026-09-30T18:50:03Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:50:03Z",
+          "completed_at": "2026-09-30T18:50:03Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480439",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000162051,
+      "runner_name": "GitHub Actions 1000162051",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480459,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns32Sw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480459",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480459",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:01Z",
+      "completed_at": "2026-09-30T18:43:10Z",
+      "name": "Linux x86-64 release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:01Z",
+          "completed_at": "2026-09-30T18:35:02Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:02Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:37Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:37Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:35:53Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:53Z",
+          "completed_at": "2026-09-30T18:35:54Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:54Z",
+          "completed_at": "2026-09-30T18:35:54Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:54Z",
+          "completed_at": "2026-09-30T18:35:57Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:57Z",
+          "completed_at": "2026-09-30T18:35:57Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:57Z",
+          "completed_at": "2026-09-30T18:35:57Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:57Z",
+          "completed_at": "2026-09-30T18:35:57Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:57Z",
+          "completed_at": "2026-09-30T18:35:57Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:57Z",
+          "completed_at": "2026-09-30T18:36:16Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:36:16Z",
+          "completed_at": "2026-09-30T18:36:16Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:36:16Z",
+          "completed_at": "2026-09-30T18:43:05Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:43:05Z",
+          "completed_at": "2026-09-30T18:43:05Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:43:05Z",
+          "completed_at": "2026-09-30T18:43:05Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:43:05Z",
+          "completed_at": "2026-09-30T18:43:06Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:43:06Z",
+          "completed_at": "2026-09-30T18:43:06Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:43:06Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:43:07Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:43:07Z",
+          "completed_at": "2026-09-30T18:43:07Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480459",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000162052,
+      "runner_name": "GitHub Actions 1000162052",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480464,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns32UA",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480464",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480464",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:02Z",
+      "completed_at": "2026-09-30T18:37:21Z",
+      "name": "Windows AArch64 checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:04Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:04Z",
+          "completed_at": "2026-09-30T18:35:17Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:17Z",
+          "completed_at": "2026-09-30T18:35:19Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:19Z",
+          "completed_at": "2026-09-30T18:35:19Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:19Z",
+          "completed_at": "2026-09-30T18:35:19Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:19Z",
+          "completed_at": "2026-09-30T18:35:19Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:19Z",
+          "completed_at": "2026-09-30T18:35:23Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:23Z",
+          "completed_at": "2026-09-30T18:35:24Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:24Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:35:39Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:39Z",
+          "completed_at": "2026-09-30T18:36:00Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-09-30T18:36:00Z",
+          "completed_at": "2026-09-30T18:36:00Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 17,
+          "started_at": "2026-09-30T18:36:00Z",
+          "completed_at": "2026-09-30T18:36:00Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-09-30T18:36:00Z",
+          "completed_at": "2026-09-30T18:37:10Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:37:10Z",
+          "completed_at": "2026-09-30T18:37:10Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:37:10Z",
+          "completed_at": "2026-09-30T18:37:11Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:37:11Z",
+          "completed_at": "2026-09-30T18:37:11Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:37:11Z",
+          "completed_at": "2026-09-30T18:37:13Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:37:13Z",
+          "completed_at": "2026-09-30T18:37:16Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:37:16Z",
+          "completed_at": "2026-09-30T18:37:16Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480464",
+      "labels": [
+        "windows-11-arm"
+      ],
+      "runner_id": 1000162063,
+      "runner_name": "GitHub Actions 1000162063",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480475,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns32Ww",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480475",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480475",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:07Z",
+      "completed_at": "2026-09-30T18:43:58Z",
+      "name": "macOS AArch64 release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:08Z",
+          "completed_at": "2026-09-30T18:35:10Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:10Z",
+          "completed_at": "2026-09-30T18:35:10Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:10Z",
+          "completed_at": "2026-09-30T18:35:15Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:15Z",
+          "completed_at": "2026-09-30T18:35:15Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:15Z",
+          "completed_at": "2026-09-30T18:36:11Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:36:11Z",
+          "completed_at": "2026-09-30T18:36:18Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:36:18Z",
+          "completed_at": "2026-09-30T18:36:18Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:36:18Z",
+          "completed_at": "2026-09-30T18:36:21Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:36:21Z",
+          "completed_at": "2026-09-30T18:36:21Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:36:21Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:36:30Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-09-30T18:36:30Z",
+          "completed_at": "2026-09-30T18:43:46Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 18,
+          "started_at": "2026-09-30T18:43:46Z",
+          "completed_at": "2026-09-30T18:43:46Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:43:46Z",
+          "completed_at": "2026-09-30T18:43:47Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:43:47Z",
+          "completed_at": "2026-09-30T18:43:48Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:43:48Z",
+          "completed_at": "2026-09-30T18:43:48Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:43:48Z",
+          "completed_at": "2026-09-30T18:43:51Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:43:51Z",
+          "completed_at": "2026-09-30T18:43:52Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:43:52Z",
+          "completed_at": "2026-09-30T18:43:53Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480475",
+      "labels": [
+        "macos-26"
+      ],
+      "runner_id": 1000162048,
+      "runner_name": "GitHub Actions 1000162048",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480619,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns326w",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480619",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480619",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:02Z",
+      "completed_at": "2026-09-30T18:51:13Z",
+      "name": "Windows x86-64 checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:12Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:12Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:14Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:35:14Z",
+          "completed_at": "2026-09-30T18:35:16Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:35:16Z",
+          "completed_at": "2026-09-30T18:35:16Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:35:16Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:35:29Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-09-30T18:35:29Z",
+          "completed_at": "2026-09-30T18:35:29Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 17,
+          "started_at": "2026-09-30T18:35:29Z",
+          "completed_at": "2026-09-30T18:35:29Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-09-30T18:35:29Z",
+          "completed_at": "2026-09-30T18:51:04Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:51:04Z",
+          "completed_at": "2026-09-30T18:51:04Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:51:04Z",
+          "completed_at": "2026-09-30T18:51:07Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:51:07Z",
+          "completed_at": "2026-09-30T18:51:07Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:51:07Z",
+          "completed_at": "2026-09-30T18:51:09Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:51:09Z",
+          "completed_at": "2026-09-30T18:51:10Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:51:10Z",
+          "completed_at": "2026-09-30T18:51:10Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480619",
+      "labels": [
+        "windows-2025"
+      ],
+      "runner_id": 1000162058,
+      "runner_name": "GitHub Actions 1000162058",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480651,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns33Cw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480651",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480651",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:58Z",
+      "started_at": "2026-09-30T18:35:01Z",
+      "completed_at": "2026-09-30T18:46:16Z",
+      "name": "Windows x86-64 release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:11Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:11Z",
+          "completed_at": "2026-09-30T18:35:13Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:13Z",
+          "completed_at": "2026-09-30T18:36:29Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:36:29Z",
+          "completed_at": "2026-09-30T18:36:43Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:36:43Z",
+          "completed_at": "2026-09-30T18:36:43Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:36:43Z",
+          "completed_at": "2026-09-30T18:36:46Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:36:46Z",
+          "completed_at": "2026-09-30T18:36:46Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:36:46Z",
+          "completed_at": "2026-09-30T18:36:51Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:36:51Z",
+          "completed_at": "2026-09-30T18:36:51Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:36:51Z",
+          "completed_at": "2026-09-30T18:36:51Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:36:51Z",
+          "completed_at": "2026-09-30T18:36:51Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:36:51Z",
+          "completed_at": "2026-09-30T18:36:51Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:36:51Z",
+          "completed_at": "2026-09-30T18:37:04Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-09-30T18:37:04Z",
+          "completed_at": "2026-09-30T18:37:04Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 17,
+          "started_at": "2026-09-30T18:37:04Z",
+          "completed_at": "2026-09-30T18:37:04Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-09-30T18:37:04Z",
+          "completed_at": "2026-09-30T18:46:08Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:46:08Z",
+          "completed_at": "2026-09-30T18:46:09Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:46:09Z",
+          "completed_at": "2026-09-30T18:46:10Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:46:10Z",
+          "completed_at": "2026-09-30T18:46:10Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:46:10Z",
+          "completed_at": "2026-09-30T18:46:12Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:46:12Z",
+          "completed_at": "2026-09-30T18:46:13Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:46:13Z",
+          "completed_at": "2026-09-30T18:46:13Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480651",
+      "labels": [
+        "windows-2025"
+      ],
+      "runner_id": 1000162059,
+      "runner_name": "GitHub Actions 1000162059",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110038480978,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZns34Ug",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110038480978",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110038480978",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:34:59Z",
+      "started_at": "2026-09-30T18:35:01Z",
+      "completed_at": "2026-09-30T18:55:20Z",
+      "name": "Windows AArch64 release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:35:02Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Defer macOS runner lane for draft pull request",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 2,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:03Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:35:03Z",
+          "completed_at": "2026-09-30T18:35:18Z"
+        },
+        {
+          "name": "Resolve exact Zig cache policy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:35:18Z",
+          "completed_at": "2026-09-30T18:35:20Z"
+        },
+        {
+          "name": "Workflow tool regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:35:20Z",
+          "completed_at": "2026-09-30T18:40:16Z"
+        },
+        {
+          "name": "Bootstrap wrapper regression tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-09-30T18:40:16Z",
+          "completed_at": "2026-09-30T18:46:55Z"
+        },
+        {
+          "name": "Install mold",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-30T18:46:55Z",
+          "completed_at": "2026-09-30T18:46:55Z"
+        },
+        {
+          "name": "Restore Zig archive",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-09-30T18:46:55Z",
+          "completed_at": "2026-09-30T18:46:58Z"
+        },
+        {
+          "name": "Validate exact Zig cache restore",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-30T18:46:58Z",
+          "completed_at": "2026-09-30T18:46:59Z"
+        },
+        {
+          "name": "Install verified Zig",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:46:59Z",
+          "completed_at": "2026-09-30T18:47:18Z"
+        },
+        {
+          "name": "Save verified Zig archive",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-30T18:47:18Z",
+          "completed_at": "2026-09-30T18:47:18Z"
+        },
+        {
+          "name": "Prepare Zig cache publication proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-30T18:47:18Z",
+          "completed_at": "2026-09-30T18:47:18Z"
+        },
+        {
+          "name": "Restore published Zig archive for proof",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-30T18:47:18Z",
+          "completed_at": "2026-09-30T18:47:18Z"
+        },
+        {
+          "name": "Retain exact Zig cache evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-09-30T18:47:18Z",
+          "completed_at": "2026-09-30T18:47:18Z"
+        },
+        {
+          "name": "Install latest stable LLVM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-09-30T18:47:18Z",
+          "completed_at": "2026-09-30T18:47:43Z"
+        },
+        {
+          "name": "Application compilers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-09-30T18:47:43Z",
+          "completed_at": "2026-09-30T18:47:43Z"
+        },
+        {
+          "name": "Combination matrix (Linux, macOS)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 17,
+          "started_at": "2026-09-30T18:47:43Z",
+          "completed_at": "2026-09-30T18:47:43Z"
+        },
+        {
+          "name": "Combination matrix (Windows)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-09-30T18:47:43Z",
+          "completed_at": "2026-09-30T18:55:09Z"
+        },
+        {
+          "name": "Collect CMake configure evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-30T18:55:09Z",
+          "completed_at": "2026-09-30T18:55:09Z"
+        },
+        {
+          "name": "Desktop result and reproduction",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-30T18:55:09Z",
+          "completed_at": "2026-09-30T18:55:10Z"
+        },
+        {
+          "name": "Sanitize desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-30T18:55:10Z",
+          "completed_at": "2026-09-30T18:55:10Z"
+        },
+        {
+          "name": "Retain desktop logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-09-30T18:55:10Z",
+          "completed_at": "2026-09-30T18:55:12Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 44,
+          "started_at": "2026-09-30T18:55:12Z",
+          "completed_at": "2026-09-30T18:55:15Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 45,
+          "started_at": "2026-09-30T18:55:15Z",
+          "completed_at": "2026-09-30T18:55:15Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110038480978",
+      "labels": [
+        "windows-11-arm"
+      ],
+      "runner_id": 1000162064,
+      "runner_name": "GitHub Actions 1000162064",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 110046770351,
+      "run_id": 36759465982,
+      "workflow_name": "Buster CI",
+      "head_branch": "gh-readonly-queue/main/pr-1278-a947bc1d0e0050e516743b9a51253645dd805345",
+      "run_url": "https://api.github.com/repos/buster14a/buster/actions/runs/36759465982",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOP-FZBc8AAAAZn0x0rw",
+      "head_sha": "af6b2b100acfdd9c970e35e33d4468cd35883812",
+      "url": "https://api.github.com/repos/buster14a/buster/actions/jobs/110046770351",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/36759465982/job/110046770351",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-30T18:55:31Z",
+      "started_at": "2026-09-30T18:55:36Z",
+      "completed_at": "2026-09-30T18:55:47Z",
+      "name": "CI complete",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-30T18:55:36Z",
+          "completed_at": "2026-09-30T18:55:37Z"
+        },
+        {
+          "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-30T18:55:37Z",
+          "completed_at": "2026-09-30T18:55:42Z"
+        },
+        {
+          "name": "Verify every desktop partition exists",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-30T18:55:42Z",
+          "completed_at": "2026-09-30T18:55:43Z"
+        },
+        {
+          "name": "Retain desktop partition inventory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-30T18:55:43Z",
+          "completed_at": "2026-09-30T18:55:44Z"
+        },
+        {
+          "name": "Require every shard",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-30T18:55:44Z",
+          "completed_at": "2026-09-30T18:55:44Z"
+        },
+        {
+          "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-30T18:55:44Z",
+          "completed_at": "2026-09-30T18:55:44Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-30T18:55:44Z",
+          "completed_at": "2026-09-30T18:55:44Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/buster14a/buster/check-runs/110046770351",
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "runner_id": 1000162435,
+      "runner_name": "GitHub Actions 1000162435",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

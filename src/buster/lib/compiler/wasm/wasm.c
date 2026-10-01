@@ -3,11 +3,15 @@
 // wasm_emit owns direct WebAssembly output for Memory64 freestanding and
 // wasm32 WASI Preview 1. wasm64_emit keeps the original Memory64 API. Both
 // consume canonical IR; all temporary vectors and encoded bytes belong to
-// the caller supplied arena. wasm64_prepare_wasi_imports reserves command
-// imports before definitions, and wasm64_fe_emit_wasi_start writes the adapter.
+// the caller supplied arena. wasm64_collect_functions derives which symbols are
+// defined and which are called once per module, not once per symbol, before it
+// orders imports; wasm64_prepare_wasi_imports reserves command imports before
+// definitions, and wasm64_fe_emit_wasi_start writes the adapter.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
+// wasm64_build_name_payload names the data segments of section-attributed
+// data in the name section.
 // Scalar function pointers are i64 handles into a private i32-indexed table.
 // Collection assigns import/definition indices before relocation and emission;
 // table and element payloads follow that order, with a permanently null slot 0.
@@ -20,6 +24,7 @@ enum
 {
     WASM64_DATA_BASE = 0x10000,
     WASM64_STACK_SIZE = 0x10000,
+    WASM64_NAME_SUBSECTION_DATA_SEGMENT = 9,
 };
 
 #define WASM64_MAX_MEMORY_PAGES (UINT64_C(1) << 48)
@@ -122,6 +127,7 @@ struct Wasm64Context
     Wasm64Buffer element_payload;
     Wasm64Buffer code_payload;
     Wasm64Buffer data_payload;
+    Wasm64Buffer name_payload;
     Wasm64Signature* signatures;
     u32 signature_count;
     u32 signature_capacity;
@@ -700,35 +706,6 @@ static IrTypeId wasm64_function_type_from_symbol(Wasm64Context* context, IrSymbo
     return symbol_type && symbol_type->kind == IR_TYPE_FUNCTION ? symbol_type->id : IR_TYPE_ID_INVALID;
 }
 
-static bool wasm64_symbol_is_function_definition(Wasm64Context* context, IrSymbolId symbol_id, IrFunction** function_out, u32* module_out)
-{
-    if (context->program && symbol_id.value < context->program->symbols.count)
-    {
-        for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-        {
-            IrModule* module = context->modules + module_index;
-            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-            {
-                IrFunction* function = module->functions + function_index;
-                if (function->symbol.value == symbol_id.value && function->state == IR_FUNCTION_LOWERED)
-                {
-                    if (function_out)
-                    {
-                        *function_out = function;
-                    }
-                    if (module_out)
-                    {
-                        *module_out = module_index;
-                    }
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
 static String8 wasm64_import_module(String8 link_name)
 {
     u64 hash = 0;
@@ -1080,27 +1057,6 @@ static bool wasm64_prepare_wasi_imports(Wasm64Context* context)
     return valid && !wasm64_failed(context);
 }
 
-static bool wasm64_symbol_is_called(Wasm64Context* context, IrSymbolId symbol_id)
-{
-    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-    {
-        IrModule* module = context->modules + module_index;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-        {
-            IrFunction* function = module->functions + function_index;
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value == symbol_id.value)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 static bool wasm64_collect_functions(Wasm64Context* context)
 {
     u32 symbol_count = context->program->symbols.count;
@@ -1112,17 +1068,69 @@ static bool wasm64_collect_functions(Wasm64Context* context)
         context->symbol_seen[symbol_index] = 0;
     }
 
+    // Which symbols a lowered function defines, and which some CALL names,
+    // are facts of the whole module, not of one symbol. Derive them once:
+    // definitions from one pass over the functions, then calls from one pass
+    // over every row, taken only when some function symbol is neither defined
+    // nor an import or external (only those ask), instead of rescanning every
+    // function, and every row, for each symbol asked about.
+    enum
+    {
+        WASM64_SYMBOL_DEFINED = 1,
+        WASM64_SYMBOL_CALLED = 2,
+    };
+    u8* symbol_facts = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    memset(symbol_facts, 0, symbol_count ? symbol_count : 1);
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state == IR_FUNCTION_LOWERED && function->symbol.value < symbol_count)
+            {
+                symbol_facts[function->symbol.value] |= WASM64_SYMBOL_DEFINED;
+            }
+        }
+    }
+    bool calls_asked = false;
+    for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
+    {
+        IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        calls_asked |= symbol->kind == IR_SYMBOL_FUNCTION && !(facts & WASM64_SYMBOL_DEFINED) &&
+                       symbol->linkage != IR_LINKAGE_IMPORT && symbol->linkage != IR_LINKAGE_EXTERNAL;
+    }
+    for (u32 module_index = 0; calls_asked && module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value < symbol_count)
+                {
+                    symbol_facts[instruction->symbol.value] |= WASM64_SYMBOL_CALLED;
+                }
+            }
+            context->stats.call_fact_instruction_visits += function->instruction_count;
+        }
+    }
+
     // Imports occupy the first function indices. Walk symbol ids, which are
     // stable across module emission, and retain only symbols used by the IR or
     // explicitly declared as imports/externals.
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
         IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
-        if (symbol->kind != IR_SYMBOL_FUNCTION || wasm64_symbol_is_function_definition(context, symbol->id, 0, 0))
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        if (symbol->kind != IR_SYMBOL_FUNCTION || (facts & WASM64_SYMBOL_DEFINED))
         {
             continue;
         }
-        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || wasm64_symbol_is_called(context, symbol->id);
+        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || (facts & WASM64_SYMBOL_CALLED);
         if (!needed)
         {
             continue;
@@ -1377,7 +1385,7 @@ static bool wasm64_data_add_global(Wasm64Context* context, IrGlobal* global, u32
     }
     Wasm64DataRecord record = {.global = global, .symbol = symbol, .bytes = bytes, .size = size, .offset = context->data_cursor, .module_index = module_index,
                                .has_bytes = false};
-    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count))
+    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count || symbol->section_name.length))
     {
         record.has_bytes = true;
     }
@@ -2675,6 +2683,50 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_copy_bytes(Wasm64FunctionEmitter* emitter, u6
     wasm64_fe_u32(emitter, 0);
 }
 
+// ORs a bit-field's value into zeroed little-endian aggregate storage one byte
+// at a time, so packed spans and neighbouring fields need no wider access.
+BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_bit_field_insert(Wasm64FunctionEmitter* emitter, IrValueId aggregate, u64 offset, IrValueId operand,
+                                                         IrType* operand_type, IrField* field)
+{
+    Wasm64ValType valtype = 0;
+    wasm64_valtype_for_type(emitter->context, operand_type, false, &valtype);
+    u32 first = field->bit_offset / 8;
+    u32 end = field->bit_width ? (field->bit_offset + field->bit_width + 7) / 8 : first;
+    for (u32 byte = first; byte < end; byte += 1)
+    {
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_u8(emitter, 0x31); // i64.load8_u
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+        wasm64_fe_emit_value(emitter, operand);
+        if (valtype != WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+        }
+        if (field->bit_width < 64)
+        {
+            wasm64_fe_i64_const(emitter, (s64)((UINT64_C(1) << field->bit_width) - 1));
+            wasm64_fe_u8(emitter, 0x83); // i64.and
+        }
+        u32 bit = byte * 8;
+        if (bit > field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(bit - field->bit_offset));
+            wasm64_fe_u8(emitter, 0x88); // i64.shr_u
+        }
+        else if (bit < field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(field->bit_offset - bit));
+            wasm64_fe_u8(emitter, 0x86); // i64.shl
+        }
+        wasm64_fe_u8(emitter, 0x84); // i64.or
+        wasm64_fe_u8(emitter, 0x3c); // i64.store8
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
 {
     bool valid = wasm64_type_is_local_aggregate(type);
@@ -2697,13 +2749,15 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
         valid = operand_type && operand_type->layout.resolved &&
                 emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
                 (wasm64_type_is_scalar(operand_type) || wasm64_type_is_local_aggregate(operand_type));
+        IrField* bit_field = 0;
         if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
         {
             u64 field_index = instruction->immediates[index];
-            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            valid = field_index < type->field_count;
             if (valid)
             {
                 offset = type->fields[field_index].offset;
+                bit_field = type->fields[field_index].is_bit_field ? type->fields + field_index : 0;
             }
         }
         else if (valid)
@@ -2714,8 +2768,20 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
                 offset = (u64)index * operand_type->layout.size;
             }
         }
-        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
-        if (valid)
+        if (valid && bit_field)
+        {
+            valid = wasm64_type_is_integer(operand_type) && bit_field->bit_width <= 64 &&
+                    offset <= type->layout.size && (bit_field->bit_offset + bit_field->bit_width + 7) / 8 <= type->layout.size - offset;
+            if (valid)
+            {
+                wasm64_fe_emit_bit_field_insert(emitter, instruction->result, offset, operand, operand_type, bit_field);
+            }
+        }
+        else if (valid)
+        {
+            valid = offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        }
+        if (valid && !bit_field)
         {
             wasm64_fe_emit_value(emitter, instruction->result);
             wasm64_fe_emit_address_add(emitter, offset);
@@ -3868,6 +3934,48 @@ static bool wasm64_build_data_payload(Wasm64Context* context)
     return true;
 }
 
+// A section attribute on a data definition names its data segment in the
+// name section's data-segment subsection, the placement Clang records for
+// Wasm. Segment indices follow wasm64_build_data_payload's order.
+static bool wasm64_build_name_payload(Wasm64Context* context)
+{
+    u32 named_count = 0;
+    for (u32 index = 0; index < context->data_count; index += 1)
+    {
+        Wasm64DataRecord* record = context->data_records + index;
+        if (record->has_bytes && record->symbol->section_name.length)
+        {
+            named_count += 1;
+        }
+    }
+    if (named_count)
+    {
+        Wasm64Buffer subsection = {0};
+        wasm64_buffer_init(&subsection, context->arena);
+        wasm64_buffer_u32_leb(&subsection, named_count);
+        u32 segment_index = 0;
+        for (u32 index = 0; index < context->data_count; index += 1)
+        {
+            Wasm64DataRecord* record = context->data_records + index;
+            if (!record->has_bytes)
+            {
+                continue;
+            }
+            if (record->symbol->section_name.length)
+            {
+                wasm64_buffer_u32_leb(&subsection, segment_index);
+                wasm64_buffer_string(&subsection, record->symbol->section_name);
+            }
+            segment_index += 1;
+        }
+        wasm64_buffer_string(&context->name_payload, wasm64_s8("name"));
+        wasm64_buffer_u8(&context->name_payload, WASM64_NAME_SUBSECTION_DATA_SEGMENT);
+        wasm64_buffer_u32_leb(&context->name_payload, (u32)subsection.length);
+        wasm64_buffer_bytes(&context->name_payload, subsection.data, subsection.length);
+    }
+    return true;
+}
+
 static void wasm64_append_section(Wasm64Buffer* output, u8 id, Wasm64Buffer* payload)
 {
     if (!payload->length)
@@ -3901,6 +4009,7 @@ static bool wasm64_build_module(Wasm64Context* context, ByteSlice* output)
     wasm64_append_section(&result, 9, &context->element_payload);
     wasm64_append_section(&result, 10, &context->code_payload);
     wasm64_append_section(&result, 11, &context->data_payload);
+    wasm64_append_section(&result, 0, &context->name_payload);
     *output = (ByteSlice){.pointer = result.data, .length = result.length};
     context->stats.binary_bytes = result.length;
     return true;
@@ -3943,6 +4052,7 @@ static void wasm64_context_initialize(Wasm64Context* context, Arena* arena, IrPr
     wasm64_buffer_init(&context->element_payload, arena);
     wasm64_buffer_init(&context->code_payload, arena);
     wasm64_buffer_init(&context->data_payload, arena);
+    wasm64_buffer_init(&context->name_payload, arena);
 }
 
 static bool wasm64_validate_inputs(Wasm64Context* context)
@@ -3991,7 +4101,7 @@ static bool wasm64_validate_inputs(Wasm64Context* context)
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
-        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, false);
+        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, context->options.assume_validated);
         if (validation.error != IR_VALIDATION_NONE)
         {
             IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;
@@ -4035,7 +4145,7 @@ static WasmArtifact wasm_emit_internal(Arena* arena, IrProgram* program, IrModul
                 (!wasm64_is_memory64(&context) || wasm64_build_table_payload(&context)) &&
                 wasm64_build_memory_payload(&context) && wasm64_build_global_payload(&context) &&
                 wasm64_build_export_payload(&context) && (!wasm64_is_memory64(&context) || wasm64_build_element_payload(&context)) &&
-                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context);
+                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context) && wasm64_build_name_payload(&context);
     }
     if (valid && !wasm64_failed(&context))
     {

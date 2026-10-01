@@ -116,7 +116,7 @@ accepted option settings are exercised.
 | `macos-x64`, `macos-arm64` | Native when host-compatible. |
 | `llvm-native` | Buster emits bitcode; host Clang consumes it and the resulting executable runs. |
 | `wasm64` | Node's WebAssembly engine with Memory64 enabled. |
-| `ebpf` | The existing bounded test-only eBPF interpreter, not the kernel verifier/JIT. |
+| `ebpf` | The bounded test-only eBPF interpreter, plus the Linux verifier/JIT when this host may load BPF programs. |
 
 Foreign native rows still compile and link when execution is unavailable. They
 are reported as `unexecuted`; no disassembly check is called a behavior check.
@@ -129,11 +129,18 @@ generation or reduction. This supports both engines where Memory64 is enabled
 by default and older engines that require the flag.
 
 The eBPF interpreter supports the generated subset and has bounded instruction
-execution and checked stack accesses. It does not implement local calls: only
+execution and checked stack accesses. It applies the verifier's structural
+rules (every instruction reachable, in-range jumps) and width-aligned stack
+accesses, and it refuses relocations, objects with more than one function and
+encodings it does not model. It does not implement local calls: only
 mask 1024 is excluded for that row, with an explicit
-`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. All previously supported relations
-and aggregate materialization still run. This is a coverage exclusion, not an
-execution pass for the call relation. This change adds multiplication to that
+`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. When `BPF_PROG_LOAD` of a probe
+program succeeds (root or `CAP_BPF` on Linux 5.14 or later), every eBPF input
+is also loaded into the kernel verifier and executed through its JIT, and the
+result must match. `METAMORPHIC_EBPF_KERNEL available=0|1` records which case
+applied; VM execution alone does not certify kernel acceptance. All previously
+supported relations and aggregate materialization still run. This is a coverage
+exclusion, not an execution pass for the call relation. This change adds multiplication to that
 existing interpreter, with separate 32- and 64-bit multiplication cases in its
 existing compiler tests. An interpreter refusal is reported as a runner failure,
 not incorrectly classified as a successful guest result or a proven compiler bug.
@@ -141,7 +148,9 @@ not incorrectly classified as a successful guest result or a proven compiler bug
 The local aggregate-copy relation is lowered by both nonnative backends.
 Wasm64 uses private shadow-stack snapshots and bulk memory operations; eBPF
 allocates each snapshot within its existing 512-byte frame and copies exact
-bytes without over-reading packed objects. Neither representation aliases a
+bytes without over-reading packed objects. Scalar packed-member loads and
+stores use the widest pieces that the member's frame offset aligns, because
+the verifier rejects misaligned stack accesses. Neither representation aliases a
 mutable source object. The canonical IR and aggregate function ABI contracts
 are unchanged. Aggregate block parameters and bit-field aggregate construction
 remain explicit unsupported cases; eBPF snapshot alignment is at most eight
@@ -151,8 +160,10 @@ The same five repository-relative C cases cover plain, packed, nested and union
 copies plus independent mutations. The ordinary driver suite checks both
 frontend forms through Node for Wasm64; the existing codegen test module checks
 eBPF output in its bounded VM, including all input pairs at the signed boundary
-and wraparound. Negative cases retain eBPF aggregate ABI, alignment and frame
-limits. VM execution does not certify kernel verifier/JIT acceptance.
+and wraparound, and in the kernel verifier/JIT when available. Each eBPF test
+reports whether the kernel took part. Negative cases retain eBPF aggregate ABI,
+alignment and frame limits. VM execution does not certify kernel verifier/JIT
+acceptance.
 
 Wasm32 is not supported by the current driver. The external SPIR-V, NVPTX,
 AMDGCN, Metal and DXIL pipelines accept different source-language/toolchain

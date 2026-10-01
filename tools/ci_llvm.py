@@ -119,9 +119,18 @@ def _request(url, token, accept):
 
 
 def fetch_releases(token):
-    with urllib.request.urlopen(_request(RELEASES_URL, token, "application/vnd.github+json"),
-                                timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-        return json.load(response)
+    # The listing is fetched before any download, so a stalled API read would otherwise fail the whole lane.
+    last_error = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(_request(RELEASES_URL, token, "application/vnd.github+json"),
+                                        timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                return json.load(response)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            last_error = error
+            print(f"LLVM release listing attempt {attempt} failed: {error}", file=sys.stderr)
+            time.sleep(attempt * 5)
+    raise RuntimeError(f"could not list LLVM releases: {last_error}")
 
 
 def download(asset, destination, token):

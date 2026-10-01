@@ -81,8 +81,10 @@ nested scope work and nested reporting; do not sum nested intervals or infer CPU
 cost. Module-scope intervals have slightly different boundaries from the existing
 `TEST_MODULE_TIMING` rows and must not replace that series. `status=completed`
 means only that the scope ended, **not** that assertions passed. A crash/timeout
-may have no ending row. Existing assertion/failure totals and process outcomes
-remain authoritative.
+may have no ending row. Its `TEST_FIXTURE_START_V1` record, and the watchdog's
+`TEST_FIXTURE_TIMEOUT_V1` after a hang, still name the scope; see
+[the hang watchdog](agents/testing.md#fixture-start-records-and-the-hang-watchdog).
+Existing assertion/failure totals and process outcomes remain authoritative.
 
 ## Reading a capture and remaining acceptance work
 
@@ -114,6 +116,14 @@ listed operations includes unsampled setup, checks, cleanup, and the observer
 itself, so do not label it all as removable setup. Intervals are wall times
 under matrix contention, never CPU usage. Compare identical configurations and
 correlate with the retained Windows process events before choosing a repair.
+
+`native_frame_vectors` compiles its cells on a gang of `BUSTER_TEST_JOBS`
+lanes (`compiler_driver_test_frame_vector_lane`) and then checks, links and
+runs them serially in matrix order. Its `buster_compile` and `positive_compile`
+rows therefore sum per-cell lane wall and can exceed `body`; the
+`compile_gang` row is the gang's own wall interval, with `calls` equal to the
+lane count. The gang is the fixture's only worker pool: the driver declines to
+start a nested one inside a caller's gang (`compiler_driver_unit_worker_limit`).
 
 For a subsequent optimization, retain at least three successful comparable full
 uninstrumented runs per arm, matched runner/image and configuration identities,

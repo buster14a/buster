@@ -106,6 +106,8 @@ struct MetaContext
     bool full;
     bool frontend_ssa;
     bool node_memory64_flag;
+    // The Linux verifier and JIT also execute eBPF artifacts when available.
+    bool ebpf_kernel;
     String8 target_filter;
 };
 
@@ -511,12 +513,20 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, String8 direc
                     bool valid = true;
                     bool interpreted = true;
                     u32 failing_input = 0;
-                    u64 observed = 0, expected = 0;
+                    u64 observed = 0, expected = 0, kernel_observed = 0;
+                    String8 kernel_reason = context->ebpf_kernel ? S8("not-run") : S8("unavailable");
                     for (u32 input = 0; valid && input < spec.input_count; input += 1)
                     {
                         interpreted = codegen_test_ebpf_execute(object, meta_inputs[input][0], meta_inputs[input][1], &observed);
                         expected = meta_expected(spec, meta_inputs[input][0], meta_inputs[input][1]);
                         valid = interpreted && observed == expected;
+                        if (valid && context->ebpf_kernel)
+                        {
+                            // VM execution does not certify kernel acceptance (#1305).
+                            CodegenTestEbpfKernel kernel = codegen_test_ebpf_kernel_run(arena, codegen_test_ebpf_code(object), meta_inputs[input][0],
+                                                                                        meta_inputs[input][1], &kernel_observed, &kernel_reason);
+                            valid = kernel == CODEGEN_TEST_EBPF_KERNEL_EXECUTED && kernel_observed == expected;
+                        }
                         if (!valid)
                         {
                             failing_input = input + 1;
@@ -526,8 +536,8 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, String8 direc
                                            .wait = {.result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED, .platform_status = failing_input}};
                     if (!valid)
                     {
-                        String8 message = string_format(arena, S8("eBPF input={u32} interpreted={u32} actual={u64} expected={u64}\n"),
-                                                         failing_input, (u32)interpreted, observed, expected);
+                        String8 message = string_format(arena, S8("eBPF input={u32} interpreted={u32} actual={u64} expected={u64} kernel={S8} kernel_actual={u64}\n"),
+                                                         failing_input, (u32)interpreted, observed, expected, kernel_reason, kernel_observed);
                         result.wait.streams[STANDARD_STREAM_ERROR] = BUSTER_SLICE_TO_BYTE_SLICE(message);
                     }
                 }
@@ -873,6 +883,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaContext meta_context(Arena* arena, St
         result.node = executable_resolve_in_path(arena, S8("node"));
         result.qemu = executable_resolve_in_path(arena, S8("qemu-aarch64"));
         result.wine = executable_resolve_in_path(arena, S8("wine"));
+        result.ebpf_kernel = codegen_test_ebpf_oracle(arena).kernel_available;
     }
     return result;
 }
@@ -1077,6 +1088,10 @@ ProcessResult metamorphic_campaign(Arena* arena)
             }
             else if (meta_prepare_node(&context))
             {
+                if (!context.target_filter.length || string_equal(context.target_filter, S8("ebpf")))
+                {
+                    string_print(S8("METAMORPHIC_EBPF_KERNEL available={u32}\n"), (u32)context.ebpf_kernel);
+                }
                 MetaSummary summary = meta_run(&context, seed, cases, mask);
                 string_print(S8("METAMORPHIC_SUMMARY seed={u32} cases={u32} pairs={u32} executed={u32} unexecuted={u32} failures={u32} unique={u32} reducer_replays={u32} frontend_ssa={u32} output={S8}\n"),
                              seed, cases, summary.pairs, summary.executed, summary.unexecuted, summary.failures, summary.unique_failures, summary.reductions, frontend_ssa, directory);

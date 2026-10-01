@@ -12,11 +12,25 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/work_ledger.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+// Diagnostic rows reserved before any diagnostic exists, by the stage that
+// reserves them (LEX, PREPROCESS, SEMANTIC, EVALUATION, LOWERING), for the
+// allocation diagnostic build's census; normal builds evaluate nothing.
+#define C_DIAGNOSTIC_RESERVATION_CENSUS(stage, rows)                                                 \
+    do                                                                                               \
+    {                                                                                                \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_RESERVATIONS, 1);                                   \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_ROWS_RESERVED, (rows));                             \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_BYTES_RESERVED, (u64)(rows) * sizeof(CDiagnostic)); \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_##stage##_ROWS, (rows));                            \
+    } while (0)
 
 #if BUSTER_SIMD_512 && !defined(__BUSTER__)
 #define BUSTER_C_LEX_COMPACT 1
@@ -146,6 +160,17 @@ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
+// GNU `_Alignof(object)` answers the object's alignment, which its alignment
+// records raise; a record may itself spell `_Alignof(object)`, so each layout
+// engine counts the nested evaluations and refuses past this many rather than
+// chain -- or cycle, for `extern int g; _Alignas(_Alignof(g)) int g;` --
+// through its constant evaluator.
+#define C_ALIGNOF_OBJECT_DEPTH_LIMIT 4
+// Steps through the alignment runs that raise `_Alignof(entity)` at
+// `token_index`: the entity's own, then those of each object declaration of
+// the entity that ends before the operand. `*cursor` starts at zero.
+BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
+                                               u32* count_out);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -184,11 +209,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CP
            c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                  u32 start, u32 end, CIrDecodedString* decoded_out);
+                                                                  u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
 // The same answer without the bytes, for the callers that only size or type
 // the literal; see the definition.
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                 u32 start, u32 end, CIrDecodedString* decoded_out);
+                                                                 u32 start, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
                                                    u32* invalid_specifier);
@@ -293,7 +318,7 @@ BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
 #define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
 #endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
-                                             CParseResult checkpoint, u32 mutation_mark);
+                                             CParseResult const* checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
 BUSTER_C_EXTERN bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end);
 BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess,
@@ -312,6 +337,127 @@ BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u3
 #define C_DEFINITION_INDEX_COUNT(index, field, amount) ((void)0)
 #endif
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
+
+// The syntax pass converts every preprocessing number of the final stream once
+// (c_number_facts_build) and publishes the answers beside the token rows, so
+// the semantic typing, constant folding and lowering sites that used to call
+// c_conditional_number and c_semantic_integer_literal_kind on the same
+// spelling again read a byte and a word instead. The index is a rank over the
+// stream: one bit per token in 64-token windows marks the numbers, and the
+// window's prefix count plus a popcount below the lane gives the number's
+// ordinal into `values` and `flags`. Everything is immutable after the syntax
+// pass and lives in its arena for the translation unit. A fact answers only for
+// `tokens`, the stream it was built from; any other token array (synthesized
+// evaluation tokens, hand-built results) takes the conversion itself.
+enum
+{
+    // CTypeKind of c_semantic_integer_literal_kind(target, 0, spelling, value)
+    // for `target`, or C_TYPE_INVALID when there is none.
+    C_NUMBER_FACT_KIND_MASK = 0x3f,
+    // c_conditional_number accepted the spelling; `values` holds its value.
+    C_NUMBER_FACT_CONVERTED = 0x40,
+    // c_number_is_float classified the spelling as floating.
+    C_NUMBER_FACT_FLOATING = 0x80,
+};
+BUSTER_CT_CHECK((u32)C_TYPE_COUNT <= (u32)C_NUMBER_FACT_KIND_MASK + 1);
+
+struct CNumberFacts
+{
+    CToken const* tokens;
+    u64* number_masks;
+    u32* number_ranks;
+    u64* values;
+    u8* flags;
+    // The data model the cached kinds were typed for. Integer literal typing
+    // reads the target only through target_data_layout, which depends on the
+    // architecture and operating system alone (c_number_fact_kind).
+    CpuArch cpu_arch;
+    OperatingSystem os;
+    u32 token_count;
+    u32 number_count;
+};
+
+typedef struct CNumberFact CNumberFact;
+struct CNumberFact
+{
+    u64 value;
+    u8 flags;
+    bool present;
+};
+
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE CNumberFact c_number_fact(CNumberFacts const* facts, CToken const* tokens, u64 token_index)
+{
+    CNumberFact result = {0};
+    if (facts && facts->tokens == tokens && token_index < facts->token_count)
+    {
+        u64 lane = token_index & 63;
+        Mask64 window = facts->number_masks[token_index >> 6];
+        if ((window >> lane) & 1)
+        {
+            Mask64 below = window & mask64_prefix(lane);
+            u32 ordinal = facts->number_ranks[token_index >> 6] + mask64_count(below);
+            result = (CNumberFact){
+                .value = facts->values[ordinal],
+                .flags = facts->flags[ordinal],
+                .present = true,
+            };
+        }
+    }
+    return result;
+}
+
+// The literal's type kind for `target` from a present fact: true, with the
+// cached kind (C_TYPE_INVALID when the spelling did not convert or fits no
+// candidate), when the facts were typed for the same data model.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_number_fact_kind(CNumberFacts const* facts, CNumberFact fact, Target target, CTypeKind* kind_out)
+{
+    bool result = fact.present && facts->cpu_arch == target.cpu_arch && facts->os == target.os;
+    if (result)
+    {
+        *kind_out = (fact.flags & C_NUMBER_FACT_CONVERTED) ? (CTypeKind)(fact.flags & C_NUMBER_FACT_KIND_MASK) : C_TYPE_INVALID;
+    }
+    return result;
+}
+
+BUSTER_C_EXTERN CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess);
+// c_conditional_number of the token at `token_index`: its fact when `facts`
+// answer for `tokens`, the conversion itself otherwise. `value_out` is written
+// only on success, as c_conditional_number writes it.
+BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index,
+                                         u64* value_out);
+
+// The decoded bytes of narrow string-literal fragments, decoded once per
+// final-stream token. Semantic analysis records a fragment the first time a
+// consumer sizes or types it (c_ir_count_string_literal_range_for_target), so
+// every later consumer that sizes, types or reads the same literal -- the
+// remaining semantic queries and every lowering decode -- takes the recorded
+// bytes instead of walking the spelling again. Keys are token indices of
+// `tokens`, the one stream the memo answers for; a query against any other
+// token array bypasses it. The header, its slots and every recorded buffer
+// live in the parse arena, which is never rewound and outlives lowering, so
+// speculative rollback's wholesale CParseResult restore keeps a valid pointer
+// and lowering reads buffers that stay valid for the translation unit. Only
+// semantic analysis records; lowering reads, and every reader copies the
+// bytes it keeps, so a recorded buffer is never written after it is made.
+typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
+struct CStringLiteralMemoSlot
+{
+    u8* bytes;
+    // Decoded byte count, which is the element count of a narrow fragment.
+    u32 length;
+    // token_index + 1; zero marks an empty slot.
+    u32 key;
+};
+
+struct CStringLiteralMemo
+{
+    Arena* arena;
+    CToken const* tokens;
+    CStringLiteralMemoSlot* slots;
+    u32 capacity;
+    u32 count;
+};
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 
@@ -432,6 +578,7 @@ BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
+BUSTER_C_EXTERN CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,
                                                                      IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
@@ -649,6 +796,42 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
     return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
 }
 
+// The C frontend only exposes the canonical x87 spelling on a target whose
+// selected ABI actually carries it.  The target layout is the frontend's
+// source of truth for the spelling; the shared ABI classifier is the source of
+// truth for how a value with that spelling crosses a function boundary.
+// x86_64 Android shares the ELF System V convention, but target_data_layout
+// gives it sixteen-byte IEEE binary128 long double, so the exact
+// representation checks below keep it off this x87 path.  Lowering and the
+// parser's lowering-constraint mirror ask this same predicate.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
+// The supported C long-double ABIs carry IEEE binary128 directly in one
+// sixteen-byte vector-file part: AAPCS64 in a Q register and Android System V
+// x86-64 in an XMM register. Keep this gate as narrow as the exact target data
+// layout so ordinary System V x87 long double remains on its separate path.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    bool direct_register_abi =
+        (target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_AAPCS64) ||
+        (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+         convention == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    return direct_register_abi && layout.endianness == TARGET_ENDIAN_LITTLE &&
+           layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];
 
@@ -771,6 +954,31 @@ typedef enum CConditionalOperator
 BUSTER_C_EXTERN u32 c_conditional_precedence(CConditionalOperator operation);
 BUSTER_C_EXTERN bool c_conditional_is_unary(CConditionalOperator operation);
 BUSTER_C_EXTERN bool c_conditional_operator(CToken token, bool unary, CConditionalOperator* operation);
+// C integer operators over the one integer semantics (ir_integer_*). The
+// operation table maps a C operator and the signedness of its operation type
+// to the canonical operation; runtime lowering (c_ir_operation) and the three
+// constant evaluators -- preprocessing conditionals (c_conditional_apply), the
+// parser's typed evaluator (c_parse_constant_binary) and lowering's constant
+// evaluator (c_ir_constant_apply_binary) -- all select through it, so a folded
+// constant and the executed instruction are the same operation.
+BUSTER_C_EXTERN bool c_integer_operation(CConditionalOperator operation, bool is_signed, IrUnaryOperation* unary_out, IrBinaryOperation* binary_out);
+// One C integer operator on constants already converted as C requires: both
+// operands to the operation type (`width`, `is_signed`), except that a shift
+// count keeps its own promoted width. `constant` is C's answer to whether the
+// expression has a value: false for a division by zero, a shift count outside
+// [0, width) and a non-integer operator. Signed overflow keeps the wrapped
+// bits GCC and Clang fold to; `faults` retains it for a caller that diagnoses.
+typedef struct CIntegerConstantResult CIntegerConstantResult;
+struct CIntegerConstantResult
+{
+    IrInteger bits;
+    u8 faults;
+    bool constant;
+    bool comparison;
+};
+BUSTER_C_EXTERN CIntegerConstantResult c_integer_constant_binary(CConditionalOperator operation, IrInteger left, IrInteger right, u32 width,
+                                                                 bool is_signed, u32 count_width);
+BUSTER_C_EXTERN CIntegerConstantResult c_integer_constant_unary(CConditionalOperator operation, IrInteger operand, u32 width);
 typedef enum CIrStringEncoding
 {
     C_IR_STRING_ENCODING_ORDINARY,
@@ -857,8 +1065,13 @@ struct CParseExpressionTypeTask
 struct CTypeParseFrame
 {
     CParseResult* result;
-    CParseResult checkpoint;
-    CPreprocessResult preprocess;
+    // The token stream of the root query that pushed this frame, shared by
+    // every frame of one machine run: the root outlives the run, which pops
+    // its frames before returning or failing, so no frame holds a copy. A
+    // frame that saves a rollback snapshot keeps it in the machine's
+    // frame_checkpoints row of the same slot, not in the frame, because few
+    // frames ever take one and every push copies the whole row.
+    CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
     CType qualifiers;
@@ -981,11 +1194,24 @@ struct CTypeParseMachine
     u32 expression_query_start;
     u32 expression_query_end;
     CTypeParseFrame* frames;
+    // One rollback snapshot per frame slot, written only by the frame kinds
+    // that can abandon a partial parse (aggregate segments and typeof/_Atomic
+    // operands) and read back only by that frame; see
+    // c_type_parse_frame_checkpoint.
+    CParseResult* frame_checkpoints;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
     CTypeId* incomplete_array_chain;
     u32 incomplete_array_chain_capacity;
     Arena* scratch_arena;
+    // Query-local state -- the layout solve's type-table-sized arrays and its
+    // bound evaluation -- is allocated here above a mark and released when the
+    // query returns. Null keeps it in the arena the query was handed.
+    Arena* phase_arena;
+    // What those releases returned, exactly; published as
+    // CParseResult.phase_released_bytes/phase_releases when analysis returns.
+    u64 phase_released_bytes;
+    u64 phase_releases;
     CTypeLayoutCache layout_cache;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
@@ -1010,6 +1236,11 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool enum_constant_members_active;
+    // How many GNU `_Alignof(object)` evaluations of an object's alignment
+    // records enclose this one, and whether one of them hit
+    // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
+    u8 alignof_object_depth;
+    bool alignof_object_refused;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

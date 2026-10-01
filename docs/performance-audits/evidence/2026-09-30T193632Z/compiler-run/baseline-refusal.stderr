@@ -1,0 +1,1 @@
+cc: error: src/buster/lib/x86_64.c:38:5: C code generation refused: kind=codegen.unsupported-instruction target=x86_64-linux allocator=fast function='xgetbv' opcode=inline-assembly operation=not-applicable

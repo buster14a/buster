@@ -1,0 +1,115 @@
+{
+ "schema": "buster-first-touch-census-v1",
+ "thp_mode": "madvise",
+ "cwd": "/home/user/buster",
+ "arguments": [
+  "cc",
+  "-Isrc",
+  "-Ibuild/generated",
+  "-DBUSTER_UNITY_BUILD=1",
+  "-DBUSTER_INCLUDE_TESTS=0",
+  "-g",
+  "-c",
+  "src/buster/apps/ide/ide.c"
+ ],
+ "identical_objects": true,
+ "summary": {
+  "baseline": {
+   "compiler": "/tmp/claude-0/-home-user-buster/d117f688-1ac4-5d3c-bfcc-eb1a4fa4a29f/scratchpad/base/ide-base",
+   "compiler_sha256": "5f769d8a3e8cf5b2a652c26d92ec85f14b9237460bb1b1282738647a060f427c",
+   "runs": 2,
+   "all_exit_zero": true,
+   "object_sha256": [
+    "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e"
+   ],
+   "minor_faults": [
+    282760,
+    282764
+   ],
+   "maxrss_kib": [
+    1123640,
+    1123664
+   ],
+   "thp_fault_alloc_delta": [
+    0,
+    0
+   ]
+  },
+  "candidate": {
+   "compiler": "/tmp/claude-0/-home-user-buster/d117f688-1ac4-5d3c-bfcc-eb1a4fa4a29f/scratchpad/streams/ide-streams",
+   "compiler_sha256": "f10ba5fc30eb76d29bf24e81b0af811479a3e807c03ad20487a1b33411a0118c",
+   "runs": 2,
+   "all_exit_zero": true,
+   "object_sha256": [
+    "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e"
+   ],
+   "minor_faults": [
+    263838,
+    263840
+   ],
+   "maxrss_kib": [
+    1047844,
+    1048016
+   ],
+   "thp_fault_alloc_delta": [
+    0,
+    0
+   ]
+  }
+ },
+ "records": [
+  {
+   "label": "baseline",
+   "index": 0,
+   "exit_status": 0,
+   "maxrss_kib": 1123664,
+   "minor_faults": 282760,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 0,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 4.6042,
+   "diagnostic_user_s": 3.7716,
+   "diagnostic_system_s": 0.7536
+  },
+  {
+   "label": "candidate",
+   "index": 0,
+   "exit_status": 0,
+   "maxrss_kib": 1047844,
+   "minor_faults": 263840,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 0,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 4.4711,
+   "diagnostic_user_s": 3.5902,
+   "diagnostic_system_s": 0.8159
+  },
+  {
+   "label": "candidate",
+   "index": 1,
+   "exit_status": 0,
+   "maxrss_kib": 1048016,
+   "minor_faults": 263838,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 0,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 4.7526,
+   "diagnostic_user_s": 3.7584,
+   "diagnostic_system_s": 0.8487
+  },
+  {
+   "label": "baseline",
+   "index": 1,
+   "exit_status": 0,
+   "maxrss_kib": 1123640,
+   "minor_faults": 282764,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 0,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 4.6889,
+   "diagnostic_user_s": 3.7965,
+   "diagnostic_system_s": 0.8197
+  }
+ ],
+ "note": "Deterministic page-work census; wall/user/system fields are diagnostics, not acceptance timing."
+}

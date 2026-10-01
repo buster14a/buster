@@ -236,6 +236,55 @@ def classify_candidate(repo: Path, base: str, head: str) -> Classification:
     return classify_paths(changed_paths(repo, base_commit, head_commit))
 
 
+def bound_sources(repo: Path, base: str) -> frozenset[str]:
+    result = _git(repo, "show", base + ":docs/native-retirement-repository-sources-v1.json")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise IntegrationError("trusted base has malformed repository-source snapshot") from error
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise IntegrationError("trusted base repository-source snapshot has no records")
+    sources: set[str] = set()
+    for record in records:
+        source = record.get("source") if isinstance(record, dict) else None
+        if not isinstance(source, str):
+            raise IntegrationError("trusted base repository-source snapshot has a malformed record")
+        sources.add(_canonical_path(source))
+    if not sources:
+        raise IntegrationError("trusted base repository-source snapshot is unexpectedly empty")
+    return frozenset(sources)
+
+
+def classification_is_bound(classification: Classification, changed: tuple[str, ...],
+                            sources: frozenset[str]) -> bool:
+    """True when the candidate changes admitted sources or trusted state."""
+    source_change = any(path in sources for path in changed)
+    return source_change or classification.kind in ("bootstrap", "policy")
+
+
+def require_trusted_integration(repo: Path, base: str, head: str) -> Classification:
+    """Refuse candidates whose integration head merge admission would reject.
+
+    The gate admits a writer head only for a bound candidate or a catch-up
+    (an empty candidate, #1893). Publishing any other head changes no
+    generated state and turns the required admission check red (#1828).
+    """
+    base_commit = _commit(repo, base)
+    head_commit = _commit(repo, head)
+    changed = changed_paths(repo, base_commit, head_commit)
+    classification = classify_paths(changed)
+    enforce_classification(classification, None, True)
+    if changed and not classification_is_bound(classification, changed,
+                                               bound_sources(repo, base_commit)):
+        raise IntegrationError(
+            "candidate does not require trusted integration: it changes no "
+            "native-retirement-bound source, trusted implementation, or policy/schema "
+            "path; merge it through the ordinary path without dispatching the writer"
+        )
+    return classification
+
+
 def stage(repo: Path, worktree: Path, base: str, head: str, requested_kind: str,
           authorized: bool) -> dict:
     repo = repo.resolve()
@@ -839,9 +888,9 @@ def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         if arguments.command == "resolve-dispatch":
-            classification = classify_candidate(arguments.repo_root, arguments.base,
-                                                arguments.source_head or arguments.head)
-            enforce_classification(classification, classification.kind, True)
+            classification = require_trusted_integration(
+                arguments.repo_root, arguments.base, arguments.source_head or arguments.head
+            )
             report = resolve_dispatch(
                 arguments.base, arguments.head, classification.kind,
                 expected_base=arguments.expected_base, expected_head=arguments.expected_head,
