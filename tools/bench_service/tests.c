@@ -6164,6 +6164,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
 #endif
 
 #include "retirement_admission_tests.h"
+#include "retirement_aa_admission_tests.h"
 #include "export_tests.c"
 
 #ifdef __linux__
@@ -6414,6 +6415,9 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_codec();
     bq_test_typed_client();
     bq_test_retirement_admission();
+#ifdef __linux__
+    bq_test_retirement_aa_admission();
+#endif
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();

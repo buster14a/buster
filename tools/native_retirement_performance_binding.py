@@ -254,7 +254,14 @@ BUILD_RECEIPT_SCHEMA = "buster-native-retirement-build-receipt-v1"
 SERVICE_RECEIPT_SCHEMA = "buster-native-retirement-service-receipt-v1"
 PROFILE_SCHEMA = "buster-native-retirement-host-profile-v1"
 QUALIFICATION_SCHEMA = "buster-native-retirement-host-qualification-v1"
-AA_SCHEMA = "buster-native-retirement-aa-admission-v1"
+# (#426 plan step 6) Version 2 adds the pinned #426 A/A policy digest, the
+# policy's current-job equivalence band exactly as recorded and the per-job
+# decision; version 1 is refused. Only an admission writes a receipt.
+AA_SCHEMA = "buster-native-retirement-aa-admission-v2"
+AA_VERSION = 2
+AA_DECISION = "admitted"
+# zen5_aa_evaluator.py's DECIMAL_RE for the band's decimal strings.
+AA_BAND_DECIMAL_RE = re.compile(r"^(0|[1-9][0-9]{0,8})(\.[0-9]{1,12})?$")
 LEASE_RECEIPT_SCHEMA = "buster-native-retirement-lease-receipt-v1"
 STATISTICAL_SCOPES = ["round-1", "round-2", "pooled"]
 STATISTICAL_DIMENSIONS = ["target", "cpu", "allocator", "frontend_lowering", "PIC",
@@ -5817,9 +5824,23 @@ def _check_execution_evidence(root, binding):
         "schema", "version", "machine_id", "profile_id", "profile_version", "service_id",
         "logical_cpu", "native_target", "admitted", "native_only",
         "baseline_source_commit", "baseline_source_tree", "lease_protocol",
-        "family_sha256"), "aa_admission_receipt")
-    if admission["schema"] != AA_SCHEMA or admission["version"] != 1:
+        "family_sha256", "aa_policy_sha256", "equivalence_band", "aa_decision"),
+        "aa_admission_receipt")
+    if admission["schema"] != AA_SCHEMA or type(admission["version"]) is not int or \
+            admission["version"] != AA_VERSION:
         _fail("A/A admission schema/version is not the admitted #437 receipt")
+    # (#426 plan step 6) The decision the pinned A/A policy admitted, the
+    # policy's digest and its current-job band (0 < lower < 1 < upper).
+    if admission["aa_decision"] != AA_DECISION:
+        _fail("A/A admission receipt does not record an admitted decision")
+    _sha(admission["aa_policy_sha256"], "aa_admission_receipt.aa_policy_sha256")
+    band = _keys(admission["equivalence_band"], ("lower", "upper"),
+                 "aa_admission_receipt.equivalence_band")
+    for bound in ("lower", "upper"):
+        if not isinstance(band[bound], str) or not AA_BAND_DECIMAL_RE.fullmatch(band[bound]):
+            _fail(f"aa_admission_receipt.equivalence_band.{bound} is not a band decimal")
+    if not Decimal(0) < Decimal(band["lower"]) < Decimal(1) < Decimal(band["upper"]):
+        _fail("A/A admission equivalence band is not 0 < lower < 1 < upper")
     if (admission["machine_id"], admission["profile_id"], admission["profile_version"],
             admission["service_id"]) != (host["machine_id"], expected_profile["id"],
                                            expected_profile["version"], execution["service"]["id"]):

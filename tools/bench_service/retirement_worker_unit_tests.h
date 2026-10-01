@@ -156,22 +156,27 @@
 
 /* The #437 A/A admission receipt stand-in the fixture build's producer
  * presents (retirement_worker_campaign.c declares it under
- * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA keys in
- * sorted order with test identities, over the driver's family and the
- * campaign's CPU; its identities are the ones the fixture's binding context
- * binds (retirement_binding_context_fixture.py). It is test data, not a #426
- * decision. */
+ * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA (v2)
+ * keys in sorted order with test identities, a test policy digest and band,
+ * over the driver's family and the campaign's CPU; its identities are the
+ * ones the fixture's binding context binds
+ * (retirement_binding_context_fixture.py). It is test data, not a #426
+ * decision: the production receipt comes from bq_retirement_aa_admission_decide. */
+#define BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
     TpRetirementCampaign const* campaign, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
     u32* length, char digest[SHA256_HEX_CAPACITY])
 {
     int written = driver && campaign ? snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
-        "{\"admitted\":true,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\",\"aa_policy_sha256\":\""
+        BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "\",\"admitted\":true,\"baseline_source_commit\":\"%040d\","
+        "\"baseline_source_tree\":\"%040d\",\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
         "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\","
         "\"profile_version\":\"fixture-profile-v1\","
-        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\",\"version\":1}",
+        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\","
+        "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
         1, 2, driver->family_sha256, campaign->cpu) : -1;
     bool ok = written > 0 && written < (int)BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX;
     if (ok) bq_digest(receipt, (u32)written, (char8*)digest);

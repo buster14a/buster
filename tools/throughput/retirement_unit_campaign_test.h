@@ -255,11 +255,15 @@ static int test_unit_campaign_population(TestUnitCampaign* fixture)
 static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, char const* family, char const* admitted)
 {
     int length = snprintf(fixture->aa_receipt, sizeof(fixture->aa_receipt),
-        "{\"admitted\":%s,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\","
+        "\"aa_policy_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\","
+        "\"admitted\":%s,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
         "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
-        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\",\"version\":1}",
+        "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\","
+        "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
         admitted, 1, 2, family, cpu);
     int ok = length > 0 && (size_t)length < sizeof(fixture->aa_receipt);
     if (ok)

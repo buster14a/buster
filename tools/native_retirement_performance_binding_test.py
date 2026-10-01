@@ -473,7 +473,9 @@ class BindingTests(unittest.TestCase):
             "whole_host_isolation": True, "lease_protocol": binding.LEASE_PROTOCOL,
         })
         aa_admission = json_artifact("execution/aa-admission.json", {
-            "schema": binding.AA_SCHEMA, "version": 1,
+            "schema": binding.AA_SCHEMA, "version": binding.AA_VERSION,
+            "aa_decision": binding.AA_DECISION, "aa_policy_sha256": "8" * 64,
+            "equivalence_band": {"lower": "0.98", "upper": "1.02"},
             "machine_id": "zen5-9700x-01", "profile_id": "zen5-9700x-native",
             "profile_version": "profile-v1", "service_id": "retirement-9700x",
             "admitted": True, "native_only": True,
@@ -2202,6 +2204,49 @@ class BindingTests(unittest.TestCase):
                 self.write_evidence(root, candidate, candidate_contents)
                 with self.subTest(value=value), self.assertRaisesRegex(
                         ValueError, "statistical family|family_sha256|missing fields"):
+                    binding._check_execution_evidence(root, candidate)
+
+    def test_aa_admission_v2_binds_policy_band_and_decision(self):
+        # (#426 plan step 6) The receipt is version 2 only: v1, a missing or
+        # malformed policy digest, a band outside 0 < lower < 1 < upper or not
+        # in the evaluator's decimal form, and any decision but "admitted"
+        # are refused.
+        record, contents = self.make_record()
+        mutations = {
+            "v1 schema": lambda value: value.update(
+                schema="buster-native-retirement-aa-admission-v1", version=1),
+            "v1 version": lambda value: value.update(version=1),
+            "float version": lambda value: value.update(version=2.0),
+            "no policy digest": lambda value: value.pop("aa_policy_sha256"),
+            "short policy digest": lambda value: value.update(aa_policy_sha256="8" * 63),
+            "upper-case policy digest": lambda value: value.update(aa_policy_sha256="A" * 64),
+            "no band": lambda value: value.pop("equivalence_band"),
+            "band field": lambda value: value["equivalence_band"].update(width="0.04"),
+            "numeric band": lambda value: value["equivalence_band"].update(lower=0.98),
+            "exponent band": lambda value: value["equivalence_band"].update(upper="1.02e0"),
+            "lower above one": lambda value: value["equivalence_band"].update(lower="1.01"),
+            "upper below one": lambda value: value["equivalence_band"].update(upper="0.99"),
+            "zero lower": lambda value: value["equivalence_band"].update(lower="0"),
+            "no decision": lambda value: value.pop("aa_decision"),
+            "refused decision": lambda value: value.update(aa_decision="refused"),
+            "extra field": lambda value: value.update(phase_receipt_sha256="9" * 64),
+        }
+        for name, mutate in mutations.items():
+            candidate = copy.deepcopy(record)
+            candidate_contents = dict(contents)
+            descriptor = candidate["execution"]["host"]["aa_admission_receipt"]
+            admission = json.loads(candidate_contents[descriptor["path"]].decode())
+            self.assertEqual((admission["schema"], admission["version"], admission["aa_decision"]),
+                             (binding.AA_SCHEMA, 2, "admitted"))
+            mutate(admission)
+            data = (json.dumps(admission, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            candidate_contents[descriptor["path"]] = data
+            descriptor.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            with tempfile.TemporaryDirectory(prefix="retirement-aa-v2-") as directory:
+                root = Path(directory)
+                self.write_evidence(root, candidate, candidate_contents)
+                with self.subTest(mutation=name), self.assertRaisesRegex(
+                        ValueError, "aa_admission_receipt|A/A admission"):
                     binding._check_execution_evidence(root, candidate)
 
     def test_batch_records_bind_the_group_round_pair_population(self):

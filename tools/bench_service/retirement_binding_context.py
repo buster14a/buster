@@ -546,12 +546,17 @@ def evidence_checks(snapshot, record, logical_cpu):
 
     The A/A admission receipt cannot exist before the campaign, so the
     execution check reads a placeholder at the sentinel's path, derived from
-    the bound facts: that part checks nothing here. The producer's admission
+    the bound facts (its policy digest and band are placeholders too: the
+    profile's ``aa-policy-sha256=`` pin is the producer's to check): that
+    part checks nothing here. The producer's admission
     step checks the real receipt (the post-A/A document binds its digest) and
     lane F's #511 validation checks it inside the final binding."""
     execution = record["execution"]
     baseline = record["subjects"]["baseline"]
-    placeholder = {"schema": binding.AA_SCHEMA, "version": 1, "machine_id": execution["host"]["machine_id"],
+    placeholder = {"schema": binding.AA_SCHEMA, "version": binding.AA_VERSION,
+                   "aa_decision": binding.AA_DECISION, "aa_policy_sha256": "0" * 64,
+                   "equivalence_band": {"lower": "0.5", "upper": "1.5"},
+                   "machine_id": execution["host"]["machine_id"],
                    "profile_id": execution["profile"]["id"], "profile_version": execution["profile"]["version"],
                    "service_id": execution["service"]["id"], "logical_cpu": logical_cpu,
                    "native_target": binding.NATIVE_TIMED_TARGET, "admitted": True, "native_only": True,

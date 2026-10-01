@@ -339,14 +339,17 @@ the attempt:
    `bq_retirement_campaign_run`; transcript and metrics shards rotate onto
    service-supplied streams; then the metrics writer, transcript and numeric
    export finish, the stage must be ready and the post-A/A digest is formed.
-7. `bq_retirement_unit_campaign_admit`: production has no authority (no
-   approved #426 A/A decision, no #1021 one-use capability), so it refuses and
-   leaves the attempt awaiting one. Only the functional fixture build
+7. `bq_retirement_unit_campaign_admit`: production refuses and leaves the
+   attempt awaiting authority. The producer decides from the pinned #426
+   policy first (`retirement_aa_admission.c`, see `RETIREMENT_PREPARATION.md`),
+   but no #1021 phase authenticates the A/A rows to the coordinator, so
+   nothing can authorize A/B. Only the functional fixture build
    (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`, rejected with
    `BQ_SERVICE_INSTALLED`, as is the campaign's own fixture macro) enters A/B
    through the campaign's fixture stand-in, and only with this campaign's
-   plan, pre-sample and post-A/A digests and a #437 receipt (above). It
-   records the receipt digest.
+   plan, pre-sample and post-A/A digests and a #437 receipt (v2: an
+   `admitted` decision with a policy digest and band, above). It records the
+   receipt digest.
 8. `bq_retirement_unit_campaign_post_aa_document`: the post-A/A binding.
 9. `bq_retirement_unit_campaign_freeze`: before the first candidate child, the
    post-A/A document, held join, sealed gate, frozen plan and context,

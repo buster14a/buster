@@ -1391,10 +1391,88 @@ leaves SIGINT and SIGTERM to its caller instead of installing its own
 Everything is released in reverse and, unless the campaign composed, the
 store is aborted: an unfinished campaign never composes.
 
-Production A/A admission has no authority (#426, #1021) and stays compiled
-out (`BQ_RETIREMENT_WORKER_CAMPAIGN_UNAUTHORIZED`); only the preparation
-fixture compiles the driver's fixture admission and supplies a receipt
-stand-in.
+**Production A/A admission (#426 plan step 6, #1021).**
+`bq_retirement_aa_admission_decide` (`retirement_aa_admission.c`) decides
+after the A/A stage and before the driver's admission. The decision rules
+were decided by OPUS-CLOUD on #36.
+
+1. **The policy.** The #426 decision is the A/A policy document that
+   `tools/zen5_aa_evaluator.py` writes: `buster-zen5-aa-policy-v1`, in its
+   canonical bytes with one trailing line feed. It is installed read-only
+   under `recipes/` as `native-retirement-performance-v1.aa-policy`. The
+   recipe profile's single `aa-policy-sha256=` line is the only source of
+   the expected digest. Each of these refuses with `BQ_RECIPE_MISMATCH` and
+   writes no receipt:
+   - a missing or repeated pin line, or a pin that is not 64 lowercase hex
+     digits;
+   - bytes of another digest;
+   - a `status` other than `eligible`, or a recorded `ab_authorized` other
+     than `false`;
+   - a `current_job_aa` other than `pairs_per_round` 60 and `runtime_rows`
+     `U=R`;
+   - an `equivalence_band` other than `{lower, upper}` decimals in the
+     evaluator's `DECIMAL_RE` form with 0 < lower < 1 < upper.
+
+   An unreadable or unowned file refuses with `BQ_CONFIGURATION_MISMATCH`.
+   The installed blocked profile pins no policy, so it refuses here (and the
+   recipe never reaches this step anyway).
+2. **The band.** The band applies to the current job's A/A rows as #1188
+   specifies. The rows are lane D's finished A/A spool
+   (`bq_retirement_aa_ratios`): the ratio of the candidate slot to the
+   baseline slot, cell-major, per metric. The members are every member of
+   the derived #619 family, which the composer exports for this purpose
+   (`tp_retirement_compose_family`, `tp_retirement_compose_member_selects`).
+   Each member is assessed once by `tp_retirement_assess` with the frozen
+   campaign plan: aggregates and slices are bootstrapped with the pinned
+   seed and resample count, and cells use exact intervals. In each round
+   and pooled, both bounds must lie in `[lower, upper]`
+   (`bq_retirement_aa_band_check`). A crossing interval is inconclusive, and
+   `[0, inf)` (no order statistic meets the tail) is unbounded; either
+   refuses. The plan's pair count must equal the policy's 60, and its member
+   counts must equal the family's. The band's decimals are read as their
+   nearest doubles.
+3. **The receipt.** Only an admission renders the receipt
+   (`bq_retirement_aa_receipt_render`). It is
+   `buster-native-retirement-aa-admission-v2`, version 2, with these fields:
+   - the v1 identities, taken from the pinned binding context
+     (`bq_retirement_aa_identities`: host machine, host profile id and
+     version, service id, baseline commit and tree, and the population's
+     statistical family, which must be lane D's);
+   - `aa_policy_sha256`;
+   - `equivalence_band`, the band strings exactly as the policy records
+     them;
+   - `aa_decision` `admitted`.
+
+   The driver checks the schema, version, decision, CPU, target and family
+   (`bq_retirement_unit_campaign_receipt`). Lane F's #511 validator requires
+   v2 with exactly these keys: it checks the digest form, the band form and
+   order, and the decision, and it refuses v1.
+
+The admission is still refused in production. The decision is the unit's
+own: the rows come from this unit's private spool, and no #1021 phase
+authenticates them to the coordinator. The BQPHASE2 sequence has no phase
+between A/A and A/B, and the worker-phase receipts acknowledge only
+PREPARING, RETIREMENT_READY, SETTLING, MEASURING and MEASURED. So
+`bq_retirement_unit_campaign_admit` has no production transition into A/B.
+An admitted decision stops there with
+`BQ_RETIREMENT_WORKER_CAMPAIGN_AA_PHASE_UNAUTHENTICATED`, and a refused one
+stops earlier with `BQ_RECIPE_MISMATCH`. The receipt carries no phase-receipt
+digest until such a phase exists.
+
+The preparation fixture (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`) compiles
+none of `retirement_aa_admission.c`. It enters A/B through the driver's
+fixture admission with a v2 receipt stand-in
+(`bq_retirement_worker_campaign_fixture_receipt`) whose test policy digest
+and band are not a #426 decision. `bq_test_retirement_aa_admission`
+(`retirement_aa_admission_tests.h`, in the service self-test) covers the
+production layers over synthetic inputs:
+- the policy, in the evaluator's canonical bytes, refused for another digest;
+  for a missing, repeated or malformed pin; for the blocked profile; for each
+  inadmissible field; and without its line feed;
+- the band, admitted for rows inside it with every member assessed, and
+  refused for an exact cell outside it, a bootstrap aggregate crossing it and
+  a plan of another P;
+- the exact receipt bytes.
 
 **Composition (PR 3).** After READY, `bq_retirement_worker_compose`
 (`retirement_worker_compose.c`) runs, in order:
@@ -1598,7 +1676,8 @@ runtime rows compile a host program (`tests/unit.c.program`) that prints the
 reference oracle's output. Job 82 runs through the real coordinator path
 (`bq_prep_worker_unit_coordinate`: the queue's active job, the lease and
 channel handed to the forked unit, `bq_worker_phase_join`) SETTLING,
-MEASURING, A/A, the fixture admission, the post-A/A document, the freeze,
+MEASURING, A/A, the fixture admission (the v2 receipt stand-in), the
+post-A/A document, the freeze,
 A/B, READY, composition and MEASURED, then the finalization; all five
 documents are written at exactly the sizes the campaign retained before
 timing (`documents-sized.txt`), and the post-sample record, every stream
@@ -1779,7 +1858,8 @@ makes the loss explicit.
 What remains unverifiable by the coordinator, bound only by digest: the bind
 time, the stage facts and log chains (measurement outputs the post-sample
 record and the receipt also bind), the untimed records' contents and the
-fixture's A/A admission receipt (production admission has no authority).
+fixture's A/A admission receipt (production A/B is refused: no #1021 phase
+authenticates the A/A rows).
 The two pending binding phases are lane F's.
 
 On the producer side, the version-2 MEASURED acknowledgement window
@@ -2238,8 +2318,9 @@ Every section passes the #511 validator's structural check, and every
 artifact path is unique.
 
 The A/A admission receipt cannot exist before the campaign. That part of
-`_check_execution_evidence` therefore reads a placeholder derived from the
-bound facts and checks nothing here. The producer's admission step checks the
+`_check_execution_evidence` therefore reads a v2 placeholder derived from the
+bound facts, with a placeholder policy digest and band, and checks nothing
+here. The producer's admission step checks the
 real receipt, and lane F's #511 validation of the final binding checks it
 again.
 

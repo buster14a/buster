@@ -19,6 +19,9 @@
  *   tp_retirement_compose_plan     plan the result store before any timing and
  *                                  bind the retained-file declaration
  *   tp_retirement_compose          verify every input and publish the result
+ *   tp_retirement_compose_family   the derived #619 family of a layout, and
+ *   tp_retirement_compose_member_selects  each member's cells (also the
+ *                                  producer's A/A admission's family)
  * Canonical JSON: retirement_compose_json.h.
  *
  * Every store file must be a sealed input or match the retained declaration
@@ -283,6 +286,50 @@ int tp_retirement_compose_plan(TpRetirementStore* store, TpRetirementCampaignCap
  * sealed and the store validates at its settled exact inventory. The caller
  * then issues the producer authority with result->context_sha256. */
 int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetirementComposeResult* result);
+
+/* The derived #619 statistical family over a layout (the validator's
+ * _derive_statistical_family), which the composer writes as the adapter's
+ * series and the producer's A/A admission (retirement_aa_admission.c)
+ * assesses against the pinned A/A equivalence band. A member is an aggregate
+ * (kind 0, dimension TP_RETIREMENT_COMPOSE_NONE), a slice (kind 0, one
+ * dimension value) or a cell (kind 1, `unit` its cell); `family` is its
+ * ordinal among the bootstrap or the cell members. Cells of metric m are,
+ * in order: timed rows (wall, peak memory), runtime rows (runtime_dense
+ * names each one's dense row) or object groups (object_groups names each
+ * one's group). members[order[i]] is the i-th member in canonical order. */
+#define TP_RETIREMENT_COMPOSE_NONE 0xffffffffu
+typedef struct TpRetirementComposeMember
+{
+    char name[TP_RETIREMENT_COMPOSE_MEMBER_BYTES];
+    unsigned metric, kind, family, dimension, unit, cells;
+    char const* value;
+} TpRetirementComposeMember;
+
+typedef struct TpRetirementComposeFamily
+{
+    TpRetirementComposeLayout const* layout;
+    TpRetirementComposeMember* members;
+    unsigned* order;
+    unsigned* group_first;
+    unsigned* group_offset;
+    unsigned* group_rows;
+    unsigned* group_object;
+    unsigned* object_groups;
+    unsigned* runtime_dense;
+    unsigned* runtime_ids;
+    unsigned* runtime_index;
+    unsigned count, capacity, bootstrap, cells_total, object_count, runtime_count;
+    unsigned cells[TP_RETIREMENT_COMPOSE_METRICS];
+} TpRetirementComposeFamily;
+
+/* Build the family of `layout` from `arena` (zeroed and 0 on refusal: a
+ * layout outside the frozen A1 shape, a metric without a cell or a family
+ * outside the #619 caps). */
+int tp_retirement_compose_family(TpRetirementComposeLayout const* layout, Arena* arena,
+                                 TpRetirementComposeFamily* family);
+/* Whether `member`'s series includes cell `cell` of its metric. */
+int tp_retirement_compose_member_selects(TpRetirementComposeFamily const* family,
+                                         TpRetirementComposeMember const* member, unsigned cell);
 
 #endif
 #endif

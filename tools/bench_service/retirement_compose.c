@@ -5,7 +5,10 @@
  *   helpers        tp_compose_cursor_*, tp_compose_field, tp_compose_json_number,
  *                  tp_compose_decimal_ratio, tp_compose_sort, tp_compose_sort_text
  *   family         tp_compose_layout_check, tp_compose_family_build,
- *                  tp_compose_bounds_of
+ *                  tp_compose_bounds_of; exported to the producer's A/A
+ *                  admission as tp_retirement_compose_family and
+ *                  tp_retirement_compose_member_selects (which the series
+ *                  pass also uses)
  *   declaration    tp_compose_declaration_digest, tp_compose_declaration_reserve
  *   readers        TpComposeReader, tp_compose_reader_*, TpComposeTiling,
  *                  tp_compose_tiling_*, tp_compose_metrics_input
@@ -101,7 +104,7 @@
 #define TP_COMPOSE_GROUP_DIGITS 4u
 #define TP_COMPOSE_SUFFIX_BYTES 32u
 #define TP_COMPOSE_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-#define TP_COMPOSE_NONE 0xffffffffu
+#define TP_COMPOSE_NONE TP_RETIREMENT_COMPOSE_NONE
 #define TP_COMPOSE_READ_BYTES 65536u
 /* The adapter's approved schema and its three #619 scopes. */
 #define TP_COMPOSE_REPLAY_SCHEMA "buster-native-retirement-statistics-replay-v1"
@@ -535,29 +538,10 @@ BUSTER_GLOBAL_LOCAL Arena* tp_compose_arena(void)
 
 /* ----------------------------------------------------------------- family */
 
-typedef struct TpComposeMember
-{
-    char name[TP_RETIREMENT_COMPOSE_MEMBER_BYTES];
-    unsigned metric, kind, family, dimension, unit, cells;
-    char const* value;
-} TpComposeMember;
-
-typedef struct TpComposeFamily
-{
-    TpRetirementComposeLayout const* layout;
-    TpComposeMember* members;
-    unsigned* order;
-    unsigned* group_first;
-    unsigned* group_offset;
-    unsigned* group_rows;
-    unsigned* group_object;
-    unsigned* object_groups;
-    unsigned* runtime_dense;
-    unsigned* runtime_ids;
-    unsigned* runtime_index;
-    unsigned count, capacity, bootstrap, cells_total, object_count, runtime_count;
-    unsigned cells[TP_RETIREMENT_COMPOSE_METRICS];
-} TpComposeFamily;
+/* The family types are public (retirement_compose.h) so that the producer's
+ * A/A admission assesses exactly this family. */
+typedef TpRetirementComposeMember TpComposeMember;
+typedef TpRetirementComposeFamily TpComposeFamily;
 
 /* The frozen A1 shape: ascending rows, groups numbered by smallest member,
  * singletons of one non-object row, object rows sharing configuration. */
@@ -763,6 +747,23 @@ BUSTER_GLOBAL_LOCAL int tp_compose_family_build(TpRetirementComposeLayout const*
             cells == family->cells_total;
     if (!valid) *family = (TpComposeFamily){0};
     return valid;
+}
+
+int tp_retirement_compose_family(TpRetirementComposeLayout const* layout, Arena* arena,
+                                 TpRetirementComposeFamily* family)
+{
+    int valid = layout && arena && family && tp_compose_family_build(layout, family, arena);
+    return valid;
+}
+
+/* A cell member selects its own cell, an aggregate every cell and a slice
+ * the cells whose dimension holds its value. */
+int tp_retirement_compose_member_selects(TpRetirementComposeFamily const* family,
+                                         TpRetirementComposeMember const* member, unsigned cell)
+{
+    int selected = member->kind ? cell == member->unit : member->dimension == TP_COMPOSE_NONE ||
+        !strcmp(tp_compose_cell_value(family, member->metric, cell, member->dimension), member->value);
+    return selected;
 }
 
 /* Every composer output's byte bound, each at most one store file. */
@@ -2406,8 +2407,7 @@ BUSTER_GLOBAL_LOCAL int tp_compose_series_pass(TpComposeState* state, unsigned w
         unsigned written = 0;
         for (unsigned cell = 0; series.valid && cell < family->cells[member->metric]; ++cell)
         {
-            int selected = member->kind ? cell == member->unit : member->dimension == TP_COMPOSE_NONE ||
-                !strcmp(tp_compose_cell_value(family, member->metric, cell, member->dimension), member->value);
+            int selected = tp_retirement_compose_member_selects(family, member, cell);
             for (uint64_t index = 0; selected && series.valid && index < per_unit; ++index)
             {
                 uint64_t slot = cell * per_unit + index;

@@ -42,7 +42,8 @@
  * consumes a SIGTERM held in that teardown window.
  *
  * The producer exits 0 only after MEASURED was acknowledged and the manifest
- * written. Production A/A admission has no authority and stays compiled out,
+ * written. Production A/A admission decides from the pinned #426 policy
+ * (retirement_aa_admission.c), but no #1021 phase authenticates the A/A rows,
  * so production cannot reach A/B, and the compiled profile is blocked, so it
  * cannot even start. Nothing here is a timing fact.
  */

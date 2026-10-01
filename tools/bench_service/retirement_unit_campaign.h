@@ -5,9 +5,10 @@
  * This header sequences the fixed campaign inside the unit, in the one order
  * the contract allows, and derives the frozen plan and its pre-sample and
  * post-sample context digests from service-authenticated inputs only. It does
- * not admit the recipe: production A/A admission has no authority (#426
- * decision plus #1021 capability) and always refuses, so production can never
- * reach A/B; only the functional fixture build compiles the stand-in.
+ * not admit the recipe: the producer evaluates the pinned #426 A/A policy
+ * (retirement_aa_admission.c), but production has no #1021 phase authority
+ * over the A/A rows and always refuses here, so production can never reach
+ * A/B; only the functional fixture build compiles the stand-in.
  *
  * Entry points, in the only order the driver accepts:
  *   bq_retirement_unit_campaign_begin      SETTLING acknowledgement; the heavy
@@ -32,7 +33,7 @@
  *                                          exact held descriptors in cursor
  *                                          order, shards, metrics, export;
  *                                          after A/A the post-A/A binding
- *   bq_retirement_unit_campaign_admit      A/A admission (fixture only)
+ *   bq_retirement_unit_campaign_admit      A/A admission (A/B: fixture only)
  *   bq_retirement_unit_campaign_post_aa_document  (retirement_unit_documents.h)
  *                                          the post-A/A binding over the
  *                                          admission receipt
@@ -172,8 +173,13 @@ static char const* const bq_retirement_unit_campaign_document_paths[BQ_RETIREMEN
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD "unit-campaign-post-sample.txt"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER "BQ-RETIREMENT-UNIT-POST-SAMPLE-V1\n"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX 4096u
-/* The #437 A/A admission receipt (the validator's AA_SCHEMA) and its cap. */
-#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "buster-native-retirement-aa-admission-v1"
+/* The #437 A/A admission receipt (the validator's AA_SCHEMA, version 2: the
+ * v1 identities plus the pinned #426 policy digest, its current-job
+ * equivalence band and the per-job decision; v1 is refused), its decision
+ * word and its cap. Only an admission writes a receipt. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "buster-native-retirement-aa-admission-v2"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "2"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "admitted"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX 4096u
 
 typedef struct BqRetirementUnitCampaignPins
@@ -1924,9 +1930,11 @@ static inline int bq_retirement_unit_campaign_member(char const* text, size_t le
 }
 
 /* The #437 receipt the admission carries: its bytes hash to the recorded
- * digest, and it is this campaign's approved schema, admitted and native
- * only, on the campaign's CPU and native target, over the family the
- * pre-sample plan named. Its schema has no field for the post-A/A evidence
+ * digest, and it is this campaign's approved schema (v2), an admitted
+ * decision, admitted and native only, on the campaign's CPU and native
+ * target, over the family the pre-sample plan named. The policy digest and
+ * band it records are the producer's (retirement_aa_admission.c checks them
+ * against the profile's aa-policy-sha256= pin before rendering it). Its schema has no field for the post-A/A evidence
  * digest (the validator refuses unknown receipt fields), so the admission
  * capability names that digest and the post-A/A binding document binds this
  * receipt. */
@@ -1950,7 +1958,9 @@ static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign c
     }
     ok = ok && !strcmp(digest, admission->receipt_sha256) &&
         bq_retirement_unit_campaign_member(text, length, "schema", "\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\"") &&
-        bq_retirement_unit_campaign_member(text, length, "version", "1") &&
+        bq_retirement_unit_campaign_member(text, length, "version", BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION) &&
+        bq_retirement_unit_campaign_member(text, length, "aa_decision",
+                                           "\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\"") &&
         bq_retirement_unit_campaign_member(text, length, "admitted", "true") &&
         bq_retirement_unit_campaign_member(text, length, "native_only", "true") &&
         bq_retirement_unit_campaign_member(text, length, "native_target", "\"x86_64-unknown-linux-gnu\"") &&
@@ -1959,10 +1969,14 @@ static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign c
     return ok;
 }
 
-/* Production has no admission authority, so it refuses and leaves the A/A
- * attempt awaiting one (A/B stays unreachable). The functional fixture build
- * enters A/B through the campaign's fixture stand-in, which poisons the
- * attempt on a denied, stale or mismatched admission. */
+/* Production refuses and leaves the A/A attempt awaiting authority (A/B
+ * stays unreachable): the producer's #426 policy decision
+ * (retirement_aa_admission.c) is computed in this unit from rows this unit
+ * measured, and no #1021 phase authenticates those rows to the coordinator
+ * between A/A and A/B (the BQPHASE2 sequence has no post-A/A phase), so no
+ * production transition into A/B exists. The functional fixture build enters
+ * A/B through the campaign's fixture stand-in, which poisons the attempt on a
+ * denied, stale or mismatched admission. */
 static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignAdmission const* admission)
 {
@@ -1985,8 +1999,8 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
     }
     else bq_retirement_unit_campaign_fail(driver);
 #else
-    /* #426 has no approved empirical A/A decision and #1021 no launch
-     * capability: nothing can authorize A/B. */
+    /* The pinned #426 policy can admit this job's A/A rows, but #1021 has no
+     * authenticated post-A/A phase over them: nothing can authorize A/B. */
     ok = 0;
 #endif
     return ok;
