@@ -84,20 +84,46 @@ for run_id, expected in runs.items():
             raise RuntimeError("Capture manifest source disagreement")
         records = {name: read_json(name) for name in ("manifest.json", "summary.json", "quality.json", "census.json",
                    "timing.json", "commands.json", "host-compiler.json", "baseline-overlay-sources.json", "candidate-overlay-sources.json")}
+        sources = read_json("sources.json")
+        if not sources:
+            raise RuntimeError("Missing frozen-source manifest")
+        for name, expected_sha in sources.items():
+            if hashlib.sha256(archive.read("frozen/" + name)).hexdigest() != expected_sha:
+                raise RuntimeError("Frozen source hash disagreement: " + name)
+        records["sources.json"] = sources
+        records["build-details.json"] = {}
+        for arm in ("baseline", "candidate"):
+            compile_rows = read_json(arm + "-compile_commands.json")
+            records["build-details.json"][arm] = {
+                "ide_compile": [row for row in compile_rows if row["file"].endswith("/src/buster/apps/ide/ide.c")],
+                "cmake_c_flags": [line for line in archive.read(arm + "-CMakeCache.txt").decode().splitlines()
+                                  if line.startswith("CMAKE_C_FLAGS")]}
+        records["host-details.json"] = {name: archive.read(name).decode() for name in
+            ("clang.stdout", "cmake.stdout", "ninja.stdout", "uname.stdout", "lscpu.stdout")}
         hashes = {name: archive.read(name).decode().strip() for name in names if name.endswith(".sha256")}
+        binaries = {"driver.sha256": "build-driver", "baseline-binary.sha256": "baseline-ide",
+                    "candidate-binary.sha256": "candidate-ide", "baseline-census-binary.sha256": "baseline-census-ide",
+                    "candidate-census-binary.sha256": "candidate-census-ide"}
+        for hash_name, binary_name in binaries.items():
+            if hashlib.sha256(archive.read(binary_name)).hexdigest() != hashes[hash_name]:
+                raise RuntimeError("Binary hash disagreement: " + binary_name)
+        records["census.json"] = [dict(row, metrics={key: value for key, value in row["metrics"].items()
+            if key.startswith("work.delimiter.") or key in ("preprocessed.tokens", "allocation.arena_calls",
+                                                          "allocation.arena_bytes")}) for row in records["census.json"]]
         logs = {name: archive.read(name).decode(errors="replace") for name in names
                 if name.endswith("-self-host.stdout") or name.endswith("-modes.stdout") or name == "source-size.stdout"}
-        package = {"run_id": run_id, "head": expected, "conclusion": run["conclusion"],
+        logs = {name: "\n".join(line for line in data.splitlines() if
+            "SELF_HOST fixed_point" in line or "Self-host " in line or "MODE_MATRIX" in line or
+            "SOURCE_SIZE_RESULT_V1" in line or "SOURCE_SIZE_RATCHET_V1" in line) + "\n"
+            for name, data in logs.items()}
+        package = {"source_manifest_verified": True, "archived_binaries_verified": True, "run_id": run_id, "head": expected, "conclusion": run["conclusion"],
                    "artifact_id": artifact["id"], "artifact_zip_sha256": archive_sha, "artifact_bytes": total,
                    "records": records, "hashes": hashes, "correctness_logs": logs}
         all_reports.append(package)
     print("DELIMITER_CAPTURE=" + json.dumps(package, separators=(",", ":")), flush=True)
-audit = subprocess.check_output(["python3", "tools/new_audit.py",
-    "delimiter producer-fact experiment; cloud work counts and negative 2x result",
-    "--platform", "GitHub-hosted Ubuntu x86-64; qualified-host acceptance pending"], text=True).strip()
-path = pathlib.Path(audit)
-if not path.is_file():
-    # The helper may print prose beside its canonical relative path.
-    matches = list(pathlib.Path("docs/performance-audits").glob("2026-10-01T*.md"))
-    path = max(matches, key=lambda p: p.name)
-print("DELIMITER_AUDIT=" + json.dumps({"path": str(path), "template": path.read_text()}), flush=True)
+checked = subprocess.run(["git", "diff", "--check", "c5a073139691e9111986c4fca6f6b03d2a6dfcf1", "HEAD"],
+                         text=True, capture_output=True, check=False)
+print("DELIMITER_DIFF_CHECK=" + json.dumps({"status": checked.returncode, "stdout": checked.stdout,
+                                          "stderr": checked.stderr}), flush=True)
+if checked.returncode:
+    raise SystemExit(checked.returncode)
