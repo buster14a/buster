@@ -497,7 +497,9 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
         if status == "completed":
             if conclusion is None:
                 raise ValueError("Completed CI job has no conclusion.")
-            if conclusion != "success":
+            # A job whose `if:` excludes merge groups (Main CI reuse decision,
+            # #1808) completes as skipped; CI complete still requires every shard.
+            if conclusion not in ("success", "skipped"):
                 failed.append(job.get("name", "unnamed"))
         elif conclusion is not None:
             raise ValueError("Incomplete CI job already has a conclusion.")
