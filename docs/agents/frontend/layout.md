@@ -121,10 +121,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
+  bits and can still be assigned and read back (issue #710). **A width is
+  evaluated once, where the member is declared**: `c_parse.c` folds a
+  single-token literal (decimal, hex, octal or suffixed) with
+  `c_integer_expression_evaluate` and anything else through
+  `c_parse_typed_integer_constant`, the evaluator enumerators use, and stores
+  it on `CMember.bit_width` with `bit_width_resolved`. The sizeof folding,
+  bit-field promotion, the zero-width check and the IR layout all read that
+  number, so `int b : (5)`, an enumerator, a cast, `0x5` or
+  `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
+  and in the object. An unresolved width holds the layout unresolved instead
+  of reading as zero; lowering still evaluates such a width itself as a
+  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
+  unresolved widths to diagnose a non-integer one.
+  `c_test_bit_field_width_authority` pins clang's answers for each spelling.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
   are one `definition_rejection` slot whose kind travels with the message --
   and the definition still lays out, the way a rejected alignment specifier
@@ -355,6 +366,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## `_Alignof` over an object
+
+GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
+answer the object's alignment rather than its type's: GCC and Clang fold
+`_Alignas(32) int g; _Alignof(g)` to 32 and accept it as an integer constant
+expression (issue #1704). Both layout engines raise the type's answer by the
+same runs, which `c_alignof_object_next_run` names: the entity's own and those
+of every object declaration of it that is complete before the operand, so
+`extern int g; _Alignas(32) int g;` answers 32 after the second declaration.
+`c_parse_alignof_object_alignment` serves the parse-time folds; a file-scope
+static assertion over such an operand is deferred to canonical-IR constant
+evaluation, where `c_ir_alignof_object_alignment` serves both that and the
+lowered value. An enum initializer runs inside the type machine and must not
+mutate it, so there only runs of integer expressions and builtin types fold;
+`_Alignas(struct S)` there is refused as not constant. A run may itself spell
+`_Alignof(object)`, so each engine counts nested evaluations and refuses past
+`C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
+operand, because a record's evaluator otherwise falls back to another fold and
+answers the type's alignment. Member operands (`_Alignof(s.x)` with an
+`_Alignas` member, or a `packed` one) still answer the member type's alignment
+where Clang answers the member's (issue #1249).
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
@@ -362,6 +395,121 @@ object size to the next power of two. The x86-64 SysV and Win64 canonical
 emitters implement their call boundaries; optimized modes currently report
 canonical fallback for those new shapes. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
-cross-target, native mixed-compiler, and Wine checks. The approved retirement
+cross-target, native mixed-compiler, and Wine checks. In the native Linux
+mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
+compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
+and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
+
+## Parse-side layout solve: ordered passes and the agenda
+
+`c_parse_type_layout_core` answers `sizeof`/`_Alignof`/`offsetof` during
+semantic analysis. A query that is not a builtin kind and has no committed
+cache entry reaches `c_parse_type_layout_solve`, which has two drivers over one
+per-type attempt, `c_parse_type_layout_attempts`. The attempt body is shared,
+so each type's layout rule has one implementation; the drivers differ only in
+which type they hand it next (`c_parse_layout_next`) and where its facts live
+(`c_parse_layout_resolved`/`_size`/`_alignment`/`_provisional`/`_publish`).
+The body takes the agenda as a parameter and is inlined into each driver with
+a constant, so the ordered passes' copy carries no agenda branch; keep new
+reads and writes of per-query facts on those accessors. Its aggregate branch
+places members through `c_record_layout_place` (above), which reads only the
+target and the member it is handed, so it adds no agenda prerequisite.
+
+- **Ordered passes** (`c_parse_type_layout_passes`, the only driver before this
+  section existed). Per-query columns cover the whole type table, seeded from
+  the committed cache when there is one; every pending type is seeded, then
+  attempted in pending order, pass after pass, until the requested type
+  resolves or a pass resolves nothing; resolved non-provisional types are then
+  committed. Without a cache the pending list is the whole table, so every
+  such query costs O(types) even when it needs one small struct.
+- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used only
+  for queries with no cache and no type-parse machine: enumerator `sizeof`
+  folds and other machineless constant evaluation. It enters the requested
+  type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
+  shared with the passes), and attempts only what is reached. The first time
+  a type is popped it waits on each of its static prerequisites that is still
+  open (`c_parse_layout_agenda_expand`: an aligned alias's unqualified type and
+  specifier types, an atomic copy's unqualified type, an enum's/vector's/array's
+  element, and a complete aggregate's member layout types and specifier types),
+  and it is attempted only once all of them are final. Array-bound `sizeof`
+  operands are discovered by the attempt itself: an attempt that stops at an
+  open type records it as the blocker, waits on it, and is retried exactly when
+  it becomes final.
+
+**Why the agenda gives the passes' answer.** Within one query a type's fact
+only moves from unknown to resolved, and without a machine an attempt reads
+only other types' facts plus immutable parse state; its operand parses work on
+a by-value `CParseResult` copy, and every identifier token is already interned.
+So an attempt that succeeds keeps succeeding with the same value once more
+types resolve, and the requested type's value is the unique least fixed point
+of its dependency closure. Every edge the agenda registers is read by any
+successful attempt of the waiting type, so it is a necessary condition. When
+nothing is ready and the requested type is still open, every open type waits
+on another open type through necessary conditions; none of them can resolve
+in any order, which is the passes' "a pass without progress".
+
+**The one order-dependent read.** An array-bound `sizeof` operand whose kind
+alone decides its layout (not an aggregate, array or vector) is answered by
+the passes from the operand once it has resolved, and otherwise from the
+first type of the same kind that has resolved by then. That depends on attempt
+order unless the seed resolves the type in question before any attempt. The
+agenda answers only those cases (`c_parse_layout_operand_resolved`,
+`c_parse_layout_kind_scan`); a complete enum or an aligned alias as operand,
+or a kind whose first type is not seeded, abandons the agenda before its
+answer is used, and the query reruns on the passes (`agenda_fallbacks`).
+
+**What stays on the passes, and why.** A query with a machine can reenter the
+type-parse machine from an attempt (a bound's operand type, a type-naming
+`_Alignas`), which rewrites the machine's shared result slot and mutation
+limit; skipping the passes' reentries for types outside the closure would
+change that state, so machine queries, including `offsetof` inside the machine
+(#1297), keep the passes. A cached query commits every type its passes
+resolved, and later kind-scan answers read that committed set, so running the
+cached path on the agenda would change future answers. Both obstacles are the
+ones #1247 removes (a side-effect-free evaluator in Stage 0, the array-arm
+re-tokenizer and its kind scan in Stage 3); after them the agenda can serve
+both paths.
+
+**Work and storage.** Agenda state is arena scratch for the one query: an
+entry per reached type the seed rule does not answer (open-addressed index at
+most half full), one edge per distinct (waiting type, prerequisite) pair, and a
+LIFO ready stack; nothing outlives the query. A seeded type's fact is a function
+of its own record, so it is recomputed on a miss rather than stored; every
+declaration's scalar specifier is a record of its own, so this keeps the
+entries to the closure's aggregates, arrays, enums and aliases. The last type
+looked up is remembered, because an attempt reads a type's resolution and then
+its layout. An entry is pushed the first time
+something waits on it (the requested type is pushed at the start) and again
+each time its unfinished edge count returns to zero; it gains edges only while
+popped, so it is never on the stack twice. A type the seed resolves is never
+pushed. A type is attempted once, plus once per array-bound operand that was
+still open when an attempt read it, since its static prerequisites are all
+final before the first attempt. An expansion registers its edges back to back,
+so a prerequisite named twice (two members of one type) finds its own edge at
+the head of that prerequisite's waiters and is not registered again; a blocker
+is open and every earlier prerequisite is final, so it is never a repeat. Each
+edge completes exactly once. `ide cc -v` prints the counts accumulated over a
+compile:
+
+```text
+C_TYPE_LAYOUT solves=N pass_solves=N pass_state_types=N pass_attempts=N agenda_solves=N agenda_types=N agenda_attempts=N agenda_edges=N agenda_notifications=N agenda_pushes=N agenda_fallbacks=N
+```
+
+`solves` counts queries that reached a driver; a fallback counts one agenda
+solve and one pass solve. `pass_state_types` sums each pass solve's column
+length (the query's type count), `pass_attempts` the per-type attempts those
+solves handed out; the `agenda_*` fields are entries, attempts, registered
+edges, completed edges, pushes and abandoned solves. They are work counts, not
+timings, and live on `CParseResult.type_layout_statistics`, outside the
+checkpointed body so rollbacks and operand copies keep counting.
+
+`c_type_layout_tests` asks every question of both drivers
+(`c_test_type_layout`): exact agenda work on a stable region of 0 to 1024
+unrelated structs (constant) against linear pass work, containment chains
+(D + 1 attempts and D edges for depth D), fan-out (W + 1 attempts, W edges),
+a diamond whose every type is attempted once, three invalid cycles (unresolved on both, no edge ever completes), the
+order-dependent operands with their fallbacks, production enumerator folds,
+and a 160-program seeded random corpus of valid and invalid aggregates whose
+every type and member offset must match.

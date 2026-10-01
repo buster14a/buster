@@ -57,6 +57,16 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
+Every type-machine push copies a whole `CTypeParseFrame`, so a frame holds
+neither a parse-result snapshot nor the token stream. The frames of one run
+share the root query's `CPreprocessResult` by pointer; the root outlives the
+run, which pops its frames before returning or failing. The few frame kinds
+that can abandon a partial parse (aggregate segments, typeof and `_Atomic`
+operands) snapshot into the machine's `frame_checkpoints` row for their own
+slot, and root snapshots and rollbacks are passed by pointer. A rollback that
+does not continue into a successful parse is masked by its root's rollback, so
+`c_test_type_parse_snapshot_rows` checks row independence directly.
+
 A modification destination is typed from its whole operand.
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in

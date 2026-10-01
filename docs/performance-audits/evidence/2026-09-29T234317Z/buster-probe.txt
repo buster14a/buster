@@ -1,0 +1,120 @@
+fixture=tree leaves=4 mode=mir-stack rows=9 values=7 edits=14 frame=64 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=9 transfers=18 edit_transfers=28 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=4 mode=mir-stack sample=0 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2950 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=1 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2501 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=2 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2408 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=3 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2368 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=4 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2352 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=5 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2334 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=mir-stack sample=6 rows=9 edits=14 locations=9 symbols=7 elapsed_ns=2334 transfers=18 edit_transfers=28 sweeps=1 workspace_bytes=70720
+certificate leaves=4 mode=mir-stack checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=4 mode=mir-stack checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=4 mode=mir-stack checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=overlapping-live-homes leaves=4 mode=mir-stack checker=2 reason=source location does not prove the required reaching value
+mutation=partial-save-area-overlap leaves=4 mode=mir-stack checker=1 reason=invalid register or actual frame range
+mutation=source-opcode-after-freeze leaves=4 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=4 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=4 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=4 mode=fast rows=9 values=7 edits=9 frame=16 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=6 transfers=18 edit_transfers=18 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=4 mode=fast sample=0 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2615 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=1 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2355 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=2 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2143 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=3 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2113 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=4 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2093 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=5 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2099 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=fast sample=6 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2128 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+certificate leaves=4 mode=fast checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=4 mode=fast checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=4 mode=fast checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=4 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=4 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=4 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=4 mode=quality rows=9 values=7 edits=9 frame=16 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=6 transfers=18 edit_transfers=18 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=4 mode=quality sample=0 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2147 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=1 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2135 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=2 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2112 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=3 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2121 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=4 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2109 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=5 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2109 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=4 mode=quality sample=6 rows=9 edits=9 locations=6 symbols=7 elapsed_ns=2127 transfers=18 edit_transfers=18 sweeps=1 workspace_bytes=70720
+certificate leaves=4 mode=quality checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=4 mode=quality checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=4 mode=quality checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=4 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=4 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=4 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=16 mode=mir-stack rows=33 values=31 edits=62 frame=256 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=33 transfers=66 edit_transfers=124 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=16 mode=mir-stack sample=0 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=11283 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=1 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10500 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=2 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10383 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=3 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10397 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=4 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10384 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=5 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10363 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=mir-stack sample=6 rows=33 edits=62 locations=33 symbols=31 elapsed_ns=10413 transfers=66 edit_transfers=124 sweeps=1 workspace_bytes=70720
+certificate leaves=16 mode=mir-stack checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=16 mode=mir-stack checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=16 mode=mir-stack checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=overlapping-live-homes leaves=16 mode=mir-stack checker=2 reason=source location does not prove the required reaching value
+mutation=partial-save-area-overlap leaves=16 mode=mir-stack checker=1 reason=invalid register or actual frame range
+mutation=source-opcode-after-freeze leaves=16 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=16 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=16 mode=mir-stack checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=16 mode=fast rows=33 values=31 edits=45 frame=80 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=18 transfers=66 edit_transfers=90 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=16 mode=fast sample=0 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=7718 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=1 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6977 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=2 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6865 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=3 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6860 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=4 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6859 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=5 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6804 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=fast sample=6 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6789 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+certificate leaves=16 mode=fast checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=16 mode=fast checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=16 mode=fast checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=16 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=16 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=16 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=16 mode=quality rows=33 values=31 edits=45 frame=80 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=18 transfers=66 edit_transfers=90 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=16 mode=quality sample=0 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6905 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=1 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6873 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=2 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6853 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=3 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6855 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=4 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6844 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=5 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6863 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=16 mode=quality sample=6 rows=33 edits=45 locations=18 symbols=31 elapsed_ns=6901 transfers=66 edit_transfers=90 sweeps=1 workspace_bytes=70720
+certificate leaves=16 mode=quality checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=16 mode=quality checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=16 mode=quality checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=16 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=16 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=16 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=32 mode=mir-stack rows=65 values=63 edits=126 frame=512 verified=0 placement_valid=1 source_unchanged=1 checker=3 locations=64 transfers=0 edit_transfers=0 sweeps=0 reason=prototype location capacity
+fixture=tree leaves=32 mode=fast rows=65 values=63 edits=93 frame=144 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=26 transfers=130 edit_transfers=186 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=32 mode=fast sample=0 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=16480 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=1 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15641 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=2 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15314 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=3 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15265 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=4 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15142 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=5 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=41845 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=fast sample=6 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=23627 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+certificate leaves=32 mode=fast checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=32 mode=fast checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=32 mode=fast checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=32 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=32 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=32 mode=fast checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=32 mode=quality rows=65 values=63 edits=93 frame=144 verified=0 placement_valid=1 source_unchanged=1 checker=0 locations=26 transfers=130 edit_transfers=186 sweeps=1 reason=validated supported allocation contract
+actual-check-cost leaves=32 mode=quality sample=0 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15387 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=1 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15235 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=2 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15186 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=3 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15198 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=4 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15220 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=5 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15215 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+actual-check-cost leaves=32 mode=quality sample=6 rows=65 edits=93 locations=26 symbols=63 elapsed_ns=15210 transfers=130 edit_transfers=186 sweeps=1 workspace_bytes=70720
+certificate leaves=32 mode=quality checker=0 reason=validated supported allocation contract
+mutation=wrong-allocated-use leaves=32 mode=quality checker=2 reason=source location does not prove the required reaching value
+mutation=unemitted-edit-phase leaves=32 mode=quality checker=1 reason=malformed, unsorted, trailing or unemitted-phase edit
+mutation=source-opcode-after-freeze leaves=32 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-payload-after-freeze leaves=32 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+mutation=source-literal-after-freeze leaves=32 mode=quality checker=1 reason=allocated source stream differs from frozen preallocation input
+fixture=tree leaves=64 mode=mir-stack rows=129 values=127 edits=254 frame=1024 verified=0 placement_valid=1 source_unchanged=1 checker=3 locations=0 transfers=0 edit_transfers=0 sweeps=0 reason=outside scalar single-block adapter subset or capacity
+fixture=tree leaves=64 mode=fast rows=129 values=127 edits=189 frame=272 verified=0 placement_valid=1 source_unchanged=1 checker=3 locations=0 transfers=0 edit_transfers=0 sweeps=0 reason=outside scalar single-block adapter subset or capacity
+fixture=tree leaves=64 mode=quality rows=129 values=127 edits=189 frame=272 verified=0 placement_valid=1 source_unchanged=1 checker=3 locations=0 transfers=0 edit_transfers=0 sweeps=0 reason=outside scalar single-block adapter subset or capacity

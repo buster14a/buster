@@ -2,20 +2,20 @@ name: Compiler throughput
 
 on:
   pull_request:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       baseline_ref:
         description: Baseline commit or ref (PRs always use their immutable base SHA)
         default: main
-        required: true
-  schedule:
-    - cron: '23 4 * * 1'
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: throughput-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # The request workflow owns the bounded non-PR queue. A reusable invocation
+  # must not create a second, single-pending group that replaces its caller.
+  group: throughput-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
