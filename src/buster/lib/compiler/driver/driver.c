@@ -85,13 +85,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_runtime_object_target(Target target
     return target.os == OPERATING_SYSTEM_LINUX && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
 }
 
-// A shared object registers its exit handlers under a `__dso_handle` of its
-// own and finalizes them when unloaded; an executable passes the null handle
-// libc_nonshared.a's stubs pass (issue #1709).
-BUSTER_GLOBAL_LOCAL ObjectFile compiler_driver_elf_libc_runtime_object(Arena* arena, CompilerDriverInvocation invocation)
+// An x86-64 Linux shared image registers handlers under its own DSO handle
+// and finalizes them at unload (#1709). Other ELF runtime targets retain the
+// ordinary null-handle stubs; the shared runtime builder is x86-64-only.
+ObjectFile compiler_driver_elf_libc_runtime_object(Arena* arena, CompilerDriverInvocation invocation)
 {
-    return invocation.image_kind == NATIVE_IMAGE_SHARED ? link_elf_libc_shared_runtime_object(arena, invocation.target)
-                                                        : link_elf_libc_runtime_object(arena, invocation.target);
+    bool shared_runtime = invocation.image_kind == NATIVE_IMAGE_SHARED && invocation.target.os == OPERATING_SYSTEM_LINUX &&
+                          invocation.target.cpu_arch == CPU_ARCH_X86_64;
+    return shared_runtime ? link_elf_libc_shared_runtime_object(arena, invocation.target)
+                          : link_elf_libc_runtime_object(arena, invocation.target);
 }
 
 // How many synthetic runtime objects a hosted link for this target can add:

@@ -11573,6 +11573,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         }
     }
 
+    // A user destructor may use priority zero and register a new handler.
+    // The internal finalizer must run after it, rather than tying with zero
+    // and leaving that new handler registered after the DSO is unmapped.
+    String8 late_library_source = S8(
+        "long write(int, const void*, unsigned long);\n"
+        "int atexit(void (*)(void));\n"
+        "static void late_handler(void) { write(1, \"late handler\\n\", 13); }\n"
+        "__attribute__((destructor(0))) static void last_destructor(void)\n"
+        "{ write(1, \"priority zero destructor\\n\", 25); atexit(late_handler); }\n"
+        "int register_handler(void) { return 0; }\n"
+    );
+    String8 late_library_path = string_format_z(arena, S8("{S8}/basic_c_elf_late_atexit_library.c"), directory);
+    String8 late_library = string_format_z(arena, S8("{S8}/liblateatexitprobe.so"), directory);
+    if (BUSTER_REQUIRE(arguments, file_write(late_library_path, BUSTER_SLICE_TO_BYTE_SLICE(late_library_source))))
+    {
+        String8 late_library_command[] = {S8("-g0"), S8("-shared"), S8("-o"), late_library, late_library_path};
+        CompilerDriverResult late_built = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(late_library_command)));
+        BUSTER_TEST_RAW(arguments, late_built.error == COMPILER_DRIVER_ERROR_NONE, late_built.diagnostic);
+        if (late_built.error == COMPILER_DRIVER_ERROR_NONE && atexit_linked.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {atexit_main, late_library};
+            String8 output = {0};
+            bool ran = compiler_driver_test_image_run(arguments, arena, run, BUSTER_ARRAY_LENGTH(run), directory, &output);
+            BUSTER_TEST(arguments, ran);
+            if (ran)
+            {
+                BUSTER_STRING_TEST(arguments, output, S8("priority zero destructor\nlate handler\nclosed\n"));
+            }
+        }
+    }
+
     // An object compiled for a fixed address reads imported data with a
     // rel32, which a shared object cannot hold.
     String8 non_pic_object = string_format_z(arena, S8("{S8}/non-pic.o"), directory);
@@ -11993,6 +12025,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
         BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, invocation.image_kind == image_cases[case_index].kind);
         BUSTER_TEST(arguments, invocation.position_independent == (image_cases[case_index].kind != NATIVE_IMAGE_EXECUTABLE));
+    }
+    // #1709's DSO builder is x86-64-only. Direct runtime selection for an
+    // AArch64 shared invocation must retain the ordinary null-handle stubs,
+    // even though the image writer still refuses that link kind.
+    CompilerDriverInvocation aarch64_shared = {
+        .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        .image_kind = NATIVE_IMAGE_SHARED,
+    };
+    ObjectFile aarch64_runtime = compiler_driver_elf_libc_runtime_object(temporary.arena, aarch64_shared);
+    if (BUSTER_REQUIRE(arguments, aarch64_runtime.error == OBJECT_ERROR_NONE && aarch64_runtime.section_count == OBJECT_SECTION_COUNT))
+    {
+        u8 ordinary_stubs[] = {
+            0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0xd2, 0x00, 0x00, 0x00, 0x14, // mov x1,0; mov x2,0; b __cxa_atexit
+            0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0xd2, 0x00, 0x00, 0x00, 0x14, // the same for __cxa_at_quick_exit
+        };
+        ByteSlice text = aarch64_runtime.sections[OBJECT_SECTION_TEXT].data;
+        BUSTER_TEST(arguments, text.length == sizeof(ordinary_stubs) && memcmp(text.pointer, ordinary_stubs, sizeof(ordinary_stubs)) == 0);
+        BUSTER_TEST(arguments, !aarch64_runtime.sections[OBJECT_SECTION_FINI_ARRAY].data.length);
+        if (BUSTER_REQUIRE(arguments, aarch64_runtime.symbol_count == 4 && aarch64_runtime.relocation_count == 2))
+        {
+            BUSTER_TEST(arguments, string_equal(aarch64_runtime.symbols[0].name, S8("atexit")) &&
+                                   string_equal(aarch64_runtime.symbols[2].name, S8("at_quick_exit")));
+            for (u32 stub = 0; stub < 2; stub += 1)
+            {
+                ObjectRelocation relocation = aarch64_runtime.relocations[stub];
+                BUSTER_TEST(arguments, relocation.kind == OBJECT_RELOCATION_AARCH64_JUMP26 && relocation.section == OBJECT_SECTION_TEXT &&
+                                       relocation.offset == 8 + stub * 12 && relocation.symbol == stub * 2 + 1 && !relocation.addend);
+            }
+        }
     }
     // Only x86-64 Linux has a writer for either image. Elsewhere a link that
     // asks for one is refused by name, while compiling alone ignores the

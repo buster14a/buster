@@ -2007,6 +2007,17 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
     return result;
 }
 
+// User initializer priorities are 0..65535, with 65536 denoting none.
+// Only the linker's in-memory shared runtime uses this next value: its fini
+// slot must precede even user priority zero, so reverse execution finalizes
+// the DSO after every user destructor. Section-name readers never produce it.
+enum { LINK_ELF_DSO_FINALIZER_PRIORITY = IR_INITIALIZER_PRIORITY_NONE + 1 };
+
+BUSTER_GLOBAL_LOCAL u32 link_initializer_priority_sort_key(ObjectSectionKind kind, u32 priority)
+{
+    return kind == OBJECT_SECTION_FINI_ARRAY ? (priority == LINK_ELF_DSO_FINALIZER_PRIORITY ? 0 : priority + 1) : priority;
+}
+
 // GNU runs every prioritized initializer before every unprioritized one,
 // ascending, across the *whole program* rather than within one translation
 // unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
@@ -2035,7 +2046,8 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
         bool ordered = true;
         for (u64 entry = 1; entry < entries; entry += 1)
         {
-            ordered = ordered && priorities[entry - 1] <= priorities[entry];
+            ordered = ordered && link_initializer_priority_sort_key(kind, priorities[entry - 1]) <=
+                                  link_initializer_priority_sort_key(kind, priorities[entry]);
         }
         // A program whose initializers all named no priority, and one whose
         // inputs happen to have arrived in GNU's order already, are the
@@ -2063,7 +2075,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             u32 shift = byte_index * INITIALIZER_RADIX_BITS;
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (link_initializer_priority_sort_key(kind, priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 offsets[bucket] += 1;
             }
             u64 offset = 0;
@@ -2075,7 +2087,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             }
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (link_initializer_priority_sort_key(kind, priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 destination[offsets[bucket]++] = order[entry];
             }
             u32* swap = order;
@@ -2391,7 +2403,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             u64 entries = priorities && section ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
             for (u64 entry = 1; alias_section_data[kind] && entry < entries; entry += 1)
             {
-                if (priorities[entry - 1] > priorities[entry])
+                if (link_initializer_priority_sort_key(kind, priorities[entry - 1]) > link_initializer_priority_sort_key(kind, priorities[entry]))
                 {
                     alias_section_data[kind] = false;
                 }
@@ -2941,8 +2953,8 @@ enum
 // and one `.fini_array` entry naming the finalizer.  __cxa_finalize runs and
 // forgets every handler filed under the handle, so a dlclose runs them there
 // and a later `exit` finds nothing left of the library's.  The entry takes
-// priority 0, which link_initializer_arrays_order sorts ahead of every entry
-// a program can name; the loader walks the array backwards, so the finalizer
+// the internal LINK_ELF_DSO_FINALIZER_PRIORITY, which sorts ahead of even
+// user priority zero; the loader walks the array backwards, so the finalizer
 // runs after all of the library's own destructors, where crtbeginS's
 // __do_global_dtors_aux runs.  `__cxa_finalize` is a weak reference, as in
 // crtbeginS; libc.so.6 defines it wherever a shared object can be loaded.
@@ -3018,7 +3030,8 @@ ObjectFile link_elf_libc_shared_runtime_object(Arena* arena, Target target)
         result.sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, OBJECT_INITIALIZER_ENTRY_SIZE),
                                                                      .length = OBJECT_INITIALIZER_ENTRY_SIZE};
         result.sections[OBJECT_SECTION_FINI_ARRAY].virtual_size = OBJECT_INITIALIZER_ENTRY_SIZE;
-        result.initializer_priorities[1] = arena_allocate_zeroed(arena, u32, 1);
+        result.initializer_priorities[1] = arena_allocate(arena, u32, 1);
+        result.initializer_priorities[1][0] = LINK_ELF_DSO_FINALIZER_PRIORITY;
 
         result.symbols = arena_allocate(arena, ObjectSymbol, LINK_ELF_DSO_SYMBOL_COUNT);
         result.relocations = arena_allocate(arena, ObjectRelocation, LINK_ELF_DSO_RELOCATION_COUNT);

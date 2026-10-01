@@ -509,8 +509,8 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   `link_elf_libc_shared_runtime_object` instead of the executable's stubs: a
   hidden `__dso_handle` of its own, stubs that pass it to `__cxa_atexit` or
   `__cxa_at_quick_exit` in each function's correct argument, and
-  a priority-0 `.fini_array` entry calling `__cxa_finalize(&__dso_handle)`
-  after the library's destructors, as `crtbeginS.o` does. `dlclose` then runs
+  an internal-priority `.fini_array` entry calling `__cxa_finalize(&__dso_handle)`
+  after every user destructor, including priority zero. `dlclose` then runs
   the library's handlers instead of `exit` calling unmapped code (#1709).
 - Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
   executable. In a shared object general-dynamic keeps its `__tls_get_addr`

@@ -369,8 +369,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   In an x86-64 Linux shared image, `compiler_driver_elf_libc_runtime_object`
   selects `link_elf_libc_shared_runtime_object` instead. It retains the same
   archive-member selection, but passes the image's hidden `__dso_handle`
-  to the two `__cxa_` registration calls. Its priority-0 `.fini_array` entry
-  finalizes that handle after the image's own destructors, so `dlclose` runs
+  to the two `__cxa_` registration calls. Its reserved internal `.fini_array` priority sorts
+  ahead of user priority zero; reverse execution therefore runs it last.
+  Other ELF runtime targets retain the ordinary stubs. The shared runtime
+  finalizes its handle after the image's own destructors, so `dlclose` runs
   and removes its `atexit` handlers before the library is unmapped (#1709).
   The same finalizer removes `at_quick_exit` handlers without calling them;
   a later `quick_exit` must not call into that unloaded image.

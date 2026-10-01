@@ -361,6 +361,9 @@ struct ObjectFile
     // format has no such convention (issue 795), or a hand-built file --
     // leaves these null, which reads as every entry unprioritized and keeps
     // the arrays in the order they arrived.
+    // Native linking also owns a reserved in-memory fini priority for its
+    // synthetic ELF DSO finalizer; link_initializer_priority_sort_key orders
+    // it before user priority zero, without changing source priority values.
     u32* initializer_priorities[2];
 };
 
