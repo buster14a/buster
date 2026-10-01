@@ -411,6 +411,10 @@ struct IrType
     // zero-parameter prototypes and never set it.
     bool is_unprototyped;
     u8 float_format;
+    // Optional source-language integer conversion rank. Width and signedness
+    // do not distinguish, for example, LP64 long from long long. Numeric rank
+    // contains no frontend type ID and survives aligned/qualified copies.
+    u8 integer_conversion_rank;
 };
 
 typedef struct IrTypeTable IrTypeTable;

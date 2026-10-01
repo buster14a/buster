@@ -4564,6 +4564,91 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     return C_TYPE_INVALID;
 }
 
+// Integer rank is independent of the target's storage widths (C17 6.3.1.1).
+// The canonical type carries only this numeric provenance, never a CTypeId.
+BUSTER_C_SHARED u8 c_semantic_integer_rank(CTypeKind kind)
+{
+    u8 rank;
+    switch (kind)
+    {
+    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
+    case C_TYPE_CHAR:
+    case C_TYPE_SIGNED_CHAR:
+    case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
+    case C_TYPE_SHORT:
+    case C_TYPE_UNSIGNED_SHORT: rank = C_INTEGER_RANK_SHORT; break;
+    case C_TYPE_INT:
+    case C_TYPE_UNSIGNED_INT:
+    case C_TYPE_ENUM: rank = C_INTEGER_RANK_INT; break;
+    case C_TYPE_LONG:
+    case C_TYPE_UNSIGNED_LONG: rank = C_INTEGER_RANK_LONG; break;
+    case C_TYPE_LONG_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
+    case C_TYPE_INT128:
+    case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
+    default: rank = C_INTEGER_RANK_INVALID; break;
+    }
+    return rank;
+}
+
+BUSTER_C_SHARED CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed)
+{
+    CTypeKind kind;
+    switch (rank)
+    {
+    case C_INTEGER_RANK_BOOL: kind = C_TYPE_BOOL; break;
+    case C_INTEGER_RANK_CHAR: kind = is_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_UNSIGNED_CHAR; break;
+    case C_INTEGER_RANK_SHORT: kind = is_signed ? C_TYPE_SHORT : C_TYPE_UNSIGNED_SHORT; break;
+    case C_INTEGER_RANK_INT: kind = is_signed ? C_TYPE_INT : C_TYPE_UNSIGNED_INT; break;
+    case C_INTEGER_RANK_LONG: kind = is_signed ? C_TYPE_LONG : C_TYPE_UNSIGNED_LONG; break;
+    case C_INTEGER_RANK_LONG_LONG: kind = is_signed ? C_TYPE_LONG_LONG : C_TYPE_UNSIGNED_LONG_LONG; break;
+    case C_INTEGER_RANK_INT128: kind = is_signed ? C_TYPE_INT128 : C_TYPE_UNSIGNED_INT128; break;
+    default: kind = C_TYPE_INVALID; break;
+    }
+    return kind;
+}
+
+// The operands have already undergone their context's integer promotions.
+// Rank chooses the type; target widths answer only signed representability.
+BUSTER_C_SHARED CTypeKind c_semantic_integer_arithmetic_kind(Target target, CTypeKind left, CTypeKind right)
+{
+    u8 left_rank = c_semantic_integer_rank(left);
+    u8 right_rank = c_semantic_integer_rank(right);
+    CTypeKind kind = C_TYPE_INVALID;
+    if (left_rank && right_rank)
+    {
+        bool left_signed = c_parse_expression_signed_kind(left);
+        bool right_signed = c_parse_expression_signed_kind(right);
+        if (left_signed == right_signed)
+        {
+            kind = right_rank > left_rank ? right : left;
+        }
+        else
+        {
+            CTypeKind signed_kind = left_signed ? left : right;
+            CTypeKind unsigned_kind = left_signed ? right : left;
+            u8 signed_rank = left_signed ? left_rank : right_rank;
+            u8 unsigned_rank = left_signed ? right_rank : left_rank;
+            if (unsigned_rank >= signed_rank)
+            {
+                kind = unsigned_kind;
+            }
+            else
+            {
+                u64 signed_size = 0;
+                u64 unsigned_size = 0;
+                u32 ignored_alignment = 0;
+                if (c_parse_builtin_type_layout(target, signed_kind, &signed_size, &ignored_alignment) &&
+                    c_parse_builtin_type_layout(target, unsigned_kind, &unsigned_size, &ignored_alignment))
+                {
+                    kind = signed_size > unsigned_size ? signed_kind : c_parse_expression_unsigned_kind(signed_kind);
+                }
+            }
+        }
+    }
+    return kind;
+}
+
 BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
 {
     if (kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
@@ -4668,84 +4753,54 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
 BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
                                                                 u32 left_bit_field_width, u32 right_bit_field_width)
 {
+    CTypeId type;
     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
     {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeKind left = c_parse_expression_value_kind(result, left_id);
-    CTypeKind right = c_parse_expression_value_kind(result, right_id);
-    bool complex = c_type_kind_is_complex(left) || c_type_kind_is_complex(right);
-    if (c_type_kind_is_complex(left)) left = c_type_kind_complex_element(left);
-    if (c_type_kind_is_complex(right)) right = c_type_kind_complex_element(right);
-    bool left_arithmetic = c_parse_expression_integer_kind(left) || left == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 ||
-                           left == C_TYPE_FLOAT || left == C_TYPE_DOUBLE || left == C_TYPE_LONG_DOUBLE;
-    bool right_arithmetic = c_parse_expression_integer_kind(right) || right == C_TYPE_FLOAT16 || right == C_TYPE_BFLOAT16 ||
-                            right == C_TYPE_FLOAT || right == C_TYPE_DOUBLE || right == C_TYPE_LONG_DOUBLE;
-    if (!left_arithmetic || !right_arithmetic) return C_TYPE_ID_INVALID;
-    if (left == C_TYPE_LONG_DOUBLE || right == C_TYPE_LONG_DOUBLE)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_LONG_DOUBLE);
-    }
-    if (left == C_TYPE_DOUBLE || right == C_TYPE_DOUBLE)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_DOUBLE_COMPLEX : C_TYPE_DOUBLE);
-    }
-    if (left == C_TYPE_FLOAT || right == C_TYPE_FLOAT)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_FLOAT_COMPLEX : C_TYPE_FLOAT);
-    }
-    // `_Float16` ranks below every other real floating type, so it only wins
-    // once the three above have declined: `h * h` and `h * i` are `_Float16`,
-    // while `h * f` is `float`. C23 6.3.1.8p1 gives it that rank and clang
-    // computes the same result type.
-    if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_FLOAT16_COMPLEX : left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16 : C_TYPE_BFLOAT16);
-    }
-    if (!c_parse_expression_integer_kind(left) || !c_parse_expression_integer_kind(right))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    left = c_parse_expression_promoted_kind_with_width(target, left, left_bit_field_width);
-    right = c_parse_expression_promoted_kind_with_width(target, right, right_bit_field_width);
-    u64 left_size = 0;
-    u64 right_size = 0;
-    u32 ignored_alignment = 0;
-    if (!c_parse_builtin_type_layout(target, left, &left_size, &ignored_alignment) ||
-        !c_parse_builtin_type_layout(target, right, &right_size, &ignored_alignment))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeKind result_kind = left;
-    bool left_signed = c_parse_expression_signed_kind(left);
-    bool right_signed = c_parse_expression_signed_kind(right);
-    if (left_signed == right_signed)
-    {
-        if (right_size > left_size || (right_size == left_size && (u32)right > (u32)left))
-        {
-            result_kind = right;
-        }
+        type = C_TYPE_ID_INVALID;
     }
     else
     {
-        CTypeKind signed_kind = left_signed ? left : right;
-        CTypeKind unsigned_kind = left_signed ? right : left;
-        u64 signed_size = left_signed ? left_size : right_size;
-        u64 unsigned_size = left_signed ? right_size : left_size;
-        if (unsigned_size >= signed_size)
+        CTypeKind left = c_parse_expression_value_kind(result, left_id);
+        CTypeKind right = c_parse_expression_value_kind(result, right_id);
+        bool complex = c_type_kind_is_complex(left) || c_type_kind_is_complex(right);
+        if (c_type_kind_is_complex(left)) left = c_type_kind_complex_element(left);
+        if (c_type_kind_is_complex(right)) right = c_type_kind_complex_element(right);
+        bool left_arithmetic = c_parse_expression_integer_kind(left) || left == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 ||
+                               left == C_TYPE_FLOAT || left == C_TYPE_DOUBLE || left == C_TYPE_LONG_DOUBLE;
+        bool right_arithmetic = c_parse_expression_integer_kind(right) || right == C_TYPE_FLOAT16 || right == C_TYPE_BFLOAT16 ||
+                                right == C_TYPE_FLOAT || right == C_TYPE_DOUBLE || right == C_TYPE_LONG_DOUBLE;
+        CTypeKind kind;
+        if (!left_arithmetic || !right_arithmetic)
         {
-            result_kind = unsigned_kind;
+            kind = C_TYPE_INVALID;
+        }
+        else if (left == C_TYPE_LONG_DOUBLE || right == C_TYPE_LONG_DOUBLE)
+        {
+            kind = complex ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_LONG_DOUBLE;
+        }
+        else if (left == C_TYPE_DOUBLE || right == C_TYPE_DOUBLE)
+        {
+            kind = complex ? C_TYPE_DOUBLE_COMPLEX : C_TYPE_DOUBLE;
+        }
+        else if (left == C_TYPE_FLOAT || right == C_TYPE_FLOAT)
+        {
+            kind = complex ? C_TYPE_FLOAT_COMPLEX : C_TYPE_FLOAT;
+        }
+        else if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
+        {
+            // The existing real floating ranks remain independent of integers.
+            kind = complex ? C_TYPE_FLOAT16_COMPLEX :
+                   left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16 : C_TYPE_BFLOAT16;
         }
         else
         {
-            result_kind = signed_kind;
+            left = c_parse_expression_promoted_kind_with_width(target, left, left_bit_field_width);
+            right = c_parse_expression_promoted_kind_with_width(target, right, right_bit_field_width);
+            kind = c_semantic_integer_arithmetic_kind(target, left, right);
         }
-        if (signed_size == unsigned_size && c_parse_expression_signed_kind(result_kind))
-        {
-            result_kind = c_parse_expression_unsigned_kind(result_kind);
-        }
+        type = kind == C_TYPE_INVALID ? C_TYPE_ID_INVALID : c_parse_expression_scalar_type(result, kind);
     }
-    return result_kind == C_TYPE_INVALID ? C_TYPE_ID_INVALID : c_parse_expression_scalar_type(result, result_kind);
+    return type;
 }
 
 BUSTER_C_INTERNAL bool c_parse_expression_token_ends_operand(CToken token)
@@ -22693,45 +22748,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 
 BUSTER_C_INTERNAL CIntegerRank c_parse_integer_rank(CTypeKind kind)
 {
-    CIntegerRank rank = C_INTEGER_RANK_INVALID;
-    switch (kind)
-    {
-    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
-    case C_TYPE_CHAR:
-    case C_TYPE_SIGNED_CHAR:
-    case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
-    case C_TYPE_SHORT:
-    case C_TYPE_UNSIGNED_SHORT: rank = C_INTEGER_RANK_SHORT; break;
-    case C_TYPE_INT:
-    case C_TYPE_UNSIGNED_INT: rank = C_INTEGER_RANK_INT; break;
-    case C_TYPE_LONG:
-    case C_TYPE_UNSIGNED_LONG: rank = C_INTEGER_RANK_LONG; break;
-    case C_TYPE_LONG_LONG:
-    case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
-    case C_TYPE_INT128:
-    case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
-    case C_TYPE_INVALID:
-    case C_TYPE_VOID:
-    case C_TYPE_FLOAT16:
-    case C_TYPE_BFLOAT16:
-    case C_TYPE_FLOAT:
-    case C_TYPE_DOUBLE:
-    case C_TYPE_LONG_DOUBLE:
-    case C_TYPE_FLOAT16_COMPLEX:
-    case C_TYPE_FLOAT_COMPLEX:
-    case C_TYPE_DOUBLE_COMPLEX:
-    case C_TYPE_LONG_DOUBLE_COMPLEX:
-    case C_TYPE_VA_LIST:
-    case C_TYPE_NULLPTR:
-    case C_TYPE_POINTER:
-    case C_TYPE_ARRAY:
-    case C_TYPE_VECTOR:
-    case C_TYPE_FUNCTION:
-    case C_TYPE_STRUCT:
-    case C_TYPE_UNION:
-    case C_TYPE_ENUM:
-    case C_TYPE_COUNT: break;
-    }
+    // An unresolved enum has no stable constant rank yet. Scalar kinds share
+    // the arithmetic conversion vocabulary after that existing refusal.
+    CIntegerRank rank = kind == C_TYPE_ENUM ? C_INTEGER_RANK_INVALID : (CIntegerRank)c_semantic_integer_rank(kind);
     return rank;
 }
 
