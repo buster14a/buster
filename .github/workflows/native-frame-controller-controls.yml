@@ -1,0 +1,27 @@
+name: Native frame controller boundary controls
+on:
+  push:
+    branches: ['codex/1885-native-frame-diagnostic']
+permissions:
+  contents: read
+jobs:
+  controls:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      BUSTER_FRAME_CANDIDATE: '115fdf68ee77c9878901c81625406df7319d6375'
+      PYTHONIOENCODING: cp1252
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Compile temporary controller syntax and execute boundary controls
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m py_compile tools/driver-test/native_frame_qualification.py tools/driver-test/native_frame_qualification_controls.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/driver-test/native_frame_qualification_controls.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

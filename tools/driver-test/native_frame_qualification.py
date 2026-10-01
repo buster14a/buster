@@ -23,6 +23,7 @@ REPOSITORY = Path.cwd().resolve()
 ROOT = Path(os.environ["RUNNER_TEMP"]) / "native-frame-source"
 OUTPUT = Path(os.environ["RUNNER_TEMP"]) / "native-frame-qualification"
 WINDOWS = os.name == "nt"
+PRODUCER_DRAIN_UNRESOLVED = False
 
 
 def write_json(path, value):
@@ -30,20 +31,69 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def announce(*values):
+    # Console presentation is ASCII-safe and is never the authoritative capture.
+    message = " ".join(str(value) for value in values)
+    safe = message.encode("ascii", errors="backslashreplace").decode("ascii")
+    try:
+        print(safe, flush=True)
+    except (UnicodeError, OSError):
+        pass
+
+
 def command(argv, cwd, environment, log, show=True):
-    print("COMMAND", json.dumps([str(item) for item in argv]), flush=True)
+    global PRODUCER_DRAIN_UNRESOLVED
+    announce("COMMAND", json.dumps([str(item) for item in argv], ensure_ascii=True))
     started = time.monotonic()
-    with log.open("w", encoding="utf-8") as output:
-        child = subprocess.Popen(argv, cwd=cwd, env=environment,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 text=True, encoding="utf-8", errors="replace")
-        for line in child.stdout:
-            output.write(line)
-            if show:
-                print(line, end="", flush=True)
-        status = child.wait()
-    return {"argv": [str(item) for item in argv], "exit_status": status,
-            "wall_seconds": time.monotonic() - started}
+    child = None
+    process_status = None
+    errors = []
+    drained = True
+    try:
+        # Keep malformed native test bytes exactly. Do not decode/echo a live
+        # child's stdout through the inherited Windows console encoding.
+        with log.open("wb") as output:
+            child = subprocess.Popen(argv, cwd=cwd, env=environment,
+                                     stdout=output, stderr=subprocess.STDOUT)
+            drained = False
+            try:
+                process_status = child.wait()
+                drained = True
+            except BaseException as error:
+                errors.append("wait: " + repr(error))
+            finally:
+                if not drained:
+                    # An observer exception must not let sample cleanup delete
+                    # the source tree while its owned native producer is alive.
+                    try:
+                        process_status = child.wait()
+                        drained = True
+                    except BaseException as error:
+                        errors.append("drain: " + repr(error))
+            if drained:
+                try:
+                    output.flush()
+                    os.fsync(output.fileno())
+                except OSError as error:
+                    errors.append("capture: " + repr(error))
+    except Exception as error:
+        errors.append("launch/capture: " + repr(error))
+    PRODUCER_DRAIN_UNRESOLVED = PRODUCER_DRAIN_UNRESOLVED or not drained
+    result = {"argv": [str(item) for item in argv],
+              "exit_status": process_status if not errors and process_status is not None else 1,
+              "process_exit_status": process_status, "owned_child_drained": drained,
+              "capture_errors": errors, "wall_seconds": time.monotonic() - started}
+    write_json(log.with_suffix(log.suffix + ".result.json"), result)
+    if show and drained and log.is_file():
+        # Display a bounded post-completion tail only. Raw log bytes and the
+        # source-bound phase/coverage receipts remain authoritative.
+        try:
+            with log.open("rb") as source:
+                source.seek(max(0, log.stat().st_size - 4096))
+                announce(source.read().decode("utf-8", errors="backslashreplace"))
+        except OSError as error:
+            announce("DISPLAY ERROR", repr(error))
+    return result
 
 
 def identities(environment):
@@ -139,7 +189,7 @@ def coverage(output, environment):
 
 
 def manifest(path):
-    text = path.read_text(encoding="utf-8")
+    text = path.read_bytes().decode("utf-8", errors="backslashreplace")
     rows = re.findall(r"^NATIVE_FRAME_VECTOR_CASE_V1 id=(\S+) classification=(\S+).*status=(\S+)$", text, re.MULTILINE)
     if not rows or len({row[0] for row in rows}) != len(rows) or any(row[2] != "pass" for row in rows):
         raise RuntimeError("Missing, duplicated or failing per-case manifest: " + str(path))
@@ -182,11 +232,13 @@ def sample(name, environment):
     env["GITHUB_WORKSPACE"] = str(ROOT)
     env["BUSTER_CI_COVERAGE_PLATFORM"] = "windows" if WINDOWS else "linux"
     env["BUSTER_CI_COVERAGE_ARCH"] = "x86_64"
-    subprocess.run(["git", "worktree", "add", "--detach", str(ROOT), revision], cwd=REPOSITORY, check=True)
     result = {"sample": name, "source_revision": revision, "batch": env["BUSTER_TEST_NATIVE_FRAME_BATCH"],
               "attempt": 1, "complete": False, "success": False, "source_root": str(ROOT),
-              "checkout_wall_seconds": time.monotonic() - arm_started}
+              "checkout_wall_seconds": 0}
+    write_json(output / "result.json", result)
     try:
+        subprocess.run(["git", "worktree", "add", "--detach", str(ROOT), revision], cwd=REPOSITORY, check=True)
+        result["checkout_wall_seconds"] = time.monotonic() - arm_started
         result["source_tree"] = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True).strip()
         result["src_tree"] = subprocess.check_output(["git", "rev-parse", "HEAD:src"], cwd=ROOT, text=True).strip()
         (ROOT / "build").mkdir()
@@ -205,7 +257,7 @@ def sample(name, environment):
             argv = ["/usr/bin/time", "-v", *argv]
         result["matrix"] = command(argv, ROOT, env, output / "matrix.log")
         result["complete_source_wall_seconds"] = time.monotonic() - started
-        result["complete"] = True
+        result["complete"] = result["matrix"]["owned_child_drained"] and result["matrix"]["process_exit_status"] is not None
         if result["matrix"]["exit_status"] != 0:
             raise RuntimeError("Full matrix failed; preserve this first attempt and stop the campaign")
         phase_started = time.monotonic()
@@ -220,23 +272,29 @@ def sample(name, environment):
         result["success"] = result["matrix"]["exit_status"] == 0 and result["diagnostic_pass"] and result.get("isolated_reference_pass", True) and result.get("manifest_agrees", True)
     except Exception as error:
         result["error"] = repr(error)
-        print("SAMPLE ERROR", name, repr(error), flush=True)
+        announce("SAMPLE ERROR", name, repr(error))
     finally:
         write_json(output / "result.json", result)
-        phase_started = time.monotonic()
-        try:
-            retain_build_evidence(output)
-        except Exception as error:
-            result["evidence_error"] = repr(error)
+        producer_drained = not PRODUCER_DRAIN_UNRESOLVED
+        if producer_drained:
+            phase_started = time.monotonic()
+            try:
+                retain_build_evidence(output)
+            except Exception as error:
+                result["evidence_error"] = repr(error)
+                result["success"] = False
+            result["evidence_capture_wall_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
+            try:
+                if ROOT.exists():
+                    subprocess.run(["git", "worktree", "remove", "--force", str(ROOT)], cwd=REPOSITORY, check=True)
+            except Exception as error:
+                result["cleanup_error"] = repr(error)
+                result["success"] = False
+            result["cleanup_wall_seconds"] = time.monotonic() - phase_started
+        else:
+            result["cleanup_deferred"] = "owned producer lifecycle is unresolved; retain worktree for hosted cleanup"
             result["success"] = False
-        result["evidence_capture_wall_seconds"] = time.monotonic() - phase_started
-        phase_started = time.monotonic()
-        try:
-            subprocess.run(["git", "worktree", "remove", "--force", str(ROOT)], cwd=REPOSITORY, check=True)
-        except Exception as error:
-            result["cleanup_error"] = repr(error)
-            result["success"] = False
-        result["cleanup_wall_seconds"] = time.monotonic() - phase_started
         result["total_arm_wall_seconds"] = time.monotonic() - arm_started
         write_json(output / "result.json", result)
     return result
@@ -258,7 +316,13 @@ def main():
     try:
         identities(environment)
         for name in SAMPLES:
-            row = sample(name, environment)
+            write_json(OUTPUT / "attempted-samples.json", {"attempted": [row["sample"] for row in rows] + [name]})
+            try:
+                row = sample(name, environment)
+            except Exception as caught:
+                row = {"sample": name, "attempt": 1, "complete": False, "success": False, "error": repr(caught)}
+                announce("SAMPLE ERROR", name, repr(caught))
+                write_json(OUTPUT / name / "result.json", row)
             rows.append(row)
             if row["success"] and rows[0]["coverage_contract"] != row["coverage_contract"]:
                 row["success"] = False
