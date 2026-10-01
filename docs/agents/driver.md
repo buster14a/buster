@@ -267,10 +267,17 @@ labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
 symbol table again once every reference to one is folded, the way GNU as drops
 its own `.L` locals. A repeat or lock prefix alone on a line joins the
-instruction on the next one. And a same-section PC-relative reference to a
-label defined in the file is written into the bytes; only a cross-section or
-undefined name becomes a relocation. `@PLT` is dropped: a static link resolves
-such a call the same way it resolves a plain one. Sections keep their own
+instruction on the next one. A same-section PC-relative reference is written
+into the bytes only when its symbol's identity cannot change at link time.
+Weak symbols, including hidden weak definitions, retain references for strong
+replacement. Default-visible ELF globals also retain references for shared
+library interposition; hidden strong and local labels still fold. Cross-section
+and undefined references remain relocations. Direct x86 ELF calls and jumps to
+default-visible globals use PLT32, and an explicit `@PLT` request is preserved
+for a retained direct call/jump. Other `@PLT` operand forms are diagnosed.
+Retained displacement families the object model cannot express (such as an
+8-bit `loop` to a weak symbol) fail before publishing an object. ELF visibility
+rules do not change COFF or Mach-O global fixups. Sections keep their own
 names -- `.init` and `.fini` are neither `.text` nor absent -- and a
 hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
@@ -492,6 +499,36 @@ headers exist, and the `-fPIC` refusal.
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
 AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+## Pass-through options
+
+`-Wl,a,b,c` produces three individual linker arguments, in order. Each
+`-Xlinker value` contributes exactly one argument; commas in that value are
+not split. Empty comma fields and missing operands fail with a diagnostic.
+The driver and native linker share `link_validate_linker_arguments`, and the
+linker checks the actual static/dynamic image before publishing output.
+
+The supported subset is:
+
+- Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
+  `--export-dynamic` export definitions. A static image refuses these options.
+- Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
+  two arguments `-z defs` require strong references to resolve. Executables
+  already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
+  `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
+
+Other linker values and unsupported targets/output modes fail rather than
+silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
+preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
+export validation. Unknown options, entry overrides, wrapping, archive-mode
+switches, runtime paths, version scripts, and other `-z` modes are refused.
+
+`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
+preprocessor macro/include operations and dependency requests. Direct `-D`,
+`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
+`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
+preserves any existing artifact instead of reporting a successful stale build.
 
 ## Object output (`-c`)
 

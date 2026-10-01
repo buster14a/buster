@@ -1,0 +1,285 @@
+{
+  "assumptions": [
+    "Preserve function order and freeze all modeled intrafunction fragments/padding",
+    "Reapply only verified source-owned 16-byte module entry alignment"
+  ],
+  "evidence_class": "offline accounting over hosted Buster object/census evidence; no rewrite",
+  "inputs": [
+    {
+      "aggregate_text_accounting": {
+        "baseline_bytes": {
+          "entry_alignment_padding_bytes": 39794,
+          "function_body_bytes": 21598568,
+          "saved_text_bytes": 0,
+          "text_bytes": 21638362
+        },
+        "one_shot_bytes": {
+          "entry_alignment_padding_bytes": 39652,
+          "function_body_bytes": 21171525,
+          "saved_text_bytes": 427185,
+          "text_bytes": 21211177
+        },
+        "shortest_widen_bytes": {
+          "entry_alignment_padding_bytes": 39866,
+          "function_body_bytes": 21154239,
+          "saved_text_bytes": 444257,
+          "text_bytes": 21194105
+        }
+      },
+      "census": "unity.json",
+      "objects": [
+        {
+          "baseline_extents_and_gap_bytes_checked": true,
+          "distribution": {
+            "candidate_containing_functions": 4508,
+            "candidate_edges_beyond_oracle_limit": 234561,
+            "candidate_edges_in_oracle_functions": 11719,
+            "candidate_functions_with_code_relocations": 3630,
+            "candidate_functions_with_extra_symbol_boundaries": 285,
+            "candidate_functions_with_fixed_rel8_edges": 1,
+            "candidate_functions_with_rip_relative_instructions": 1311,
+            "functions": 5341,
+            "functions_improved_widening_over_one_shot": 1639,
+            "max_candidates": 11778,
+            "more_than_twelve_candidates": 2839,
+            "one_through_twelve_candidates": 1669,
+            "zero_candidates": 833
+          },
+          "hypothetical_realigned_sizes": {
+            "baseline_bytes": {
+              "entry_alignment_padding_bytes": 39794,
+              "function_body_bytes": 21598568,
+              "saved_text_bytes": 0,
+              "text_bytes": 21638362
+            },
+            "one_shot_bytes": {
+              "entry_alignment_padding_bytes": 39652,
+              "function_body_bytes": 21171525,
+              "saved_text_bytes": 427185,
+              "text_bytes": 21211177
+            },
+            "shortest_widen_bytes": {
+              "entry_alignment_padding_bytes": 39866,
+              "function_body_bytes": 21154239,
+              "saved_text_bytes": 444257,
+              "text_bytes": 21194105
+            }
+          },
+          "object": "unity.o",
+          "object_sha256": "258ec5a9b66a7d1eb0ac8ef984e1744cd7bc2f1ee7e34c7ed8f9c548d91d2691",
+          "observed_entry_padding_bytes": 39794,
+          "observed_text_bytes": 21638362,
+          "opaque_interfunction_or_trailing_bytes": 0
+        }
+      ],
+      "source_census_sha256": "3433156255ac7573f0cc4800a2ac44af0f69acea896de2d3dd8dd4a45c890def",
+      "source_checked_no_inline_asm": false
+    },
+    {
+      "aggregate_text_accounting": {
+        "baseline_bytes": {
+          "entry_alignment_padding_bytes": 109,
+          "function_body_bytes": 10429,
+          "saved_text_bytes": 0,
+          "text_bytes": 10538
+        },
+        "one_shot_bytes": {
+          "entry_alignment_padding_bytes": 100,
+          "function_body_bytes": 9825,
+          "saved_text_bytes": 613,
+          "text_bytes": 9925
+        },
+        "shortest_widen_bytes": {
+          "entry_alignment_padding_bytes": 101,
+          "function_body_bytes": 9787,
+          "saved_text_bytes": 650,
+          "text_bytes": 9888
+        }
+      },
+      "census": "fixtures.json",
+      "objects": [
+        {
+          "baseline_extents_and_gap_bytes_checked": true,
+          "distribution": {
+            "candidate_containing_functions": 3,
+            "candidate_edges_beyond_oracle_limit": 56,
+            "candidate_edges_in_oracle_functions": 0,
+            "candidate_functions_with_code_relocations": 1,
+            "candidate_functions_with_extra_symbol_boundaries": 1,
+            "candidate_functions_with_fixed_rel8_edges": 0,
+            "candidate_functions_with_rip_relative_instructions": 1,
+            "functions": 3,
+            "functions_improved_widening_over_one_shot": 2,
+            "max_candidates": 22,
+            "more_than_twelve_candidates": 3,
+            "one_through_twelve_candidates": 0,
+            "zero_candidates": 0
+          },
+          "hypothetical_realigned_sizes": {
+            "baseline_bytes": {
+              "entry_alignment_padding_bytes": 12,
+              "function_body_bytes": 1696,
+              "saved_text_bytes": 0,
+              "text_bytes": 1708
+            },
+            "one_shot_bytes": {
+              "entry_alignment_padding_bytes": 14,
+              "function_body_bytes": 1583,
+              "saved_text_bytes": 111,
+              "text_bytes": 1597
+            },
+            "shortest_widen_bytes": {
+              "entry_alignment_padding_bytes": 5,
+              "function_body_bytes": 1576,
+              "saved_text_bytes": 127,
+              "text_bytes": 1581
+            }
+          },
+          "object": "basic_c_switch_case_blocks.o",
+          "object_sha256": "d6ddf6379402659c8228901f5ba7ac97a9a28181888e3bada9ecab8dcf8b645d",
+          "observed_entry_padding_bytes": 12,
+          "observed_text_bytes": 1708,
+          "opaque_interfunction_or_trailing_bytes": 0
+        },
+        {
+          "baseline_extents_and_gap_bytes_checked": true,
+          "distribution": {
+            "candidate_containing_functions": 5,
+            "candidate_edges_beyond_oracle_limit": 38,
+            "candidate_edges_in_oracle_functions": 30,
+            "candidate_functions_with_code_relocations": 2,
+            "candidate_functions_with_extra_symbol_boundaries": 0,
+            "candidate_functions_with_fixed_rel8_edges": 0,
+            "candidate_functions_with_rip_relative_instructions": 1,
+            "functions": 6,
+            "functions_improved_widening_over_one_shot": 2,
+            "max_candidates": 20,
+            "more_than_twelve_candidates": 2,
+            "one_through_twelve_candidates": 3,
+            "zero_candidates": 1
+          },
+          "hypothetical_realigned_sizes": {
+            "baseline_bytes": {
+              "entry_alignment_padding_bytes": 52,
+              "function_body_bytes": 2214,
+              "saved_text_bytes": 0,
+              "text_bytes": 2266
+            },
+            "one_shot_bytes": {
+              "entry_alignment_padding_bytes": 42,
+              "function_body_bytes": 2054,
+              "saved_text_bytes": 170,
+              "text_bytes": 2096
+            },
+            "shortest_widen_bytes": {
+              "entry_alignment_padding_bytes": 48,
+              "function_body_bytes": 2048,
+              "saved_text_bytes": 170,
+              "text_bytes": 2096
+            }
+          },
+          "object": "basic_c_nested_control_substatement.o",
+          "object_sha256": "67dc2a2a6bf5b0e51a080c9f8e193fd915aaf443f1f6ef9cdf3179333f977d10",
+          "observed_entry_padding_bytes": 52,
+          "observed_text_bytes": 2266,
+          "opaque_interfunction_or_trailing_bytes": 0
+        },
+        {
+          "baseline_extents_and_gap_bytes_checked": true,
+          "distribution": {
+            "candidate_containing_functions": 3,
+            "candidate_edges_beyond_oracle_limit": 38,
+            "candidate_edges_in_oracle_functions": 8,
+            "candidate_functions_with_code_relocations": 3,
+            "candidate_functions_with_extra_symbol_boundaries": 0,
+            "candidate_functions_with_fixed_rel8_edges": 1,
+            "candidate_functions_with_rip_relative_instructions": 2,
+            "functions": 5,
+            "functions_improved_widening_over_one_shot": 1,
+            "max_candidates": 24,
+            "more_than_twelve_candidates": 2,
+            "one_through_twelve_candidates": 1,
+            "zero_candidates": 2
+          },
+          "hypothetical_realigned_sizes": {
+            "baseline_bytes": {
+              "entry_alignment_padding_bytes": 31,
+              "function_body_bytes": 1548,
+              "saved_text_bytes": 0,
+              "text_bytes": 1579
+            },
+            "one_shot_bytes": {
+              "entry_alignment_padding_bytes": 42,
+              "function_body_bytes": 1424,
+              "saved_text_bytes": 113,
+              "text_bytes": 1466
+            },
+            "shortest_widen_bytes": {
+              "entry_alignment_padding_bytes": 46,
+              "function_body_bytes": 1420,
+              "saved_text_bytes": 113,
+              "text_bytes": 1466
+            }
+          },
+          "object": "basic_c_goto_into_loop.o",
+          "object_sha256": "47a4a1a664e75f7077b2df6ca02dcf9facf79f971abfc3029e67577f7082a34c",
+          "observed_entry_padding_bytes": 31,
+          "observed_text_bytes": 1579,
+          "opaque_interfunction_or_trailing_bytes": 0
+        },
+        {
+          "baseline_extents_and_gap_bytes_checked": true,
+          "distribution": {
+            "candidate_containing_functions": 3,
+            "candidate_edges_beyond_oracle_limit": 104,
+            "candidate_edges_in_oracle_functions": 10,
+            "candidate_functions_with_code_relocations": 1,
+            "candidate_functions_with_extra_symbol_boundaries": 1,
+            "candidate_functions_with_fixed_rel8_edges": 0,
+            "candidate_functions_with_rip_relative_instructions": 1,
+            "functions": 3,
+            "functions_improved_widening_over_one_shot": 1,
+            "max_candidates": 104,
+            "more_than_twelve_candidates": 1,
+            "one_through_twelve_candidates": 2,
+            "zero_candidates": 0
+          },
+          "hypothetical_realigned_sizes": {
+            "baseline_bytes": {
+              "entry_alignment_padding_bytes": 14,
+              "function_body_bytes": 4971,
+              "saved_text_bytes": 0,
+              "text_bytes": 4985
+            },
+            "one_shot_bytes": {
+              "entry_alignment_padding_bytes": 2,
+              "function_body_bytes": 4764,
+              "saved_text_bytes": 219,
+              "text_bytes": 4766
+            },
+            "shortest_widen_bytes": {
+              "entry_alignment_padding_bytes": 2,
+              "function_body_bytes": 4743,
+              "saved_text_bytes": 240,
+              "text_bytes": 4745
+            }
+          },
+          "object": "basic_c_conditional_array_branch.o",
+          "object_sha256": "412f2c80f4b9bef1d845f09a060f248bca080d1dec6db195b3fe83897a368fa2",
+          "observed_entry_padding_bytes": 14,
+          "observed_text_bytes": 4985,
+          "opaque_interfunction_or_trailing_bytes": 0
+        }
+      ],
+      "source_census_sha256": "47b95abd51cde64da93f5cb75248b41da4fc6f953a3c2ac3564d631784d54644",
+      "source_checked_no_inline_asm": true
+    }
+  ],
+  "layout_recurrence": "cursor=0; each ordered function: start=(cursor+15)&~15; cursor=start+modeled_bytes; no trailing alignment",
+  "limits": [
+    "No per-function absence-of-inline-assembly-alignment proof for unity",
+    "All references, relocation places/addends, symbol values and debug/unwind metadata need their original target-specific authorities",
+    "No rewritten-object legality, eligible production savings or throughput claim"
+  ],
+  "revision": "8f67df736f13d4edc055110a7a6d619a00a22eaf"
+}

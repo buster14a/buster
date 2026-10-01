@@ -800,6 +800,132 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_environment_lookup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // os_tests runs serially, so these bounded captured-environment snapshots
+    // cannot affect another module. Preserve values and restore both slices.
+    SliceString8 saved_keys = program_state->input.environment_keys;
+    SliceString8 saved_values = program_state->input.environment_values;
+    String8 root_spellings[] = {S8("SystemRoot"), S8("SYSTEMROOT"), S8("systemroot"), S8("sYsTeMrOoT")};
+    String8 path_spellings[] = {S8("PATH"), S8("Path"), S8("path"), S8("pAtH")};
+#if BUSTER_WINDOWS
+    if (os_get_environment_variable(S8("BUSTER_OS_ENVIRONMENT_EVIDENCE")).length)
+    {
+        for (u64 index = 0; index < saved_keys.length; index += 1)
+        {
+            for (u64 spelling = 0; spelling < BUSTER_ARRAY_LENGTH(root_spellings); spelling += 1)
+            {
+                if (string_equal(saved_keys.pointer[index], root_spellings[spelling]) ||
+                    string_equal(saved_keys.pointer[index], path_spellings[spelling]))
+                {
+                    string_print(S8("OS_ENVIRONMENT_SPELLING name={S8}\n"), saved_keys.pointer[index]);
+                }
+            }
+        }
+        bool root_present = os_get_environment_variable(S8("SystemRoot")).length != 0;
+        bool path_present = os_get_environment_variable(S8("PATH")).length != 0;
+        string_print(S8("OS_ENVIRONMENT_LOOKUP SystemRoot_present={u32} PATH_present={u32}\n"), (u32)root_present, (u32)path_present);
+        BUSTER_TEST(arguments, root_present && path_present);
+    }
+#endif
+    String8 keys[] = {S8("SystemRoot"), S8("PATH"), S8("EMPTY"), S8("NULL_EMPTY")};
+    String8 values[] = {S8("C:\\WiNdOwS"), S8("C:\\Tools;D:\\Mixed Case"), S8(""), {0}};
+    program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(keys);
+    program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(values);
+    for (u64 stored = 0; stored < BUSTER_ARRAY_LENGTH(root_spellings); stored += 1)
+    {
+        keys[0] = root_spellings[stored];
+        keys[1] = path_spellings[stored];
+        for (u64 queried = 0; queried < BUSTER_ARRAY_LENGTH(root_spellings); queried += 1)
+        {
+#if BUSTER_WINDOWS
+            bool expected = true;
+#else
+            bool expected = stored == queried;
+#endif
+            String8 root = os_get_environment_variable(root_spellings[queried]);
+            String8 path = os_get_environment_variable(path_spellings[queried]);
+            BUSTER_TEST(arguments, expected ? root.pointer == values[0].pointer && root.length == values[0].length : root.pointer == 0 && root.length == 0);
+            BUSTER_TEST(arguments, expected ? path.pointer == values[1].pointer && path.length == values[1].length : path.pointer == 0 && path.length == 0);
+        }
+    }
+    String8 absent[] = {S8("MISSING"), S8("PATHX"), S8("SystemRootX"), S8(""), {0}, {.length = 4}};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(absent); index += 1)
+    {
+        String8 missing = os_get_environment_variable(absent[index]);
+        BUSTER_TEST(arguments, missing.pointer == 0 && missing.length == 0);
+    }
+    String8 empty = os_get_environment_variable(S8("EMPTY"));
+    BUSTER_TEST(arguments, empty.pointer == values[2].pointer && empty.length == 0);
+    empty = os_get_environment_variable(S8("NULL_EMPTY"));
+    BUSTER_TEST(arguments, empty.pointer == 0 && empty.length == 0);
+
+    keys[0] = S8("SystemRoot");
+    char8 bounded_name[] = {'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't', 'X'};
+    String8 bounded = os_get_environment_variable((String8){.pointer = bounded_name, .length = 10});
+    BUSTER_TEST(arguments, bounded.pointer == values[0].pointer && bounded.length == values[0].length);
+    char8 exact_name[] = {'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't'};
+    bounded = os_get_environment_variable((String8){.pointer = exact_name, .length = sizeof(exact_name)});
+    BUSTER_TEST(arguments, bounded.pointer == values[0].pointer && bounded.length == values[0].length);
+
+    keys[0] = S8("BUSTER_\xc3\x89");
+    String8 unicode = os_get_environment_variable(S8("BUSTER_\xc3\x89"));
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+    unicode = os_get_environment_variable(S8("buster_\xc3\xa9"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+    // The uncommon Unicode path remains usable without a ThreadContext and
+    // does not change the caller's context or the captured value's lifetime.
+    ThreadContext* saved_context = thread_context_selected();
+    thread_context_select(0);
+    unicode = os_get_environment_variable(S8("buster_\xc3\xa9"));
+    thread_context_select(saved_context);
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, unicode.pointer == 0 && unicode.length == 0);
+#endif
+    keys[1] = S8("buster_\xc3\xa9");
+    unicode = os_get_environment_variable(keys[1]);
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, unicode.pointer == values[1].pointer && unicode.length == values[1].length);
+#endif
+    keys[0] = S8("BUSTER_\xef\xbf\xbd");
+    unicode = os_get_environment_variable(S8("BUSTER_\xff"));
+    BUSTER_TEST(arguments, unicode.pointer == 0 && unicode.length == 0);
+
+    keys[0] = S8("PaTh");
+    keys[1] = S8("PATH");
+    String8 duplicate = os_get_environment_variable(S8("PATH"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, duplicate.pointer == values[1].pointer && duplicate.length == values[1].length);
+#endif
+    keys[0] = S8("PATH");
+    duplicate = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == values[0].length);
+    values[0] = S8("");
+    duplicate = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == 0);
+    keys[0] = S8("pAtH");
+    duplicate = os_get_environment_variable(S8("PATH"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == 0);
+#else
+    BUSTER_TEST(arguments, duplicate.pointer == values[1].pointer && duplicate.length == values[1].length);
+#endif
+    program_state->input.environment_keys = (SliceString8){0};
+    program_state->input.environment_values = (SliceString8){0};
+    String8 missing = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, missing.pointer == 0 && missing.length == 0);
+    program_state->input.environment_keys = saved_keys;
+    program_state->input.environment_values = saved_values;
+    return result;
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -833,6 +959,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+
+    BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Test-owned subprocess modes above must dispatch before this fixture.

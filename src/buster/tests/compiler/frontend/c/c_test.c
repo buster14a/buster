@@ -660,6 +660,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_row_streams(UnitTestArguments* argu
     return result;
 }
 
+// A returned bit-field assignment result must not reread a volatile object.
+// Count only volatile memory operations, independent of parameter/local form.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_assignment_accesses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct S { unsigned char c:3; signed char y:4; _Bool b:1; };\n"
+                        "int assign(volatile struct S *p, int n) { return p->c = n; }\n"
+                        "int compound(volatile struct S *p, int n) { return p->y += n; }\n"
+                        "int prefix(volatile struct S *p) { return ++p->c; }\n"
+                        "int boolean(volatile struct S *p, int n) { return p->b = n; }\n");
+    String8 names[] = {S8("assign"), S8("compound"), S8("prefix"), S8("boolean")};
+    u32 expected_loads[] = {1, 2, 2, 1};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bit-field-assignment-accesses.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, names[name_index]);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            u32 stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + index;
+                                if (instruction->volatile_access)
+                                {
+                                    loads += instruction->opcode == IR_OPCODE_LOAD;
+                                    stores += instruction->opcode == IR_OPCODE_STORE;
+                                }
+                            }
+                            BUSTER_TEST(arguments, loads == expected_loads[name_index]);
+                            BUSTER_TEST(arguments, stores == 1);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -828,6 +889,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* ar
                 {
                     CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
                                                                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                        BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
                     if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                     {
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
@@ -891,6 +954,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_and_wide_enumerator_types(UnitTe
             {
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
                                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
                 if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
@@ -1001,6 +1066,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
                     {
                         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-successors.c"), preprocess, parsed, target,
                                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                            BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
                         if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                         {
                             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
@@ -20964,7 +21031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         {
             CDiagnostic invalid_generic_diagnostic =
                 invalid_generic_parse.diagnostic_count ? invalid_generic_parse.diagnostics[0] : invalid_generic_ir.diagnostics[0];
-            BUSTER_STRING_TEST(arguments, invalid_generic_diagnostic.message, invalid_generic_cases[case_index].message);
+            BUSTER_TEST_RAW(arguments, string_equal(invalid_generic_diagnostic.message, invalid_generic_cases[case_index].message), invalid_generic_diagnostic.message);
         }
         scratch_end(invalid_generic_temporary);
     }
@@ -28662,6 +28729,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "void take(int *p) { (void)p; }\n"
+        "int p1(const char *p) { return _Generic(p, char *: 1, default: 2); }\n"
+        "int l2(volatile int v) { return _Generic(v, int: 1, default: 2); }\n"
+        "int f1(void) { return _Generic(take, void (*)(int *): 1, default: 2); }\n"
+        "int b1(void) { return __builtin_types_compatible_p(const char *, char *); }\n");
+    String8 names[] = {S8("p1"), S8("l2"), S8("f1"), S8("b1")};
+    u64 expected[] = {2, 1, 1, 0};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("type-identity.c"), tokens, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 checked = 0;
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(names); test += 1)
+                        {
+                            if (string_equal(function->name, names[test]))
+                            {
+                                u32 returns = 0;
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrInstruction* instruction = function->instructions + row;
+                                    if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                                    {
+                                        IrValueId value = instruction->operands[0];
+                                        if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                        {
+                                            IrInstructionId definition = function->values[value.value].definition;
+                                            if (BUSTER_REQUIRE(arguments, definition.value < function->instruction_count))
+                                            {
+                                                IrInstruction* constant = function->instructions + definition.value;
+                                                if (BUSTER_REQUIRE(arguments, constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count))
+                                                    BUSTER_TEST(arguments, constant->immediates[0] == expected[test]);
+                                            }
+                                        }
+                                        returns += 1;
+                                    }
+                                }
+                                BUSTER_TEST(arguments, returns == 1);
+                                checked += 1;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(names));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -28807,6 +28946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
@@ -28858,6 +28998,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);

@@ -47,6 +47,17 @@
 
 ## Transactional process spawning
 
+`os_get_environment_variable` searches the environment snapshot captured at
+entry. Windows names compare without case (`SystemRoot`/`SYSTEMROOT`,
+`PATH`/`Path`), using ordinal Unicode mapping for non-ASCII differences;
+POSIX names remain distinct. ASCII and byte-equal names need no allocation;
+the Unicode fallback uses temporary scratch or a private arena when no thread
+context is selected. The first matching captured entry
+wins, including an empty value, and the returned slice preserves its original
+bytes and pointer. Missing or empty query names return a null-empty slice.
+Registered `os_tests` cover these rules with serially replaced snapshots and
+restore the original environment before any other test runs.
+
 `os_process_spawn` validates all bounded argv and environment strings before it
 allocates a pipe or initializes a platform spawn object. Empty argv, embedded
 NUL bytes, mismatched key/value counts, empty keys and keys containing `=` are

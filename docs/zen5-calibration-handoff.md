@@ -196,6 +196,26 @@ python3 -B tools/zen5_aa_evaluator.py verify --protocol protocol.json \
   --ledger ledger.json --policy aa-policy.json
 ```
 
+### Frozen window-2 protocol
+
+`docs/zen5-aa-protocol-v1.json` is the protocol frozen for window 2, decided
+on [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5928278832).
+The evaluator self-test requires it to be valid with no unset choice.
+
+- **Pilots.** The window-1 qualification attempt and four pilots (jobs 82, 91,
+  100, 109, 118) were all valid with 5 values per member
+  ([summaries](https://github.com/buster14a/buster/issues/36#issuecomment-5928197212)).
+- **Limits.** Each of the 42 limits is twice the pilot maximum, rounded up to two
+  significant digits. Serial-effect correlation limits have a floor of 0.3 and
+  a cap of 0.5. The wall-time `pair_resolution` limits (1.2–1.4) therefore
+  barely bind.
+- **Band, seed and applicability.** The current-job band is `[0.98, 1.02]` and
+  the seed is `4260881`. Applicability is the window-1 install: revision
+  `d7c9d5f8`, tree `a3a04f9f`, and its source-identity and profile digests.
+- **Confirmatory jobs.** The range is `120..9999`. No other job may be
+  submitted to the service from this protocol's merge until window 2 closes,
+  or the confirmatory set is `invalid`.
+
 Each attempt is replayed from its exported result root:
 
 - the final manifest bytes must hash to the authenticated digest. The manifest
