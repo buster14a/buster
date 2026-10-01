@@ -116,7 +116,7 @@ class DispatchRecipeTest(unittest.TestCase):
         self.assertIsNotNone(MEMBERSHIP, "validation step must check service-recipes membership")
         pattern = MEMBERSHIP.group(1)
         script = 'grep -Eq "' + pattern + '" <<<"$capabilities"'
-        current = ("schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
+        current = ("schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
                    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
                    "blocked-recipes=native-retirement-performance-v1\n")
         cases = (

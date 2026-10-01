@@ -176,13 +176,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
         bq_packet(&truncated, BQ_OP_RESULT | 0x80000000u, 1, body, length);
         BQ_CHECK(bq_public_response_valid(&typed, &truncated) == (length == 124));
     }
-    u32 invalid_offsets[] = {4, 28, 32, 36, 40, 44, 48, 52, 56, 120, 124, 128, 319, 320, 384, 448};
+    /* Offset 53 is job_count's second byte: 0xff there exceeds any cap below 65,281. */
+    u32 invalid_offsets[] = {4, 28, 32, 36, 40, 44, 48, 53, 56, 120, 124, 128, 319, 320, 384, 448};
     for (u32 i = 0; i < sizeof(invalid_offsets) / sizeof(invalid_offsets[0]); i += 1)
     {
         BqPacket invalid = fixed;
         invalid.bytes[BQ_CONTROL_HEADER + invalid_offsets[i]] = 0xff;
         BQ_CHECK(!bq_public_response_valid(&typed, &invalid));
     }
+    BqPacket counted = fixed;
+    bq_put32(counted.bytes + BQ_CONTROL_HEADER + 52, BQ_JOB_CAP);
+    BQ_CHECK(bq_public_response_valid(&typed, &counted));
+    bq_put32(counted.bytes + BQ_CONTROL_HEADER + 52, BQ_JOB_CAP + 1);
+    BQ_CHECK(!bq_public_response_valid(&typed, &counted));
     BqPacket traversal = fixed;
     memcpy(traversal.bytes + BQ_CONTROL_HEADER + 128, "/../", 4);
     BQ_CHECK(!bq_public_response_valid(&typed, &traversal));
@@ -2048,6 +2054,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_restarts(void)
     }
 }
 
+/* #2114: the cap before the raise, and the minimum #426 window-2 confirmatory
+ * count, which must fit after a queue state already full at the old cap. */
+#define BQ_TEST_PREVIOUS_JOB_CAP 64u
+#define BQ_TEST_WINDOW_JOBS 64u
+
 BUSTER_GLOBAL_LOCAL void bq_test_lifetime_and_logs(void)
 {
     BqFixture fixture;
@@ -2055,12 +2066,33 @@ BUSTER_GLOBAL_LOCAL void bq_test_lifetime_and_logs(void)
     {
         BqQueue* queue = &fixture.queue;
         u64 id = 0;
+        u32 accepted = 0;
+        u32 window = 0;
         for (u32 i = 0; i < BQ_JOB_CAP; i += 1)
         {
             BqRequest request = bq_test_request(i, false);
-            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+            BqError submitted = bq_submit(queue, &request, &id);
+            BQ_CHECK(submitted == BQ_OK);
             BQ_CHECK(bq_fake_run(queue, &id) == BQ_OK);
+            accepted += submitted == BQ_OK;
+            window += submitted == BQ_OK && i >= BQ_TEST_PREVIOUS_JOB_CAP &&
+                      i < BQ_TEST_PREVIOUS_JOB_CAP + BQ_TEST_WINDOW_JOBS;
+            if (i + 1 == BQ_TEST_PREVIOUS_JOB_CAP)
+            {
+                /* A journal full under the old cap replays unchanged and admits more. */
+                u64 sequence = queue->state.sequence;
+                u32 events = queue->state.event_count;
+                bq_close(queue);
+                BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK && queue->state.job_count == BQ_TEST_PREVIOUS_JOB_CAP &&
+                         queue->state.sequence == sequence && queue->state.event_count == events &&
+                         !bq_pending(&queue->state) && bq_job(&queue->state, 1) != NULL);
+            }
         }
+        BQ_CHECK(accepted == BQ_JOB_CAP && window == BQ_TEST_WINDOW_JOBS);
+        BQ_CHECK(BQ_JOB_CAP >= 4u * (BQ_TEST_PREVIOUS_JOB_CAP + BQ_TEST_WINDOW_JOBS));
+        /* Fake jobs use the fixed phase path; the job cap binds before events. */
+        BQ_CHECK(queue->state.event_count % BQ_JOB_CAP == 0 && queue->state.event_count / BQ_JOB_CAP < 16u &&
+                 queue->state.event_count < BQ_EVENT_CAP);
         BqRequest extra = bq_test_request(BQ_JOB_CAP, false);
         BQ_CHECK(!bq_pending(&queue->state) && queue->state.job_count == BQ_JOB_CAP);
         BQ_CHECK(bq_submit(queue, &extra, &id) == BQ_FULL);
