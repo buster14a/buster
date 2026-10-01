@@ -26,11 +26,12 @@ on:
 
 permissions: {}
 
-# One serialized pass at a time. A newer pending run replaces an older pending
-# one; that is safe because every pass is a full, payload-independent sweep.
+# One serialized pass at a time. Retain up to 100 pending invocations so a
+# merge burst cannot cancel commit-visible checks through pending replacement.
 concurrency:
   group: merge-queue-admission-reconcile
   cancel-in-progress: false
+  queue: max
 
 jobs:
   reconcile:
