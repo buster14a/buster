@@ -3047,12 +3047,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
     MachineStackPlacement uncertified = machine_fast_placement_build(arena, &function);
     BUSTER_TEST(arguments, uncertified.valid && uncertified.stack_slot_offsets[0] != uncertified.stack_slot_offsets[1]);
 
+    // A frame address copied through an SSA register stays bounded when its
+    // only uses are known pointer loads and stores. The two local objects can
+    // then use the same frame bytes after the first one's last read.
+    MachineFunctionBuilder address_builder = machine_function_builder_begin(arena);
+    MachineRef address_source = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    MachineRef addresses[4];
+    MachineRef loaded[2];
+    u32 address_rows[4] = {0, 1, 4, 5};
+    u32 load_rows[2] = {3, 7};
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        u32 value = machine_builder_virtual_register(
+            &address_builder, (MachineVirtualRegister){.definition_point = machine_point_make(address_rows[index], MACHINE_POINT_AFTER),
+                                                       .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        addresses[index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    }
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        u32 value = machine_builder_virtual_register(
+            &address_builder, (MachineVirtualRegister){.definition_point = machine_point_make(load_rows[index], MACHINE_POINT_AFTER),
+                                                       .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        loaded[index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    }
+    machine_builder_block_begin(&address_builder);
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        machine_builder_instruction(&address_builder, (MachineInstruction){.opcode = MACHINE_X64_LEA_FRAME,
+                                                                           .payload = index ? 8u : 0u,
+                                                                           .operands = {addresses[2u * index],
+                                                                                        machine_ref_make(MACHINE_REF_STACK_SLOT, index)}});
+        machine_builder_instruction(&address_builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                                                           .operands = {addresses[2u * index + 1u], addresses[2u * index]}});
+        machine_builder_instruction(&address_builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_PTR8,
+                                                                           .operands = {addresses[2u * index + 1u], address_source}});
+        machine_builder_instruction(&address_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_PTR8,
+                                                                           .operands = {loaded[index], addresses[2u * index + 1u]}});
+    }
+    machine_builder_instruction(&address_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&address_builder, (MachineBlock){0});
+    MachineFunction address_function = machine_function_builder_finish(arena, &address_builder);
+    address_function.target = machine_target_x86_64();
+    address_function.stack_slot_count = 2;
+    address_function.stack_slot_sizes = arena_allocate(arena, u32, 2);
+    address_function.stack_slot_alignments = arena_allocate(arena, u32, 2);
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        address_function.stack_slot_sizes[slot] = 16;
+        address_function.stack_slot_alignments[slot] = 8;
+    }
+    address_function.returns_twice_absence_certified = true;
+    BUSTER_TEST(arguments, machine_verify_function(&address_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement address_placement = machine_fast_placement_build(arena, &address_function);
+    BUSTER_TEST(arguments, address_placement.valid &&
+                               address_placement.stack_slot_offsets[0] == address_placement.stack_slot_offsets[1]);
+
     // Slot zero is written before the loop and read after it, so the loop can
     // re-execute every row between — including slot one's — and the two ranges
     // that look disjoint in row order are not.
     MachineFunctionBuilder loop_builder = machine_function_builder_begin(arena);
     MachineRef loop_values[3];
-    u32 loop_definition_rows[3] = {0, 4, 6};
+    u32 loop_definition_rows[3] = {0, 4, 7};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(loop_values); index += 1)
     {
         u32 loop_value = machine_builder_virtual_register(
@@ -3073,8 +3128,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
                                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 1), loop_values[0]}});
     machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
                                                                     .operands = {loop_values[1], machine_ref_make(MACHINE_REF_STACK_SLOT, 1)}});
-    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_JMP,
-                                                                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_CMP64,
+                                                                    .operands = {loop_values[1], loop_values[0]}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_JCC,
+                                                                    .payload = MACHINE_X64_CONDITION_EQUAL,
+                                                                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1),
+                                                                                 machine_ref_make(MACHINE_REF_BLOCK, 2)}});
     machine_builder_block_end(&loop_builder, (MachineBlock){0});
     machine_builder_block_begin(&loop_builder);
     machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
@@ -8427,6 +8486,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (cmpxchg16_mir.frame_size + 8 * ((cmpxchg16_mir.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
     BUSTER_TEST(arguments, (cmpxchg16_fast.frame_size + 8 * ((cmpxchg16_fast.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
     BUSTER_TEST(arguments, (cmpxchg16_quality.frame_size + 8 * ((cmpxchg16_quality.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
+    // Three sixteen-byte objects end at [RBP-64]. RBX occupies [RBP-8],
+    // so a 56-byte allocation covers every object and restores alignment.
+    BUSTER_TEST(arguments, cmpxchg16_mir.frame_size == 56 && cmpxchg16_fast.frame_size == 56);
     // MIR_STACK must put every home below the callee-saved save area.  The
     // CMPXCHG16B fixture has no virtual registers, so check its selector
     // stack slots directly: slot zero must not alias [RBP-8], where the

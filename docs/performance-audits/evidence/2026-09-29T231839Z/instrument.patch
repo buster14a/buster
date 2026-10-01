@@ -1,0 +1,134 @@
+diff --git a/src/buster/lib/compiler/ir/ir.h b/src/buster/lib/compiler/ir/ir.h
+index ae910d9..f188cc0 100644
+--- a/src/buster/lib/compiler/ir/ir.h
++++ b/src/buster/lib/compiler/ir/ir.h
+@@ -818,6 +818,10 @@ struct IrFastPassStatistics
+     u64 nanoseconds;
+     u64 visits;
+     u64 changes;
++    u64 research_seed_rows;
++    u64 research_value_clear;
++    u64 research_block_visits;
++    u64 research_sweeps;
+ };
+ typedef struct IrFastStatistics IrFastStatistics;
+ struct IrFastStatistics
+diff --git a/src/buster/lib/compiler/ir/ir_fast.c b/src/buster/lib/compiler/ir/ir_fast.c
+index ef852e9..c2aa512 100644
+--- a/src/buster/lib/compiler/ir/ir_fast.c
++++ b/src/buster/lib/compiler/ir/ir_fast.c
+@@ -323,6 +323,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
+             }
+         }
+     }
++    statistics->research_seed_rows += function->instruction_count;
+     u32 head = 0, tail = 0;
+     for (u32 index = 0; index < function->instruction_count; index += 1)
+     {
+@@ -353,12 +354,30 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
+ BUSTER_GLOBAL_LOCAL void ir_fast_parameters(IrFunction* function, u32* replacements, IrFastStatistics* statistics)
+ {
+     IrFastPassStatistics* pass = statistics->passes + IR_FAST_PARAMETERS;
++    String8 research_trace = os_get_environment_variable(S8("BUSTER_PHASE_ORDER_TRACE_PARAMETERS"));
++    if (research_trace.length)
++    {
++        for (u32 block = 0; block < function->block_count; block += 1)
++        {
++            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
++            {
++                string_print(S8("PHASE_PARAM function={S8} block={u32} value={u32} incoming="), function->name, block, parameter->value.value);
++                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
++                {
++                    string_print(S8("{u32},"), ir_promote_root(replacements, incoming->value.value));
++                }
++                string_print(S8("\n"));
++            }
++        }
++    }
+     bool changed = true;
+     u32 sweep = 0;
+     while (changed && sweep < IR_FAST_PARAMETER_SWEEPS)
+     {
+         changed = false;
+         sweep += 1;
++        pass->research_sweeps += 1;
++        pass->research_block_visits += function->block_count;
+         for (u32 block = 0; block < function->block_count; block += 1)
+         {
+             IrBlock* destination = function->blocks + block;
+@@ -403,6 +422,8 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
+ {
+     statistics->functions += 1;
+     statistics->instructions_before += function->instruction_count;
++    string_print(S8("PHASE_FUNCTION function={S8} instructions={u32} values={u32} blocks={u32}\n"),
++                 function->name, function->instruction_count, function->value_count, function->block_count);
+     u64 operands = function->operand_total;
+     bool provenance = function->label_metadata_count != 0;
+     u64 provenance_opcodes = IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
+@@ -461,26 +482,48 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
+         for (u32 value = 0; value < function->value_count; value += 1) replacements[value] = value;
+         statistics->scratch_peak_bytes = BUSTER_MAX(statistics->scratch_peak_bytes, scratch_bytes);
+         u64 changes = 0;
+-        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
++        u64 parameter_changes = 0;
++        u32* research_uses = 0;
++        u32* research_queue = 0;
++        String8 schedule = os_get_environment_variable(S8("BUSTER_PHASE_ORDER_SCHEDULE"));
++        if (!schedule.length) schedule = S8("FADP");
++        BUSTER_CHECK(schedule.length <= 8);
++        for (u32 ordinal = 0; ordinal < schedule.length; ordinal += 1)
+         {
+-            if (!(program->fast_passes & IR_FAST_PASS_BIT(pass))) continue;
++            u8 code = schedule.pointer[ordinal];
++            bool selective = code == 'f' || code == 'd';
++            u32 pass = code == 'F' || code == 'f' ? IR_FAST_FOLD : code == 'A' ? IR_FAST_ADDRESS :
++                       code == 'D' || code == 'd' ? IR_FAST_DCE : IR_FAST_PARAMETERS;
++            BUSTER_CHECK(code == 'F' || code == 'A' || code == 'D' || code == 'P' || code == 'f' || code == 'd');
++            if (!(program->fast_passes & IR_FAST_PASS_BIT(pass)) || (selective && !parameter_changes)) continue;
+             IrFastPassStatistics* measurement = statistics->passes + pass;
+-            u64 before = measurement->changes;
+-            TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};
++            IrFastPassStatistics before = *measurement;
+             if (pass == IR_FAST_FOLD || pass == IR_FAST_ADDRESS)
+             {
+                 ir_fast_fold(program, function, replacements, removed, (IrFastPass)pass, measurement);
+             }
+             else if (pass == IR_FAST_DCE)
+             {
+-                u32* uses = arena_allocate(arena, u32, function->value_count);
+-                u32* queue = arena_allocate(arena, u32, function->instruction_count);
+-                memset(uses, 0, sizeof(u32) * function->value_count);
+-                ir_fast_dce(program, function, replacements, removed, uses, queue, measurement);
++                if (!research_uses)
++                {
++                    research_uses = arena_allocate(arena, u32, function->value_count);
++                    research_queue = arena_allocate(arena, u32, function->instruction_count);
++                }
++                memset(research_uses, 0, sizeof(u32) * function->value_count);
++                measurement->research_value_clear += function->value_count;
++                ir_fast_dce(program, function, replacements, removed, research_uses, research_queue, measurement);
+             }
+             else ir_fast_parameters(function, replacements, statistics);
+-            if (program->measure_fast_passes) measurement->nanoseconds += timestamp_ns_between(start, timestamp_take());
+-            changes += measurement->changes - before;
++            u64 delta = measurement->changes - before.changes;
++            changes += delta;
++            if (pass == IR_FAST_PARAMETERS) parameter_changes += delta;
++            string_print(S8("PHASE_STEP function={S8} ordinal={u32} pass={u32} visits={u64} changes={u64} "
++                            "setup_values={u64} seed_rows={u64} block_visits={u64} sweeps={u64}\n"),
++                         function->name, ordinal, pass, measurement->visits - before.visits, delta,
++                         measurement->research_value_clear - before.research_value_clear,
++                         measurement->research_seed_rows - before.research_seed_rows,
++                         measurement->research_block_visits - before.research_block_visits,
++                         measurement->research_sweeps - before.research_sweeps);
+         }
+         if (changes)
+         {
+@@ -492,6 +535,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
+         scratch_end(scratch);
+     }
+     statistics->instructions_after += function->instruction_count;
++    string_print(S8("PHASE_DONE function={S8} instructions={u32}\n"), function->name, function->instruction_count);
+ }
+ #if BUSTER_INCLUDE_TESTS
+ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)

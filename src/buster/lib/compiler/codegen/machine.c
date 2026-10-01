@@ -5211,9 +5211,10 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // around establishing RBP. Where the pushes follow it, the save area was
         // included in `running` above and is subtracted back out when sizing the
         // post-save allocation; where they precede it, `push_area` is zero and
-        // the whole run is frame. Either way, add eight bytes for odd push parity
-        // to restore the call boundary before any nested call.
-        placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+        // the whole run is frame. Round to the smallest allocation that covers
+        // the slots while restoring sixteen-byte alignment after the pushes.
+        u32 push_parity = (push_count & 1u) ? 8u : 0u;
+        placement.frame_size = ((running - push_area + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
         if (function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
