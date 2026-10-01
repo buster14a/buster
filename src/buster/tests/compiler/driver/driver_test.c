@@ -9036,7 +9036,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
                     S8("1504 frontend-to-Wasm integer checks passed"), deadline, deadline);
                 BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
-                String8 unsigned_arguments[] = {node, S8("tests/wasm_unsigned_div_rem_execution.js"), output};
+                String8 unsigned_arguments[] = {node, S8("tools/wasm_unsigned_div_rem_execution.js"), output};
                 CompilerDriverWasmNodeRun unsigned_run = compiler_driver_test_wasm_node_run_with_retry(
                     arguments, arguments->arena, S8("unsigned-div-rem"), S8("default"), S8("retry"),
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(unsigned_arguments),
