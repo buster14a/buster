@@ -1,0 +1,605 @@
+{
+  "source": "f20f88429dee673f8e7d30afa5bf44767e65eda8",
+  "machine": "ARM64",
+  "python": "C:\\hostedtoolcache\\windows\\Python\\3.13.15\\arm64\\python.exe",
+  "python_version": "3.13.15",
+  "image_os": "win11-vs2026-arm64",
+  "image_version": "20260920.164.1",
+  "orders": [
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      1
+    ],
+    [
+      1,
+      2
+    ]
+  ],
+  "runs": [
+    {
+      "jobs": 1,
+      "elapsed_seconds": 409.6352921,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 1,
+      "log": "pair-1-jobs-1.log"
+    },
+    {
+      "jobs": 2,
+      "elapsed_seconds": 216.38263770000003,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 1,
+      "log": "pair-1-jobs-2.log"
+    },
+    {
+      "jobs": 2,
+      "elapsed_seconds": 216.87480699999992,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 2,
+      "log": "pair-2-jobs-2.log"
+    },
+    {
+      "jobs": 1,
+      "elapsed_seconds": 394.38847770000007,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 2,
+      "log": "pair-2-jobs-1.log"
+    },
+    {
+      "jobs": 1,
+      "elapsed_seconds": 398.60224689999995,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 3,
+      "log": "pair-3-jobs-1.log"
+    },
+    {
+      "jobs": 2,
+      "elapsed_seconds": 217.79134219999992,
+      "success": true,
+      "cancelled": false,
+      "cases": [
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cache_ownership_failure_propagates_before_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cached_driver_exit_status_is_preserved",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_cold_then_warm_reuse_and_argument_forwarding",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_concurrent_cold_publication_uses_immutable_outputs",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_corrupt_and_incomplete_entries_are_never_executed",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_dependency_and_compiler_identity_invalidate_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_effective_flag_change_invalidates_reuse",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_required_rebuild_failure_propagates_without_stale_execution",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        },
+        {
+          "test": "bootstrap_wrapper_test.BootstrapWrapperTests.test_source_change_during_compile_is_not_published",
+          "completed": true,
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "success": true
+        }
+      ],
+      "worker_errors": [],
+      "cleanup_errors": [],
+      "owned_children": 22,
+      "peak_live_children": 6,
+      "unreaped_children": 0,
+      "pair": 3,
+      "log": "pair-3-jobs-2.log"
+    }
+  ],
+  "cpu_seconds": null,
+  "process_tree_peak_rss": null,
+  "whole_compiler_job_seconds": null,
+  "success": true,
+  "experiment_elapsed_seconds": 1853.6855126
+}

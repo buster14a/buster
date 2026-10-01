@@ -99,12 +99,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
 // Preparation validates and publishes each function straight after
 // transforming it. What it decides must not move: FAST's input guard is
 // answered for the whole module before any function is rewritten, the
-// promotion-output check still rejects the module before FAST or publication
-// starts, the output check covers every function, and statistics and
+// promotion-output check preserves attribution to already-invalid certified
+// functions, the output check covers every function, and statistics and
 // publication cover the whole module exactly once. Direct frontend SSA leaves
 // promotion nothing to change, so its planted fault reaches the guard; shared
-// promotion changes every function, so test builds reject the same fault at
-// the promotion-output boundary.
+// promotion changes every function. Its pre-existing planted fault is excluded
+// at the promotion-output boundary, and still declines FAST as a whole.
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_preparation_order_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -159,36 +159,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_preparation_order_tests(UnitTestArgum
             }
             IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
             BUSTER_TEST(arguments, (module->local_promotion.promoted_locals != 0) == shared_promotion);
-            bool rejected = guarded && shared_promotion && BUSTER_IR_TRANSFORM_CHECKS;
-            if (rejected)
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, module->local_promotion_complete && module->fast_complete);
+            if (guarded)
             {
-                BUSTER_TEST(arguments, prepared.error != IR_VALIDATION_NONE && prepared.function.value == 2);
-                BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
-                BUSTER_TEST(arguments, !module->local_promotion_complete && !module->fast_complete);
-                BUSTER_TEST(arguments, module->fast.functions == 0);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                if (shared_promotion && BUSTER_IR_TRANSFORM_CHECKS)
+                {
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
+                }
             }
             else
             {
-                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
-                BUSTER_TEST(arguments, module->local_promotion_complete && module->fast_complete);
-                if (guarded)
-                {
-                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
-                }
-                else
-                {
-                    BUSTER_TEST(arguments, module->fast.validation_skips == 0 && module->fast.functions == 3);
-                    BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0);
-                    BUSTER_TEST(arguments, prepared.boundary == (BUSTER_IR_TRANSFORM_CHECKS ? IR_VALIDATION_BOUNDARY_FAST_OUTPUT
-                                                                                             : IR_VALIDATION_BOUNDARY_UNSPECIFIED));
-                }
+                BUSTER_TEST(arguments, module->fast.validation_skips == 0 && module->fast.functions == 3);
+                BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0);
+                BUSTER_TEST(arguments, prepared.boundary == (BUSTER_IR_TRANSFORM_CHECKS ? IR_VALIDATION_BOUNDARY_FAST_OUTPUT
+                                                                                         : IR_VALIDATION_BOUNDARY_UNSPECIFIED));
             }
             IrPublishedCfg const* published[3];
             for (u32 index = 0; index < 3; index += 1)
             {
                 IrFunction* function = module->functions + index;
                 published[index] = function->published_cfg;
-                BUSTER_TEST(arguments, (published[index] != 0) == !rejected);
+                BUSTER_TEST(arguments, published[index] != 0);
                 if (guarded && !shared_promotion)
                 {
                     BUSTER_TEST(arguments, function->instruction_count == counts[index]);
@@ -208,16 +201,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_preparation_order_tests(UnitTestArgum
 #define IR_PREPARATION_EXPECT(counter, expected) \
     BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
             IR_PREPARATION_EXPECT(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, shared_promotion ? 1 : 0);
-            IR_PREPARATION_EXPECT(PREPARATION_FAST_INPUT_VALIDATIONS, shared_promotion ? 0 : 1);
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_INPUT_VALIDATIONS, shared_promotion && !guarded ? 0 : 1);
             IR_PREPARATION_EXPECT(PREPARATION_FAST_OUTPUT_VALIDATIONS, guarded ? 0 : 1);
             IR_PREPARATION_EXPECT(PREPARATION_PROMOTION_FUNCTIONS, 3);
             IR_PREPARATION_EXPECT(PREPARATION_FAST_FUNCTIONS, guarded ? 0 : 3);
-            IR_PREPARATION_EXPECT(PREPARATION_PUBLICATION_FUNCTIONS, rejected ? 0 : 3);
+            IR_PREPARATION_EXPECT(PREPARATION_PUBLICATION_FUNCTIONS, 3);
             IR_PREPARATION_EXPECT(VALIDATION_CALLS, guarded ? 1 : 3);
-            IR_PREPARATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, guarded ? 3 : 9);
+            IR_PREPARATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, (guarded ? 3u : 9u) + (shared_promotion ? 3u : 0u));
 #undef IR_PREPARATION_EXPECT
 #endif
-            if (!rejected)
             {
                 // The backend's own preparation call finds nothing left to do.
                 BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, true).error == IR_VALIDATION_NONE);

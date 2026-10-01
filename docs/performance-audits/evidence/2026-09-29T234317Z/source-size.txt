@@ -1,0 +1,46 @@
+Source size of 734e1908e93bdcd3a85db9a2163c28363dcaa51e
+  base 8f67df736f13d4edc055110a7a6d619a00a22eaf
+  baseline 4b80b3f862aebf2a388d3f875afb35f2c9bc0e61 (docs/source-size-baseline.txt)
+
+category    ratchet   files       bytes  change vs base  since baseline
+production  yes         179    16177663               0          +25729
+build       yes         212     6967501          +72955         +118270
+tests       no          732    15192378          +36772         +154537
+generated   no           47    51745042               0               0
+docs        no         1920    51678704               0         +171425
+dormant     no           65       88893               0               0
+total                  3155   141850181         +109727         +469961
+
+Largest ratcheted files:
+  production     2568258  src/buster/lib/compiler/frontend/c/c_gen.c
+  build          2072896  build.c
+  production     1449772  src/buster/lib/compiler/codegen/codegen.c
+  production     1292211  src/buster/lib/compiler/frontend/c/c_parse.c
+  production      989142  src/buster/lib/compiler/codegen/machine_x86_64.c
+  production      825448  src/buster/lib/compiler/assembly/x86_64_metadata.c
+  production      761257  src/buster/lib/compiler/assembly/assembly.c
+  production      652503  src/buster/lib/compiler/link/link.c
+  production      631053  src/buster/lib/compiler/object/object.c
+  production      599530  src/buster/lib/compiler/codegen/machine_aarch64.c
+
+Ratcheted files changed from base: 5
+  build           +33069  tools/research/ra_checker.c (added)
+  build           +31348  tools/research/ra_buster_probe.c (added)
+  build            +5456  tools/research/ra_checker.h (added)
+  build            +2039  tools/research/ra_probe_run.sh (added)
+  build            +1043  .github/workflows/allocation-checker-probe.yml (added)
+
+production: 0 bytes from base, within the 32768-byte change limit
+error: build: +72955 bytes from base exceeds the 32768-byte change limit and its baseline row is unchanged.
+  Acknowledge it: run ./build.sh source_size --write-baseline, commit docs/source-size-baseline.txt,
+  and explain the growth in the change description (docs/source-size.md).
+
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=production ratcheted=1 files=179 bytes=16177663 base_files=179 base_bytes=16177663 baseline_files=179 baseline_bytes=16151934
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=build ratcheted=1 files=212 bytes=6967501 base_files=207 base_bytes=6894546 baseline_files=205 baseline_bytes=6849231
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=tests ratcheted=0 files=732 bytes=15192378 base_files=731 base_bytes=15155606 baseline_files=730 baseline_bytes=15037841
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=generated ratcheted=0 files=47 bytes=51745042 base_files=47 base_bytes=51745042 baseline_files=47 baseline_bytes=51745042
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=docs ratcheted=0 files=1920 bytes=51678704 base_files=1920 base_bytes=51678704 baseline_files=1895 baseline_bytes=51507279
+SOURCE_SIZE_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e category=dormant ratcheted=0 files=65 bytes=88893 base_files=65 base_bytes=88893 baseline_files=65 baseline_bytes=88893
+SOURCE_SIZE_RATCHET_V1 category=production growth=0 limit=32768 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=+72955 limit=32768 verdict=unacknowledged
+SOURCE_SIZE_RESULT_V1 revision=734e1908e93bdcd3a85db9a2163c28363dcaa51e base=8f67df736f13d4edc055110a7a6d619a00a22eaf baseline_commit=4b80b3f862aebf2a388d3f875afb35f2c9bc0e61 status=fail
