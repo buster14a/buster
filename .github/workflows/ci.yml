@@ -1161,8 +1161,9 @@ jobs:
           retention-days: 14
 
   analyzer:
+    needs: reuse
     name: Clang analyzer shards
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
@@ -1171,6 +1172,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Bootstrap candidate and select reference build driver
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1251,16 +1253,19 @@ jobs:
             trap - EXIT
           fi
       - name: Exercise analyzer failure and coverage controls
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/self-test.log"
       - name: Configure the authoritative split-source database
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
       - name: Compare reference analysis and aggregate all module shards
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1369,6 +1374,15 @@ jobs:
               ;;
           esac
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
+      - name: Report reused analyzer validation
+        if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}
+        shell: bash
+        env:
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-analyzer"
+          printf 'Full candidate analyzer validation and failure/coverage controls reused from the exact queue execution. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-analyzer/reuse.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain analyzer inventory, results and measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

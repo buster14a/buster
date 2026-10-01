@@ -44,6 +44,8 @@ def job(name, run_id, *, status="completed", conclusion="success"):
                 required.add("Native MSVC reference differential")
             if name.endswith("native") and not name.startswith("Windows"):
                 required.add("Native configuration differential matrix")
+    if name in inventory.ANALYZER:
+        required.update(reuse.ANALYZER_STEPS)
     return {"id": len(name) + run_id, "name": name, "run_id": run_id,
             "run_attempt": 1, "head_sha": SHA, "status": status,
             "conclusion": conclusion,
@@ -76,6 +78,11 @@ class FakeAPI:
                                    for name in reuse.CACHE_STEPS]
                 record['steps'] += [dict(name=name, status='completed', conclusion='skipped')
                                     for name in reuse.VALIDATION_STEPS]
+            if record['name'] in inventory.ANALYZER:
+                record['steps'] = [dict(name=name, status='completed', conclusion='success')
+                                   for name in reuse.ANALYZER_RECEIPT_STEPS]
+                record['steps'] += [dict(name=name, status='completed', conclusion='skipped')
+                                    for name in reuse.ANALYZER_STEPS]
         self.main_jobs.append(job(inventory.MAIN_REUSE_JOB, CURRENT_ID))
         self.main_jobs += [job(name, CURRENT_ID, conclusion="skipped") for name in reuse.REUSED_NAMES]
         for index, record in enumerate(self.main_jobs):
@@ -119,8 +126,8 @@ class MainCIReuseTests(unittest.TestCase):
 
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()
-        self.assertEqual(len(receipt["source_jobs"]), 18)
-        self.assertEqual(len(receipt["source_artifacts"]), 18)
+        self.assertEqual(len(receipt["source_jobs"]), 19)
+        self.assertEqual(len(receipt["source_artifacts"]), 19)
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
         self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
@@ -245,6 +252,29 @@ class MainCIReuseTests(unittest.TestCase):
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertNotIn("needs.reuse.outputs.reuse != 'true'", block)
         self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.COMBINATION_PLATFORMS))
+
+    def test_analyzer_requires_complete_source_controls_and_main_receipt(self):
+        for step_name in reuse.ANALYZER_STEPS:
+            self.api = FakeAPI()
+            source = next(j for j in self.api.jobs if j['name'] in inventory.ANALYZER)
+            next(s for s in source['steps'] if s['name'] == step_name)['conclusion'] = 'skipped'
+            with self.assertRaises(AdmissionError):
+                self.admit()
+        for step_name in reuse.ANALYZER_STEPS + reuse.ANALYZER_RECEIPT_STEPS:
+            self.api = FakeAPI()
+            current = next(j for j in self.api.main_jobs if j['name'] in inventory.ANALYZER)
+            next(s for s in current['steps'] if s['name'] == step_name)['conclusion'] = 'failure'
+            with self.assertRaises(AdmissionError):
+                reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
+        self.assertIn('needs: reuse', analyzer)
+        # Queue and main bind baseline to their exact SHA; explicit comparisons
+        # remain dispatch-only and never enter main reuse.
+        self.assertEqual(analyzer.count('BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}'), 2)
+        for name in reuse.ANALYZER_STEPS:
+            block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
+            self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)
 
     def test_api_uncertainty_and_incomplete_pagination_fall_back(self):
         with mock.patch.object(self.api, "pages", side_effect=OSError("API unavailable")):

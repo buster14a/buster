@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only queue-to-main CI reuse for issue #1808.
 
-Native, mobile, UEFI and desktop validation are reusable. Desktop jobs retain
-only main's Zig cache lifecycle; lint checks the main history and the analyzer
-has an event-specific reference, so both still validate on main. This module
+Native, mobile, UEFI, desktop and analyzer validation are reusable. Desktop
+jobs retain main's Zig cache lifecycle, analyzer retains a truthful receipt,
+and lint still checks the main history. This module
 never creates a check or changes a ref. A missing proof schedules the normal
 jobs, while a proof that changes after jobs were skipped fails the aggregate.
 """
@@ -56,7 +56,13 @@ DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
                     ("Windows AArch64", "windows", "aarch64"))
                 for shard in github_ci_time.COMBINATION_SHARDS)
 DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
-SOURCE_COVERAGE = REUSED + DESKTOP
+ANALYZER_STEPS = ("Bootstrap candidate and select reference build driver",
+                  "Exercise analyzer failure and coverage controls",
+                  "Configure the authoritative split-source database",
+                  "Compare reference analysis and aggregate all module shards")
+ANALYZER_RECEIPT_STEPS = ("Report reused analyzer validation",
+                         "Retain analyzer inventory, results and measurements")
+SOURCE_COVERAGE = REUSED + DESKTOP + (("Clang analyzer shards", "clang-analyzer", ANALYZER_STEPS[-1]),)
 CACHE_STEPS = ("Checkout", "Resolve exact Zig cache policy", "Restore Zig archive",
                "Validate exact Zig cache restore", "Install verified Zig",
                "Retain exact Zig cache evidence", "Report reused desktop validation",
@@ -129,6 +135,8 @@ def successful_source_jobs(api, source, sha):
     by_name = {job["name"]: job for job in jobs}
     for name, _, step in SOURCE_COVERAGE:
         mandatory = {step}
+        if name in github_ci_time.ANALYZER:
+            mandatory.update(ANALYZER_STEPS)
         if name in github_ci_time.NATIVE:
             if name.startswith("Windows"):
                 mandatory.add("Native MSVC reference differential")
@@ -229,9 +237,23 @@ def verify_current_jobs(api, sha, run_id):
             require(len(matches) == 1 and matches[0].get("status") == "completed" and
                     matches[0].get("conclusion") == expected,
                     job["name"] + ": cache-only step proof missing: " + step_name)
-    validation = [job for job in jobs if job.get("name") not in DESKTOP_NAMES]
+    analyzer = [job for job in jobs if job.get("name") in github_ci_time.ANALYZER]
+    require(len(analyzer) == 1, "main analyzer receipt job is missing or duplicated")
+    for job in analyzer:
+        require(job.get("run_id") == run_id and job.get("head_sha") == sha and
+                job.get("run_attempt") == 1 and job.get("status") == "completed" and
+                job.get("conclusion") == "success", "main analyzer receipt failed or is misbound")
+        for step_name in ANALYZER_STEPS + ANALYZER_RECEIPT_STEPS:
+            matches = [step for step in job.get("steps", []) if step.get("name") == step_name]
+            expected = "success" if step_name in ANALYZER_RECEIPT_STEPS else "skipped"
+            require(len(matches) == 1 and matches[0].get("status") == "completed" and
+                    matches[0].get("conclusion") == expected,
+                    "main analyzer receipt step proof missing: " + step_name)
+    validation = [job for job in jobs if job.get("name") not in DESKTOP_NAMES and
+                  job.get("name") not in github_ci_time.ANALYZER]
     errors = github_ci_time.validate_required_jobs(validation, run_id, 1, sha,
-                       expected_names=tuple(name for name in RETAINED_NAMES if name not in DESKTOP_NAMES))
+                       expected_names=tuple(name for name in RETAINED_NAMES if name not in DESKTOP_NAMES and
+                                            name not in github_ci_time.ANALYZER))
     require(not errors, "; ".join(errors))
     identifiers = [job.get("id") for job in jobs]
     require(all(type(identifier) is int and identifier > 0 for identifier in identifiers) and
@@ -298,7 +320,8 @@ def cli():
                           f"(https://github.com/{REPOSITORY}/actions/runs/"
                           f"{receipt['source_run_id']}/attempts/1). "
                           "Native, mobile and UEFI jobs did not execute on main. "
-                          "Desktop jobs ran only the main Zig cache lifecycle; their validation did not repeat.\n")
+                          "Desktop jobs ran only the main Zig cache lifecycle and analyzer only retained a receipt; "
+                          "their validation did not repeat.\n")
     return status
 
 
