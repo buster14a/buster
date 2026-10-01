@@ -2,6 +2,7 @@ name: Delimiter fact experiment
 on:
   push:
     branches: ['codex/2183-publish-delimiter-pairs']
+    paths: ['src/**', 'docs/research/delimiter-facts/run.py', 'docs/research/delimiter-facts/instrument.py']
 permissions:
   contents: read
 jobs:

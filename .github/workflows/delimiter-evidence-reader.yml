@@ -1,0 +1,20 @@
+name: Delimiter evidence reader
+on:
+  push:
+    branches: ['codex/2183-publish-delimiter-pairs']
+    paths: ['docs/research/delimiter-facts/report.py']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  report:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify captures and print durable records
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 docs/research/delimiter-facts/report.py
