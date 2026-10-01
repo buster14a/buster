@@ -11,6 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
+| Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
 | Atomic layout, argument classification, loads/stores, conversions | [Atomics](frontend/atomics.md) |
@@ -21,6 +22,7 @@ Layout and atomic ABI work often needs both the layout and atomics guides.
 Changes to places or calls also need the foundations guide. Native selection and
 allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
+The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
 ## Preprocessor include identity
 

@@ -30,3 +30,4 @@ jobs:
           python3 -B tools/merge_conflict_preflight_test.py -v
           python3 -B tools/merge_conflict_preflight_refresh_test.py -v
           python3 -B tools/merge_conflict_preflight_attestation_test.py -v
+          python3 -B tools/main_push_maintenance_test.py -v

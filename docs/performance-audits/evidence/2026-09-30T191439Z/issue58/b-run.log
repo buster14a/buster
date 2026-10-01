@@ -1,0 +1,55 @@
+TARGET cpu=znver4 features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdrand,rdseed,sha,shstk,smap,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                356                      392
+bytes on disk                 32.957.065               32.995.005
+physical lines                   426.684                  427.936
+
+bytes scanned                 32.954.583               32.992.515
+  code                        25.712.999   78.0 %      25.732.941   78.0 %
+  comment                      2.034.313    6.2 %       2.049.749    6.2 %
+  whitespace                   5.207.271   15.8 %       5.209.825   15.8 %
+  literals, within code       13.210.718   40.1 %      13.210.991   40.0 %
+
+lines scanned                    425.443                  426.691
+  code, the sLOC                 380.600   89.5 %         381.462   89.4 %
+  comment                         33.988    8.0 %          34.304    8.0 %
+  blank                           12.862    3.0 %          12.947    3.0 %
+  both, counted twice              2.007    0.5 %           2.022    0.5 %
+
+comments                          28.752                   28.827
+tokens                         3.291.934                3.295.274
+spliced-away lines                 1.241    0.3 %           1.245    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.666.723  111.3 %
+  their spelling bytes        26.124.607  101.5 %
+  bytes retained              36.143.309  109.6 %
+  macro expansions               137.396
+  #define directives               3.900
+
+files lexed more than once
+         lexes re-read bytes  path
+             5        17.136  /usr/include/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      37.932  re-read in total
+IR_FRONTEND_SSA functions=5116 locals=48017 reads=175576 writes=77730 parameters_created=477215 parameters_removed=444990 temporaries=12901 fallback_locals=2375
+C_TYPE_LAYOUT solves=119 pass_solves=117 pass_state_types=9037436 pass_attempts=695813 agenda_solves=2 agenda_types=4 agenda_attempts=4 agenda_edges=2 agenda_notifications=2 agenda_pushes=6 agenda_fallbacks=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1565655 changes=132269
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1565655 changes=11157
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3154205 changes=182538
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=99534 changes=0
+IR_FAST functions=5410 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2738304 retained_bound=18508836 compact_ns=0 instructions_before=1565655 instructions_after=1371759
+IR_LOCAL_PROMOTION candidates=32940 promoted=193 loads_removed=592 stores_removed=350 parameters_inserted=1374 parameters_removed=1236 uninitialized=0 barriers=8 instructions_before=1566790 instructions_after=1565655 values_before=1348214 values_after=1347567
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3824 parameter_visits=2538 incoming_visits=5795
+CODEGEN cpu=znver4 vector_bits=512 functions=5410 instructions=1371759 values=1153671 stack_value_bytes=6143440 stack_frame_bytes=6143440 max_stack_frame_bytes=907272 code_bytes=21662721 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=116 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1797587 exact_successes=1797587 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=85927
+CODEGEN_EMIT machine_code_in_place=21622456 machine_code_copied=0
+CODEGEN_ALLOCATOR reloads=203004 spills=250058 boundary_spills=103268 boundary_reloads=23202 boundary_copies=85 copies=187794 rematerializations=43086 pins=0 splits=0 scheduled=0 schedule_kept=0

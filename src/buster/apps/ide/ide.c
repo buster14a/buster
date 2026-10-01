@@ -18,6 +18,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/file.h>
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.h>
+#endif
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
@@ -36,6 +39,8 @@
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
@@ -94,6 +99,9 @@
 #include <buster/lib/float.c>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/truetype.c>
+#endif
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.c>
 #endif
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
@@ -493,6 +501,16 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
         if (arena)
         {
+            ByteSlice image_bytes = {.pointer = (u8*)pointer, .length = size};
+            image_decode(arena, image_bytes,
+                         (ImageDecodeOptions){
+                             .max_width = 4096,
+                             .max_height = 4096,
+                             .max_pixels = BUSTER_MB(8),
+                             .max_decoded_bytes = BUSTER_MB(32),
+                             .max_work = BUSTER_MB(64),
+                         });
+            arena_reset_to_start(arena);
             String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
             CPreprocessResult preprocess = c_preprocess(arena, source,
                                                         (CPreprocessOptions){
@@ -908,6 +926,10 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
+    CCensusCounters source_census = c_census_counters();
+    IrSemanticCounters semantics = ir_semantic_counters();
+    WorkLedgerCounters work = work_ledger_counters();
+    IrDiagnosticCensus diagnostic_census = ir_diagnostic_census();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -932,6 +954,60 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     {
         source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
                                     construction.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("overflowed"), source_census.overflowed);
+    for (u32 index = 0; index < C_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("c_census"), c_census_counter_name((CCensusCounter)index), source_census.values[index]);
+    }
+    // Literal groups: formatting one here would interleave its bytes with the
+    // contiguous report text the append helper extends.
+    String8 const census_groups[C_CENSUS_PHASE_COUNT] = {
+        [C_CENSUS_PHASE_OTHER] = S8("c_census.other"),
+        [C_CENSUS_PHASE_PREPROCESS] = S8("c_census.preprocess"),
+        [C_CENSUS_PHASE_PARSE] = S8("c_census.parse"),
+        [C_CENSUS_PHASE_SEMANTIC] = S8("c_census.semantic"),
+        [C_CENSUS_PHASE_LOWER] = S8("c_census.lower"),
+    };
+    for (u32 phase = 0; phase < C_CENSUS_PHASE_COUNT; phase += 1)
+    {
+        String8 group = census_groups[phase];
+        for (u32 index = 0; index < C_CENSUS_PHASE_COUNTER_COUNT; index += 1)
+        {
+            source_metrics_append_field(arena, &text, group, c_census_phase_counter_name((CCensusPhaseCounter)index),
+                                        source_census.phase_values[phase][index]);
+        }
+    }
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("overflowed"), semantics.overflowed);
+    for (u32 index = 0; index < IR_SEMANTIC_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("ir_semantics"), ir_semantic_counter_name((IrSemanticCounter)index), semantics.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("work"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("work"), S8("overflowed"), work.overflowed);
+    for (u32 index = 0; index < WORK_LEDGER_COUNT; index += 1)
+    {
+        source_metrics_append_line(&text, string_format(arena, S8("work.{S8}.{S8}={u64}\n"), work_ledger_counter_mechanism((WorkLedgerCounter)index),
+                                                        work_ledger_counter_name((WorkLedgerCounter)index), work.values[index]));
+    }
+    for (u32 index = 0; index < WORK_LEDGER_PHASE_COUNT; index += 1)
+    {
+        String8 phase = work_ledger_phase_name((WorkLedgerPhase)index);
+        WorkLedgerPhaseTotals totals = work.phases[index];
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.marks={u64}\n"), phase, totals.marks));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.minor_faults={u64}\n"), phase, totals.minor_faults));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_calls={u64}\n"), phase, totals.arena_calls));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_bytes={u64}\n"), phase, totals.arena_bytes));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_zero_written={u64}\n"), phase, totals.arena_zero_written));
+    }
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("overflowed"), diagnostic_census.overflowed);
+    for (u32 index = 0; index < IR_DIAGNOSTIC_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("diagnostic_census"), ir_diagnostic_census_counter_name((IrDiagnosticCensusCounter)index),
+                                    diagnostic_census.values[index]);
     }
 #endif
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
@@ -983,6 +1059,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // Only the source reports below read the spelled-byte sum.
+    invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
@@ -1047,6 +1125,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        CTypeLayoutStatistics layout = compile.type_layout;
+        string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
+                        "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
+                     layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
+                     layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
         if (invocation.fast_passes)
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
@@ -1099,12 +1182,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             ObjectWriteStatistics written = compile.object_write_statistics;
             string_print(S8("OBJECT_WRITE format={S8} section_visits={u64} symbol_visits={u64} relocation_visits={u64} image_reserved={u64} "
-                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} scratch={u64} retained={u64} "
-                            "output={u64}\n"),
+                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} payload_borrowed={u64} scratch={u64} "
+                            "retained={u64} output={u64}\n"),
                          object_format_name(object_format_for_target(invocation.target)), written.section_visits, written.symbol_visits,
                          written.relocation_visits, written.image_bytes_reserved, written.image_bytes_stored, written.image_bytes_zeroed,
-                         written.image_bytes_patched, written.payload_bytes_copied, written.scratch_bytes, written.retained_bytes,
-                         written.output_bytes);
+                         written.image_bytes_patched, written.payload_bytes_copied, written.payload_bytes_borrowed, written.scratch_bytes,
+                         written.retained_bytes, written.output_bytes);
         }
         for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
         {
