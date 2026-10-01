@@ -1,0 +1,73 @@
+name: Native frame batching frozen-source qualification
+
+# Temporary hosted measurement branch. Ordinary PR checks are unchanged.
+on:
+  push:
+    branches: ['codex/1885-native-frame-qualification']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-frame-qualification-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Frozen full matrix ${{ matrix.os }} first attempts
+    runs-on: ${{ matrix.os == 'windows' && 'windows-2025' || 'ubuntu-26.04' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [linux, windows]
+    env:
+      BUSTER_FRAME_CANDIDATE: '115fdf68ee77c9878901c81625406df7319d6375'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install verified Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/ci_zig.py --target '${{ matrix.os == 'windows' && 'x86_64-windows' || 'x86_64-linux' }}' --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig"
+      - name: Install Linux linker
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Serial frozen Linux A1 B1 B2 A2 A3 B3
+        if: ${{ matrix.os == 'linux' }}
+        timeout-minutes: 340
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/driver-test/native_frame_qualification.py
+      - name: Serial frozen Windows A1 B1 B2 A2 A3 B3
+        if: ${{ matrix.os == 'windows' }}
+        timeout-minutes: 340
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools unavailable' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          python tools/driver-test/native_frame_qualification.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain all first attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-frame-qualification-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-frame-qualification/
+          if-no-files-found: error
+          retention-days: 14
