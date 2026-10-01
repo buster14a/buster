@@ -7,6 +7,7 @@
 // against native host-linked controls, including each scaled low12 form.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
+// compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -14916,6 +14917,214 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_location_counte
     return result;
 }
 
+// Inspect serialized ELF relocation/symbol entries, independently of object_read.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_cfi_local(ByteSlice image)
+{
+    u64 relocations = 0, relocation_size = 0, symbols = 0, symbol_size = 0, ignored = 0;
+    bool result = compiler_driver_test_elf_section_find(image, S8(".rela.eh_frame"), &relocations, &relocation_size, &ignored) &&
+                  compiler_driver_test_elf_section_find(image, S8(".symtab"), &symbols, &symbol_size, &ignored) && relocation_size &&
+                  relocation_size % 24 == 0 && symbol_size % 24 == 0;
+    for (u64 offset = 0; result && offset < relocation_size; offset += 24)
+    {
+        u64 info = 0;
+        memcpy(&info, image.pointer + relocations + offset + 8, sizeof(info));
+        u64 symbol = info >> 32;
+        result = symbol < symbol_size / 24 && (image.pointer[symbols + symbol * 24 + 4] >> 4) == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_cfi_unique(ByteSlice image)
+{
+    u64 offset = 0, size = 0, ignored = 0;
+    bool result = compiler_driver_test_elf_section_find(image, S8(".eh_frame_hdr"), &offset, &size, &ignored) && size >= 12;
+    u32 count = 0;
+    if (result)
+    {
+        memcpy(&count, image.pointer + offset + 8, sizeof(count));
+        result = image.pointer[offset] == 1 && image.pointer[offset + 2] == 3 && image.pointer[offset + 3] == 0x3b && count && count <= (size - 12) / 8;
+    }
+    s32 previous = 0;
+    for (u32 index = 0; result && index < count; index += 1)
+    {
+        s32 key = 0;
+        memcpy(&key, image.pointer + offset + 12 + (u64)index * 8, sizeof(key));
+        result = !index || key > previous;
+        previous = key;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("buster-weak-unwind"), S8(".c"));
+    String8 body = S8("volatile int sink;\n"
+                      "__attribute__((weak)) void hook(void) {\n"
+                      "  for (int i = 0; i < 100; i++) { sink += i; sink ^= sink >> 3; sink *= 7; sink += 11; sink ^= 0x55; sink -= i; }\n"
+                      "}\n"
+                      "__attribute__((weak, section(\"buster_unwind_text\"))) int placed_hook(void) { return 7; }\n"
+                      "int run_hook(void) { hook(); return sink + 13; }\n");
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(body));
+    BUSTER_TEST(arguments, written);
+    String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                       S8("-fregister-allocator=quality")};
+    for (u32 target_index = 0; written && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 model = 0; model < 2; model += 1)
+            {
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    TemporalArena row = scratch_begin(&arena, 1);
+                    Arena* row_arena = row.arena;
+                    String8 object = buster_test_temporary_path(row_arena, S8("buster-weak-unwind"), S8(".o"));
+                    String8 command[] = {S8("-target"),
+                                         targets[target_index],
+                                         modes[mode],
+                                         model ? S8("-fPIC") : S8("-fno-pic"),
+                                         debug ? S8("-g") : S8("-g0"),
+                                         S8("-c"),
+                                         source,
+                                         S8("-o"),
+                                         object};
+                    CompilerDriverResult compiled =
+                        compiler_driver_execute_invocation(row_arena, compiler_driver_parse_arguments(row_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object))
+                    {
+                        ByteSlice artifact = file_read(row_arena, object, (FileReadOptions){0});
+                        BUSTER_TEST(arguments, compiler_driver_test_elf_cfi_local(artifact));
+                        u32 cfi_count = 0;
+                        bool named_anchor = false;
+                        u64 caller_size = 0;
+                        for (u32 symbol = 0; symbol < compiled.object.symbol_count; symbol += 1)
+                        {
+                            if (string_equal(compiled.object.symbols[symbol].name, S8("run_hook")))
+                            {
+                                caller_size = compiled.object.symbols[symbol].size;
+                            }
+                        }
+                        for (u32 index = 0; index < compiled.object.relocation_count; index += 1)
+                        {
+                            ObjectRelocation relocation = compiled.object.relocations[index];
+                            if (relocation.section == OBJECT_SECTION_UNWIND && BUSTER_REQUIRE(arguments, relocation.symbol < compiled.object.symbol_count))
+                            {
+                                ObjectSymbol anchor = compiled.object.symbols[relocation.symbol];
+                                BUSTER_TEST(arguments, !anchor.global && !anchor.weak && anchor.value == 0);
+                                BUSTER_TEST(arguments, anchor.section < compiled.object.section_count &&
+                                                           compiled.object.sections[anchor.section].kind == OBJECT_SECTION_TEXT);
+                                if (BUSTER_REQUIRE(arguments, cfi_count < 3))
+                                {
+                                    ObjectSymbol function = compiled.object.symbols[cfi_count];
+                                    BUSTER_TEST(arguments, anchor.section == function.section && relocation.addend == (s64)function.value);
+                                }
+                                named_anchor |= string_equal(anchor.name, S8("buster_unwind_text"));
+                                cfi_count += 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, cfi_count == 3 && named_anchor && caller_size);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+                        bool native_target = compiled.object.target.cpu_arch == (BUSTER_CPU_ARCH_X86_64 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64);
+                        if (native_target && !debug)
+                        {
+                            String8 host_source = buster_test_temporary_path(row_arena, S8("buster-weak-unwind-host"), S8(".c"));
+                            String8 host_object = buster_test_temporary_path(row_arena, S8("buster-weak-unwind-host"), S8(".o"));
+                            String8 host_body = string_format(row_arena,
+                                                              S8("extern int backtrace(void**, int);\nextern int run_hook(void);\nvolatile int observed;\n"
+                                                                 "void hook(void) {{ void* frames[32]; int count = backtrace(frames, 32);\n"
+                                                                 "  unsigned long begin = (unsigned long)&run_hook;\n"
+                                                                 "  for (int i = 0; i < count; i++) {{ unsigned long pc = (unsigned long)frames[i];\n"
+                                                                 "    if (pc > begin && pc - begin < {u64}) observed = 1; }\n}\n"
+                                                                 "int main(void) {{ return run_hook() == 13 && observed ? 0 : 1; }\n"),
+                                                              caller_size);
+                            String8 host_command[12];
+                            u32 host_count = 0;
+                            host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+                            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+                                host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                            host_command[host_count++] = S8("-O2");
+                            // Keep the host observer on supported ELF GOT relocations;
+                            // non-PIC AArch64 load/store relocations are a separate import boundary.
+                            host_command[host_count++] = S8("-fPIC");
+                            host_command[host_count++] = S8("-fomit-frame-pointer");
+                            host_command[host_count++] = S8("-fasynchronous-unwind-tables");
+                            host_command[host_count++] = S8("-c");
+                            host_command[host_count++] = host_source;
+                            host_command[host_count++] = S8("-o");
+                            host_command[host_count++] = host_object;
+                            bool host_ok = file_write(host_source, BUSTER_SLICE_TO_BYTE_SLICE(host_body));
+                            if (host_ok)
+                            {
+                                ProcessSpawnResult spawn =
+                                    os_process_spawn((SliceString8){.pointer = host_command, .length = host_count}, (SliceString8){0}, (SliceString8){0},
+                                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                host_ok = spawn.handle && os_process_wait_deadline(row_arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            }
+                            BUSTER_TEST(arguments, host_ok);
+                            bool lld_available = executable_resolve_in_path(row_arena, S8("ld.lld")).length != 0;
+                            if (!lld_available)
+                                arguments->show(arguments, S8("WEAK_UNWIND LLD unavailable on this host\n"));
+                            for (u32 linker = 0; host_ok && linker < 3; linker += 1)
+                            {
+                                if (linker == 2 && !lld_available)
+                                    continue;
+                                for (u32 order = 0; order < 2; order += 1)
+                                {
+                                    String8 executable = buster_test_temporary_path(row_arena, S8("buster-weak-unwind-image"), S8(".exe"));
+                                    String8 first = order ? object : host_object;
+                                    String8 second = order ? host_object : object;
+                                    bool linked = false;
+                                    if (!linker)
+                                    {
+                                        String8 link[] = {first, second, S8("-o"), executable};
+                                        CompilerDriverResult image = compiler_driver_execute_invocation(
+                                            row_arena, compiler_driver_parse_arguments(row_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                                        linked = image.error == COMPILER_DRIVER_ERROR_NONE;
+                                        BUSTER_TEST_RAW(arguments, linked, image.diagnostic);
+                                    }
+                                    else
+                                    {
+                                        String8 link[10];
+                                        u32 count = 0;
+                                        link[count++] = S8(BUSTER_HOST_C_COMPILER);
+                                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+                                            link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                                        link[count++] = linker == 1 ? S8("-fuse-ld=bfd") : S8("-fuse-ld=lld");
+                                        link[count++] = S8("-no-pie");
+                                        link[count++] = first;
+                                        link[count++] = second;
+                                        link[count++] = S8("-o");
+                                        link[count++] = executable;
+                                        ProcessSpawnResult spawn =
+                                            os_process_spawn((SliceString8){.pointer = link, .length = count}, (SliceString8){0}, (SliceString8){0},
+                                                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                        linked = spawn.handle && os_process_wait_deadline(row_arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                        BUSTER_TEST(arguments, linked);
+                                    }
+                                    if (linked)
+                                    {
+                                        ByteSlice image = file_read(row_arena, executable, (FileReadOptions){0});
+                                        BUSTER_TEST(arguments, compiler_driver_test_elf_cfi_unique(image));
+                                        BUSTER_TEST(arguments, compiler_driver_test_process_success(row_arena, executable));
+                                    }
+                                }
+                            }
+                        }
+#endif
+                    }
+                    scratch_end(row);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14955,6 +15164,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_weak_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
