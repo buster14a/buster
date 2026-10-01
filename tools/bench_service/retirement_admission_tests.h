@@ -569,6 +569,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_coordinator_gates(void)
 }
 #endif
 
+#ifdef __linux__
 /* (#426 plan step 6) The A/A policy pin is required for a complete
  * (admitted) profile: an admitted profile of the full pin shape without its
  * aa-policy-sha256= line, with it twice or with a malformed digest is
@@ -618,6 +619,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_aa_pin_required(void)
              !strstr(bq_native_retirement_blocked_profile, "aa-policy-sha256=") &&
              !bq_retirement_profile_complete(blocked) && bq_retirement_compiled_servable());
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL void bq_test_retirement_admission(void)
 {
