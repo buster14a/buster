@@ -61,6 +61,12 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+Absolute dependency paths may contain lexical `..` components, as TinyCC
+resource paths can when its installation prefix contains them. Cold publication
+and warm validation hash the files at those paths and retain their spelling in
+the manifest. Relative dependency paths containing `../` remain refused before
+they are resolved against the repository root.
+
 The GitHub-hosted workflows are the bootstrap exception: the supplementary
 privacy broker and `.github/workflows/ci.yml` both compile `build.c` with the
 Clang already on the hosted image, because those images ship no TCC and modern
