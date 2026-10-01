@@ -62,6 +62,10 @@
 //   one is left unprepared, and whichever child expression owns the operand
 //   prepares it inside the block that actually runs.
 //
+// c_ir_type_identity_query consumes the retained semantic C answer for
+// generic selections and the GNU compatibility predicate. Canonical types
+// represent the selected value; they never decide source type identity.
+//
 // Layout, in file order; each anchor is a definition to search for:
 //   c_declaration_binding                         __attribute__((weak)) and
 //                                                 __attribute__((alias))
@@ -2247,18 +2251,6 @@ struct CIrFunctionNameIndex
     u32 bucket_count;
 };
 
-typedef struct CIrGenericTypePrediction CIrGenericTypePrediction;
-struct CIrGenericTypePrediction
-{
-    IrTypeId type;
-    u32 token_index;
-    u32 close_index;
-    u32 selected_start;
-    u32 selected_end;
-    bool resolved;
-    u8 reserved[3];
-};
-
 BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
 {
     struct
@@ -2784,8 +2776,6 @@ struct CIntegerIrBuilder
     CIrPreparedControlExpression* prepared_control_expressions;
     u32 prepared_control_expression_count;
     u32 prepared_control_expression_capacity;
-    CIrGenericTypePrediction* generic_type_predictions;
-    u32 generic_type_prediction_count;
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
@@ -8099,15 +8089,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             return c_ir_emit_representation_alias_conversion(builder, value, target_type, source);
         }
     }
-    // Two types that differ only in a `volatile` qualifier are one type as far
-    // as a value is concerned: the qualifier constrains how the object behind a
-    // place is accessed, and the access itself carries `volatile_access`. The
-    // ladder below spans the scalar kinds only, so an aggregate that crossed
-    // the qualifier -- `volatile sigset_t oldset = set2` in libc-test's
-    // functional/setjmp -- had no conversion to reach for and was refused
-    // (#735). Nothing is emitted: the value already has the representation the
-    // target asks for, and the load/store validation admits the difference.
-    if (ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
+    // Scalar conversions must retain the requested canonical result type:
+    // return validation requires the exact function signature, including a
+    // volatile-qualified scalar return. Aggregates have no scalar conversion
+    // ladder, and their load/store validation admits the qualifier difference.
+    if (source_value->kind != IR_TYPE_BOOLEAN && source_value->kind != IR_TYPE_INTEGER && source_value->kind != IR_TYPE_ENUM &&
+        source_value->kind != IR_TYPE_FLOAT && source_value->kind != IR_TYPE_POINTER &&
+        ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
     {
         return value;
     }
@@ -17721,297 +17709,31 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
     return false;
 }
 
-BUSTER_C_INTERNAL CIrGenericTypePrediction* c_ir_generic_type_prediction_find(CIntegerIrBuilder* builder, u32 token_index)
+// A language type-identity question never reaches canonical type ids. The
+// semantic source-range answer is also used by enumerators and validation.
+BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 start, u32 end, CTypeIdentityQuery* answer)
 {
-    for (u32 index = 0; index < builder->generic_type_prediction_count; index += 1)
-    {
-        CIrGenericTypePrediction* prediction = builder->generic_type_predictions + index;
-        if (prediction->resolved && prediction->token_index == token_index)
-        {
-            return prediction;
-        }
-    }
-    return 0;
+    CScopeId root = c_ir_current_scope(builder);
+    if (root.value == C_SCOPE_ID_INVALID.value && builder->parse.scope_count) root = (CScopeId){0};
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, start);
+    String8 message = {0};
+    bool valid = c_semantic_type_identity_query(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, answer, &message);
+    if (!valid && message.length) builder->failure_message = message;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out,
                                                 IrTypeId* selected_type_out)
 {
-    if (token_index + 1 >= end || builder->preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER ||
-        !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]), S8("_Generic")) ||
-        !c_token_is_punctuator(&builder->preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        return false;
-    }
-    u32 capacity = end - token_index;
-    CIrGenericTypePrediction* predictions = arena_allocate(builder->temporary_arena, CIrGenericTypePrediction, capacity);
-    u32 prediction_count = 0;
-    for (u32 index = token_index; index + 1 < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER || !string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Generic")) ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            continue;
-        }
-        u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close == UINT32_MAX || prediction_count >= capacity)
-        {
-            builder->failure_token_index = index;
-            builder->failure_message = S8("unterminated _Generic selection");
-            return false;
-        }
-        predictions[prediction_count++] = (CIrGenericTypePrediction){
-            .type = IR_TYPE_ID_INVALID,
-            .token_index = index,
-            .close_index = close,
-        };
-    }
-    CIrGenericTypePrediction* previous_predictions = builder->generic_type_predictions;
-    u32 previous_prediction_count = builder->generic_type_prediction_count;
-    builder->generic_type_predictions = predictions;
-    builder->generic_type_prediction_count = prediction_count;
-    bool valid = true;
-    u32 resolved_count = 0;
-    while (valid && resolved_count < prediction_count)
-    {
-        CIrGenericTypePrediction* selected = 0;
-        u32 selected_span = UINT32_MAX;
-        for (u32 index = 0; index < prediction_count; index += 1)
-        {
-            CIrGenericTypePrediction* candidate = predictions + index;
-            u32 span = candidate->close_index - candidate->token_index;
-            if (!candidate->resolved && span < selected_span)
-            {
-                selected = candidate;
-                selected_span = span;
-            }
-        }
-        if (!selected)
-        {
-            valid = false;
-            break;
-        }
-        u32 content_start = selected->token_index + 2;
-        u32 content_end = selected->close_index;
-        u32 controller_end = UINT32_MAX;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = content_start; index < content_end; index += 1)
-        {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            {
-                controller_end = index;
-                break;
-            }
-        }
-        if (controller_end == UINT32_MAX || controller_end == content_start)
-        {
-            builder->failure_token_index = selected->token_index;
-            builder->failure_message = S8("_Generic requires a controlling expression and at least one association");
-            valid = false;
-            break;
-        }
-        IrTypeId controller_type = c_ir_predict_expression_type(builder, content_start, controller_end);
-        if (controller_type.value == IR_ID_UNDERLYING_INVALID)
-        {
-            builder->failure_token_index = content_start;
-            builder->failure_message = S8("could not determine the type of the _Generic controlling expression");
-            valid = false;
-            break;
-        }
-        IrTypeId* association_types = arena_allocate(builder->temporary_arena, IrTypeId, content_end - controller_end);
-        u32 association_type_count = 0;
-        u32 match_count = 0;
-        u32 match_start = UINT32_MAX;
-        u32 match_end = UINT32_MAX;
-        u32 default_start = UINT32_MAX;
-        u32 default_end = UINT32_MAX;
-        u32 association_start = controller_end + 1;
-        while (valid && association_start < content_end)
-        {
-            u32 association_end = content_end;
-            u32 colon = UINT32_MAX;
-            parentheses = 0;
-            brackets = 0;
-            braces = 0;
-            for (u32 index = association_start; index < content_end; index += 1)
-            {
-                CToken token = builder->preprocess.tokens[index];
-                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    braces += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                {
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && colon == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-                {
-                    colon = index;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-                {
-                    association_end = index;
-                    break;
-                }
-            }
-            if (colon == UINT32_MAX || colon == association_start || colon + 1 >= association_end)
-            {
-                builder->failure_token_index = association_start;
-                builder->failure_message = S8("expected 'type-name: expression' or 'default: expression' in _Generic association");
-                valid = false;
-                break;
-            }
-            bool is_default = colon == association_start + 1 && builder->preprocess.tokens[association_start].kind == C_TOKEN_IDENTIFIER &&
-                              string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[association_start]), S8("default"));
-            if (is_default)
-            {
-                if (default_start != UINT32_MAX)
-                {
-                    builder->failure_token_index = association_start;
-                    builder->failure_message = S8("_Generic selection has more than one default association");
-                    valid = false;
-                    break;
-                }
-                default_start = colon + 1;
-                default_end = association_end;
-            }
-            else
-            {
-                IrTypeId association_type = c_ir_type_name(builder, association_start, colon);
-                IrType* association_type_value = ir_type_from_id(&builder->program->types, association_type);
-                if (association_type.value == IR_ID_UNDERLYING_INVALID || !association_type_value || association_type_value->kind == IR_TYPE_VOID ||
-                    association_type_value->kind == IR_TYPE_FUNCTION || !association_type_value->layout.resolved)
-                {
-                    builder->failure_token_index = association_start;
-                    builder->failure_message = S8("_Generic association requires a complete object type");
-                    valid = false;
-                    break;
-                }
-                for (u32 type_index = 0; type_index < association_type_count; type_index += 1)
-                {
-                    if (association_types[type_index].value == association_type.value)
-                    {
-                        builder->failure_token_index = association_start;
-                        builder->failure_message = S8("_Generic selection has multiple compatible type associations");
-                        valid = false;
-                        break;
-                    }
-                }
-                if (!valid)
-                {
-                    break;
-                }
-                association_types[association_type_count++] = association_type;
-                if (association_type.value == controller_type.value)
-                {
-                    match_count += 1;
-                    match_start = colon + 1;
-                    match_end = association_end;
-                }
-            }
-            association_start = association_end + 1;
-        }
-        if (!valid)
-        {
-            break;
-        }
-        if (match_count > 1)
-        {
-            builder->failure_token_index = selected->token_index;
-            builder->failure_message = S8("_Generic controlling type matches more than one association");
-            valid = false;
-            break;
-        }
-        if (!match_count)
-        {
-            match_start = default_start;
-            match_end = default_end;
-        }
-        if (match_start == UINT32_MAX || match_end == UINT32_MAX)
-        {
-            builder->failure_token_index = selected->token_index;
-            builder->failure_message = S8("_Generic controlling type is not compatible with any association and no default was provided");
-            valid = false;
-            break;
-        }
-        selected->selected_start = match_start;
-        selected->selected_end = match_end;
-        selected->type = c_ir_predict_expression_type(builder, match_start, match_end);
-        if (selected->type.value == IR_ID_UNDERLYING_INVALID)
-        {
-            builder->failure_token_index = match_start;
-            builder->failure_message = S8("could not determine the type of the selected _Generic association");
-            valid = false;
-            break;
-        }
-        selected->resolved = true;
-        resolved_count += 1;
-    }
-    CIrGenericTypePrediction* root = 0;
+    CTypeIdentityQuery answer;
+    bool valid = c_ir_type_identity_query(builder, token_index, end, &answer) && answer.result_start != UINT32_MAX;
     if (valid)
     {
-        for (u32 index = 0; index < prediction_count; index += 1)
-        {
-            if (predictions[index].token_index == token_index)
-            {
-                root = predictions + index;
-                break;
-            }
-        }
-        valid = root && root->resolved;
+        *selected_start_out = answer.result_start;
+        *selected_end_out = answer.result_end;
+        *selected_type_out = c_ir_predict_expression_type(builder, answer.result_start, answer.result_end);
+        valid = selected_type_out->value != IR_ID_UNDERLYING_INVALID;
     }
-    if (valid)
-    {
-        *selected_start_out = root->selected_start;
-        *selected_end_out = root->selected_end;
-        *selected_type_out = root->type;
-    }
-    builder->generic_type_predictions = previous_predictions;
-    builder->generic_type_prediction_count = previous_prediction_count;
     return valid;
 }
 
@@ -18559,7 +18281,7 @@ struct CIrTypeCompatibilityTask
     IrTypeId right;
 };
 
-BUSTER_C_INTERNAL bool c_ir_types_compatible(CIntegerIrBuilder* builder, IrTypeId left_id, IrTypeId right_id)
+BUSTER_C_INTERNAL bool c_ir_representation_types_compatible(CIntegerIrBuilder* builder, IrTypeId left_id, IrTypeId right_id)
 {
     if (!builder || !builder->program || !builder->temporary_arena)
     {
@@ -19962,14 +19684,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else if (selected->builtin_types_compatible_p)
             {
-                IrTypeId left = argument_count == 2 ? c_ir_type_name(builder, starts[0], ends[0]) : IR_TYPE_ID_INVALID;
-                IrTypeId right = argument_count == 2 ? c_ir_type_name(builder, starts[1], ends[1]) : IR_TYPE_ID_INVALID;
-                if (left.value == IR_ID_UNDERLYING_INVALID || right.value == IR_ID_UNDERLYING_INVALID)
+                CTypeIdentityQuery answer;
+                if (argument_count != 2 || !c_ir_type_identity_query(builder, selected->token_index, selected->close_index + 1, &answer) ||
+                    answer.result_start != UINT32_MAX)
                 {
-                    return false;
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
-                bool compatible = c_ir_types_compatible(builder, left, right);
-                selected->result = c_ir_emit_integer_value_typed(builder, compatible ? 1 : 0, false, token, builder->s32_type);
+                selected->result = c_ir_emit_integer_value_typed(builder, answer.result_end, false, token, builder->s32_type);
             }
             else if (selected->builtin_object_size)
             {
@@ -32750,11 +32471,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             result = builder->nullptr_type;
             continue;
         }
-        CIrGenericTypePrediction* generic_prediction = c_ir_generic_type_prediction_find(builder, index);
-        if (generic_prediction)
+        CTypeIdentityQuery identity;
+        CSymbolBuiltin identity_kind = c_ir_token_builtin_kind(builder, token);
+        bool type_identity = (identity_kind == C_SYMBOL_BUILTIN_GENERIC || identity_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P) &&
+            c_ir_type_identity_query(builder, index, end, &identity);
+        if (type_identity)
         {
-            candidate = generic_prediction->type;
-            u32 postfix = generic_prediction->close_index + 1;
+            if (identity.result_start == UINT32_MAX)
+            {
+                candidate = builder->s32_type;
+            }
+            else if (!c_ir_query_prediction(builder, identity.result_start, identity.result_end, &candidate) && builder->queries->has_request)
+            {
+                return IR_TYPE_ID_INVALID;
+            }
+            u32 postfix = identity.token_end;
             IrTypeId postfix_type = candidate;
             if (postfix < end && c_ir_static_postfix_type(builder, &postfix_type, postfix, end))
             {
@@ -32763,7 +32494,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             else
             {
-                index = generic_prediction->close_index;
+                index = identity.token_end - 1;
             }
         }
         else if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -41096,7 +40827,7 @@ BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* b
         return decoded.element_width == 1 && element->bit_width == 8;
     }
     IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
-    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, element_type, expected_type);
 }
 
 BUSTER_C_INTERNAL bool c_ir_string_pointer_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded)
@@ -41107,7 +40838,7 @@ BUSTER_C_INTERNAL bool c_ir_string_pointer_element_compatible(CIntegerIrBuilder*
         return element && element->kind == IR_TYPE_VOID;
     }
     IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
-    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, element_type, expected_type);
 }
 
 BUSTER_C_INTERNAL bool c_ir_label_address_expression(CIntegerIrBuilder* builder, u32 start, u32 end, u32* label_index_out, IrTypeId* cast_type_out)
@@ -41191,7 +40922,7 @@ BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* b
     IrType* cast_element = ir_type_from_id(&builder->program->types, cast->element_type);
     IrType* destination_element = ir_type_from_id(&builder->program->types, destination->element_type);
     if (!cast_element || !destination_element || (cast_element->kind != IR_TYPE_VOID && destination_element->kind != IR_TYPE_VOID &&
-                                                   !c_ir_types_compatible(builder, cast->element_type, destination->element_type)))
+                                                   !c_ir_representation_types_compatible(builder, cast->element_type, destination->element_type)))
     {
         return false;
     }
@@ -41354,7 +41085,7 @@ BUSTER_C_INTERNAL void c_ir_initializer_narrow_compound_literal_value(CIntegerIr
     if (c_ir_initializer_compound_literal_info(builder, *start, *end, &open, &close, &type_start, &type_end))
     {
         IrTypeId literal = c_ir_compound_literal_type(builder, type_start, type_end, open, close);
-        if (literal.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, literal, destination))
+        if (literal.value != IR_ID_UNDERLYING_INVALID && c_ir_representation_types_compatible(builder, literal, destination))
         {
             *start = open;
             *end = close + 1;
@@ -44801,7 +44532,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                     return c_ir_constant_initializer_fail(builder, S8("compound literal initializer exceeds the target object"), value_start);
                 }
                 IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
-                if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, child_type))
+                if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_representation_types_compatible(builder, compound_type, child_type))
                 {
                     return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), value_start);
                 }
@@ -44967,7 +44698,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
                                                           relocation_capacity);
         }
         IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
-        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, root_type))
+        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_representation_types_compatible(builder, compound_type, root_type))
         {
             return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), start);
         }
@@ -48284,6 +48015,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 index = close;
                 continue;
             }
+            if (token.kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_types_compatible_p")))
+            {
+                CTypeIdentityQuery answer;
+                if (!c_ir_type_identity_query(builder, index, end, &answer) || answer.result_start != UINT32_MAX)
+                {
+                    return false;
+                }
+                values[value_count++] = c_ir_constant_integer(builder->s32_type, answer.result_end);
+                expect_operand = false;
+                index = answer.token_end - 1;
+                continue;
+            }
             // A generic selection has the type and value of its selected
             // association. Resolve the selector through the shared type matcher,
             // then schedule only that association on the explicit constant-query
@@ -48295,20 +48039,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                u32 selected_start = 0;
-                u32 selected_end = 0;
-                IrTypeId selected_type = IR_TYPE_ID_INVALID;
+                CTypeIdentityQuery answer;
                 CIrConstantValue selected = {0};
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 if (close >= end ||
-                    !c_ir_generic_selection(builder, index, close + 1, &selected_start, &selected_end, &selected_type) ||
-                    !c_ir_query_constant(builder, selected_start, selected_end, &selected))
+                    !c_ir_type_identity_query(builder, index, close + 1, &answer) || answer.result_start == UINT32_MAX ||
+                    !c_ir_query_constant(builder, answer.result_start, answer.result_end, &selected))
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start,
                                                           value_count, operator_count);
                 }
-                (void)selected_type;
                 if (value_count >= capacity)
                 {
                     return false;
@@ -48946,7 +48687,7 @@ BUSTER_C_INTERNAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder*
         }
         IrType* cast_element = ir_type_from_id(&builder->program->types, cast_type->element_type);
         if (!cast_element || (destination_element->kind != IR_TYPE_VOID && cast_element->kind != IR_TYPE_VOID &&
-                              !c_ir_types_compatible(builder, cast_type->element_type, type->element_type)))
+                              !c_ir_representation_types_compatible(builder, cast_type->element_type, type->element_type)))
         {
             return false;
         }

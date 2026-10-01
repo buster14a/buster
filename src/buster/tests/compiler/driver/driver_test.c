@@ -2539,7 +2539,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
         {S8("int g(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true},
         {S8("int g(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true},
-        {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), false},
+        {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), true},
+        {S8("int g(volatile int v) { return _Generic(v, int: 1, volatile int: 2); }\n"), true},
+        {S8("int g(void (*fp)(int *)) { return _Generic(fp, void (*)(int *): 1); }\n"), true},
+        {S8("int g(const char *p) { return _Generic(p, char *: 1); }\n"), false},
+        {S8("int g(void) { int a = 0; typeof(_Generic(a, default: (char)0)) c = 0; _Static_assert(sizeof c == 1, \"selected type\"); return c; }\n"), true},
+        {S8("volatile int v; _Static_assert(_Generic(v, int: 1, default: 0), \"conversion\");\n"), true},
+        {S8("const char *p; _Static_assert(!_Generic(p, char *: 1, default: 0), \"pointee\");\n"), true},
+        {S8("_Static_assert(!__builtin_types_compatible_p(const char *, char *), \"identity\");\n"), true},
         {S8("long long g(long long x) { switch (x) { case -1: return 1; case 4294967295LL: return 2; } return 0; }\n"), true},
         {S8("static int x; int *p = &x;\n"), true},
         {S8("int f(int x) { return x + 1; }\n"), true, true},
@@ -2575,7 +2582,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(void) { int *p = 0; return _Generic(p, int *: 1); }\n"), true, true},
         {S8("int f(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true, true},
         {S8("int f(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true, true},
-        {S8("int f(int); int g(void) { return _Generic(f, int (*)(int): 1); }\n"), false, true},
+        {S8("int f(int); int g(void) { return _Generic(f, int (*)(int): 1); }\n"), true},
         {S8("int f(int x) { switch(x) { case 1 ? 2 : 3: return 1; } return 0; }\n"), true, true},
         {S8("int f(double); int g(void) { int (*p)(int); p=f; return 0; }\n"), false, true},
         {S8("int f(double); int (*g(void))(int) { return f; }\n"), false, true},
@@ -11782,6 +11789,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/driver_pass_through_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 #include <buster/tests/compiler/driver/driver_metrics_test.c>
@@ -14546,6 +14554,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
@@ -15123,7 +15134,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-pthread"),
         S8("-L/sdk/lib"),
         S8("-l:libandroid.so"),
-        S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
         S8("-o"),
         S8("output.o"),
@@ -15163,7 +15173,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.library_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.library_paths[0], S8("/sdk/lib"));
     BUSTER_STRING_TEST(arguments, invocation.libraries[0], S8(":libandroid.so"));
-    BUSTER_TEST(arguments, invocation.linker_argument_count == 1);
+    BUSTER_TEST(arguments, invocation.linker_argument_count == 0);
     BUSTER_TEST(arguments, invocation.input_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
@@ -15344,7 +15354,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation uefi_linker_argument =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(uefi_linker_argument_command_line));
     BUSTER_TEST(arguments, uefi_linker_argument.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets"));
+    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets: --gc-sections"));
     String8 unsupported_uefi_command_line[] = {
         S8("--target=wasm64-unknown-uefi"), S8("source.c"),
     };
@@ -19056,7 +19066,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_generic_command_line[] = {
         S8("-o"),
         c_generic_path,
-        S8("tests/basic_c_generic.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
     };
     CompilerDriverResult c_generic = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_generic_command_line)));
@@ -25159,6 +25169,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
     String8 c_differential_regression_paths[] = {
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
+        S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
@@ -25175,6 +25187,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_frontend_ssa.c"),
     };
     String8 c_differential_regression_names[] = {
+        S8("buster-c-generic-identity"),
+        S8("buster-c-generic-identity-reference"),
         S8("buster-c-ffs"),
         S8("buster-c-ffs-reference"),
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -25204,9 +25218,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // The promotion witness must not depend on the native selectors'
             // legacy local-to-mutable-register transformation.
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
+            bool generic_identity = string_equal(c_differential_regression_paths[fixture_index], S8("src/buster/tests/compiler/frontend/c/fixtures/type_identity.c"));
+            fixture_invocation.verify_codegen |= generic_identity;
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
-            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
+            fixture_invocation.disable_direct_ssa = (generic_identity && fixture_index == 1) || string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
                 string_equal(c_differential_regression_names[fixture_index], S8("buster-c-ffs-reference"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE, fixture.diagnostic);
