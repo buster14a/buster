@@ -394,6 +394,11 @@ for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
 
+Allocator-matrix commands place optimization flags before the explicit allocator
+flag because the last allocator-affecting option wins. Assert the parsed allocator
+on the invocation passed to execution; retain `-fverify-codegen` and allow machine
+fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+
 ## Oracle independence
 
 A differential test is evidence only when its two sides obtain the answer
