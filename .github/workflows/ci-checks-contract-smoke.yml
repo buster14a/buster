@@ -1,0 +1,30 @@
+name: CI checks contract validation
+on:
+  push:
+    branches: [codex/2119-ci-contract-validation]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 20149932eb96bda37b6a58eb25e31962710c9378
+          persist-credentials: false
+      - name: Pinned workflow lint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/ci-unit-partitions.yml
+      - name: Native driver and focused contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/build-driver"
+          "$RUNNER_TEMP/build-driver" test_units_partitioned --self-test
+          "$RUNNER_TEMP/build-driver" source_size --self-test
+          python3 -B tools/ci_matrix_phases_test.py -v
+          python3 -B tools/matrix_shard_test.py -v
+          python3 -B tools/coverage_manifest_test.py -v
+          python3 -B tests/ci_tools_test.py WorkflowPolicyTests TimingTests -v
+          python3 -B tools/ci_unit_tests_measure_test.py -v
+          python3 -B tools/ci_unit_tests_campaign_test.py -v
