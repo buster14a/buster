@@ -11,6 +11,7 @@ source = parse_path.read_text()
 ledger = ledger_path.read_text()
 counters = [
     ("DELIMITER_PAIRS", "pairs"),
+    ("DELIMITER_INVERSE_BUILD_TRIGGERS", "inverse_build_triggers"),
     ("DELIMITER_REVERSE_STORES", "reverse_stores"),
     ("DELIMITER_BACKWARD_READS", "backward_reads"),
     ("DELIMITER_INVERSE_MAPS", "inverse_maps"),
@@ -48,7 +49,10 @@ while True:
     indent = match[1]
     loop_end = source.index("\n" + indent + "}\n", start) + len("\n" + indent + "}")
     old = source[start:loop_end]
-    before = (indent + "TimeDataType inverse_region_start = timestamp_take();\n" +
+    before = (indent + "if (!result->position_index->built)\n" + indent + "{\n" +
+              indent + "    WORK_LEDGER_RECORD(DELIMITER_INVERSE_BUILD_TRIGGERS, 1);\n" +
+              indent + "    c_parse_position_index_ensure(result, preprocess);\n" + indent + "}\n" +
+              indent + "TimeDataType inverse_region_start = timestamp_take();\n" +
               indent + "WORK_LEDGER_RECORD(DELIMITER_INVERSE_MAPS, 1);\n" +
               indent + "WORK_LEDGER_RECORD(DELIMITER_INVERSE_TOKENS, end - start);\n" +
               indent + "WORK_LEDGER_RECORD(DELIMITER_INVERSE_CLEAR_BYTES, sizeof(*openers) * (end - start));\n")

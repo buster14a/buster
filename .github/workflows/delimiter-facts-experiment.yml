@@ -1,7 +1,7 @@
 name: Delimiter fact experiment
 on:
   push:
-    branches: [codex/2183-publish-delimiter-pairs]
+    branches: ['codex/2183-publish-delimiter-pairs']
 permissions:
   contents: read
 jobs:

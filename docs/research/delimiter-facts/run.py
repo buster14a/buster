@@ -70,6 +70,7 @@ def execute(command, name, env=None, required=True, seconds=180):
     if required and (process.returncode or expired):
         failures.append(name)
         raise RuntimeError(name + " failed; retained logs")
+    print(name, "status=", row["status"], "wall_ns=", row["wall_ns"], flush=True)
     return row
 
 def metrics(path):
@@ -91,6 +92,11 @@ execute(["clang", "-Isrc", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unu
 for command, label in [(["clang", "--version"], "clang"), (["cmake", "--version"], "cmake"),
                        (["ninja", "--version"], "ninja"), (["uname", "-a"], "uname"), (["lscpu"], "lscpu")]:
     execute(command, label)
+(out / "driver.sha256").write_text(digest(driver) + "\n")
+clang_path = pathlib.Path(shutil.which("clang")).resolve()
+(out / "host-compiler.json").write_text(json.dumps({"path": str(clang_path), "sha256": digest(clang_path),
+    "runner": {key: os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_OS",
+                                                 "RUNNER_ARCH", "ImageOS", "ImageVersion")}}, indent=2))
 frozen = out / "frozen"
 frozen.mkdir()
 try:
@@ -112,11 +118,17 @@ try:
             shutil.copytree(root / "src", frozen / "src")
             shutil.copytree(root / "build/generated", frozen / "generated")
             shutil.copy2(root / "tests/basic_c_operations.c", frozen / "operations.c")
+        overlay_sources = ["src/buster/lib/compiler/frontend/c/c_parse.c", "src/buster/lib/compiler/work_ledger.h"]
+        source_before = {path: digest(root / path) for path in overlay_sources}
         execute(["python3", str(out / "instrument.py"), str(root)], arm + "-overlay")
+        source_after = {path: digest(root / path) for path in overlay_sources}
+        (out / (arm + "-overlay-sources.json")).write_text(json.dumps({"before": source_before, "after": source_after,
+            "overlay_sha256": digest(out / "instrument.py")}, indent=2))
         execute([str(driver), "generate", "--cc", "clang", "--ci", "--linker", "DEFAULT",
                  "-DBUSTER_BENCH_ALLOCATIONS=ON", "-DBUSTER_UNITY_BUILD=OFF"], arm + "-census-generate", env, seconds=240)
         execute([str(driver), "build", "--config", "Release", "-t", "ide", "--", "-j2"], arm + "-census-build", env, seconds=600)
         shutil.copy2(root / "build/Release/ide", out / (arm + "-census-ide"))
+        (out / (arm + "-census-binary.sha256")).write_text(digest(out / (arm + "-census-ide")) + "\n")
         execute(["git", "restore", "--source=" + revision, "--", "src/buster/lib/compiler/frontend/c/c_parse.c",
                  "src/buster/lib/compiler/work_ledger.h"], arm + "-restore-overlay")
     tiny = frozen / "tiny.c"
@@ -129,6 +141,8 @@ try:
     labels.write_text("\n".join(
         "int label_%d(int x) { void *target = &&done; if (x) goto *target; done: return x; }" % n
         for n in range(128)) + "\n")
+    bad = frozen / "invalid-update.c"
+    bad.write_text("int invalid_update(void) { const int x = 0; return x++; }\n")
     cases = [("tiny", tiny, []), ("operations", frozen / "operations.c", []),
              ("updates", updates, []), ("labels", labels, []),
              ("unity", frozen / "src/buster/apps/ide/ide.c",
@@ -136,6 +150,8 @@ try:
                "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0"])]
     quality = []
     census = []
+    timing = []
+    stages = []
     target = out / "same-output.o"
     source_hashes = {str(path.relative_to(frozen)): digest(path) for path in frozen.rglob("*") if path.is_file()}
     (out / "sources.json").write_text(json.dumps(source_hashes, indent=2))
@@ -150,32 +166,76 @@ try:
                 command = [str(out / (arm + "-ide")), "cc"] + flags + form_flags + [
                     "-g", "-c", "-fsource-metrics=" + str(metric_path), str(source), "-o", str(target)]
                 row = execute(command, "quality-" + arm + "-" + name + "-" + form, env, required=False)
-                outputs.append(digest(target))
+                plain_digest = digest(target)
+                if row["status"] == 0 and (plain_digest is None or target.stat().st_size == 0):
+                    raise RuntimeError("Missing successful output: " + row["name"])
+                outputs.append(plain_digest)
                 diagnostics.append(row["stderr_sha256"])
                 statuses.append(row["status"])
                 diag_metric = out / (arm + "-" + name + "-" + form + "-census.metrics")
                 command[0] = str(out / (arm + "-census-ide"))
                 command[command.index("-fsource-metrics=" + str(metric_path))] = "-fsource-metrics=" + str(diag_metric)
-                row = execute(command, "census-" + arm + "-" + name + "-" + form, env, required=False)
+                target.unlink(missing_ok=True)
+                row = execute(command, "census-" + arm + "-" + name + "-" + form, env)
+                census_digest = digest(target)
+                if census_digest != plain_digest or row["stderr_sha256"] != diagnostics[-1]:
+                    raise RuntimeError("Instrumented output mismatch: " + row["name"])
                 values = metrics(diag_metric)
+                required_metrics = ("work.delimiter.pairs", "work.delimiter.reverse_stores",
+                                    "work.delimiter.inverse_maps", "work.delimiter.inverse_tokens",
+                                    "work.delimiter.inverse_clear_bytes", "work.delimiter.backward_reads")
+                if not all(key in values for key in required_metrics):
+                    raise RuntimeError("Missing diagnostic metrics: " + str(diag_metric))
+                if arm == "candidate" and (values["work.delimiter.inverse_maps"] != 0 or
+                                          values["work.delimiter.inverse_tokens"] != 0 or
+                                          values["work.delimiter.inverse_clear_bytes"] != 0 or
+                                          values["work.delimiter.reverse_stores"] != values["work.delimiter.pairs"]):
+                    raise RuntimeError("Producer publication census failed")
+                if arm == "baseline" and (values["work.delimiter.inverse_maps"] == 0 or
+                                         values["work.delimiter.reverse_stores"] != 0 or
+                                         values["work.delimiter.inverse_clear_bytes"] != 4 * values["work.delimiter.inverse_tokens"]):
+                    raise RuntimeError("Baseline inverse-map census not exercised")
                 region = values.get("work.delimiter.inverse_region_ns", 0) + values.get("work.delimiter.inverse_allocation_ns", 0)
                 census.append({"arm": arm, "case": name, "form": form, "status": row["status"],
                                "wall_ns": row["wall_ns"], "timed_inverse_ns": region,
                                "diagnostic_region_fraction": region / row["wall_ns"],
-                               "metrics": values})
+                               "object_sha256": census_digest, "metrics": values})
+                (out / "census.json").write_text(json.dumps(census, indent=2))
             equal = outputs[0] == outputs[1] and diagnostics[0] == diagnostics[1] and statuses == [0, 0]
             quality.append({"case": name, "form": form, "statuses": statuses, "object_sha256": outputs,
                             "diagnostic_sha256": diagnostics, "equal": equal})
+            (out / "quality.json").write_text(json.dumps(quality, indent=2))
             if not equal:
                 failures.append("output-" + name + "-" + form)
-    timing = []
+    for form, form_flags in [("direct", []), ("promotion", ["-fno-frontend-ssa"])]:
+        checks = []
+        for arm in ("baseline", "candidate"):
+            target.unlink(missing_ok=True)
+            row = execute([str(out / (arm + "-ide")), "cc"] + form_flags +
+                          ["-g0", "-c", str(bad), "-o", str(target)], "invalid-" + arm + "-" + form, env, required=False)
+            checks.append({"status": row["status"], "stderr_sha256": row["stderr_sha256"], "object_sha256": digest(target)})
+        equal = checks[0]["status"] != 0 and checks[0] == checks[1] and checks[0]["object_sha256"] is None
+        quality.append({"case": "invalid-update", "form": form, "equal": equal, "checks": checks})
+        (out / "quality.json").write_text(json.dumps(quality, indent=2))
+        if not equal:
+            failures.append("invalid-" + form)
+    stages.append("quality-and-census")
+    timing_hashes = {}
     for name, source, flags in cases:
         for sample in range(8):
             order = ("baseline", "candidate") if sample % 2 == 0 else ("candidate", "baseline")
             for arm in order:
                 command = [str(out / (arm + "-ide")), "cc"] + flags + ["-g0", "-c", str(source), "-o", str(target)]
+                target.unlink(missing_ok=True)
                 row = execute(command, "timing-" + name + "-" + str(sample) + "-" + arm, env)
-                timing.append(dict(row, arm=arm, case=name, sample=sample, warmup=sample < 2))
+                output_digest = digest(target)
+                if output_digest is None or target.stat().st_size == 0:
+                    raise RuntimeError("Missing timing output")
+                if name in timing_hashes and timing_hashes[name] != output_digest:
+                    raise RuntimeError("-g0 output changed: " + row["name"])
+                timing_hashes[name] = output_digest
+                timing.append(dict(row, arm=arm, case=name, sample=sample, warmup=sample < 2, object_sha256=output_digest))
+                (out / "timing.json").write_text(json.dumps(timing, indent=2))
     summary = {}
     for name, _, _ in cases:
         selected = [r for r in timing if r["case"] == name and not r["warmup"]]
@@ -188,16 +248,22 @@ try:
     (out / "census.json").write_text(json.dumps(census, indent=2))
     (out / "timing.json").write_text(json.dumps(timing, indent=2))
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    stages.append("paired-descriptive-timing")
     if failures:
         raise RuntimeError("Output parity failed: " + repr(failures))
     execute(["git", "checkout", "--detach", candidate], "restore-candidate")
     execute([str(driver), "generate", "--cc", "clang", "--ci", "--linker", "DEFAULT", "--sanitize"], "sanitize-generate", env, seconds=240)
     execute([str(driver), "build", "--config", "Debug", "-t", "ide", "--", "-j2"], "sanitize-build", env, seconds=600)
     execute([str(root / "build/Debug/ide"), "test", "--module=c_frontend_tests"], "sanitize-frontend", env, seconds=600)
+    stages.append("sanitized-frontend")
+except BaseException as error:
+    failures.append(type(error).__name__ + ": " + str(error))
+    raise
 finally:
     execute(["git", "restore", "--source=" + candidate, "--worktree", "--staged", "."], "final-restore", required=False)
     manifest = {"baseline": baseline, "candidate": candidate, "pending_qualified_host_acceptance": True,
-                "failures": failures, "scope": "GitHub-hosted correctness and bounded diagnostics",
+                "failures": failures, "completed_stages": locals().get("stages", []),
+                "scope": "GitHub-hosted correctness and bounded diagnostics",
                 "timing_rule": "2 warmup + 6 measured pairs, alternating order; descriptive only"}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
 print(json.dumps({"failures": failures, "evidence": str(out)}))
