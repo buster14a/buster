@@ -14278,296 +14278,335 @@ BUSTER_GLOBAL_LOCAL bool object_address_difference(u64 target, u64 place, s64 ad
 ObjectExecutable object_link_executable(ObjectFile* object)
 {
     ObjectExecutable result = {0};
-    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
-        !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
+    do
     {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
-    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
-    u64 image_size = 0;
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        ObjectSection* source = object->sections + section;
-        if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
-            (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
-            (source->alignment && (source->alignment & (source->alignment - 1))))
+        if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
+            !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
+            break;
         }
-        u64 alignment = object->sections[section].alignment;
-        if (!alignment)
+        u64 page_size = os_get_page_size();
+        if (!page_size || (page_size & (page_size - 1)))
         {
-            alignment = 1;
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+            break;
         }
-        if (image_size > UINT64_MAX - (alignment - 1))
+        u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+        u64 section_spans[OBJECT_SECTION_COUNT] = {0};
+        u64 maximum_alignment = page_size;
+        u32 text_section = UINT32_MAX;
+        u64 image_size = 0;
+        for (u32 section = 0; section < object->section_count; section += 1)
+        {
+            ObjectSection* source = object->sections + section;
+            if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
+                (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
+                (source->alignment && (source->alignment & (source->alignment - 1))))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if (source->kind == OBJECT_SECTION_TEXT && text_section == UINT32_MAX) text_section = section;
+            u64 alignment = object->sections[section].alignment;
+            alignment = BUSTER_MAX(alignment, page_size);
+            maximum_alignment = BUSTER_MAX(maximum_alignment, alignment);
+            if (image_size > UINT64_MAX - (alignment - 1))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            image_size = (image_size + alignment - 1) & ~(alignment - 1);
+            section_offsets[section] = image_size;
+            u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
+            if (section_size > UINT64_MAX - image_size)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            if (section_size > UINT64_MAX - (page_size - 1))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            section_spans[section] = (section_size + page_size - 1) & ~(page_size - 1);
+            if (section_spans[section] > UINT64_MAX - image_size)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            image_size += section_spans[section];
+        }
+        if (text_section == UINT32_MAX) result.error = OBJECT_ERROR_INVALID_INPUT;
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        if (image_size > UINT64_MAX - (maximum_alignment - page_size))
         {
             result.error = OBJECT_ERROR_CAPACITY;
-            return result;
-        }
-        image_size = (image_size + alignment - 1) & ~(alignment - 1);
-        section_offsets[section] = image_size;
-        u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
-        if (section_size > UINT64_MAX - image_size)
-        {
-            result.error = OBJECT_ERROR_CAPACITY;
-            return result;
-        }
-        image_size += section_size;
-    }
-    u64 page_size = os_get_page_size();
-    if (!page_size || (page_size & (page_size - 1)) || image_size > UINT64_MAX - (page_size - 1))
-    {
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    u64 allocation_size = (image_size + page_size - 1) & ~(page_size - 1);
-    if (!allocation_size)
-    {
-        allocation_size = page_size;
-    }
-    void* address = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
-    if (!address)
-    {
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        if (object->sections[section].data.length)
-        {
-            memcpy((u8*)address + section_offsets[section], object->sections[section].data.pointer, object->sections[section].data.length);
-        }
-    }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->section < object->section_count && object_section_kind_is_debug(object->sections[relocation->section].kind))
-        {
-            continue;
-        }
-        if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
+        u64 allocation_size = image_size + maximum_alignment - page_size;
+        if (!allocation_size)
         {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
+            allocation_size = page_size;
+        }
+        void* allocation = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
+        if (!allocation)
+        {
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
             break;
         }
-        u64 relocation_size = object_relocation_kind_width(relocation->kind);
-        ObjectSection* source_section = object->sections + relocation->section;
-        if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
+        u64 allocation_value = (u64)(uintptr_t)allocation;
+        u8* address = (u8*)(uintptr_t)((allocation_value + maximum_alignment - 1) & ~(maximum_alignment - 1));
+        for (u32 section = 0; section < object->section_count; section += 1)
         {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-            ((relocation->offset & 3) || source_section->alignment < 4))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        ObjectSymbol* symbol = object->symbols + relocation->symbol;
-        if (symbol->section == OBJECT_SECTION_UNDEFINED)
-        {
-            result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
-            break;
-        }
-        u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
-        if (symbol->section >= object->section_count)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        ObjectSection* target_section = object->sections + symbol->section;
-        u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
-        if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
-        {
-            s64 displacement = 0;
-            if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                displacement < INT32_MIN || displacement > INT32_MAX)
+            if (object->sections[section].data.length)
             {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            s32 value = (s32)displacement;
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
-        {
-            s32 value = 0;
-            if (!object_absolute32s_value((u64)(uintptr_t)target, relocation->addend, &value))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
-        {
-            s64 displacement = 0;
-            u32 instruction = 0;
-            u32 patched = 0;
-            memcpy(&instruction, patch, sizeof(instruction));
-            A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
-            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
-                !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
-        {
-            s64 displacement = 0;
-            if (((u64)(uintptr_t)patch & 3) ||
-                !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                displacement < INT32_MIN || displacement > INT32_MAX)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            s32 value = (s32)displacement;
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
-        {
-            u64 value = 0;
-            if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
-        {
-            u32 word = 0;
-            u32 patched = 0;
-            memcpy(&word, patch, sizeof(word));
-            if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                relocation->addend, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
-        {
-            u32 word = 0;
-            u32 patched = 0;
-            memcpy(&word, patch, sizeof(word));
-            if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                  relocation->addend, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-        {
-            if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                           relocation->addend))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
+                memcpy((u8*)address + section_offsets[section], object->sections[section].data.pointer, object->sections[section].data.length);
             }
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                 relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+        for (u32 index = 0; index < object->relocation_count; index += 1)
         {
-            // A standalone executable image has no thread-pointer or Darwin
-            // TLVP resolver.  Keep these relocations fail-closed rather than
-            // encoding an address that would only work by accident on one
-            // host's TLS layout.
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            break;
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
-        {
-            u64 value = section_offsets[symbol->section] + symbol->value;
-            if (relocation->addend < 0)
+            ObjectRelocation* relocation = object->relocations + index;
+            if (relocation->section < object->section_count && object_section_kind_is_debug(object->sections[relocation->section].kind))
             {
-                u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
-                if (magnitude > value)
+                continue;
+            }
+            if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u64 relocation_size = object_relocation_kind_width(relocation->kind);
+            ObjectSection* source_section = object->sections + relocation->section;
+            if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
+                ((relocation->offset & 3) || source_section->alignment < 4))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ObjectSymbol* symbol = object->symbols + relocation->symbol;
+            if (symbol->section == OBJECT_SECTION_UNDEFINED)
+            {
+                result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
+                break;
+            }
+            u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
+            if (symbol->section >= object->section_count)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ObjectSection* target_section = object->sections + symbol->section;
+            u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
+            if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+            {
+                s64 displacement = 0;
+                if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    displacement < INT32_MIN || displacement > INT32_MAX)
                 {
                     result.error = OBJECT_ERROR_CAPACITY;
                     break;
                 }
-                value -= magnitude;
+                s32 value = (s32)displacement;
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
+            {
+                s32 value = 0;
+                if (!object_absolute32s_value((u64)(uintptr_t)target, relocation->addend, &value))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+            {
+                s64 displacement = 0;
+                u32 instruction = 0;
+                u32 patched = 0;
+                memcpy(&instruction, patch, sizeof(instruction));
+                A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
+                if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
+                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                s64 displacement = 0;
+                if (((u64)(uintptr_t)patch & 3) ||
+                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    displacement < INT32_MIN || displacement > INT32_MAX)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                s32 value = (s32)displacement;
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+            {
+                u64 value = 0;
+                if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
+            {
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, patch, sizeof(word));
+                if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                    relocation->addend, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
+            {
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, patch, sizeof(word));
+                if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                      relocation->addend, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+            {
+                if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                               relocation->addend))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                     relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+            {
+                // A standalone executable image has no thread-pointer or Darwin
+                // TLVP resolver.  Keep these relocations fail-closed rather than
+                // encoding an address that would only work by accident on one
+                // host's TLS layout.
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                break;
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
+            {
+                u64 value = section_offsets[symbol->section] + symbol->value;
+                if (relocation->addend < 0)
+                {
+                    u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
+                    if (magnitude > value)
+                    {
+                        result.error = OBJECT_ERROR_CAPACITY;
+                        break;
+                    }
+                    value -= magnitude;
+                }
+                else
+                {
+                    u64 addend = (u64)relocation->addend;
+                    if (addend > UINT32_MAX || value > UINT32_MAX - addend)
+                    {
+                        result.error = OBJECT_ERROR_CAPACITY;
+                        break;
+                    }
+                    value += addend;
+                }
+                if (value > UINT32_MAX)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                u32 image_relative = (u32)value;
+                memcpy(patch, &image_relative, sizeof(image_relative));
             }
             else
             {
-                u64 addend = (u64)relocation->addend;
-                if (addend > UINT32_MAX || value > UINT32_MAX - addend)
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                value += addend;
-            }
-            if (value > UINT32_MAX)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 break;
             }
-            u32 image_relative = (u32)value;
-            memcpy(patch, &image_relative, sizeof(image_relative));
+        }
+        if (result.error == OBJECT_ERROR_NONE && !os_protect(allocation, allocation_size, (ProtectionFlags){.read = 1}))
+        {
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+        }
+        for (u32 section = 0; section < object->section_count && result.error == OBJECT_ERROR_NONE; section += 1)
+        {
+            ObjectSectionKind kind = object->sections[section].kind;
+            ProtectionFlags protection = {
+                .read = 1,
+                .write = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO ||
+                         kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO,
+                .execute = kind == OBJECT_SECTION_TEXT,
+            };
+            if (section_spans[section] &&
+                (!os_protect(address + section_offsets[section], section_spans[section], protection) ||
+                 (protection.execute && !os_flush_instruction_cache(address + section_offsets[section], section_spans[section]))))
+            {
+                result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+            }
+        }
+        if (result.error == OBJECT_ERROR_NONE)
+        {
+            result.address = address + section_offsets[text_section];
+            result.allocation_address = allocation;
+            result.allocation_size = allocation_size;
         }
         else
         {
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            break;
+            os_unreserve(allocation, allocation_size);
         }
-    }
-    if (result.error != OBJECT_ERROR_NONE)
-    {
-        os_unreserve(address, allocation_size);
-        return result;
-    }
-    if (!os_commit(address, allocation_size,
-                   (ProtectionFlags){
-                       .read = 1,
-                       .execute = 1,
-                   },
-                   false) ||
-        !os_flush_instruction_cache(address, image_size))
-    {
-        os_unreserve(address, allocation_size);
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    result.address = (u8*)address + section_offsets[OBJECT_SECTION_TEXT];
-    result.allocation_size = allocation_size;
+    } while (false);
     return result;
 }
 
@@ -14575,6 +14614,6 @@ void object_release_executable(ObjectExecutable executable)
 {
     if (executable.address && executable.allocation_size)
     {
-        os_unreserve(executable.address, executable.allocation_size);
+        os_unreserve(executable.allocation_address, executable.allocation_size);
     }
 }

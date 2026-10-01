@@ -432,6 +432,8 @@ typedef struct ObjectExecutable ObjectExecutable;
 struct ObjectExecutable
 {
     void* address;
+    // The reservation may begin before the aligned text entry.
+    void* allocation_address;
     u64 allocation_size;
     ObjectError error;
 };
