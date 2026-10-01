@@ -47,6 +47,23 @@ direct table workload retains its cross-size ratio check on fixed path keys.
 
 ## Builtin capability queries
 
+Direct angle-bracket header operands preserve their translated-source
+characters, including internal spaces, rather than joining token spellings.
+The same policy applies to `#include`, `#include_next`, `#import`, and literal
+`__has_include`/`__has_include_next` operands. Include-query builtins recognize
+literal operands before argument prescan, including when an alias reaches the
+builtin during rescanning, so identifiers inside a direct header name do not
+expand. Quoted operands retain their literal spelling.
+
+Macro-produced angle header operands use the existing implementation-defined
+policy of concatenating the surviving token spellings. A wrapper that prescans
+its own argument uses this policy too; substituted or removed tokens cannot
+recover the original source span. The query builtin's endpoint `no_expand`
+bits carry literal provenance through its replacement without increasing
+token size. `c_test_header_operands` covers simultaneous spaced/unspaced files,
+repeated spaces, line splicing, identifier collisions, aliases, wrapper
+prescan, expanded operands and include-next search origins.
+
 `c_conditional_builtin_supported` answers `__has_builtin` for implemented
 operations, not every recognized identifier. Its complex and atomic branches
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
