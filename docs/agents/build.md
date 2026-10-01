@@ -119,6 +119,22 @@ general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
 
+A requested subprocess working directory is mandatory: if the driver cannot
+capture its original directory or enter the requested directory, it returns a
+`PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY` result with the native OS error before
+launching any child. The diagnostic distinguishes capture from entry failure.
+After a successful entry, the existing restore failure still stops the driver,
+since later relative paths would otherwise use the wrong checkout.
+
+Apple source graphs follow the single requested `CMAKE_OSX_ARCHITECTURES` entry,
+including same-OS cross builds; the target architecture selects backend modules
+and tests. A target different from the normalized host architecture disables
+host-native tuning. Universal Apple builds fail during configure with an explicit
+unsupported diagnostic; native single-architecture behavior is unchanged. The
+macOS cross-target object smoke in `tools/build_configuration_test.py` runs in the
+existing hosted compatibility suite and checks the selected module, compile flags,
+and Mach-O object architecture without executing the cross-built object.
+
 Native GNU-family builds compile with `-march=native`
 (`GNU_FAMILY_NATIVE_TARGET` in `CMakeLists.txt`). The only compatibility
 exception lives in `cmake/NativeTargetCompatibility.cmake`: upstream Clang
@@ -442,6 +458,20 @@ drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
 compilation is explicitly enabled.
+
+## Android SDK packaging inputs
+
+The explicit `BUSTER_ANDROID_BUILD_TOOLS_DIR` and `BUSTER_ANDROID_JAR` overrides
+win. Otherwise packaging selects build-tools by numeric `major.minor.patch`,
+preferring the newest stable version even when a newer preview is installed.
+Without a stable version it uses the newest preview version, then `rc` over
+`beta` over `alpha`, then the largest numeric preview suffix. Unrecognized
+names are ignored. Platform selection first uses the requested `ANDROID_PLATFORM`
+jar when installed, then the largest numeric `android-<API>` jar. Missing valid
+candidates and nonexistent explicit overrides fail configure with an actionable
+SDK diagnostic. The selection requires only CMake 3.17. Controlled mixed-digit,
+preview, override and missing-candidate fixtures run in the same compatibility
+suite as the cwd and Apple architecture regressions.
 
 ## Incremental Android test assets
 
