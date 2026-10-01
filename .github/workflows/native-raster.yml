@@ -14,12 +14,16 @@ on:
   push:
     branches: [main]
     paths:
+      - CMakeLists.txt
+      - src/buster/lib/window.*
       - .github/workflows/native-raster.yml
       - cmake/Raster.cmake
       - src/buster/lib/rendering_raster.*
       - src/buster/lib/rendering/raster*
       - src/buster/lib/window/**
       - src/buster/tests/rendering_raster*
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
