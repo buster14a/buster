@@ -88,3 +88,13 @@ do not add graphics dependencies to `ide`.
 
 XCB initialization rejects error-bearing connections before native setup.
 Shutdown consumes and clears the connection; repeated shutdown is safe.
+
+`wm_window_set_title` admits validated UTF-8 metadata titles up to 4096 bytes
+through checked XCB requests. Other native backends report unsupported.
+`wm_poll_events_bounded` currently admits Linux XCB batches of 1–32 native
+events, retaining unread events for a later call. It requires at least the
+reported minimum remaining, already committed event-arena space before removing
+each event. That allowance includes the existing 16 MiB file-drop path budget,
+the slice array, alignment and event overhead. Library-internal native
+allocations and the separate XDND transfer arena are outside this allowance.
+The legacy full-drain API retains its existing contract.

@@ -1824,8 +1824,14 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
     xcb_generic_event_t* event;
     xcb_connection_t* connection = windowing->connection;
 
-    while ((event = xcb_poll_for_event(connection)))
+    while ((!windowing->native_poll_limit ||
+            (windowing->native_poll_count < windowing->native_poll_limit && wm_bounded_poll_has_headroom(arena))) &&
+           (event = xcb_poll_for_event(connection)))
     {
+        if (windowing->native_poll_limit)
+        {
+            windowing->native_poll_count += 1;
+        }
         u8 event_type = event->response_type & 0x7f;
         if (event_type == 0)
         {

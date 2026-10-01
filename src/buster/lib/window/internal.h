@@ -98,6 +98,8 @@ struct WmHandle
     Arena* poll_arena;
     WmEventList* poll_event_list;
     WmWindowHandle* focused_window;
+    u32 native_poll_limit;
+    u32 native_poll_count;
 #elif defined(_WIN32)
     HINSTANCE instance;
 #elif defined(__APPLE__)
@@ -154,6 +156,7 @@ struct WmWindowHandle
 
 BUSTER_WINDOW_INTERNAL_LINKAGE WmHandle windowing_handle;
 BUSTER_WINDOW_INTERNAL_LINKAGE WmEvent* wm_event_push(WmHandle* windowing, WmEvent event);
+BUSTER_WINDOW_INTERNAL_LINKAGE BUSTER_UNUSED_DECL bool wm_bounded_poll_has_headroom(Arena* arena);
 BUSTER_WINDOW_INTERNAL_LINKAGE SliceWmWindowHandle get_windows(WmHandle* handle);
 
 #undef BUSTER_WINDOW_INTERNAL_LINKAGE

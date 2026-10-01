@@ -69,6 +69,51 @@ BUSTER_GLOBAL_LOCAL bool raster_native_close_message(WmNativeSurface surface)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void raster_native_bounded_poll(Arena* arena, WmHandle* windowing, WmWindowHandle* window, WmNativeSurface surface)
+{
+    // Drain startup events before submitting two distinct native pointer moves.
+    BUSTER_UNUSED(wm_poll_events(arena, windowing));
+    arena_reset_to_start(arena);
+    xcb_connection_t* connection = (xcb_connection_t*)surface.display;
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        xcb_motion_notify_event_t motion = {0};
+        motion.response_type = XCB_MOTION_NOTIFY;
+        motion.event = (xcb_window_t)(uintptr_t)surface.window;
+        motion.event_x = (s16)(7u + index * 4u);
+        motion.event_y = 9;
+        motion.same_screen = 1;
+        xcb_generic_error_t* error = xcb_request_check(connection,
+            xcb_send_event_checked(connection, 0, motion.event, XCB_EVENT_MASK_NO_EVENT, (char const*)&motion));
+        raster_native_check(error == 0, "two native motions queued");
+        free(error);
+    }
+    u32 observed = 0;
+    for (u32 poll = 0; poll < 128 && observed < 2; poll += 1)
+    {
+        WmEventList events = {0};
+        bool admitted = wm_poll_events_bounded(arena, windowing, 1, &events);
+        raster_native_check(admitted, "one-native-event bounded poll admitted");
+        raster_native_check(events.count <= 1, "bounded motion batch does not drain both native events");
+        for (WmEvent* event = events.first; event; event = event->next)
+        {
+            if (event->kind == WM_EVENT_MOUSE_MOVE && event->window == window)
+            {
+                raster_native_check(event->position.x == (s16)(7u + observed * 4u) && event->position.y == 9, "queued native motion preserved in order");
+                observed += 1;
+            }
+        }
+        arena_reset_to_start(arena);
+    }
+    raster_native_check(observed == 2, "superseding poll preserves remaining native event");
+    WmEventList invalid = {0};
+    raster_native_check(!wm_poll_events_bounded(arena, windowing, 0, &invalid) && invalid.count == 0, "zero native poll bound refused");
+    raster_native_check(!wm_poll_events_bounded(arena, windowing, 33, &invalid) && invalid.count == 0, "large native poll bound refused");
+    Arena* small = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
+    raster_native_check(!wm_poll_events_bounded(small, windowing, 1, &invalid) && invalid.count == 0, "insufficient precommitted poll arena refused");
+    arena_destroy(small, 1);
+}
+
 BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
 {
     WmHandle* windowing = wm_initialize();
@@ -116,6 +161,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
                     raster_native_check(rendering_raster_readback_matches_for_test(&presenter, canvas), "actual server pixels equal opaque canvas");
                 }
 
+                raster_native_bounded_poll(arena, windowing, window, surface);
                 xcb_connection_t* connection = (xcb_connection_t*)surface.display;
                 u32 values[] = {48, 40};
                 xcb_generic_error_t* error = xcb_request_check(connection,
@@ -167,7 +213,7 @@ int main(int argc, char* argv[])
     os_state.large_page_size = BUSTER_MB(2);
     ThreadContext* context = thread_context_allocate();
     thread_context_select(context);
-    Arena* arena = arena_create((ArenaCreation){0});
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32), .initial_size = BUSTER_MB(32), .flags = {.no_pool = true}});
     program_state->arena = arena;
     bool failure_mode = argc == 2 && strcmp(argv[1], "--no-display") == 0;
     if (failure_mode)

@@ -221,6 +221,22 @@ BUSTER_UNUSED_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64
 }
 #endif
 
+
+u64 wm_poll_events_bounded_minimum_arena_bytes(void)
+{
+    // One URI transfer can publish the entire path budget plus its slice array.
+    // The extra MiB admits per-path alignment, one event and small native text.
+    return BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES + BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT * sizeof(String8) + BUSTER_MB(1);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool wm_bounded_poll_has_headroom(Arena* arena)
+{
+    bool result = arena && arena->position >= arena_minimum_position && arena->os_position >= arena->position &&
+                  arena->os_position <= arena->reserved_size &&
+                  arena->os_position - arena->position >= wm_poll_events_bounded_minimum_arena_bytes();
+    return result;
+}
+
 #if BUSTER_LINUX
 #include <buster/lib/window/xcb.c>
 #elif defined(_WIN32)
@@ -268,12 +284,46 @@ WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
 {
     windowing->event_arena = arena;
     windowing->event_list = (WmEventList){0};
-
+#if BUSTER_LINUX
+    windowing->native_poll_limit = 0;
+    windowing->native_poll_count = 0;
+#endif
 #if BUSTER_LINUX || defined(_WIN32) || defined(__APPLE__) || BUSTER_ANDROID
     wm_platform_poll_events(arena, windowing);
 #endif
-
     return windowing->event_list;
+}
+
+bool wm_poll_events_bounded(Arena* arena, WmHandle* windowing, u32 max_native_events, WmEventList* events)
+{
+    bool result = false;
+    if (events)
+    {
+        *events = (WmEventList){0};
+    }
+#if BUSTER_LINUX
+    if (events && windowing && windowing->connection && !xcb_connection_has_error(windowing->connection) &&
+        max_native_events >= 1 && max_native_events <= BUSTER_WM_BOUNDED_POLL_MAX_NATIVE_EVENTS && wm_bounded_poll_has_headroom(arena))
+    {
+        windowing->event_arena = arena;
+        windowing->event_list = (WmEventList){0};
+        windowing->native_poll_limit = max_native_events;
+        windowing->native_poll_count = 0;
+        wm_platform_poll_events(arena, windowing);
+        result = !xcb_connection_has_error(windowing->connection);
+        if (result)
+        {
+            *events = windowing->event_list;
+        }
+        windowing->native_poll_limit = 0;
+        windowing->native_poll_count = 0;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(windowing);
+    BUSTER_UNUSED(max_native_events);
+#endif
+    return result;
 }
 
 bool wm_window_set_title(WmHandle* windowing, WmWindowHandle* window, String8 title)

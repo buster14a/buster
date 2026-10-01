@@ -325,6 +325,18 @@ BUSTER_F_DECL WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindo
 BUSTER_F_DECL f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window);
 BUSTER_F_DECL WmEventList wm_poll_events(Arena* arena, WmHandle* windowing);
 
+// Linux/XCB bounded consumer path. Native events left behind remain queued.
+// The arena must already have minimum_arena_bytes committed and available;
+// this poll never grows its event arena. A batch stops before consuming another
+// native event when worst-case file-drop headroom is unavailable. Limits 1..32
+// are admitted. False means invalid arguments, unavailable connection,
+// insufficient committed capacity, or unsupported platform; *events is empty.
+// Event/text/path slices borrow this arena until it is reset by the caller.
+#define BUSTER_WM_BOUNDED_POLL_MAX_NATIVE_EVENTS ((u32)32)
+BUSTER_F_DECL u64 wm_poll_events_bounded_minimum_arena_bytes(void);
+BUSTER_F_DECL bool wm_poll_events_bounded(Arena* arena, WmHandle* windowing, u32 max_native_events, WmEventList* events);
+
+
 // False while the app is backgrounded/locked (no usable native window).
 BUSTER_F_DECL bool wm_window_is_visible(WmHandle* windowing);
 
