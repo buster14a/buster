@@ -5611,63 +5611,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    TemporalArena noreturn_temporary = scratch_begin(0, 0);
-    CPreprocessResult noreturn_tokens = c_preprocess(noreturn_temporary.arena,
-                                                      S8("[[noreturn]] void die_marked(int status);"
-                                                         "[[__gnu__::__noreturn__]] void die_scoped(int status);"
-                                                         "void die_plain(int status);"
-                                                         "int through_marked(int status) { die_marked(status); }"
-                                                         "int through_scoped(int status) { die_scoped(status); }"
-                                                         "int through_plain(int status) { die_plain(status); return 0; }\n"),
-                                                      (CPreprocessOptions){
-                                                          .target = target_native,
-                                                          .data_layout = target_data_layout(target_native),
-                                                          .dialect = C_PREPROCESS_DIALECT_C23,
-                                                      });
-    CParseResult noreturn_parse = c_parse(noreturn_temporary.arena, noreturn_tokens);
-    CIRLowerResult noreturn_ir =
-        c_lower_to_ir(noreturn_temporary.arena, S8("c23-attribute-noreturn.c"), noreturn_tokens, noreturn_parse, target_native);
-    BUSTER_TEST(arguments, noreturn_tokens.diagnostic_count == 0);
-    BUSTER_TEST(arguments, noreturn_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, noreturn_ir.diagnostic_count == 0);
-    if (noreturn_ir.program)
+    for (u32 form = 0; form < 2; form += 1)
     {
-        IrModule* module = &noreturn_ir.program->modules[0];
-        u32 checked = 0;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        TemporalArena noreturn_temporary = scratch_begin(0, 0);
+        CPreprocessResult noreturn_tokens = c_preprocess(noreturn_temporary.arena,
+                                                          S8("[[noreturn]] void die_marked(int status);"
+                                                             "[[__gnu__::__noreturn__]] void die_scoped(int status);"
+                                                             "void die_plain(int status);"
+                                                             "int through_marked(int status) { die_marked(status); }"
+                                                             "int through_scoped(int status) { die_scoped(status); }"
+                                                             "int through_plain(int status) { die_plain(status); return 0; }\n"),
+                                                          (CPreprocessOptions){
+                                                              .target = target_native,
+                                                              .data_layout = target_data_layout(target_native),
+                                                              .dialect = C_PREPROCESS_DIALECT_C23,
+                                                          });
+        CParseResult noreturn_parse = c_parse(noreturn_temporary.arena, noreturn_tokens);
+        CIRLowerResult noreturn_ir = c_lower_to_ir_with_options(noreturn_temporary.arena, S8("c23-attribute-noreturn.c"), noreturn_tokens,
+                                                                  noreturn_parse, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST(arguments, noreturn_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, noreturn_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, noreturn_ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, noreturn_ir.program != 0))
         {
-            IrFunction* function = &module->functions[function_index];
-            bool marked = string_equal(function->name, S8("through_marked")) || string_equal(function->name, S8("through_scoped"));
-            bool plain = string_equal(function->name, S8("through_plain"));
-            if (!marked && !plain)
+            IrModule* module = &noreturn_ir.program->modules[0];
+            u32 checked = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
             {
-                continue;
+                IrFunction* function = &module->functions[function_index];
+                bool marked = string_equal(function->name, S8("through_marked")) || string_equal(function->name, S8("through_scoped"));
+                bool plain = string_equal(function->name, S8("through_plain"));
+                if (!marked && !plain)
+                {
+                    continue;
+                }
+                bool unreachable = false;
+                bool returns = false;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                    returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
+                }
+                // The marked callers end in the trap and never return; the plain
+                // one returns and never traps.  Both halves matter: without the
+                // second, a compiler that marked everything noreturn would pass.
+                BUSTER_TEST(arguments, marked ? (unreachable && !returns) : (returns && !unreachable));
+                checked += 1;
             }
-            bool unreachable = false;
-            bool returns = false;
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
-                returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
-            }
-            // The marked callers end in the trap and never return; the plain
-            // one returns and never traps.  Both halves matter: without the
-            // second, a compiler that marked everything noreturn would pass.
-            BUSTER_TEST(arguments, marked ? (unreachable && !returns) : (returns && !unreachable));
-            checked += 1;
+            BUSTER_TEST(arguments, checked == 3);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(noreturn_ir.program, module).error == IR_VALIDATION_NONE);
         }
-        BUSTER_TEST(arguments, checked == 3);
-        // No canonical-validation assertion here, unlike the sibling tests.
-        // A caller whose block ends in the trap keeps the dead tail of the
-        // return sequence behind it, so the module reports
-        // IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR.  That is the shape the
-        // GNU spelling has always produced -- replacing the two attributes
-        // above with __attribute__((noreturn)) yields the identical code --
-        // so it is a pre-existing property of the noreturn lowering rather
-        // than anything the C23 syntax introduced, and asserting on it here
-        // would be asserting on an unrelated contract.
+        scratch_end(noreturn_temporary);
     }
-    scratch_end(noreturn_temporary);
     return result;
 }
 
