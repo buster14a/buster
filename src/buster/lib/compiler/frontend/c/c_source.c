@@ -3337,12 +3337,9 @@ CSourceCacheStats c_source_cache_stats(CSourceCache const* cache)
 BUSTER_C_INTERNAL CLexResult c_source_cache_copy(Arena* arena, CSpellingSpace* space, CLexResult const* source)
 {
     CLexResult result = *source;
+    // Translation shrinks its raw-size reservation to this final compact size.
     u64 size = source->translated_source.length + 1;
-    // Preserve the cold spelling reservation and subsequent offsets even when
-    // CRLF folding or splicing shrank the translated text. Retained templates
-    // themselves stay compact; only the current spelling space uses raw size.
-    u64 capacity = space ? source->metrics.bytes + 1 : size;
-    char8* text = space ? c_space_allocate(space, capacity) : arena_allocate(arena, char8, size);
+    char8* text = space ? c_space_allocate(space, size) : arena_allocate(arena, char8, size);
     memcpy(text, source->translated_source.pointer, size);
     result.translated_source.pointer = text;
     result.translated_offset = space ? c_space_offset(space, text) : 0;

@@ -68,9 +68,9 @@ background worker, file database or second IR is introduced.
 
 Imports deep-copy every pointer-bearing lexical component. Token offsets are
 normalized on capture and rebased into the current spelling space on import;
-symbols remain zero until **fresh** interning. Replay preserves the cold raw-size
-spelling reservation so splices/CRLF folds do not shift subsequent offsets or
-conceptual spelling-byte metrics; the retained template remains compact. Checkpoints and their offsets
+symbols remain zero until **fresh** interning. The ordinary translator shrinks
+unused raw capacity after CRLF folding/splicing, so compact replay preserves
+its final spelling offsets and conceptual spelling-byte metrics. Checkpoints and their offsets
 are file-local and copied unchanged; the location cursor resets. EOF and the
 translated terminator are retained. Nothing in a result or canonical IR points
 into the cache. A cache may be cleared or destroyed while an earlier result
