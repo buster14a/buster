@@ -204,7 +204,9 @@ row ownership remain unchanged; alternative-order predictions are diagnostic.
 
 ## Isolated module process experiment
 
-The opt-in `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`.
+The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
+matrix enables it for its Clang test trees, whose serialized test phases receive
+the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
 driver runs `compiler_driver_tests` and the remaining enabled modules in
@@ -238,9 +240,10 @@ to the [comparison helper](../tools/ci_unit_tests_measure.py).
 
 A single alternating pair is screening evidence. Formal diagnostic review
 requires three alternating pairs. Neither result replaces ordinary CI
-completion or proves a full-workflow speedup. Production matrix rows still
-share the four-worker quota with other builds and tests; enabling this option
-there requires explicit admission that prevents oversubscription. See the
+completion or proves a full-workflow speedup. Production checks shards admit
+the partitioned runner by serializing their test phases, each with the whole
+four-CPU budget; builds may still overlap a test phase, which the
+[build guidance](agents/build.md) records as an accepted bounded overlap. See the
 [current observations and research](research/2026-09-30-ci-throughput.md),
 [#1826](https://github.com/buster14a/buster/issues/1826), and
 [#709](https://github.com/buster14a/buster/issues/709).
