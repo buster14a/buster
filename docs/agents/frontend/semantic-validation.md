@@ -25,6 +25,13 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
+to the function specifier `inline`, without injecting a storage class. UCRT-style
+`static __inline` and `extern __inline` declarations retain their source storage;
+explicit duplicate and conflicting classes remain rejected. The regression checks
+canonical symbol linkage for static, extern, and bare aliases using the existing
+inline lowering policy; it does not add Microsoft COMDAT emission semantics.
+
 `c_type_parse_root_finish` validates restrict applicability on the type rows a
 query appended, after parenthesized function-pointer declarators settle. Direct
 pointer construction and GNU `__auto_type` inference use the same object-pointer
