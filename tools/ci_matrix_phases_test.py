@@ -222,6 +222,42 @@ class PhaseValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quota mismatch"):
             self.check()
 
+    def chain(self, after):
+        def change(plan):
+            next(t for t in plan["tasks"] if t["id"] == phases.task_id("tree1", "validation", "Release"))["after"] = after
+        self.mutate("plan.json", change)
+
+    def test_serialized_test_phase_waits_for_previous_tree(self):
+        self.chain(phases.task_id("tree0", "validation", "Debug"))
+        report = self.check()
+        event = next(e for e in report["timeline"] if e["task"] == phases.task_id("tree1", "validation", "Release") and e["event"] == "enqueue")
+        self.assertEqual(event["time_us"], 210)
+        def early(value):
+            value["start_us"] = value["child_start_us"] = 205
+        self.mutate("tree1-validation-Release.*.start.json", lambda v: v.update(start_us=205))
+        self.mutate("tree1-validation-Release.*.end.json", early)
+        with self.assertRaisesRegex(ValueError, "dependency overlap"):
+            self.check()
+
+    def test_serialized_edge_must_name_another_trees_last_test_phase(self):
+        for after, message in ((phases.task_id("tree1", "build"), "another tree"), (phases.task_id("tree0", "build"), "another tree"),
+                               ("missing", "another tree")):
+            with self.subTest(after=after):
+                self.coverage = fixture(self.root)
+                self.chain(after)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.check()
+
+    def test_partitioned_test_runner_command_is_the_trees_ide(self):
+        runner = ["build/build.exe", "test_units_partitioned", "build/tree0/Debug/ide.exe"]
+        for pattern in ("tree0-test-Debug.*.start.json", "tree0-test-Debug.*.end.json"):
+            self.mutate(pattern, lambda v: v.update(argv=list(runner)))
+        self.assertTrue(self.check()["complete"])
+        for pattern in ("tree0-test-Debug.*.start.json", "tree0-test-Debug.*.end.json"):
+            self.mutate(pattern, lambda v: v.update(argv=runner[:2] + ["build/tree1/Release/ide.exe"]))
+        with self.assertRaisesRegex(ValueError, "test executable/tree mismatch"):
+            self.check()
+
     def test_missing_coverage_terminal(self):
         self.coverage["phase"] = "planned"
         with self.assertRaisesRegex(ValueError, "coverage is incomplete"):
@@ -297,6 +333,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             matrix_phase_wrap(arena, configure, matrix_phase_find_tree(gen.build_directory), S8("configure"), S8(""), 0);
             trees[count].build_directory = gen.build_directory;
             trees[count].parallel_jobs = 1;
+            trees[count].runs_tests = tree.compiler == BUILD_COMPILER_CLANG;
             for (u32 r = 0; r < tree.row_count; r += 1)
             {
                 MatrixCoverageRow row = coverage.plan.rows[tree.row_indices[r]];
@@ -358,7 +395,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
                 payload->arguments = (SliceString8){.pointer = args, .length = 2};
             }
         }
-        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs((u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count()), count);
+        u32 fixture_threads = (u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count());
+        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(fixture_threads, count);
+        // The production quotas, including serialized checks test phases.
+        matrix_superbuild_allocate_jobs(trees, count, fixture_threads, checks ? 0 : 1);
         MatrixSuperbuildSelfHostPlan self_host = {.enabled = !checks, .tree_index = 0, .pool_jobs = 1, .build_directory = trees[0].build_directory};
         ok = matrix_superbuild_manifest_write(arena, path_join(arena, matrix_phase.root, S8("matrix.cmake")), S8("/fixture"),
                    matrix_phase.driver, trees, count, matrix_phase.outer_jobs, combinations, self_host, false, false) && ok;

@@ -85,8 +85,10 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_begin(Arena* arena, MatrixCoverageManifest
     return result;
 }
 
+// `after` names a second predecessor task, or is empty. A serialized test
+// phase waits for both its own tree's build and the previous tree's tests.
 BUSTER_GLOBAL_LOCAL String8 matrix_phase_task(Arena* arena, String8 tree, String8 phase, String8 config,
-                                             String8 pool, String8 dependency, u32 jobs, SliceString8 argv)
+                                             String8 pool, String8 dependency, String8 after, u32 jobs, SliceString8 argv)
 {
     String8 id = string_format(arena, S8("{S8}-{S8}-{S8}"), tree, phase, config.length ? config : S8("all"));
     if (matrix_phase.enabled)
@@ -94,9 +96,10 @@ BUSTER_GLOBAL_LOCAL String8 matrix_phase_task(Arena* arena, String8 tree, String
         if (matrix_phase.task_count++) { string8_list_push(arena, &matrix_phase.tasks, S8(",\n")); }
         matrix_phase.valid = matrix_phase.valid && matrix_phase.task_count <= MATRIX_PHASE_MAX_TASKS;
         string8_list_push(arena, &matrix_phase.tasks, string_format(arena,
-            S8("{{\"id\":{S8},\"tree\":{S8},\"phase\":{S8},\"configuration\":{S8},\"pool_edge\":{S8},\"dependency\":{S8},\"inner_jobs\":{S8},\"argv\":{S8}}}"),
+            S8("{{\"id\":{S8},\"tree\":{S8},\"phase\":{S8},\"configuration\":{S8},\"pool_edge\":{S8},\"dependency\":{S8},\"after\":{S8},\"inner_jobs\":{S8},\"argv\":{S8}}}"),
             matrix_coverage_json_escape(arena, id), matrix_coverage_json_escape(arena, tree), matrix_coverage_json_escape(arena, phase),
             matrix_coverage_json_escape(arena, config), matrix_coverage_json_escape(arena, pool), matrix_coverage_json_escape(arena, dependency),
+            matrix_coverage_json_escape(arena, after),
             jobs ? string_format(arena, S8("{u32}"), jobs) : S8("\"unknown\""), matrix_phase_array(arena, argv)));
     }
     return id;
@@ -119,7 +122,7 @@ BUSTER_GLOBAL_LOCAL void matrix_phase_wrap(Arena* arena, ProcessRun* run, String
 {
     if (matrix_phase.enabled)
     {
-        String8 id = matrix_phase_task(arena, tree, phase, config, S8(""), S8("ready"), jobs, run->arguments);
+        String8 id = matrix_phase_task(arena, tree, phase, config, S8(""), S8("ready"), S8(""), jobs, run->arguments);
         SliceString8 prefix = matrix_phase_prefix(arena, id, run->timeout_seconds);
         OsArgumentBuilder builder = os_argument_builder_start(arena);
         for (u64 i = 0; i < prefix.length; i += 1) { os_argument_builder_append(&builder, prefix.pointer[i]); }
@@ -169,7 +172,7 @@ BUSTER_GLOBAL_LOCAL Generate matrix_phase_tree(Arena* arena, Generate generate, 
             MatrixCoverageRow row = coverage->plan.rows[tree.row_indices[i]];
             if (tree.compiler == BUILD_COMPILER_CLANG)
             {
-                matrix_phase_task(arena, record->id, S8("test"), row.configuration, S8(""), S8("nested"), 0, (SliceString8){0});
+                matrix_phase_task(arena, record->id, S8("test"), row.configuration, S8(""), S8("nested"), S8(""), 0, (SliceString8){0});
             }
         }
     }
@@ -187,12 +190,12 @@ BUSTER_GLOBAL_LOCAL String8 matrix_phase_find_tree(String8 directory)
 }
 
 BUSTER_GLOBAL_LOCAL void matrix_phase_cmake(Arena* arena, String8List* lines, String8 variable, String8 tree,
-                                           String8 phase, String8 config, String8 pool, String8 dependency, u32 jobs)
+                                           String8 phase, String8 config, String8 pool, String8 dependency, String8 after, u32 jobs)
 {
     string8_list_push(arena, lines, string_format(arena, S8("set({S8}"), variable));
     if (matrix_phase.enabled)
     {
-        String8 id = matrix_phase_task(arena, tree, phase, config, pool, dependency, jobs, (SliceString8){0});
+        String8 id = matrix_phase_task(arena, tree, phase, config, pool, dependency, after, jobs, (SliceString8){0});
         SliceString8 prefix = matrix_phase_prefix(arena, id, 0);
         for (u64 i = 0; i < prefix.length; i += 1)
         {
@@ -253,7 +256,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
                         String8* identity = arena_allocate(arena, String8, 1);
                         identity[0] = label;
                         run->arguments = (SliceString8){.pointer = identity, .length = 1};
-                        run->phase_task = matrix_phase_task(arena, tree, S8("evidence"), label, S8(""), S8("ready"), 0, run->arguments);
+                        run->phase_task = matrix_phase_task(arena, tree, S8("evidence"), label, S8(""), S8("ready"), S8(""), 0, run->arguments);
                     }
                 }
                 if (!run->phase_task.length && !run->callback)

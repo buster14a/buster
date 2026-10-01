@@ -56,7 +56,13 @@ return success. The enclosing worker/driver completion proves publication
 finished. Partial staging files are retained and make the consumer fail.
 
 In pooled mode each build becomes eligible when the outer scheduler starts;
-validation becomes eligible at its producer's completion. Consecutive validation
+validation becomes eligible at its producer's completion. A serialized test
+tree's first validation task also names the previous test tree's last test task
+as `after`; it becomes eligible when both have completed. The validator accepts
+`after` only on a pooled tree's first validation task, only for another tree's
+final validation or post-test task, and only as a single chain. A nested test
+command may be the tree's `ide test` or the isolated-process runner
+`<driver> test_units_partitioned <tree ide>`. Consecutive validation
 commands for a shared multi-config tree retain one pool-edge identity because
 Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.

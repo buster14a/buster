@@ -158,8 +158,20 @@ def validate_plan(plan, coverage, environment):
             elif task["phase"] == "self_host":
                 expected_pool, expected_dep = "self-host", task_id(tree_id, "build")
         require(task["pool_edge"] == expected_pool and dep == expected_dep, f"admission/dependency identity mismatch: {name}")
+        # Serialized test phases (build.c matrix_superbuild_allocate_jobs): a
+        # tree's first test command also waits for another tree's last one.
+        after = task.get("after", "")
+        require(isinstance(after, str), f"malformed after identity: {name}")
+        if after:
+            first_validation = task["phase"] == "validation" and dep == task_id(task["tree"], "build")
+            require(plan["scheduler"] == "pooled" and first_validation, f"after edge on a non-initial test phase: {name}")
+            require(after in tasks and tasks[after]["tree"] != task["tree"] and tasks[after]["phase"] in ("validation", "post_test"),
+                    f"after edge does not name another tree's test phase: {name}")
+            require(not any(t.get("dependency") == after for t in tasks.values()), f"after edge skips a later test phase: {name}")
         if task["pool_edge"]:
             require(plan["scheduler"] == "pooled" and task["phase"] in ("build", "validation", "post_test", "self_host"), "impossible pooled phase")
+    afters = [t.get("after", "") for t in tasks.values() if t.get("after", "")]
+    require(len(afters) == len(set(afters)), "serialized test phases branch")
     return trees, tasks
 
 
@@ -211,7 +223,12 @@ def analyze(root, coverage, environment=None):
             if task["phase"] == "test":
                 executable = "ide.exe" if plan["identity"]["platform"] == "windows" else "ide"
                 expected = Path(tree["build_directory"]) / task["configuration"] / executable
-                require(same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "test", f"test executable/tree mismatch: {name}")
+                # CI trees run test_all through the isolated-process runner
+                # (build driver test_units_partitioned <ide>), which falls back
+                # to the ordinary invocation below four test workers.
+                direct = same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "test"
+                partitioned = len(argv) > 2 and argv[1] == "test_units_partitioned" and same_path(argv[2], expected)
+                require(direct or partitioned, f"test executable/tree mismatch: {name}")
                 if plan["scheduler"] == "pooled":
                     parent = tasks[task_id(task["tree"], "validation", task["configuration"])]
                     require(end.get("test_jobs") == str(parent["inner_jobs"]), f"nested test-worker quota mismatch: {name}")
@@ -239,6 +256,8 @@ def analyze(root, coverage, environment=None):
             record["ready_us"] = records[task_id("matrix", "scheduler")]["child_start_us"]
         elif dep != "ready":
             record["ready_us"] = records[dep]["end_us"]
+        if task.get("after", ""):
+            record["ready_us"] = max(record["ready_us"], records[task["after"]]["end_us"])
         require(record["ready_us"] <= record["start_us"], f"dependency overlap: {name}")
         if task["phase"] != "configure" and task["tree"] in trees:
             require(records[task_id(task["tree"], "configure")]["end_us"] <= record["start_us"], f"build before configure: {name}")

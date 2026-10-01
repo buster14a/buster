@@ -22984,8 +22984,12 @@ struct MatrixTestTree
     String8 build_directory;
     u64 combination_indices[2];
     u32 combination_count;
+    // Build quota (inner Ninja --parallel) and test-worker quota. They match
+    // unless matrix_superbuild_allocate_jobs serializes the test phases.
     u32 parallel_jobs;
+    u32 test_jobs;
     u32 unity_only : 1;
+    u32 test_serialized : 1;
     u32 unity_analysis_scheduled : 1;
     u32 table_audit_scheduled : 1;
     u32 runs_tests : 1;
@@ -24322,6 +24326,21 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, 
     {
         matrix_superbuild_allocate_legacy_jobs(trees, tree_count, thread_count);
     }
+
+    // With two or more test trees on a low-core runner, the last test phase
+    // used to run alone on its share while the rest of the CPUs sat idle
+    // (Windows x86-64 checks: about 900 s of sanitized Debug testing on two of
+    // four CPUs). Test phases instead run one tree at a time, in declaration
+    // order, each with the whole budget; builds keep their shares and may
+    // still overlap a test phase. The superbuild chains the test targets. A
+    // concurrent self-host worker would take part of that budget, so a matrix
+    // that schedules one keeps the shared test quotas.
+    bool serialize_tests = test_share && test_tree_count > 1 && !self_host_jobs;
+    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    {
+        trees[tree_i].test_serialized = serialize_tests && trees[tree_i].runs_tests;
+        trees[tree_i].test_jobs = trees[tree_i].test_serialized ? thread_count : trees[tree_i].parallel_jobs;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuildSelfHostPlan plan, MatrixTestTree* trees, u32 tree_count,
@@ -24401,6 +24420,7 @@ struct MatrixSuperbuildAllocationCase
     u8 unity_only[MATRIX_COVERAGE_MAX_TREES];
     u8 runs_tests[MATRIX_COVERAGE_MAX_TREES];
     u8 expected_jobs[MATRIX_COVERAGE_MAX_TREES];
+    u8 expected_test_jobs[MATRIX_COVERAGE_MAX_TREES];
 };
 
 // Hosted shard shapes after longest-first ordering (#892 tree inventories).
@@ -24409,29 +24429,30 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(vo
     BUSTER_GLOBAL_LOCAL MatrixSuperbuildAllocationCase cases[] = {
         // Shared sanitized Debug;Release tree, GCC, Zig on three Apple-Silicon CPUs.
         {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 3,
-         .runs_tests = {1, 0, 0}, .expected_jobs = {3, 1, 1}},
-        // Sanitized Debug, sanitized Release, GCC, Zig.
+         .runs_tests = {1, 0, 0}, .expected_jobs = {3, 1, 1}, .expected_test_jobs = {3, 1, 1}},
+        // Sanitized Debug, sanitized Release, GCC, Zig. The two test phases run
+        // one after the other, each with all four CPUs.
         {.name = S8_INITIALIZER("Linux checks"), .thread_count = 4, .tree_count = 4,
-         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {2, 2, 1, 1}},
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {2, 2, 1, 1}, .expected_test_jobs = {4, 4, 1, 1}},
         // Five trees on four slots: the two sanitized trees plus MSVC, GCC, Zig.
         {.name = S8_INITIALIZER("Windows x86-64 checks"), .thread_count = 4, .tree_count = 5,
-         .runs_tests = {1, 1, 0, 0, 0}, .expected_jobs = {2, 2, 1, 1, 1}},
+         .runs_tests = {1, 1, 0, 0, 0}, .expected_jobs = {2, 2, 1, 1, 1}, .expected_test_jobs = {4, 4, 1, 1, 1}},
         // The canonical unity tree serializes with the self-host worker in one slot.
         {.name = S8_INITIALIZER("four-CPU release"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 1,
-         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {4}},
+         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {4}, .expected_test_jobs = {4}},
         {.name = S8_INITIALIZER("macOS arm64 release"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 1,
-         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {3}},
+         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {3}, .expected_test_jobs = {3}},
         // A compile-only MSVC tree keeps the legacy whole-budget allocation.
         {.name = S8_INITIALIZER("Windows arm64 checks"), .thread_count = 4, .tree_count = 1,
-         .runs_tests = {0}, .expected_jobs = {4}},
+         .runs_tests = {0}, .expected_jobs = {4}, .expected_test_jobs = {4}},
         // Sharing would let the concurrent self-host worker oversubscribe.
         {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}},
+         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
         {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}},
+         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
         // Larger hosts keep the weighted legacy schedule.
         {.name = S8_INITIALIZER("sixteen-CPU checks"), .thread_count = 16, .tree_count = 4,
-         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {4, 4, 4, 4}},
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {4, 4, 4, 4}, .expected_test_jobs = {4, 4, 4, 4}},
     };
 
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -24449,7 +24470,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(vo
                      matrix_superbuild_self_host_cpu_budget_valid(trees, test_case.tree_count, test_case.thread_count, test_case.self_host_jobs);
         for (u32 tree_i = 0; tree_i < test_case.tree_count; tree_i += 1)
         {
-            valid = valid && trees[tree_i].parallel_jobs == test_case.expected_jobs[tree_i];
+            valid = valid && trees[tree_i].parallel_jobs == test_case.expected_jobs[tree_i] &&
+                    trees[tree_i].test_jobs == test_case.expected_test_jobs[tree_i] &&
+                    trees[tree_i].test_serialized == (trees[tree_i].test_jobs != trees[tree_i].parallel_jobs);
         }
         if (!valid)
         {
@@ -24605,6 +24628,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
+
+    // A four-CPU checks shard: the two sanitized test trees keep their build
+    // shares, test with the whole budget, and the second waits for the first.
+    MatrixTestCombination serial_combinations[3] = {
+        {.build_directory = S8("build/sanitized-debug"), .options = {.config = S8("Debug"), .optimize_set = 1},
+         .compiler = BUILD_COMPILER_CLANG, .sanitize = 1, .run_tests = 1},
+        {.build_directory = S8("build/sanitized-release"), .options = {.config = S8("Release"), .optimize = 1, .optimize_set = 1},
+         .compiler = BUILD_COMPILER_CLANG, .sanitize = 1, .run_tests = 1},
+        {.build_directory = S8("build/gcc-debug"), .options = {.config = S8("Debug"), .optimize_set = 1}, .compiler = BUILD_COMPILER_GCC},
+    };
+    MatrixTestTree serial_trees[3] = {
+        {.build_directory = S8("build/sanitized-debug"), .combination_indices = {0}, .combination_count = 1, .runs_tests = 1},
+        {.build_directory = S8("build/sanitized-release"), .combination_indices = {1}, .combination_count = 1, .runs_tests = 1},
+        {.build_directory = S8("build/gcc-debug"), .combination_indices = {2}, .combination_count = 1},
+    };
+    matrix_superbuild_allocate_jobs(serial_trees, BUSTER_ARRAY_LENGTH(serial_trees), 4, 0);
+    bool serial_written = matrix_superbuild_manifest_write(arena, manifest_path, S8("/absolute/source"), S8("/absolute/build-driver"),
+                                                            serial_trees, BUSTER_ARRAY_LENGTH(serial_trees), 3, serial_combinations,
+                                                            (MatrixSuperbuildSelfHostPlan){0}, false, false);
+    ByteSlice serial_bytes = file_read(arena, manifest_path, (FileReadOptions){.map_required = 0});
+    String8 serial_manifest = BYTE_SLICE_TO_STRING(8, serial_bytes);
+    bool serial_fields_valid = serial_written && serial_manifest.pointer &&
+                               string_first_sequence(serial_manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_PARALLEL_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_TEST_JOBS 4)")) != BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_JOBS 4)")) != BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_AFTER 0)")) != BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("set(BUSTER_SUPERBUILD_TREE_2_TEST_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("TREE_0_TEST_AFTER")) == BUSTER_STRING_NO_MATCH &&
+                               string_first_sequence(serial_manifest, S8("TREE_2_TEST_AFTER")) == BUSTER_STRING_NO_MATCH;
+    remove_path_recursive(arena, manifest_path);
     if (low_core_result != PROCESS_RESULT_SUCCESS ||
         matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
@@ -24615,6 +24668,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         matrix_superbuild_self_host_plan_valid(malformed_manifest, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_provenance, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_producer_clean, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) || !manifest_fields_valid ||
+        !serial_fields_valid ||
         matrix_superbuild_self_host_plan_valid(oversized_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_cpu_budget_valid(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4, 2) || path_exists(arena, manifest_path))
     {
@@ -24658,9 +24712,14 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED {u32})\n"), self_host.producer_clean_required));
 
+    u32 previous_test_tree = tree_count;
+    String8 previous_test_task = {0};
     for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
     {
         MatrixTestTree tree = trees[tree_i];
+        // A tree that never went through matrix_superbuild_allocate_jobs tests
+        // with its build quota.
+        tree.test_jobs = tree.test_jobs ? tree.test_jobs : tree.parallel_jobs;
         MatrixTestCombination first = combinations[tree.combination_indices[0]];
         String8 first_config = cmake_build_config(first.options);
         String8 first_test_config = first.run_tests ? first_config : (String8){0};
@@ -24690,24 +24749,41 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         String8 phase_tree = matrix_phase_find_tree(tree.build_directory);
         String8 build_id = string_format(arena, S8("{S8}-build-all"), phase_tree);
         String8 test_pool = string_format(arena, S8("validation-{S8}"), phase_tree);
+        bool has_test_target = first_test_config.length || second_test_config.length || analyze_config.length;
+        // A serialized tree's first test command also waits for the previous
+        // serialized tree's last test command (matrix_superbuild_allocate_jobs).
+        bool chained = tree.test_serialized && has_test_target && previous_test_tree < tree_count;
+        String8 test_after = chained ? previous_test_task : (String8){0};
         matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_BUILD_OBSERVER"), prefix), phase_tree,
-                           S8("build"), S8(""), string_format(arena, S8("build-{S8}"), phase_tree), S8("scheduler"), tree.parallel_jobs);
+                           S8("build"), S8(""), string_format(arena, S8("build-{S8}"), phase_tree), S8("scheduler"), (String8){0}, tree.parallel_jobs);
         if (first_test_config.length)
         {
             matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_0_OBSERVER"), prefix), phase_tree,
-                               S8("validation"), first_test_config, test_pool, build_id, tree.parallel_jobs);
+                               S8("validation"), first_test_config, test_pool, build_id, test_after, tree.test_jobs);
         }
         if (second_test_config.length)
         {
             matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_1_OBSERVER"), prefix), phase_tree,
                                S8("validation"), second_test_config, test_pool,
-                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, first_test_config), tree.parallel_jobs);
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, first_test_config),
+                               first_test_config.length ? (String8){0} : test_after, tree.test_jobs);
         }
         if (analyze_config.length)
         {
             matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_ANALYZE_OBSERVER"), prefix), phase_tree,
                                S8("post_test"), analyze_config, test_pool,
-                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), 0);
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), (String8){0}, 0);
+        }
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_JOBS {u32})\n"), prefix, tree.test_jobs));
+        if (chained)
+        {
+            string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_AFTER {u32})\n"), prefix, previous_test_tree));
+        }
+        if (tree.test_serialized && has_test_target)
+        {
+            previous_test_tree = tree_i;
+            previous_test_task = analyze_config.length ? string_format(arena, S8("{S8}-post_test-{S8}"), phase_tree, analyze_config)
+                : string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, second_test_config.length ? second_test_config : first_test_config);
         }
 
         string8_list_push(arena, &lines,
@@ -24742,7 +24818,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     {
         String8 phase_tree = matrix_phase_find_tree(self_host.build_directory);
         matrix_phase_cmake(arena, &lines, S8("BUSTER_SUPERBUILD_SELF_HOST_OBSERVER"), phase_tree, S8("self_host"), S8("Release"),
-                           S8("self-host"), string_format(arena, S8("{S8}-build-all"), phase_tree), self_host.pool_jobs);
+                           S8("self-host"), string_format(arena, S8("{S8}-build-all"), phase_tree), (String8){0}, self_host.pool_jobs);
     }
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
@@ -24930,6 +25006,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
+    // Sanitized Clang trees own the serialized checks test phases. Their
+    // test_all uses the isolated-process runner, which partitions only at four
+    // or more test workers and otherwise runs the ordinary invocation unchanged
+    // (tools/ci_unit_tests.c). The unsanitized canonical Release producer keeps
+    // exactly the standard arguments (build_artifact_fanout_is_canonical).
+    BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
+        S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8_INITIALIZER("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
+    };
 
     for (u32 tree_i = 0; tree_i < coverage_plan.tree_count; tree_i += 1)
     {
@@ -24975,7 +25060,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && tree_plan.sanitize ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+                : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
         generate_add(arena, generate_step, generate);
