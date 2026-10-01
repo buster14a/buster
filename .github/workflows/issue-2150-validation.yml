@@ -1,0 +1,20 @@
+name: Issue 2150 focused validation
+on:
+  push:
+    branches: [codex/2150-readiness-validation]
+permissions:
+  contents: read
+jobs:
+  cancellation:
+    runs-on: windows-11-arm
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 97e768bd06f77884aeb8db1f7d2a1cf39e0f21c8
+          persist-credentials: false
+      - name: Validate cancellation controls with three concurrent suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/2150" tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log tools/ci_matrix_phases_test.py=matrix-phases.log tools/matrix_shard_test.py=matrix-shard.log
