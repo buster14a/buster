@@ -2112,8 +2112,8 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAcces
 
         if (access.read) desired_access |= GENERIC_READ;
         if (access.write) desired_access |= GENERIC_WRITE;
-        if (share_access.read) shared_mode |= FILE_SHARE_READ;
-        if (share_access.write) shared_mode |= FILE_SHARE_WRITE;
+        if (share_flags.read) shared_mode |= FILE_SHARE_READ;
+        if (share_flags.write) shared_mode |= FILE_SHARE_WRITE;
         if (share_flags.delete) shared_mode |= FILE_SHARE_DELETE;
 
         // Creation disposition depends only on the operation flags.
