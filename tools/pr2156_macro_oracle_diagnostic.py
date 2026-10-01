@@ -2,6 +2,7 @@
 """Bounded, isolated correctness diagnostic for PR 2156. No performance verdict."""
 import argparse
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -15,8 +16,202 @@ import time
 HEAD = "f149ef3ac3d3c2f9397a0e0e5c280c6bfd544d13"
 PREFIX = '#define M 7\n#pragma push_macro("M")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n'
 CASES = [
-    ("omitted", PREFIX + 'M(_Pragma("pop_macro(\\\"M\\\")") 11) M\n', ["11", "7"]),
-    ("empty", PREFIX + 'M(_Pragma("pop_macro(\\\"M\\\")") 11,) M\n', ["11", ",", "7"]),
+    [
+        "case00",
+        "#define F(x) x\nF\n(11)\n",
+        [
+            "11"
+        ]
+    ],
+    [
+        "case01",
+        "#define F(x) x\nF\n(__LINE__)\n",
+        [
+            "3"
+        ]
+    ],
+    [
+        "case02",
+        "#define F(x) x\n#define A F\nA\n(__LINE__)\n",
+        [
+            "4"
+        ]
+    ],
+    [
+        "case03",
+        "#define F(x) x\n#define ID(x) x\nID(F\n(__LINE__))\n",
+        [
+            "4"
+        ]
+    ],
+    [
+        "case04",
+        "#define F(x) x\n#line 70 \"rescan-lines.c\"\nF\n(__LINE__)\n",
+        [
+            "71"
+        ]
+    ],
+    [
+        "case05",
+        "#define F(x) x\n#define A F\n#define B A\nB\n\n(12)\n",
+        [
+            "12"
+        ]
+    ],
+    [
+        "case06",
+        "#define F(x) x\nF /* comment\ncontinued */\n/* between */ (13)\n",
+        [
+            "13"
+        ]
+    ],
+    [
+        "case07",
+        "#define F(x) x\r\nF\r\n\r\n(14)\r\n",
+        [
+            "14"
+        ]
+    ],
+    [
+        "case08",
+        "#define F(x) x\n#define ID(x) x\n#define A F\nID(A)\n(ID(F\n(15)))\n",
+        [
+            "15"
+        ]
+    ],
+    [
+        "case09",
+        "#define F(x) x\n#define TAIL(x) x F\nTAIL(16)\n(17)\n",
+        [
+            "16",
+            "17"
+        ]
+    ],
+    [
+        "case10",
+        "#define F(x) x\n#define A F\nF\nname A\n+ 18\n",
+        [
+            "F",
+            "name",
+            "F",
+            "+",
+            "18"
+        ]
+    ],
+    [
+        "case11",
+        "#define F(x) x\n#define A F\nA\n#undef A\n#define A 19\nA\n",
+        [
+            "F",
+            "19"
+        ]
+    ],
+    [
+        "case12",
+        "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n_Pragma(\"pop_macro(\\\"X\\\")\") X\n",
+        [
+            "1"
+        ]
+    ],
+    [
+        "case13",
+        "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n_Pragma(\"pop_macro(\\\"X\\\")\")\nX\n",
+        [
+            "1"
+        ]
+    ],
+    [
+        "case14",
+        "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n#define RESTORE _Pragma(\"pop_macro(\\\"X\\\")\")\n#define ID(x) x\nID(RESTORE X) X\n",
+        [
+            "1",
+            "1"
+        ]
+    ],
+    [
+        "case15",
+        "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n#pragma push_macro(\"X\")\n#undef X\n#define X 3\n#define DUP(x) x x\nDUP(_Pragma(\"pop_macro(\\\"X\\\")\") X) X\n",
+        [
+            "2",
+            "2",
+            "2"
+        ]
+    ],
+    [
+        "case16",
+        "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n_Pragma(\"push_macro(\\\"X\\\")\") _Pragma(\"pop_macro(\\\"X\\\")\") X _Pragma(\"pop_macro(\\\"X\\\")\") X\n",
+        [
+            "2",
+            "1"
+        ]
+    ],
+    [
+        "case17",
+        "#pragma push_macro(\"MISSING\")\n#define MISSING 9\n_Pragma(\"pop_macro(\\\"MISSING\\\")\") MISSING\n",
+        [
+            "MISSING"
+        ]
+    ],
+    [
+        "case18",
+        "#define F(x) x\n#pragma push_macro(\"F\")\n#undef F\n#define F(x,y) x + y\nF(_Pragma(\"pop_macro(\\\"F\\\")\") 1,2) F(3)\n",
+        [
+            "1",
+            "+",
+            "2",
+            "3"
+        ]
+    ],
+    [
+        "case19",
+        "#define F(x) x\n#pragma push_macro(\"F\")\n#undef F\n#define F(x,y) x #y\nF(_Pragma(\"pop_macro(\\\"F\\\")\") 4,5) F(6)\n",
+        [
+            "4",
+            "\"",
+            "5",
+            "\"",
+            "6"
+        ]
+    ],
+    [
+        "case20",
+        "#pragma push_macro(\"X\")\n#define X _Pragma(\"pop_macro(\\\"X\\\")\")\nX\n#define X 1\nX\n",
+        [
+            "1"
+        ]
+    ],
+    [
+        "case21",
+        "#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\nM(_Pragma(\"pop_macro(\\\"M\\\")\") 11) M\n",
+        [
+            "11",
+            "7"
+        ]
+    ],
+    [
+        "case22",
+        "#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\nM(_Pragma(\"pop_macro(\\\"M\\\")\") 11,) M\n",
+        [
+            "11",
+            ",",
+            "7"
+        ]
+    ],
+    [
+        "case23",
+        "#define SAME _Pragma(\"push_macro(\\\"SAME\\\")\") _Pragma(\"pop_macro(\\\"SAME\\\")\") SAME\nSAME\n",
+        [
+            "SAME"
+        ]
+    ],
+    [
+        "case24",
+        "#define SELF 7\n#pragma push_macro(\"SELF\")\n#undef SELF\n#define SELF _Pragma(\"pop_macro(\\\"SELF\\\")\") SELF\nSELF SELF\n",
+        [
+            "7",
+            "7"
+        ]
+    ]
 ]
 
 def limits(address_limit):
@@ -91,6 +286,7 @@ def main():
                 print("DIAGNOSTIC_TOOL", tool_name, version.stdout.splitlines()[0], flush=True)
             for dialect in ["gnu17", "c17"]:
                 for name, source, expected in CASES:
+                    print("DIAGNOSTIC_CASE", json.dumps({"name": name, "source": source, "sha256": hashlib.sha256(source.encode()).hexdigest()}), flush=True)
                     command = [executable] + (["-E", "-P"] if options.references else ["cc", "-E"])
                     command += ["-std=" + dialect, str(fixtures / (name + ".c"))]
                     receipt, stdout, stderr = execute(command, tool_name + "-" + dialect + "-" + name,

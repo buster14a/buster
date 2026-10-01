@@ -1,4 +1,4 @@
-name: PR 2156 bounded macro oracle diagnostic
+name: PR 2156 all boundary reference diagnostic
 
 on:
   push:
@@ -10,48 +10,16 @@ permissions:
 jobs:
   references:
     runs-on: ubuntu-26.04
-    timeout-minutes: 2
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Bounded GCC and Clang token oracles
+      - name: Bounded GCC and Clang oracles for all 25 boundary cases
         run: python3 tools/pr2156_macro_oracle_diagnostic.py --references --log-dir diagnostic-output
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: pr2156-reference-oracles-${{ github.run_id }}
-          path: diagnostic-output
-          retention-days: 7
-  buster:
-    needs: references
-    runs-on: ubuntu-26.04
-    timeout-minutes: 8
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: diagnostic
-          persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: candidate
-          ref: f149ef3ac3d3c2f9397a0e0e5c280c6bfd544d13
-          persist-credentials: false
-      - name: Build exact PR head with bounded parallelism
-        working-directory: candidate
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = f149ef3ac3d3c2f9397a0e0e5c280c6bfd544d13
-          clang --version
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/pr2156-build"
-          timeout --kill-after=5s 180s "$RUNNER_TEMP/pr2156-build" generate --config Release --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON
-          timeout --kill-after=5s 180s "$RUNNER_TEMP/pr2156-build" build --config Release -t ide -- -j2
-      - name: Bounded exact-head Buster token and serial frontend oracles
-        working-directory: candidate
-        run: python3 ../diagnostic/tools/pr2156_macro_oracle_diagnostic.py --buster ./build/Release/ide --module --log-dir ../diagnostic-output
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: pr2156-buster-oracles-${{ github.run_id }}
           path: diagnostic-output
           retention-days: 7
