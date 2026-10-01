@@ -259,18 +259,21 @@ without facts for identical bitcode and diagnostics.
   argument list across whitespace. Directive lines retain their ordered batch
   boundary. Builtin `__LINE__` uses its invocation stamp, including an argument
   on a later line of that batch.
-  `_Pragma`/`__pragma` push/pop macro effects execute at the expansion cursor
-  before following tokens, and are consumed there to prevent argument reuse
-  from replaying them. Pack markers retain their output-token positions.
+  `_Pragma`/`__pragma` push/pop macro markers survive argument prescan, then
+  execute at the outer rescan cursor before following tokens. A substituted
+  argument executes each surviving marker occurrence, matching Clang/GCC's
+  phase-four behavior. Pack markers retain their output-token positions.
   ENABLE tasks own definition generations rather than just names: a restored
-  different definition can expand inside an older replacement. A pop snapshots
-  only suspended invocations whose definition it changes, and restores the
-  generation's disabled state from active ENABLE tasks without consuming them.
+  different definition can expand inside an older replacement. A pop restores
+  the generation's disabled state from active ENABLE tasks without consuming
+  them; child argument contexts never execute macro-state effects.
   The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
   so restoring one after an ordinary definition also restores its behavior.
   `c_macro_conditional_tests` checks these boundaries against literal token
   expectations, independent hosted Clang/GCC preprocessors and both frontend
-  lowering forms.
+  lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
+  separately and omit only GCC's observed nonterminating self-push/pop control;
+  Buster's literal checks and Clang's matching controls remain in place.
   A non-builtin definition without `#` or `##` is written straight into its
   reserved batch by `c_macro_produce_plain_tasks` (exact size from
   `plain_count` and per-parameter use counts); builtins, stringify and paste

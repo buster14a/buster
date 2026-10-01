@@ -3314,7 +3314,7 @@ struct CMacroDefinition
     bool has_paste;
     bool has_stringify;
     // Dynamic builtins belong to the saved definition just like replacement
-    // tokens, so push/pop and suspended invocations restore their kind too.
+    // tokens, so push/pop restores their synthesized behavior too.
     u8 builtin;
 };
 
@@ -4338,9 +4338,6 @@ struct CMacroExpansionContinuation
 {
     CMacroExpansionContext* parent;
     CMacro* macro;
-    // Allocated only when an in-flight pop_macro changes this invocation's
-    // definition during argument prescan. Other invocations read the live one.
-    CMacroDefinition* saved_definition;
     CMacroArgument* arguments;
     CPpToken invocation;
     u32 argument_count;
@@ -4348,7 +4345,7 @@ struct CMacroExpansionContinuation
 };
 
 typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
-BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context, CMacroExpansionContext* expansion,
+BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context,
                                                        char8 const* base, CPpToken marker, CPpStampTable const* stamps, CMacroExpansionTaskStack const* tasks);
 
 typedef struct CMacroReplacementToken CMacroReplacementToken;
@@ -5259,7 +5256,7 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
     while (!child && continuation->argument_index < continuation->argument_count)
     {
         CMacroArgument* argument = continuation->arguments + continuation->argument_index;
-        CMacroDefinition const* definition = continuation->saved_definition ? continuation->saved_definition : &continuation->macro->definition;
+        CMacroDefinition const* definition = &continuation->macro->definition;
         if (definition->header_query && argument->token_count >= 3 &&
             c_token_is_punctuator(&argument->tokens[0].token, C_PUNCTUATOR_LESS) &&
             c_token_is_punctuator(&argument->tokens[argument->token_count - 1].token, C_PUNCTUATOR_GREATER))
@@ -5383,7 +5380,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
 // produced into its batch directly; builtins, `#` and `##` stage first.
 BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, CMacro* first_macro, CMacro* macro, CMacroDefinition const* definition, CMacroArgument* arguments,
                                             u32 argument_count, CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result,
-                                            CMacroExpansionContext* target, CMacroExpansionTaskStack* tasks, CPreprocessPragmaContext* pragma_context)
+                                            CMacroExpansionTaskStack* tasks)
 {
     bool ok = true;
     if (definition->pragma_like)
@@ -5391,10 +5388,10 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
         if (argument_count == 1)
         {
             CPpToken pragma = c_macro_pragma_token(space, macro, arguments[0], invocation);
-            if (!c_preprocess_expansion_pragma(pragma_context, target, space->base, pragma, stamps, tasks))
-            {
-                c_preprocess_output_push(arena, &target->first_output, &target->last_output, pragma, &target->output_count);
-            }
+            // Argument prescan retains the marker. The same task path executes
+            // direct and substituted markers once they reach the outer rescan.
+            macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
+            c_macro_expansion_tasks_push(arena, tasks, &pragma, 1, macro, definition->generation);
         }
     }
     else if (!definition->builtin && !definition->has_paste && !definition->has_stringify)
@@ -5468,9 +5465,9 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                 {
                     context = continuation->parent;
                     ok = c_macro_materialize(arena, space, first_macro, continuation->macro,
-                                             continuation->saved_definition ? continuation->saved_definition : &continuation->macro->definition,
+                                             &continuation->macro->definition,
                                              continuation->arguments, continuation->argument_count,
-                                             continuation->invocation, stamps, result, context, &tasks, pragma_context);
+                                             continuation->invocation, stamps, result, &tasks);
                     done = !ok;
                 }
             }
@@ -5485,6 +5482,11 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             else
             {
                 CPpToken token = task.token;
+                if (token.token.kind == C_TOKEN_PRAGMA && !context->parent &&
+                    c_preprocess_expansion_pragma(pragma_context, space->base, token, stamps, &tasks))
+                {
+                    continue;
+                }
                 CMacro* macro = token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand
                                     ? c_macro_find_token(first_macro, symbols, space->base, &token.token)
                                     : 0;
@@ -5552,13 +5554,13 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                             }
                             else
                             {
-                                ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, context, &tasks, pragma_context);
+                                ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, &tasks);
                                 done = !ok;
                             }
                         }
                         else
                         {
-                            ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, context, &tasks, pragma_context);
+                            ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, &tasks);
                             done = !ok;
                         }
                     }
@@ -7416,10 +7418,10 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_marker(CPreprocessPragmaContext conte
     c_preprocess_handle_pragma(context, lex.spelling_base, lex.tokens, token_count);
 }
 
-// Macro-state pragmas take effect at the expansion cursor, including during
-// argument prescan. Consume them here so a substituted argument cannot replay
-// the effect. Other markers stay in the output for their token-position reader.
-BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context, CMacroExpansionContext* expansion,
+// Macro-state pragmas take effect at the outer rescan cursor. Argument prescan
+// preserves markers, so each substituted occurrence executes in that cursor's
+// order. Other markers stay in the output for their token-position reader.
+BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context,
                                                        char8 const* base, CPpToken marker, CPpStampTable const* stamps, CMacroExpansionTaskStack const* tasks)
 {
     bool handled = false;
@@ -7440,15 +7442,6 @@ BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* p
             if (pop && c_preprocess_pragma_macro_name(lex.spelling_base, lex.tokens, token_count, &name))
             {
                 popped_macro = c_macro_find(*pragma_context->first_macro, c_symbol_intern(pragma_context->symbols, name));
-                for (CMacroExpansionContext* cursor = expansion; cursor; cursor = cursor->parent)
-                {
-                    CMacroExpansionContinuation* continuation = cursor->continuation;
-                    if (popped_macro && continuation && continuation->macro == popped_macro && !continuation->saved_definition)
-                    {
-                        continuation->saved_definition = arena_allocate(pragma_context->arena, CMacroDefinition, 1);
-                        *continuation->saved_definition = popped_macro->definition;
-                    }
-                }
             }
             CPreprocessPragmaContext context = *pragma_context;
             context.current_location = c_pp_stamp_location(stamps, marker.stamp);
@@ -7456,8 +7449,8 @@ BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* p
             if (popped_macro)
             {
                 // Only the restored generation's ENABLE markers disable it.
-                // Inspect suspended parent batches too, without consuming any
-                // task or changing an argument context's floor.
+                // Inspect all active batches without consuming any task or
+                // changing an argument context's floor.
                 for (u64 index = 0; index < tasks->count; index += 1)
                 {
                     CMacroExpansionTask task = tasks->data[index];
