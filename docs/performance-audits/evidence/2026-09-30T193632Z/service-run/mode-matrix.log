@@ -1,0 +1,28 @@
+MACHINE_INFO arch=x86_64 cpu="AMD EPYC 7763 64-Core Processor" model=znver3 cores=4 ram_mib=15983
+ninja: no work to do.
+MODE_MATRIX_HARNESS ide=/home/runner/work/buster/buster/candidate/build/Release/ide targets=6 modes=4 fixtures=6 qemu=0 wine=0 oracle=0
+MODE_MATRIX leg=x86_64-linux/none avenue=native status=pass fixtures=6 elapsed_us=230795
+MODE_MATRIX leg=x86_64-linux/mir-stack avenue=native status=pass fixtures=6 elapsed_us=212485
+MODE_MATRIX leg=x86_64-linux/fast avenue=native status=pass fixtures=6 elapsed_us=222803
+MODE_MATRIX leg=x86_64-linux/quality avenue=native status=pass fixtures=6 elapsed_us=223321
+MODE_MATRIX leg=aarch64-linux/none avenue=link status=pass fixtures=6 elapsed_us=36048
+MODE_MATRIX leg=aarch64-linux/mir-stack avenue=link status=pass fixtures=6 elapsed_us=33898
+MODE_MATRIX leg=aarch64-linux/fast avenue=link status=pass fixtures=6 elapsed_us=29529
+MODE_MATRIX leg=aarch64-linux/quality avenue=link status=pass fixtures=6 elapsed_us=41357
+MODE_MATRIX leg=x86_64-windows/none avenue=link status=pass fixtures=6 elapsed_us=163304
+MODE_MATRIX leg=x86_64-windows/mir-stack avenue=link status=pass fixtures=6 elapsed_us=161724
+MODE_MATRIX leg=x86_64-windows/fast avenue=link status=pass fixtures=6 elapsed_us=160882
+MODE_MATRIX leg=x86_64-windows/quality avenue=link status=pass fixtures=6 elapsed_us=163146
+MODE_MATRIX leg=aarch64-windows/none avenue=link status=pass fixtures=6 elapsed_us=29817
+MODE_MATRIX leg=aarch64-windows/mir-stack avenue=link status=pass fixtures=6 elapsed_us=34249
+MODE_MATRIX leg=aarch64-windows/fast avenue=link status=pass fixtures=6 elapsed_us=42359
+MODE_MATRIX leg=aarch64-windows/quality avenue=link status=pass fixtures=6 elapsed_us=45888
+MODE_MATRIX leg=x86_64-macos/none avenue=link status=pass fixtures=6 elapsed_us=162202
+MODE_MATRIX leg=x86_64-macos/mir-stack avenue=link status=pass fixtures=6 elapsed_us=174612
+MODE_MATRIX leg=x86_64-macos/fast avenue=link status=pass fixtures=6 elapsed_us=147954
+MODE_MATRIX leg=x86_64-macos/quality avenue=link status=pass fixtures=6 elapsed_us=172769
+MODE_MATRIX leg=aarch64-macos/none avenue=link status=pass fixtures=6 elapsed_us=35731
+MODE_MATRIX leg=aarch64-macos/mir-stack avenue=link status=pass fixtures=6 elapsed_us=33122
+MODE_MATRIX leg=aarch64-macos/fast avenue=link status=pass fixtures=6 elapsed_us=31654
+MODE_MATRIX leg=aarch64-macos/quality avenue=link status=pass fixtures=6 elapsed_us=37185
+MODE_MATRIX_RESULT legs=24 executed=4 oracle_checked=0 expected_failures=0 failures=0 elapsed_us=2627431 status=pass

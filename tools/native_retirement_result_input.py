@@ -20,8 +20,10 @@ Symlinks are rejected, and regular files must have link count one; this strict
 hard-link policy prevents an evidence pathname from aliasing mutable storage
 outside the root. Every absolute-root and shard-relative directory descriptor
 is retained and revalidated against its parent entry; ancestors above the
-evidence root compare device, inode, mode, and ownership but not their link
-count, which unrelated sibling mkdir/rmdir changes. Each open file, its
+evidence root compare only device, inode, and file type, because unrelated
+processes change their link count, permission bits, and ownership in place.
+The root and its descendants also compare mode, link count, and ownership.
+Each open file, its
 descriptor, and its held parent entry are likewise rechecked after streaming,
 so ancestor or file replacement, truncation, growth, or in-place metadata
 changes fail closed. The receipt reports integrity only. It defines no
@@ -251,13 +253,18 @@ def _close_directories(directories):
 
 
 def _revalidated_identity(identity, directory):
-    # A directory's link count moves whenever any subdirectory is created or
-    # removed inside it. Ancestors above the evidence root (such as /tmp) are
-    # shared with unrelated processes, so only their device, inode, mode, and
-    # ownership prove they were not replaced; the root and its descendants keep
-    # the strict link comparison. Unlinked ancestors still fail through
-    # ``_directory_identity``'s link-count floor and the parent-entry lookup.
-    return replace(identity, links=0) if directory.ancestor else identity
+    # Ancestors above the evidence root (such as /tmp) are shared with
+    # unrelated processes. Their link count moves on any sibling mkdir/rmdir,
+    # and their permission bits and ownership can change in place without
+    # replacing them (#2085). Only device, inode, and file type prove that the
+    # held descriptor and the parent entry still name the same directory; the
+    # descriptor-relative walk rejects a rename or replacement through them.
+    # The root and its descendants keep the strict comparison. Unlinked
+    # ancestors still fail through ``_directory_identity``'s link-count floor
+    # and the parent-entry lookup.
+    if directory.ancestor:
+        identity = replace(identity, mode=stat.S_IFMT(identity.mode), links=0, owner=0, group=0)
+    return identity
 
 
 def _verify_directories(directories, name):

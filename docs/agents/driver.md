@@ -236,7 +236,7 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -245,6 +245,17 @@ describes unwinding rather than bytes. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+Integer data expressions retain `.` as the current field's section-relative
+address, including each separate operand in a comma-separated directive.
+`.long symbol - .` and `.quad symbol - .` use ELF PC32/PC64 on x86-64 and
+PREL32/PREL64 on AArch64; `.quad .` and `label + constant` retain absolute
+address relocations. Quoted names printed by `-S` are accepted. Differences
+between defined, non-weak terms in the same section fold after forward labels
+are known. Cross-section symbol differences, negative undefined addresses,
+multiple positive symbolic terms, and symbolic fields narrower than four
+bytes are diagnosed with the directive and source line. Weak definitions
+retain relocations because a linker can replace their addresses.
 
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
@@ -453,14 +464,27 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   executable. In a shared object general-dynamic keeps its `__tls_get_addr`
   call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
   `DF_STATIC_TLS`, and local-exec is refused.
+- Local-dynamic TLS, which this compiler never emits but GCC and Clang do for a
+  file-local `__thread` under `-fPIC -O1` and above (`R_X86_64_TLSLD` then
+  `DTPOFF32` per variable, issue 1711), is read from foreign objects. An
+  executable -- fixed-address or PIE -- relaxes the `lea`/`call
+  __tls_get_addr` pair (direct, or through the GOT under `-fno-plt`) to
+  `mov rax, fs:0` behind data16 padding and resolves `DTPOFF32` in code to the
+  thread-pointer offset, as ld does. A shared object keeps the call and gives
+  the image one `DTPMOD64` pair with a zero offset, and `DTPOFF32` is the
+  variable's offset in the module's block. `DTPOFF32`/`DTPOFF64` in DWARF
+  sections resolve to that block offset in every image.
 
 `compiler_driver_test_position_independent_images` exercises the whole path:
 a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
 PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
 library must follow), calls and data in both directions, the lifecycle order
 of initializers and handlers, a randomized PIE base, a CPython extension when
-`python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
-and Mach-O dylibs have no writer yet.
+`python3` and its headers exist, and the `-fPIC` refusal.
+`compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
+local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
+runs them, the shared object under both a Buster PIE and the host toolchain.
+AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
 
 ## Object output (`-c`)
 

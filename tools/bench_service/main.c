@@ -1,5 +1,7 @@
 /* Service and control entry points. No caller-selected commands or shell execution.
- * bq_client_arguments owns typed requests; gateway fixes socket/principal/recipe.
+ * bq_client_arguments owns typed requests; gateway fixes socket/principal and
+ * either fixes validate-buster-v1 (submit) or names one registry service recipe
+ * (submit-recipe), which bq_recipe_service admits exactly as for the client.
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
  * Tests include this entry point, as the existing throughput tests do.
  */
@@ -46,17 +48,23 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
         *operation = BQ_OP_CAPABILITIES;
         valid = true;
     }
-    else if (argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit"))
+    else if ((argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit")) ||
+             (gateway && argc == 5 && !strcmp(argv[0], "submit-recipe")))
     {
+        /* submit-recipe only names the recipe. It passes the same
+         * bq_recipe_service registry check as every other submission, so an
+         * unknown, blocked, fake or supervisor-internal name is refused here
+         * and again by the service; no command, flag or path is accepted. */
         BqRequest submission;
         String8 fields[BQ_FIELD_COUNT];
         if (gateway)
         {
+            u32 selected = argc == 5 ? 1u : 0u;
             fields[0] = S8("github-actions");
-            fields[1] = string_from_pointer(argv[1]);
-            fields[2] = S8("validate-buster-v1");
-            fields[3] = string_from_pointer(argv[2]);
-            fields[4] = string_from_pointer(argv[3]);
+            fields[1] = string_from_pointer(argv[1 + selected]);
+            fields[2] = selected ? string_from_pointer(argv[1]) : S8("validate-buster-v1");
+            fields[3] = string_from_pointer(argv[2 + selected]);
+            fields[4] = string_from_pointer(argv[3 + selected]);
         }
         else
         {
@@ -443,6 +451,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
                     "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "gateway export JOB TOKEN FULL_SHA | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "

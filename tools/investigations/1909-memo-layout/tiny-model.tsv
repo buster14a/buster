@@ -1,0 +1,10 @@
+# model: logical field accesses; separately 64B-aligned streams; no cache/timing claim
+# events=12 total_tokens=8 max_body_tokens=5 bodies_0=0 bodies_1_4=1 bodies_5_64=1 bodies_65_plus=0 max_scope_count=3 max_type_count=30
+layout	bodies	queries	nested_queries	root_queries	hits	writes	overwrites	mismatches	storage_sum	storage_peak	aligned_storage_sum	aligned_storage_peak	init_bytes	init_lines	query_bytes	query_flags_bytes	query_payload_bytes	query_payload_probes	query_lines	query_stages	end_checks	scope_checks	flags_checks	type_checks	write_bytes	write_lines	narrow_bodies	fallback_bodies
+current16	2	6	4	2	0	2	0	0	128	80	192	128	128	3	24	0	24	6	6	6	6	0	0	0	32	2	0	0
+flags_first16	2	6	4	2	0	2	0	0	128	80	192	128	128	3	24	24	0	0	6	6	0	0	6	0	32	2	0	0
+hot_cold13	2	6	4	2	0	2	0	0	104	65	256	128	8	2	6	6	0	0	6	6	0	0	6	0	26	4	0	0
+soa13	2	6	4	2	0	2	0	0	104	65	512	256	8	2	6	6	0	0	6	6	0	0	6	0	26	8	0	0
+blocked64	2	6	4	2	0	2	0	0	1664	832	1664	832	128	2	6	6	0	0	6	6	0	0	6	0	26	4	0	0
+compact16	2	6	4	2	0	2	0	0	128	80	192	128	8	3	6	6	0	0	6	6	0	0	6	0	26	2	0	0
+narrow12_wide16	2	6	4	2	0	2	0	0	96	60	128	64	8	2	6	6	0	0	6	6	0	0	6	0	22	2	2	0
