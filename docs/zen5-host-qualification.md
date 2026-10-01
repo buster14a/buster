@@ -53,7 +53,7 @@ python3 -B tools/zen5_host_qualification.py capture \
   -- "$TRUSTED_COMPILER" ...
 ```
 
-The service recipe, not a request, selects the command, CPU, inputs, output contract, and environment identities. The result retains:
+The service recipe, not a request, selects the command, CPU, inputs, output contract, and environment identities. A service-materialized snapshot has no `.git`, so the recipe passes `--repository-identity FILE` (exactly `revision`, `tree` and `status`) instead of querying Git; the record keeps `identity_source: service-snapshot` and the identity file's digest; a malformed revision, tree or dirty status is an invalidity reason and a malformed file stops the capture. The result retains:
 
 - exact repository revision/tree and clean-checkout state;
 - executable, input, output, profile, and external-environment hashes;
@@ -121,6 +121,8 @@ python3 -B tools/zen5_aa_noise.py analyze \
 
 For wall time and peak RSS, the model reports logical-label, physical-path, and execution-order effects; absolute nearest-rank quantiles; pair-center drift; lag-one serial correlation; and per-round/per-block medians. The reported 95th-percentile absolute label effect is named `empirical_resolution_fraction`. It is an observation for that exact host/profile/binary/workload, not a universal acceptance threshold.
 
+Every floating-point accumulation in the model uses `math.fsum` or `statistics.fmean` (itself `fsum`-based), so identical capture bytes produce bit-identical members on every supported Python version. The built-in float `sum()` changed from naive to compensated summation in Python 3.12 and must not be used for analysis values.
+
 Any invalid or missing slot makes the analysis `invalid` and suppresses metric summaries. The raw slot remains in the capture. There is no retry-until-green path, optional stopping, outlier deletion, candidate comparison, equivalence declaration, or performance verdict in this tool.
 
 ## Statistical decision boundary
@@ -144,4 +146,4 @@ python3 -B tools/zen5_host_qualification.py --self-test
 python3 -B tools/zen5_aa_noise.py --self-test
 ```
 
-These checks validate schemas, exact event encodings, unavailable/null behavior, running-fraction rejection, successful and invalid replay, fixed schedule coverage, label/path/order reconstruction, drift/serial summaries, missing-slot rejection, and the prohibition on turning invalid evidence into a qualified result. They do not claim a physical host run.
+These checks validate schemas, exact event encodings, unavailable/null behavior, running-fraction rejection, successful and invalid replay, fixed schedule coverage, label/path/order reconstruction, drift/serial summaries, a pinned summation vector that distinguishes naive from correctly rounded sums, missing-slot rejection, and the prohibition on turning invalid evidence into a qualified result. They do not claim a physical host run.

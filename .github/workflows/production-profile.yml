@@ -83,6 +83,10 @@ jobs:
           test -s build/production-profile/summary.txt
           test -s build/production-profile/profile/training-contract.txt
           test -s build/production-profile/profile/manifest.txt
+          grep -qx 'build_lto=ON' build/production-profile/profile/manifest.txt
+          test -s build/production-profile/profile-no-lto/training-contract.txt
+          test -s build/production-profile/profile-no-lto/manifest.txt
+          grep -qx 'build_lto=OFF' build/production-profile/profile-no-lto/manifest.txt
           test -d build/production-profile/evidence
           cat build/production-profile/summary.txt
 
@@ -95,6 +99,8 @@ jobs:
             build/production-profile/summary.txt
             build/production-profile/profile/training-contract.txt
             build/production-profile/profile/manifest.txt
+            build/production-profile/profile-no-lto/training-contract.txt
+            build/production-profile/profile-no-lto/manifest.txt
             build/production-profile/evidence
           if-no-files-found: warn
           retention-days: 7

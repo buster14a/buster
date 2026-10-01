@@ -72,7 +72,19 @@ before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
 directly, pass an absent or empty directory. If a child exit-code check fails,
 it prints the exit code, signal, timeout, launch error and wall time, followed by
 the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
-test root, which the harness artifacts upload.
+test root, which the harness artifacts upload. The desktop matrix also retains
+these parent diagnostics and the child-log tail in `combinations.log`.
+
+The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
+and three-second child deadline. It restores the saved limit only after
+comparison has closed the reports, then emits `SUMMARY_WRITE_FAILURE` with the
+setup stage/errno, comparison result and restoration status. Otherwise the
+injected limit truncates the child log itself to one byte. The parent requires
+the complete diagnostic, absence of partial reports, unchanged sealed evidence,
+and successful normal report regeneration. A separate invalid-resource control
+must report setup failure without entering comparison or deleting good reports.
+This diagnostic coverage does not classify an unreproduced child crash, launch
+failure or timeout as a file-size-limit defect, and it never retries the child.
 
 A direct standalone build is useful when diagnosing the harness:
 
@@ -509,6 +521,45 @@ Reuse per-site allocation diagnostics and uninstrumented paired experiments.
 A smaller count is not a speedup. Normal builds preprocess recording calls
 away and retain neither counter storage nor reporting API. Row layout,
 IDs, source/label provenance, and arena lifetimes are unchanged.
+
+### Frontend source-fact census in allocation probes
+
+The same `BUSTER_BENCH_ALLOCATIONS` build also emits `c_census.*` fields in
+`-fsource-metrics`, defined in
+`src/buster/lib/compiler/frontend/c/c_census.h`. `version=1` identifies the
+vocabulary and `overflowed=1` invalidates the census. The instrumented
+compiler must produce the same artifact hash as its uninstrumented
+counterpart; it is never a timing baseline or candidate.
+
+Global fields count stage work over source bytes: `translate_*` (bytes
+examined and copied into the spelling space, checkpoints written and the
+checkpoint capacity reserved), `lex_*` (calls, translated bytes, token rows
+and reserved row bytes, including every paste and builtin-definition relex),
+`intern_pass_tokens`, `class_mask_tokens`, `output_token_rows` and the
+spelling-space copies (`space_synthesized_*`, `space_foreign_*` for macro
+output whose location is a stamp, `space_total_bytes`).
+
+Phase fields are `c_census.<phase>.<name>` for `other`, `preprocess`,
+`parse`, `semantic` and `lower`, attributed by brackets around the public
+stage entry points: spelling reads (`c_token_spelling`) with bytes and
+per-phase distinct offsets, spelling and `string_equal` comparisons with the
+bytes compared, `buster_hash_64` and name-hash calls and bytes, symbol-intern
+calls/probes/middle compares/inserts, integer/float/character/string
+conversions with bytes and distinct offsets, string range decodes and counts,
+temporary evaluation spaces and tokens, source-location recoveries, and the
+arena traffic of the phase. A conversion's `distinct` count keys the
+spelling-space offset of its token; a later conversion at the same offset is
+a repeat, and spellings outside the preprocessor's space are `untracked`.
+These are calling-thread populations, not timings, live memory or all-lane
+totals.
+
+`tools/source_fact_census.py` generates the deterministic adversarial
+corpora (short, repeated and long identifiers, literal- and comment-heavy
+files, malformed strings, dense punctuation, long lines, tiny declarations,
+one large function and token pasting) at scales 1, 2 and 4, compiles each
+with one or two census compilers, requires byte-identical objects and
+identical diagnostics between them, and writes the per-corpus fields and
+deltas to `census.json` and `census.md`.
 
 ### Diagnostic-work census in allocation probes
 

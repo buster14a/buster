@@ -30,6 +30,24 @@ typedef enum CodegenError
     CODEGEN_ERROR_COUNT,
 } CodegenError;
 
+// The active owner of a failed native generation attempt. Success reports
+// NONE; a canonical fallback that succeeds does not become a phase failure.
+typedef enum CodegenPhase
+{
+    CODEGEN_PHASE_NONE,
+    CODEGEN_PHASE_VALIDATION,
+    CODEGEN_PHASE_GLOBAL_LAYOUT,
+    CODEGEN_PHASE_MODULE_PLANNING,
+    CODEGEN_PHASE_FUNCTION_ENTRY,
+    CODEGEN_PHASE_ABI_STORAGE,
+    CODEGEN_PHASE_MACHINE_SELECTION,
+    CODEGEN_PHASE_MACHINE_PLACEMENT,
+    CODEGEN_PHASE_MACHINE_ENCODING,
+    CODEGEN_PHASE_CANONICAL_LOWERING,
+    CODEGEN_PHASE_PUBLICATION,
+    CODEGEN_PHASE_COUNT,
+} CodegenPhase;
+
 typedef enum CodegenAbi
 {
     CODEGEN_ABI_X86_64_SYSTEM_V,
@@ -441,6 +459,7 @@ struct CodegenModule
     bool position_independent;
     u8 reserved[2];
     CodegenError error;
+    CodegenPhase failed_phase;
     // Why the failing shape was refused, in the words of the rule that refused
     // it, for the refusals that have a rule worth naming: an inline assembly
     // template spelling a register the emitter could also hand to an operand,

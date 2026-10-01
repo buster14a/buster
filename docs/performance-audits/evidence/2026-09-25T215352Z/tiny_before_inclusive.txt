@@ -1,0 +1,35 @@
+== cg.tiny.out
+125,781,860 (100.0%)  PROGRAM TOTALS
+ 94,713,067 (75.30%)  codegen/machine_x86_64.c:machine_x86_64_exact_prewarm
+ 44,927,215 (35.72%)  codegen/machine_x86_64.c:machine_x64_metadata_shape_cache_prewarm
+ 43,902,579 (34.90%)  assembly/x86_64_metadata.c:buster_x86_metadata_select_form
+ 43,338,204 (34.46%)  assembly/x86_64_metadata.c:buster_x86_metadata_emit_exact_machine
+ 29,065,593 (23.11%)  assembly/x86_64_metadata.c:buster_x86_metadata_prewarm
+ 28,878,353 (22.96%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_tables_once
+ 16,353,191 (13.00%)  assembly/x86_64_metadata.c:buster_x86_metadata_fill_nul_distances
+ 11,291,916 ( 8.98%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_base64_chunk_scalar
+  3,760,719 ( 2.99%)  codegen/machine_x86_64.c:machine_x64_exact_prepare_fixed_template_family
+  2,521,617 ( 2.00%)  assembly/x86_64_metadata.c:buster_x86_metadata_exact_plan_prepare
+== /tmp/claude-0/fam/cg.ops.out
+154,897,562 (100.0%)  PROGRAM TOTALS
+ 94,713,067 (61.15%)  codegen/machine_x86_64.c:machine_x86_64_exact_prewarm
+ 44,927,215 (29.00%)  codegen/machine_x86_64.c:machine_x64_metadata_shape_cache_prewarm
+ 43,970,998 (28.39%)  assembly/x86_64_metadata.c:buster_x86_metadata_select_form
+ 43,403,597 (28.02%)  assembly/x86_64_metadata.c:buster_x86_metadata_emit_exact_machine
+ 29,065,601 (18.76%)  assembly/x86_64_metadata.c:buster_x86_metadata_prewarm
+ 28,878,353 (18.64%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_tables_once
+ 16,353,191 (10.56%)  assembly/x86_64_metadata.c:buster_x86_metadata_fill_nul_distances
+ 11,291,916 ( 7.29%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_base64_chunk_scalar
+  3,760,719 ( 2.43%)  codegen/machine_x86_64.c:machine_x64_exact_prepare_fixed_template_family
+  2,521,617 ( 1.63%)  assembly/x86_64_metadata.c:buster_x86_metadata_exact_plan_prepare
+== /tmp/claude-0/fam/cg.string.out
+282,592,417 (100.0%)  PROGRAM TOTALS
+ 94,713,005 (33.52%)  codegen/machine_x86_64.c:machine_x86_64_exact_prewarm
+ 44,927,149 (15.90%)  codegen/machine_x86_64.c:machine_x64_metadata_shape_cache_prewarm
+ 43,970,934 (15.56%)  assembly/x86_64_metadata.c:buster_x86_metadata_select_form
+ 43,503,347 (15.39%)  assembly/x86_64_metadata.c:buster_x86_metadata_emit_exact_machine
+ 29,065,601 (10.29%)  assembly/x86_64_metadata.c:buster_x86_metadata_prewarm
+ 28,878,353 (10.22%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_tables_once
+ 16,353,191 ( 5.79%)  assembly/x86_64_metadata.c:buster_x86_metadata_fill_nul_distances
+ 11,291,916 ( 4.00%)  assembly/x86_64_metadata.c:buster_x86_metadata_decode_base64_chunk_scalar
+  3,760,719 ( 1.33%)  codegen/machine_x86_64.c:machine_x64_exact_prepare_fixed_template_family

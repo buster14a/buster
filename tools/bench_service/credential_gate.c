@@ -4,6 +4,8 @@
  *
  * The installation must use a static binary with no ELF interpreter.  This
  * source performs no NSS lookup and never attempts to gain or drop privilege.
+ * Stages 0..5 are the smoke recipe's; 16..28 are the zen5-calibration-v1
+ * stages of zen5_stage.h (#426), which keep the smoke environment.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -21,11 +23,14 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "zen5_stage.h"
 
 #define BQ_GATE_SERVICE "/usr/local/libexec/buster-bench-service"
 #define BQ_GATE_BUILD "/usr/local/libexec/buster-bench-build"
 #define BQ_GATE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
 #define BQ_GATE_MAX_GROUPS 32
+/* Stages 0..5 are the smoke recipe's; 16..28 are the zen5 stages. */
+#define BQ_GATE_LAST_STAGE (BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT - 1u)
 
 static bool bq_gate_decimal(char const* text, unsigned long* output)
 {
@@ -135,13 +140,31 @@ static bool bq_gate_privileges(void)
     return ok && end_seen;
 }
 
+/* Zen5 stage: builds run the fixed driver's generate/build, oracle and
+ * captures its capture verb, and pmu the fixed interpreter's -B mode. */
+static bool bq_gate_zen5(unsigned long stage, char const* program, char const* first_argument)
+{
+    unsigned long index = stage - BQ_ZEN5_STAGE_FIRST_NUMBER;
+    bool ok = stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage <= BQ_GATE_LAST_STAGE;
+    if (ok && index < BQ_ZEN5_STAGE_ORACLE)
+        ok = !strcmp(program, BQ_ZEN5_STAGE_DRIVER) && !strcmp(first_argument, index % 2u == 0 ? "generate" : "build");
+    else if (ok && index == BQ_ZEN5_STAGE_PMU)
+        ok = !strcmp(program, BQ_ZEN5_STAGE_PYTHON) && !strcmp(first_argument, "-B");
+    else if (ok)
+        ok = !strcmp(program, BQ_ZEN5_STAGE_DRIVER) && !strcmp(first_argument, BQ_ZEN5_STAGE_CAPTURE_VERB);
+    return ok;
+}
+
 static bool bq_gate_program(unsigned long stage, char const* program, char const* first_argument)
 {
-    bool ok = program && first_argument && stage <= 5;
+    bool ok = program && first_argument && (stage <= 5 || (stage >= BQ_ZEN5_STAGE_FIRST_NUMBER &&
+                                                          stage <= BQ_GATE_LAST_STAGE));
     if (ok && stage == 0)
         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "worker-unit");
     else if (ok && stage == 5)
         ok = !strcmp(program, BQ_GATE_THROUGHPUT) && !strcmp(first_argument, "run");
+    else if (ok && stage >= BQ_ZEN5_STAGE_FIRST_NUMBER)
+        ok = bq_gate_zen5(stage, program, first_argument);
     else if (ok)
         ok = !strcmp(program, BQ_GATE_BUILD) &&
              !strcmp(first_argument, stage == 1 || stage == 3 ? "generate" : "build");
@@ -169,6 +192,24 @@ static int bq_gate_self_test(void)
                   !bq_gate_program(3, BQ_GATE_BUILD, "build"));
     BQ_GATE_CHECK(bq_gate_program(5, BQ_GATE_THROUGHPUT, "run") &&
                   !bq_gate_program(5, BQ_GATE_SERVICE, "run"));
+    BQ_GATE_CHECK(bq_gate_program(16, BQ_GATE_BUILD, "generate") && bq_gate_program(17, BQ_GATE_BUILD, "build") &&
+                  bq_gate_program(24, BQ_GATE_BUILD, "generate") && bq_gate_program(25, BQ_GATE_BUILD, "build"));
+    BQ_GATE_CHECK(!bq_gate_program(16, BQ_GATE_BUILD, "build") && !bq_gate_program(25, BQ_GATE_BUILD, "generate") &&
+                  !bq_gate_program(18, BQ_GATE_SERVICE, "generate"));
+    BQ_GATE_CHECK(bq_gate_program(26, BQ_GATE_BUILD, BQ_ZEN5_STAGE_CAPTURE_VERB) &&
+                  bq_gate_program(28, BQ_GATE_BUILD, BQ_ZEN5_STAGE_CAPTURE_VERB) &&
+                  !bq_gate_program(26, BQ_GATE_BUILD, "build") && !bq_gate_program(28, BQ_ZEN5_STAGE_PYTHON, "-B"));
+    BQ_GATE_CHECK(bq_gate_program(27, BQ_ZEN5_STAGE_PYTHON, "-B") && !bq_gate_program(27, BQ_ZEN5_STAGE_PYTHON, "-c") &&
+                  !bq_gate_program(27, BQ_GATE_BUILD, BQ_ZEN5_STAGE_CAPTURE_VERB));
+    BQ_GATE_CHECK(!bq_gate_program(6, BQ_GATE_BUILD, "generate") && !bq_gate_program(15, BQ_GATE_BUILD, "build") &&
+                  !bq_gate_program(29, BQ_GATE_BUILD, "generate") && !bq_gate_program(29, BQ_GATE_BUILD, "build"));
+    /* Every argv the broker builds from the shared contract passes here. */
+    for (unsigned index = 0; index < BQ_ZEN5_STAGE_COUNT; index += 1)
+    {
+        BqZen5StageCommand command;
+        BQ_GATE_CHECK(bq_zen5_stage_command(index, "/srv/w/1/2", &command) && command.count >= 2 &&
+                      bq_gate_program(BQ_ZEN5_STAGE_FIRST_NUMBER + index, command.argv[0], command.argv[1]));
+    }
     printf("BQ_CREDENTIAL_GATE_SELF_TEST checks=%u result=%s\n", checks, ok ? "pass" : "fail");
     return ok ? 0 : 1;
 #undef BQ_GATE_CHECK
@@ -180,7 +221,7 @@ int main(int argc, char** argv)
     gid_t expected[BQ_GATE_MAX_GROUPS];
     int group_count = 0;
     bool self_test = argc == 2 && !strcmp(argv[1], "--self-test");
-    bool ok = !self_test && argc >= 8 && bq_gate_decimal(argv[1], &stage) && stage <= 5 &&
+    bool ok = !self_test && argc >= 8 && bq_gate_decimal(argv[1], &stage) && stage <= BQ_GATE_LAST_STAGE &&
               bq_gate_decimal(argv[2], &uid_number) && uid_number > 0 &&
               uid_number < (unsigned long)(uid_t)-1 && (uid_t)uid_number == uid_number &&
               bq_gate_decimal(argv[3], &gid_number) && gid_number > 0 &&
