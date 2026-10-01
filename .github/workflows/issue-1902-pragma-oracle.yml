@@ -1,0 +1,29 @@
+name: Issue 1902 pragma generation oracle
+on:
+  push:
+    branches: [codex/1902-pragma-generation-oracle]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Compare immutable valid preprocessing witnesses
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, tempfile
+          from pathlib import Path
+          cases = json.loads("{\"restored_active_object\":\"#define SELF 7\\n#pragma push_macro(\\\"SELF\\\")\\n#undef SELF\\n#define SELF _Pragma(\\\"pop_macro(\\\\\\\"SELF\\\\\\\")\\\") SELF\\nSELF SELF\\n\",\"suspended_function\":\"#define F(x) x\\n#pragma push_macro(\\\"F\\\")\\n#undef F\\n#define F(x,y) x+y\\nF(_Pragma(\\\"pop_macro(\\\\\\\"F\\\\\\\")\\\") 1,2) F(3)\\n\",\"push_current_definition\":\"#define X 1\\n_Pragma(\\\"push_macro(\\\\\\\"X\\\\\\\")\\\")\\n#undef X\\n#define X 2\\n_Pragma(\\\"pop_macro(\\\\\\\"X\\\\\\\")\\\") X\\n\",\"new_definition_nested\":\"#define X 1\\n#pragma push_macro(\\\"X\\\")\\n#undef X\\n#define X 2\\n#define POP _Pragma(\\\"pop_macro(\\\\\\\"X\\\\\\\")\\\")\\nPOP X\\n\"}")
+          with tempfile.TemporaryDirectory() as directory:
+              for compiler in ("clang", "gcc"):
+                  print(subprocess.check_output([compiler, "--version"], text=True).splitlines()[0], flush=True)
+                  for name, source in cases.items():
+                      path = Path(directory) / (name + ".c")
+                      path.write_text(source)
+                      result = subprocess.run([compiler, "-E", "-P", "-std=c17", str(path)], text=True, capture_output=True)
+                      print(json.dumps({"compiler": compiler, "case": name, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}), flush=True)
+                      if result.returncode:
+                          raise SystemExit(result.returncode)
+          PY
