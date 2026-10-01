@@ -398,7 +398,7 @@ class ZigCacheWorkflowTests(unittest.TestCase):
             "- name: Bootstrap wrapper regression tests", 1
         )[1].split("- name: Install mold", 1)[0]
         self.assertIn(
-            "if: ${{ !cancelled() && steps.checkout.outcome == 'success' && "
+            "if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && "
             "steps.zig_cache_policy.outcome == 'success' }}",
             bootstrap,
         )

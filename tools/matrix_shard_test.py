@@ -386,6 +386,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_configure_evidence_test.py",
             "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
             "tools/ci_native_observation_test.py", "tools/ci_sanitize_logs_test.py",
+            "tools/matrix_unit_observation_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
             "tools/ci_workflow_tools_test.py",
             "tools/bootstrap_wrapper_cases_test.py",
@@ -1360,7 +1361,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
                 if job == "test":
-                    self.assertIn("\n    needs: lint\n", text)
+                    self.assertIn("\n    needs: [lint, reuse]\n", text)
                 else:
                     # Only the cheap main-push reuse decision may gate these lanes.
                     self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])
