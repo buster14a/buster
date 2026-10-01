@@ -2930,7 +2930,7 @@ BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8
 }
 
 BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, CompilerDriverInvocation invocation, String8 requested, bool* found,
-                                                                  String8* path_out)
+                                                                  String8* path_out, FileMapRead* map_out)
 {
     ObjectArchive result = {0};
     bool exact = requested.length && requested.pointer[0] == ':';
@@ -2973,8 +2973,8 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         }
         *found = true;
         *path_out = archive_path;
-        ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
-        file_map_unmap(archive_map);
+        ObjectArchive archive = object_archive_read_link(arena, archive_bytes, invocation.target);
+        *map_out = archive_map;
         return archive;
     }
     if (exact_archive)
@@ -2985,8 +2985,8 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         {
             *found = true;
             *path_out = exact_name;
-            ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
-            file_map_unmap(archive_map);
+            ObjectArchive archive = object_archive_read_link(arena, archive_bytes, invocation.target);
+            *map_out = archive_map;
             return archive;
         }
         file_map_unmap(archive_map);
@@ -4471,6 +4471,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     };
     CompilerDriverResult result = {.compilation_workers = 1};
     CompilerDriverArchiveState archive_state = {0};
+    FileMapRead* input_archive_maps = 0;
+    FileMapRead* library_archive_maps = 0;
     u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
@@ -4667,6 +4669,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     // arena or reserves a slot for it. Prebuilt inputs are link-only as well.
     bool link_inputs_retained = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
     ObjectArchive* input_archives = arena_allocate(arena, ObjectArchive, invocation.input_count);
+    input_archive_maps = arena_allocate_zeroed(arena, FileMapRead, invocation.input_count);
     u32 object_capacity = link_inputs_retained ? invocation.input_count : 0;
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
@@ -4683,8 +4686,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             file_map_unmap(archive_file);
             goto finish;
         }
-        input_archives[input_index] = object_archive_read(arena, archive_file.bytes, invocation.target);
-        file_map_unmap(archive_file);
+        input_archive_maps[input_index] = archive_file;
+        input_archives[input_index] = object_archive_read_link(arena, archive_file.bytes, invocation.target);
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
@@ -4695,13 +4698,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         object_capacity += input_archives[input_index].object_count;
     }
     ObjectArchive* library_archives = arena_allocate(arena, ObjectArchive, invocation.library_count);
+    library_archive_maps = arena_allocate_zeroed(arena, FileMapRead, invocation.library_count);
+    String8* library_archive_paths = arena_allocate(arena, String8, invocation.library_count);
     bool* static_libraries = arena_allocate(arena, bool, invocation.library_count);
     memset(static_libraries, 0, sizeof(*static_libraries) * invocation.library_count);
     for (u32 library_index = 0; library_index < invocation.library_count; library_index += 1)
     {
         bool found = false;
         String8 archive_path = {0};
-        ObjectArchive archive = compiler_driver_library_archive(arena, invocation, invocation.libraries[library_index], &found, &archive_path);
+        ObjectArchive archive = compiler_driver_library_archive(arena, invocation, invocation.libraries[library_index], &found, &archive_path, &library_archive_maps[library_index]);
         if (!found)
         {
             if (invocation.target.os == OPERATING_SYSTEM_UEFI)
@@ -4712,6 +4717,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             }
             continue;
         }
+        library_archive_paths[library_index] = archive_path;
         static_libraries[library_index] = true;
         library_archives[library_index] = archive;
         if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_capacity)
@@ -4748,6 +4754,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             ObjectArchive* archive = &input_archives[input_index];
             compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+            if (archive->error != OBJECT_ERROR_NONE)
+            {
+                result.error = COMPILER_DRIVER_ERROR_OBJECT;
+                result.object_error = archive->error;
+                result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), input_path, archive->diagnostic);
+                goto finish;
+            }
             continue;
         }
         if (compiler_driver_object_input(input_path))
@@ -5102,6 +5115,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         ObjectArchive* archive = &library_archives[library_index];
         compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+        if (archive->error != OBJECT_ERROR_NONE)
+        {
+            result.error = COMPILER_DRIVER_ERROR_OBJECT;
+            result.object_error = archive->error;
+            result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), library_archive_paths[library_index], archive->diagnostic);
+            goto finish;
+        }
     }
     if (archive_state.arena)
     {
@@ -5224,6 +5244,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
 finish:
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);
+    for (u32 index = 0; input_archive_maps && index < invocation.input_count; index += 1) file_map_unmap(input_archive_maps[index]);
+    for (u32 index = 0; library_archive_maps && index < invocation.library_count; index += 1) file_map_unmap(library_archive_maps[index]);
     // Every lane has joined before this unwind. A failed input can leave
     // later slots populated; none may outlive the driver invocation.
     for (u32 index = 0; index < unit_task_count; index += 1)
