@@ -9,8 +9,10 @@ observations. collect() retains errors and integrates with ci_summary.py.
 from collections import Counter, defaultdict
 import itertools
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 
@@ -73,6 +75,12 @@ def validate_plan(plan, coverage, environment):
     require(isinstance(identity, dict) and isinstance(coverage, dict), "missing source/coverage identity")
     for key in ("lane_id", "source_revision", "source_hash", "driver_hash", "repository", "run_id", "run_attempt", "platform", "architecture", "shard"):
         require(identity.get(key) == coverage.get("identity", {}).get(key) and bool(identity.get(key)), f"coverage identity mismatch: {key}")
+    if "source_path" in coverage["identity"]:
+        paths = ntpath if identity["platform"] == "windows" else posixpath
+        source_path = coverage["identity"]["source_path"]
+        require(isinstance(source_path, str) and paths.isabs(source_path) and
+                (identity["platform"] != "windows" or bool(paths.splitdrive(source_path)[0])),
+                "source path must be absolute for the producer platform")
     require(re.fullmatch(r"[0-9a-f]{40}", identity.get("source_tree", "")), "missing exact source tree")
     for key, env in (("source_revision", "GITHUB_SHA"), ("run_id", "GITHUB_RUN_ID"), ("run_attempt", "GITHUB_RUN_ATTEMPT"),
                      ("repository", "GITHUB_REPOSITORY"), ("workflow", "GITHUB_WORKFLOW"), ("job", "GITHUB_JOB")):
@@ -196,6 +204,11 @@ def analyze(root, coverage, environment=None):
     environment = environment or {}
     plan = read(root / "plan.json")
     trees, tasks = validate_plan(plan, coverage, environment)
+    source_path = coverage["identity"].get("source_path")
+    paths = (ntpath if plan["identity"]["platform"] == "windows" else posixpath) if source_path else os.path
+    source_directory = paths.dirname(source_path) if source_path else os.getcwd()
+    def same_path(a, b):
+        return paths.normcase(paths.normpath(paths.join(source_directory, os.fspath(a)))) == paths.normcase(paths.normpath(paths.join(source_directory, os.fspath(b))))
     epoch = plan["epoch_us"]
     records = {}
     consumed = {"plan.json", "terminal.json", "summary.json", "summary.md"}
@@ -232,12 +245,10 @@ def analyze(root, coverage, environment=None):
             require(end.get("test_jobs") == str(task["inner_jobs"]), f"test-worker quota mismatch: {name}")
         tree = trees.get(task["tree"])
         if tree:
-            def same_path(a, b):
-                return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
             argv = end["argv"]
             if task["phase"] == "test":
                 executable = "ide.exe" if plan["identity"]["platform"] == "windows" else "ide"
-                expected = Path(tree["build_directory"]) / task["configuration"] / executable
+                expected = paths.join(tree["build_directory"], task["configuration"], executable)
                 # CI trees run test_all through the isolated-process runner
                 # (build driver test_units_partitioned <ide>), which falls back
                 # to the ordinary invocation below four test workers.
@@ -248,7 +259,7 @@ def analyze(root, coverage, environment=None):
                     parent = tasks[task_id(task["tree"], "validation", task["configuration"])]
                     require(end.get("test_jobs") == str(parent["inner_jobs"]), f"nested test-worker quota mismatch: {name}")
             elif task["phase"] == "census":
-                expected = Path(tree["build_directory"]) / "Release" / "ide"
+                expected = paths.join(tree["build_directory"], "Release", "ide")
                 require(same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "x86_64_completion_census", f"census executable/tree mismatch: {name}")
             elif task["phase"] in ("build", "validation", "post_test", "self_host", "clean"):
                 option = "--build-directory" if task["phase"] == "self_host" else "--build"

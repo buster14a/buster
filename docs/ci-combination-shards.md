@@ -297,3 +297,11 @@ required success results. Admit split jobs only after at least 15% improvement
 in median whole-workflow wall time with at most 5% runner-second growth. A smaller
 job duration alone does not meet the contract. The implementation and local
 controls do not assert a measured speedup or close either research issue.
+
+`python3 tools/ci_checks_qualification.py <campaign.json>` reads digest-bound
+retained evidence and emits an independent qualification verdict. Its module
+docstring defines the campaign format. Missing or incomparable observations
+remain `pending`; complete campaigns can meet or reject each issue's contract.
+The tool records invocation binary/driver hashes within each sample while
+comparing source/policy, toolchains, conditions and exact census across runs;
+it does not require independently linked executables to have identical bytes.

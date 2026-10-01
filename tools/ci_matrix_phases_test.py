@@ -2,8 +2,10 @@
 """Deterministic phase/coverage joins plus real native observer failure controls."""
 import copy
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -177,6 +179,58 @@ class PhaseValidationTests(unittest.TestCase):
         self.coverage["identity"]["shard"] = "checks-unknown"
         with self.assertRaisesRegex(ValueError, "unknown desktop shard"):
             self.check()
+
+    def producer_path_fixture(self, platform):
+        paths = ntpath if platform == "windows" else posixpath
+        source_directory = "D:/runner/work/buster/buster" if platform == "windows" else "/runner/work/buster/buster"
+        self.coverage["identity"].update(platform=platform, source_path=paths.join(source_directory, "build.c"))
+        self.mutate("plan.json", lambda p: p["identity"].update(platform=platform))
+        for pattern in ("tree*-test-*.*.start.json", "tree*-test-*.*.end.json"):
+            for path in self.root.glob(pattern):
+                record = phases.read(path)
+                relative = record["argv"][0]
+                if platform != "windows":
+                    relative = relative.removesuffix(".exe")
+                record["argv"][0] = paths.join(source_directory, relative)
+                write(self.root, path.name, record)
+
+    def test_unix_journal_replays_from_foreign_working_directory(self):
+        self.producer_path_fixture("linux")
+        with mock.patch.object(phases.os, "getcwd", return_value="/different/checkout"):
+            self.assertTrue(self.check()["complete"])
+
+    def test_windows_journal_replays_with_native_path_and_case_rules(self):
+        self.producer_path_fixture("windows")
+        self.mutate("plan.json", lambda p: p["trees"][0].update(build_directory="build\\tree0"))
+        for pattern in ("tree0-test-*.start.json", "tree0-test-*.end.json"):
+            self.mutate(pattern, lambda v: v["argv"].__setitem__(0, v["argv"][0].upper().replace("/", "\\")))
+        with mock.patch.object(phases.os, "getcwd", return_value="/different/checkout"):
+            self.assertTrue(self.check()["complete"])
+
+    def test_foreign_source_binding_rejects_another_checkout(self):
+        for platform in ("windows", "linux"):
+            with self.subTest(platform=platform):
+                self.coverage = fixture(self.root)
+                self.producer_path_fixture(platform)
+                for pattern in ("tree0-test-*.start.json", "tree0-test-*.end.json"):
+                    self.mutate(pattern, lambda v: v["argv"].__setitem__(0, v["argv"][0].replace("runner", "another")))
+                with self.assertRaisesRegex(ValueError, "test executable/tree mismatch"):
+                    self.check()
+
+    def test_declared_source_path_requires_native_absolute_path(self):
+        for platform, paths in (("windows", (None, False, [], "", "build.c", "C:build.c", "/unix/build.c")),
+                                ("linux", (None, False, [], "", "build.c", "C:/source/build.c"))):
+            for source_path in paths:
+                with self.subTest(platform=platform, source_path=source_path):
+                    self.coverage = fixture(self.root)
+                    self.coverage["identity"].update(platform=platform, source_path=source_path)
+                    self.mutate("plan.json", lambda p: p["identity"].update(platform=platform))
+                    with self.assertRaisesRegex(ValueError, "source path must be absolute"):
+                        self.check()
+
+    def test_missing_source_path_retains_local_fixture_paths(self):
+        self.assertNotIn("source_path", self.coverage["identity"])
+        self.assertTrue(self.check()["complete"])
 
     def test_apple_sanitizer_shards_keep_shared_tree(self):
         plan = phases.read(self.root / "plan.json")
@@ -384,6 +438,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
     coverage.lane = matrix_coverage_lane_create(arena, shard);
     coverage.lane.platform = target.platform;
     coverage.lane.architecture = target.architecture;
+    // These serializer controls can describe a different platform than the
+    // executing host; give that synthetic identity its own path syntax.
+    if (!BUSTER_WINDOWS && target.windows) { coverage.lane.source_path = S8("C:/phase-fixture/build.c"); }
+    if (BUSTER_WINDOWS && !target.windows) { coverage.lane.source_path = S8("/phase-fixture/build.c"); }
     coverage.mode = S8("phase-plan-fixture");
     bool ok = matrix_coverage_plan_build_for_target(arena, &coverage.plan, coverage.lane, target);
     coverage.obligations = matrix_coverage_obligations_for_lane(direct, !direct && !checks, &coverage.plan, coverage.lane.shard);
