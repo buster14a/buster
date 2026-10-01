@@ -56,6 +56,23 @@ direct table workload retains its cross-size ratio check on fixed path keys.
 
 ## Builtin capability queries
 
+Direct angle-bracket header operands preserve their translated-source
+characters, including internal spaces, rather than joining token spellings.
+The same policy applies to `#include`, `#include_next`, `#import`, and literal
+`__has_include`/`__has_include_next` operands. Include-query builtins recognize
+literal operands before argument prescan, including when an alias reaches the
+builtin during rescanning, so identifiers inside a direct header name do not
+expand. Quoted operands retain their literal spelling.
+
+Macro-produced angle header operands use the existing implementation-defined
+policy of concatenating the surviving token spellings. A wrapper that prescans
+its own argument uses this policy too; substituted or removed tokens cannot
+recover the original source span. The query builtin's endpoint `no_expand`
+bits carry literal provenance through its replacement without increasing
+token size. `c_test_header_operands` covers simultaneous spaced/unspaced files,
+repeated spaces, line splicing, identifier collisions, aliases, wrapper
+prescan, expanded operands and include-next search origins.
+
 `c_conditional_builtin_supported` answers `__has_builtin` for implemented
 operations, not every recognized identifier. Its complex and atomic branches
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
@@ -89,3 +106,21 @@ signed int. Semantic expression queries and lowering share the spelling policy;
 the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
+
+## Source translation limits
+
+The source translator accepts at most `UINT32_MAX - 2` raw bytes so its
+terminator, checkpoint count and original-source offsets remain representable.
+`c_source_allocation_plan` checks that bound before source reads or
+length-derived allocation counts. Root preprocessing rejects oversized input
+before phase setup with `C_DIAGNOSTIC_SOURCE_TOO_LARGE` (`c.source-too-large`),
+an error count and the root file's diagnostic path. Both lexer implementations
+and included-file lexing use the same bound. An include must also fit the
+remaining shared 32-bit spelling-offset space; its error retains the include's
+source-map anchor without allocating another byte in that space.
+
+`c_test_source_size_limit` queries the exact standalone allocation boundary,
+passes oversized sentinel lengths through preprocessing and all lexer entries,
+and checks bounded allocation, structured errors, shared-space exhaustion and
+valid empty/declaration controls. It never allocates or maps a multi-gigabyte
+source to exercise the limit.

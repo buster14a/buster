@@ -278,10 +278,24 @@ without facts for identical bitcode and diagnostics.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
-  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
-  named parameters and ordinary macros retain it.
+  `, ## __VA_ARGS__` operator may delete a comma for an omitted variadic
+  argument; an explicitly supplied empty slot retains it. For a macro with
+  only a variadic parameter, an empty invocation is omitted in GNU modes and
+  explicitly empty in standard modes. Fixed-parameter omission retains the
+  GCC/Clang compatibility extension in both mode families. The omission flag
+  occupies one bit of the argument's expanded-count word, preserving its
+  48-byte row. Named fixed parameters and ordinary macros retain the comma.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+  `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
+  named variadics and ordinary placemarkers in every supported dialect.
+- `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
+  It strips the optional `L` and the quotes, and removes a backslash only
+  before a quote or another backslash. Macro-generated operands use the same
+  path. Pack markers retain their token-position contract; wide push/pop-macro
+  operations retain their existing ordering. `c_test_wide_pragma_operands`
+  checks both operand forms, macro-produced pack operations, nested alignment
+  restoration and saved macro definitions.
 - Source `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif` lines may
   cross an in-progress function-like macro invocation as the GCC/Clang
   compatibility extension. The source driver processes each conditional once

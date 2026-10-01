@@ -4,6 +4,17 @@
 // from tests-disabled builds; file identity remains separate from spelling.
 #include <buster/lib/compiler/frontend/c/c.h>
 
+// Translation keeps offsets and checkpoint counts in u32. Reserve one byte
+// for the terminator and two checkpoint slots without narrowing the counts.
+#define C_SOURCE_MAXIMUM_LENGTH ((u64)UINT32_MAX - 2)
+
+typedef struct CSourceAllocationPlan CSourceAllocationPlan;
+struct CSourceAllocationPlan
+{
+    u64 translated_capacity;
+    u64 checkpoint_capacity;
+};
+
 typedef struct CIncludeFileIdentity CIncludeFileIdentity;
 struct CIncludeFileIdentity
 {
@@ -59,6 +70,10 @@ typedef enum CIncludeFileStatus
 #define C_INCLUDE_FILE_INITIAL_CAPACITY 64
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan);
+// Includes lex into a shared spelling space; exercise that production entry
+// without creating or mapping a multi-gigabyte file.
+BUSTER_F_DECL CLexResult c_test_lex_include_source(Arena* arena, String8 source);
 BUSTER_F_DECL CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling, CIncludeFileEntry** entry_out);
 BUSTER_F_DECL bool c_test_include_file_table_grow(CIncludeFileTable* table);
 BUSTER_F_DECL void c_test_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count);

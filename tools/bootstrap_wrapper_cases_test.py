@@ -100,8 +100,22 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("FileNotFoundError", output)
 
     def test_cancellation_cleans_tree_before_fixture_removal(self):
+        self.check_cancellation_tree()
+
+    def test_cancellation_waits_for_delayed_readiness(self):
+        # Exceed the former cancelling thread's independent five-second wait.
+        self.check_cancellation_tree(readiness_delay=6)
+
+    def test_cancellation_readiness_failure_retains_inner_diagnostics(self):
+        with self.assertRaisesRegex(AssertionError, "readiness-failure-marker"):
+            self.check_cancellation_tree(fail_readiness=True)
+
+    def check_cancellation_tree(self, readiness_delay=0, fail_readiness=False):
         ownership = scheduler.CaseOwnership()
         launched = threading.Event()
+        readiness_complete = threading.Event()
+        requested = threading.Event()
+        cancellation_errors = []
         directories = []
         children = []
         descendants = []
@@ -113,36 +127,57 @@ class SchedulerTests(unittest.TestCase):
                 self.addCleanup(directory.cleanup)
                 directories.append(directory.name)
                 code = ("import subprocess, sys, time; from pathlib import Path; "
+                        f"time.sleep({readiness_delay}); "
+                        + ("sys.exit('readiness-failure-marker'); " if fail_readiness else "") +
                         "p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
                         "Path('descendant.pid').write_text(str(p.pid)); time.sleep(60)")
                 child = scheduler.bootstrap.WrapperProcess(self,
                     [sys.executable, "-c", code], directory.name, os.environ.copy())
                 children.append(child)
                 marker = Path(directory.name) / "descendant.pid"
-                deadline = time.monotonic() + 5
-                while not marker.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                self.assertTrue(marker.exists())
-                descendants.append(int(marker.read_text()))
-                launched.set()
+                try:
+                    deadline = child.started + scheduler.bootstrap.WRAPPER_TIMEOUT_SECONDS
+                    while (not marker.exists() and child.process.poll() is None and
+                           time.monotonic() < deadline):
+                        time.sleep(0.01)
+                    if not marker.exists():
+                        result = child.finish(timeout_seconds=0)
+                        self.fail("child readiness failed: " + repr(result))
+                    descendants.append(int(marker.read_text()))
+                    launched.set()
+                finally:
+                    # Setup failure also releases the coordinator; it must not
+                    # cancel a fixture whose child has already been cleaned.
+                    readiness_complete.set()
                 child.finish()
 
         def cancel():
-            if launched.wait(timeout=5):
-                ownership.cancel()
+            # Readiness uses the child's launch-relative deadline. An earlier
+            # independent timer can silently expire during valid startup.
+            readiness_complete.wait()
+            if launched.is_set():
+                requested.set()
+                cancellation_errors.extend(ownership.cancel())
 
         thread = threading.Thread(target=cancel)
         thread.start()
         try:
-            summary, _ = self.run_control([Control("test_child")], ownership=ownership)
+            summary, output = self.run_control([Control("test_child")], ownership=ownership)
         finally:
-            thread.join(timeout=5)
+            # Also release the coordinator if worker startup or child launch
+            # failed before reaching the readiness try/finally.
+            readiness_complete.set()
+            thread.join(timeout=scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)
+        diagnostics = json.dumps(summary) + "\n" + output
         self.assertFalse(thread.is_alive())
-        self.assertTrue(summary["cancelled"])
-        self.assertFalse(summary["success"])
-        self.assertEqual(summary["unreaped_children"], 0)
+        self.assertEqual(cancellation_errors, [], diagnostics)
+        self.assertEqual(summary["unreaped_children"], 0, diagnostics)
         self.assertTrue(all(child.cleaned and child.stdout.closed and child.stderr.closed for child in children))
         self.assertTrue(all(not Path(path).exists() for path in directories))
+        self.assertTrue(summary["cases"][0].get("success"), diagnostics)
+        self.assertTrue(requested.is_set(), diagnostics)
+        self.assertTrue(summary["cancelled"], diagnostics)
+        self.assertFalse(summary["success"], diagnostics)
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":

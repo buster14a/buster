@@ -173,3 +173,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   storage through an explicit builtin-list place cast. This supports either
   header order without turning ordinary pointer typedefs into builtin types.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
+
+## Declarator constraints
+
+Function types reject array and function return types when their declarators
+are formed, including unused prototypes, typedef return types and nested
+function-pointer declarators. Pointer return types keep their array/function
+pointees. Ordinary function declarators also reject a second array or function
+suffix instead of silently discarding it.
+
+All parameter-list paths share the void and ellipsis constraints. The void
+sentinel is sole, unnamed and unqualified, including through a void typedef;
+ellipsis terminates the list and requires a fixed parameter before C23. C23
+allows a list containing only ellipsis. Array `static` needs an expression;
+`[*]` belongs to prototype scope and is rejected in the definition's own
+parameter derivations. A nested function-pointer parameter still introduces
+its own prototype scope. The syntax/object diagnostic-equivalence corpus
+checks rejection, legal neighbors and both frontend SSA forms.

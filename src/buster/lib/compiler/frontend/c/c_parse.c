@@ -13061,6 +13061,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
     CPreprocessResult preprocess = *frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
+        frame->definition_type_start = result->array_bound_count;
         if (result->position_index && !result->position_index->built)
         {
             c_parse_position_index_build(result, preprocess);
@@ -13185,6 +13186,8 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
     }
+    for (u32 bound = frame->definition_type_start; bound < result->array_bound_count; bound += 1)
+        result->array_bounds[bound].is_parameter_declarator = true;
     frame->type = c_parse_adjust_parameter_type(result, frame->type);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, frame->name),
@@ -13251,6 +13254,50 @@ BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult pre
            c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
+// Declarator constraints are checked while each list/type is constructed,
+// including unused prototypes and nested function-pointer types.
+BUSTER_C_INTERNAL bool c_parse_function_return_valid(CParseResult* result, CPreprocessResult preprocess, CTypeId type, u32 token)
+{
+    bool valid = type.value < result->type_count;
+    if (valid)
+    {
+        CTypeKind kind = result->types[type.value].kind;
+        valid = kind != C_TYPE_ARRAY && kind != C_TYPE_FUNCTION;
+        if (!valid)
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                               kind == C_TYPE_ARRAY ? S8("a function cannot return an array") : S8("a function cannot return a function"));
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_parameter_list_ellipsis_valid(CParseResult* result, CPreprocessResult preprocess, u32 parameter_count,
+                                                               bool list_end, u32 token)
+{
+    bool valid = list_end && (parameter_count || c_preprocess_dialect_is_c23(preprocess.dialect));
+    if (!valid)
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                           !list_end ? S8("ellipsis must terminate the parameter list")
+                                     : S8("ellipsis requires a preceding parameter before C23"));
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_parameter_list_void_valid(CParseResult* result, CPreprocessResult preprocess, CParameter parameter,
+                                                           bool sole, u32 token, bool* sentinel)
+{
+    bool valid = true;
+    *sentinel = false;
+    if (parameter.type.value < result->type_count && result->types[parameter.type.value].kind == C_TYPE_VOID)
+    {
+        CType type = result->types[parameter.type.value];
+        *sentinel = sole && !parameter.name.length && !type.is_const && !type.is_volatile && !type.is_restrict && !type.is_atomic;
+        valid = *sentinel;
+        if (!valid)
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                               S8("void must be the sole unnamed, unqualified parameter"));
+    }
+    return valid;
+}
+
 // The outer suffix of a parenthesized declarator: `(*fp)(int)` and
 // `(*getf(int))(void)` both continue after the group's closing parenthesis,
 // with a parameter list making the declared type a function and anything else
@@ -13294,7 +13341,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame*
         return;
     }
     frame->index = list_close + 1;
-    frame->type = c_parse_add_type(result, (CType){
+    bool return_valid = c_parse_function_return_valid(result, preprocess, frame->type, list_close);
+    frame->type = return_valid ? c_parse_add_type(result, (CType){
                                              .element_type = C_TYPE_ID_INVALID,
                                              .return_type = frame->type,
                                              .array_bound = C_ARRAY_BOUND_INVALID,
@@ -13303,7 +13351,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame*
                                              .kind = C_TYPE_FUNCTION,
                                              .is_variadic = frame->variadic,
                                              .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close),
-                                         });
+                                         }) : C_TYPE_ID_INVALID;
     frame->has_function_suffix = true;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
 }
@@ -13454,9 +13502,19 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
-        result->parameters[frame->parameter_start + frame->written_parameter_count] = result->parameters[result->parameter_count - 1];
-        frame->written_parameter_count += 1;
+        CParameter parameter = result->parameters[result->parameter_count - 1];
+        bool sentinel = false;
+        bool sole = !frame->written_parameter_count && c_token_is_punctuator(&preprocess.tokens[frame->scan_index], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        bool parameter_valid = c_parse_parameter_list_void_valid(result, preprocess, parameter, sole, frame->segment_start, &sentinel);
+        result->parameters[frame->parameter_start + frame->written_parameter_count] = parameter;
+        frame->written_parameter_count += !sentinel;
         result->parameter_count -= 1;
+        if (!parameter_valid)
+        {
+            result->parameter_count = frame->parameter_start;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
         frame->segment_start = frame->scan_index + 1;
         if (c_token_is_punctuator(&preprocess.tokens[frame->scan_index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
@@ -13511,7 +13569,14 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             }
             if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[frame->segment_start], C_PUNCTUATOR_ELLIPSIS))
             {
+                bool ellipsis_valid = c_parse_parameter_list_ellipsis_valid(result, preprocess, frame->written_parameter_count, list_end, frame->segment_start);
                 frame->variadic = true;
+                if (!ellipsis_valid)
+                {
+                    result->parameter_count = frame->parameter_start;
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
             }
             else if (!(list_end && !frame->written_parameter_count && segment_count == 1 &&
                        string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[frame->segment_start]), S8("void"))))
@@ -13612,7 +13677,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         {
             // Everything derived so far -- the outer suffix and the pointer
             // chain -- is what the name's own parameter list returns.
-            frame->type = c_parse_add_type(result, (CType){
+            bool return_valid = c_parse_function_return_valid(result, preprocess, frame->type, frame->name_index);
+            frame->type = return_valid ? c_parse_add_type(result, (CType){
                                                      .element_type = C_TYPE_ID_INVALID,
                                                      .return_type = frame->type,
                                                      .array_bound = C_ARRAY_BOUND_INVALID,
@@ -13621,7 +13687,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                                      .kind = C_TYPE_FUNCTION,
                                                      .is_variadic = frame->inner_variadic,
                                                      .is_unprototyped = frame->inner_unprototyped,
-                                                 });
+                                                 }) : C_TYPE_ID_INVALID;
         }
         bool valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
         c_type_parse_frame_complete(machine, frame->type, frame->end, valid);
@@ -15154,6 +15220,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         }
     }
     u32 derived_start = result->type_count;
+    u32 first_bound = result->array_bound_count;
     u32 declarator_start = start;
     u32 type_diagnostic_start = result->diagnostic_count;
     CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
@@ -15230,6 +15297,8 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     {
         c_parse_add_noreturn_function_type(result, noreturn_function);
     }
+    for (u32 bound = first_bound; bound < result->array_bound_count; bound += 1)
+        result->array_bounds[bound].is_parameter_declarator = true;
     type = c_parse_adjust_parameter_type(result, type);
     BUSTER_VALIDATE(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
@@ -15640,6 +15709,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 u32 depth = 1;
                 bool valid = true;
                 bool unprototyped = false;
+                u32 list_close = name_index + 1;
                 for (u32 index = segment_start; index < end; index += 1)
                 {
                     CToken token = preprocess.tokens[index];
@@ -15663,16 +15733,19 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                         continue;
                     }
                     u32 segment_count = index - segment_start;
-                    if (list_end && !segment_count && result->parameter_count == parameter_start)
+                    if (list_end) list_close = index;
+                    if (list_end && !segment_count && !written_parameter_count)
                     {
                         unprototyped = true;
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
                     {
+                        valid = c_parse_parameter_list_ellipsis_valid(result, preprocess, written_parameter_count, list_end, segment_start);
                         declaration->is_variadic = true;
+                        if (!valid) break;
                     }
-                    else if (list_end && result->parameter_count == parameter_start && segment_count == 1 &&
+                    else if (list_end && !written_parameter_count && segment_count == 1 &&
                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")))
                     {
                     }
@@ -15693,8 +15766,13 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                             valid = false;
                             break;
                         }
-                        result->parameters[parameter_start + written_parameter_count++] = result->parameters[result->parameter_count - 1];
+                        CParameter parameter = result->parameters[result->parameter_count - 1];
+                        bool sentinel = false;
+                        valid = c_parse_parameter_list_void_valid(result, preprocess, parameter, list_end && !written_parameter_count, segment_start, &sentinel);
+                        result->parameters[parameter_start + written_parameter_count] = parameter;
+                        written_parameter_count += !sentinel;
                         result->parameter_count -= 1;
+                        if (!valid) break;
                     }
                     if (list_end)
                     {
@@ -15702,6 +15780,17 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     }
                     segment_start = index + 1;
                 }
+                u32 suffix = c_parse_skip_attributes(preprocess, list_close + 1, end);
+                if (valid && suffix < end &&
+                    (c_token_is_punctuator(&preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_BRACKET) ||
+                     c_token_is_punctuator(&preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_PARENTHESIS)))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[name_index]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                                       c_token_is_punctuator(&preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_BRACKET)
+                                           ? S8("a function cannot return an array") : S8("a function cannot return a function"));
+                    valid = false;
+                }
+                valid &= c_parse_function_return_valid(result, preprocess, base, name_index);
                 if (!valid)
                 {
                     result->parameter_count = parameter_start;
@@ -18027,13 +18116,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
             {
                 valid = index == close && parameter_count == 0 && !variadic;
             }
-            else if (index == segment_start + 1 && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")) && parameter_count == 0 && !variadic)
+            else if (index == segment_start + 1 && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")) && parameter_count == 0 && !variadic && index == close)
             {
                 /* An unnamed void parameter list has no parameters. */
             }
             else if (index == segment_start + 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
             {
-                valid = !variadic;
+                valid = !variadic && c_parse_parameter_list_ellipsis_valid(result, preprocess, parameter_count, index == close, segment_start);
                 variadic = true;
             }
             else if (!variadic)
@@ -18041,13 +18130,18 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                 valid = c_parse_parameter_segment(machine, result, preprocess, (CDeclaration){0}, segment_start, index);
                 if (valid)
                 {
-                    parameter_count += 1;
+                    bool sentinel = false;
+                    valid = c_parse_parameter_list_void_valid(result, preprocess, result->parameters[result->parameter_count - 1],
+                                                               index == close && !parameter_count, segment_start, &sentinel);
+                    parameter_count += !sentinel;
+                    result->parameter_count -= sentinel;
                 }
             }
             else
             {
                 valid = false;
             }
+            if (!valid) break;
             segment_start = index + 1;
             continue;
         }
@@ -18065,6 +18159,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
             nested_depth -= 1;
         }
     }
+    valid &= c_parse_function_return_valid(result, preprocess, return_type, open);
     if (!valid || nested_depth)
     {
         result->parameter_count = parameter_start;
@@ -24585,6 +24680,25 @@ BUSTER_C_INTERNAL void c_parse_validate_signature(CTypeParseMachine* machine, CP
         valid = type.value < result->type_count;
         if (!valid) continue;
         CType value = result->types[type.value];
+        if (index)
+        {
+            // Pointer/array derivations belong to this definition's parameter
+            // scope. A nested function type begins its own prototype scope.
+            CTypeId derived = type;
+            while (derived.value < result->type_count)
+            {
+                CType parameter = result->types[derived.value];
+                if (parameter.kind != C_TYPE_ARRAY && parameter.kind != C_TYPE_POINTER) break;
+                if (parameter.kind == C_TYPE_ARRAY && parameter.array_bound < result->array_bound_count)
+                {
+                    CArrayBound bound = result->array_bounds[parameter.array_bound];
+                    if (bound.is_star)
+                        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[bound.token_start]),
+                                           C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("star array bound is only allowed in function prototype scope"));
+                }
+                derived = parameter.element_type;
+            }
+        }
         bool binary128 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target);
         bool x87 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic &&
                    c_ir_target_supports_f80(preprocess.target);
@@ -26590,8 +26704,21 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
             start += 1;
         }
         u32 token = 0;
-        String8 message =
-            bound.is_star ? (String8){0} : c_parse_constant_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
+        String8 message = {0};
+        if (bound.is_static && (start == end || bound.is_star))
+        {
+            token = bound.token_start;
+            message = S8("static array parameter bound requires an expression");
+        }
+        else if (bound.is_star && !bound.is_parameter_declarator)
+        {
+            token = bound.token_start;
+            message = S8("star array bound is only allowed in function prototype scope");
+        }
+        else if (!bound.is_star)
+        {
+            message = c_parse_constant_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
+        }
         if (message.length)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION, message);

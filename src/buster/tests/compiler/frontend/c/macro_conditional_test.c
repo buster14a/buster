@@ -213,6 +213,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
             "F(_Pragma(\"pop_macro(\\\"F\\\")\") 4,5) F(6)\n"), S8("4 \"5\" 6")},
         {S8("#pragma push_macro(\"X\")\n#define X _Pragma(\"pop_macro(\\\"X\\\")\")\n"
             "X\n#define X 1\nX\n"), S8("1")},
+        // Omission belongs to the suspended variadic definition even when
+        // pop_macro restores an object-like name with no parameters. An
+        // explicitly empty final argument must retain the separating comma.
+        {S8("#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n"
+            "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11) M\n"), S8("11 7")},
+        {S8("#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n"
+            "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11,) M\n"), S8("11 , 7")},
         // Restoring the same active generation keeps its replacement disabled.
         {S8("#define SAME _Pragma(\"push_macro(\\\"SAME\\\")\") "
             "_Pragma(\"pop_macro(\\\"SAME\\\")\") SAME\nSAME\n"), S8("SAME")},
