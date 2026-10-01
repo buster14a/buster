@@ -229,6 +229,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
         values[index].definition.value = index;
         sources[index].offset = index + 100;
     }
+    // Publication requires each chain to end in its one terminator.
+    rows[3].opcode = IR_OPCODE_UNREACHABLE;
+    rows[4].opcode = IR_OPCODE_UNREACHABLE;
     function.blocks = blocks;
     function.instructions = rows;
     function.values = values;

@@ -4,6 +4,14 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+Canonical fallback identity casts of structs and unions copy the complete
+resolved layout between value frame homes on x86-64 and AArch64. The frontend
+keeps these casts on aggregate comma results to preserve their non-lvalue
+semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
+returns, partial eightbytes and tail fields with canonical FAST disabled,
+both frontend forms and all four allocators; desktop lanes execute the native
+fixture as well as compiling both architectures.
+
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
@@ -154,6 +162,13 @@ The canonical-to-machine ownership map is in [compiler phase and state](compiler
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- FAST/QUALITY never store a recreatable value. A single-definition constant
+  reloads as `MACHINE_EDIT_REMATERIALIZE` of its immediate, and a non-mutable
+  value whose only definition is the target's `frame_address_opcode` row reloads
+  as `MACHINE_EDIT_REMATERIALIZE_FRAME`, naming the value; both encoders replay
+  the defining row's slot address (`machine_x64_emit_exact_frame_address`,
+  `machine_a64_emit_frame_address`). This is sound because a slot whose address
+  a row takes keeps its own storage for the whole function.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over

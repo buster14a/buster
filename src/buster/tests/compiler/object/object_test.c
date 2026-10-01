@@ -2802,7 +2802,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // Local dynamic's two 32-bit fields (issue 1711) read as their own kinds
     // and write their own types back out, as the GOT spellings above do; a
     // type outside the vocabulary is still refused by number.
-    u32 tls_local_dynamic_types[] = {20, 21, 24};
+    u32 tls_local_dynamic_types[] = {20, 21, 25};
     ObjectRelocationKind tls_local_dynamic_kinds[] = {OBJECT_RELOCATION_X86_64_TLSLD, OBJECT_RELOCATION_X86_64_DTPOFF32, OBJECT_RELOCATION_COUNT};
     for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(tls_local_dynamic_types); type_index += 1)
     {
@@ -2822,7 +2822,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {
             BUSTER_TEST(arguments, tls_local_dynamic_offsets_valid && tls_local_dynamic_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
                                        object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(tls_local_dynamic_roundtrip.diagnostic),
-                                                            S8("unsupported ELF x86-64 relocation type 24")));
+                                                            S8("unsupported ELF x86-64 relocation type 25")));
         }
         else
         {

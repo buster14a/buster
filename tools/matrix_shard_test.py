@@ -331,7 +331,7 @@ class WorkflowSetupTests(unittest.TestCase):
         self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
         self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
-                                ZIG_TARGET="fixture", FIXTURE_EXIT="0")
+                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux")
 
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
@@ -346,7 +346,8 @@ class WorkflowSetupTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
         expected = {
-            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/ci_zig_test.py",
+            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
+            "tools/ci_zig_test.py",
             "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
             "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
@@ -356,17 +357,22 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
             "tools/ci_native_observation_test.py", "tools/ci_sanitize_logs_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
+            "tools/ci_workflow_tools_test.py",
+            "tools/bootstrap_wrapper_cases_test.py",
         }
-        suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
+        suites = re.findall(r'^            ([^ =]+\.py)=[^ =]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
         self.assertEqual(len(suites), len(expected))
-        self.assertIn('if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee', block)
-        self.assertIn('return "$status"', block)
-        self.assertIn('WORKFLOW_TOOLS_END result=success', block)
+        self.assertIn("suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)", block)
+        self.assertIn('"$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"', block)
+        self.assertNotIn("|| true", block)
 
-    def test_workflow_tools_record_all_suites_and_stop_on_failure(self):
-        expected = re.findall(r'^          run_suite ([^ ]+) ([^ ]+\.log)$',
+    def test_workflow_tools_record_all_suites_and_report_failure(self):
+        expected = re.findall(r'^            ([^ =]+\.py)=([^ =]+\.log)$',
                               self.steps["Workflow tool regression tests"], re.M)
+        runner = self.root / "tools/ci_workflow_tools.py"
+        runner.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "tools/ci_workflow_tools.py", runner)
         for suite, _ in expected:
             path = self.root / suite
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,13 +385,16 @@ class WorkflowSetupTests(unittest.TestCase):
                 self.environment["FIXTURE_EXIT"] = str(code)
                 result = self.run_step("Workflow tool regression tests")
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                completed = expected if code == 0 else expected[:2]
-                self.assertEqual(re.findall(r'SUITE_START path=([^ ]+)', result.stdout),
-                                 [suite for suite, _ in completed])
-                for suite, log in completed:
-                    self.assertIn(f"SUITE_END path={suite} result=", result.stdout)
+                # A failure no longer hides the remaining suites' evidence.
+                self.assertEqual(sorted(re.findall(r'SUITE_START path=([^ ]+)', result.stdout)),
+                                 sorted(suite for suite, _ in expected))
+                for suite, log in expected:
+                    status = "failure status=7" if code and suite.endswith("ci_admission_test.py") else "success"
+                    self.assertIn(f"SUITE_END path={suite} result={status} ", result.stdout)
                     self.assertIn("SUITE fixture", (self.root / "buster-ci" / log).read_text())
                 self.assertEqual("WORKFLOW_TOOLS_END result=success" in result.stdout, code == 0)
+                self.assertEqual("WORKFLOW_TOOLS_END result=failure failed=tools/ci_admission_test.py " in result.stdout,
+                                 code != 0)
 
     def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
         tools = self.root / "tools"
@@ -402,24 +411,36 @@ class WorkflowSetupTests(unittest.TestCase):
     def test_wrapper_suite_executes_only_in_release_and_keeps_failure_status(self):
         tests = self.root / "tests"
         tests.mkdir()
-        (tests / "bootstrap_wrapper_test.py").write_text(
+        tools = self.root / "tools"
+        tools.mkdir()
+        fixture = (
             "import os, pathlib, sys\npathlib.Path('wrapper-called').touch()\n"
-            "print('BOOTSTRAP_TEST fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
-        for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
-            with self.subTest(shard=shard, exit_code=code):
-                marker = self.root / "wrapper-called"
-                if marker.exists():
-                    marker.unlink()
-                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
-                self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code))
-                result = self.run_step("Bootstrap wrapper regression tests")
-                self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
-                self.assertEqual(marker.exists(), shard == "release")
-                if shard == "checks":
-                    self.assertIn("owned-by-release-shard", result.stdout)
-                    self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
-                else:
-                    self.assertIn("BOOTSTRAP_TEST fixture", (self.root / "buster-ci/bootstrap-wrapper.log").read_text())
+            "print('BOOTSTRAP_TEST fixture', pathlib.Path(__file__).name, sys.argv[1:])\n"
+            "sys.exit(int(os.environ['FIXTURE_EXIT']))\n")
+        (tests / "bootstrap_wrapper_test.py").write_text(fixture)
+        (tools / "bootstrap_wrapper_cases.py").write_text(fixture)
+        selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
+                      ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
+        for platform, entry, argument in selections:
+            for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
+                with self.subTest(platform=platform, shard=shard, exit_code=code):
+                    marker = self.root / "wrapper-called"
+                    if marker.exists():
+                        marker.unlink()
+                    shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                    self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code),
+                                            RUNNER_OS=platform)
+                    result = self.run_step("Bootstrap wrapper regression tests")
+                    self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
+                    self.assertEqual(marker.exists(), shard == "release")
+                    if shard == "checks":
+                        self.assertIn("owned-by-release-shard", result.stdout)
+                        self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
+                    else:
+                        log = (self.root / "buster-ci/bootstrap-wrapper.log").read_text()
+                        self.assertIn(f"BOOTSTRAP_TEST fixture {entry}", log)
+                        self.assertIn(argument, log)
+                        self.assertIn("'2'" if platform == "Windows" else "'-v'", log)
 
 
 class CompletionGateTests(unittest.TestCase):
@@ -864,7 +885,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
 
     def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
         jobs = self.sample()
@@ -988,6 +1009,102 @@ class DraftMacosDeferralTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             github_ci_time.latest_run_jobs(first + [clash], 123, 1, "a" * 40)
 
+    def rerun_failed_inventory(self, attempts, deferred=True):
+        """Run 36717332363's shape (#2052): attempt 1's CI complete failed, then
+        "Re-run failed jobs" re-stamped every retained success under each later
+        attempt with a new id but the original timing and steps."""
+        first = self.sample(deferred)
+        for number, job in enumerate(first):
+            job.update(started_at=f"2026-09-30T12:{number:02}:04Z", completed_at=f"2026-09-30T12:{number:02}:09Z")
+            for step in job["steps"]:
+                step.update(started_at=job["started_at"], completed_at=job["completed_at"])
+            if job["name"] == "CI complete":
+                job.update(status="completed", conclusion="failure", steps=[])
+        inventory = list(first)
+        for attempt in range(2, attempts + 1):
+            for job in first:
+                copied = dict(copy.deepcopy(job), id=job["id"] + 1000 * attempt, run_attempt=attempt)
+                if job["name"] == "CI complete":
+                    copied.update(status="in_progress" if attempt == attempts else "completed",
+                                  conclusion=None if attempt == attempts else "failure",
+                                  started_at=f"2026-09-30T{12 + attempt}:00:00Z", completed_at=None)
+                inventory.append(copied)
+        return inventory
+
+    def gate_rerun(self, inventory, attempts, draft):
+        payload = {"pull_request": {"draft": draft, "head": {"sha": "a" * 40}}}
+        run = {"id": 123, "run_attempt": attempts, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+               "event": "pull_request"}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "event.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=attempts,
+                                   event_name="pull_request", event_path=str(path))
+            snapshots = len(github_ci_time.JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1
+            responses = [run] + [{"total_count": len(inventory), "jobs": inventory}] * snapshots
+            with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
+                    mock.patch.object(github_ci_time.time, "sleep"):
+                result = github_ci_time.require_jobs(args)
+        return result
+
+    def test_rerun_failed_jobs_carries_attempt_one_deferrals_forward(self):
+        # #2052: the re-stamped copies are judged as attempt 1 judged the originals.
+        for attempts in (2, 3):
+            with self.subTest(attempts=attempts):
+                inventory = self.rerun_failed_inventory(attempts)
+                latest = github_ci_time.latest_run_jobs(inventory, 123, attempts, "a" * 40)
+                deferred = [job for job in latest if github_ci_time.deferred_base_name(job["name"])]
+                self.assertEqual(len(deferred), 4)
+                self.assertEqual({job["run_attempt"] for job in deferred}, {1})
+                self.assertEqual(self.check(latest, draft=True, attempt=attempts), [])
+                result = self.gate_rerun(inventory, attempts, draft=True)
+                self.assertTrue(result["success"], result["errors"])
+                self.assertEqual(result["deferred_macos_jobs"], sorted(github_ci_time.MACOS_RUNNER_JOBS))
+                # Non-draft control: the same carried deferrals never substitute for macOS.
+                result = self.gate_rerun(inventory, attempts, draft=False)
+                self.assertFalse(result["success"])
+                self.assertEqual(sum("only the first attempt of a draft pull-request run" in error
+                                     for error in result["errors"]), 4)
+        # Non-draft control without deferrals: an ordinary partial rerun still passes.
+        result = self.gate_rerun(self.rerun_failed_inventory(2, deferred=False), 2, draft=False)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["deferred_macos_jobs"], [])
+
+    def test_rerun_failed_jobs_still_fails_closed(self):
+        def target(inventory, attempt):
+            return next(job for job in inventory if job["run_attempt"] == attempt
+                        and job["name"] == "macOS AArch64 native" + github_ci_time.DEFERRED_SUFFIX)
+        for mutate in ("reran", "failed", "cancelled", "skipped", "step", "untimed", "gap", "linux"):
+            with self.subTest(mutate=mutate):
+                inventory = self.rerun_failed_inventory(3)
+                if mutate == "reran":
+                    # A deferral that executed again in a later attempt is not a copy.
+                    target(inventory, 3).update(started_at="2026-09-30T20:00:00Z", completed_at="2026-09-30T20:00:05Z")
+                elif mutate in ("failed", "cancelled", "skipped"):
+                    for attempt in (1, 2, 3):
+                        target(inventory, attempt)["conclusion"] = "failure" if mutate == "failed" else mutate
+                elif mutate == "step":
+                    target(inventory, 3)["steps"][0]["conclusion"] = "skipped"
+                elif mutate == "untimed":
+                    for attempt in (1, 2, 3):
+                        target(inventory, attempt).update(started_at=None, completed_at=None)
+                elif mutate == "gap":
+                    # Attempt 2 carried a different record; attempt 3 cannot hide it.
+                    target(inventory, 2)["completed_at"] = "2026-09-30T13:30:00Z"
+                else:
+                    linux = [job for job in inventory if job["name"] == "Linux AArch64 native"]
+                    for job in linux:
+                        job["name"] += github_ci_time.DEFERRED_SUFFIX
+                latest = github_ci_time.latest_run_jobs(inventory, 123, 3, "a" * 40)
+                self.assertTrue(self.check(latest, draft=True, attempt=3))
+                self.assertFalse(self.gate_rerun(inventory, 3, draft=True)["success"])
+        # A non-deferred failure retained from attempt 1 is not rescued either.
+        inventory = self.rerun_failed_inventory(2)
+        for job in inventory:
+            if job["name"] == "Linux x86-64 release":
+                job["conclusion"] = "failure"
+        self.assertFalse(self.gate_rerun(inventory, 2, draft=True)["success"])
+
     def gate(self, payload, event="pull_request", event_name="pull_request", deferred=True):
         jobs = self.sample(deferred)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": event}
@@ -1096,7 +1213,8 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 if job == "test":
                     self.assertIn("\n    needs: lint\n", text)
                 else:
-                    self.assertNotIn("needs:", text)
+                    # Only the cheap main-push reuse decision may gate these lanes.
+                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "

@@ -8,6 +8,7 @@
 // Parsing, allocation, scheduling and object-format relocation policy remain
 // consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/os.h>
 #include <buster/lib/simd.h>
@@ -304,6 +305,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_base64_chunk_avx512(u8* deco
 // BUSTER_X86_METADATA_BLOB_CAPACITY(blob.byte_count) bytes.
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_blob(u8* decoded, BusterX86MetadataBlob blob)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_BASE64_BYTES_DECODED, blob.byte_count);
     // The group arithmetic of buster_x86_generated_base64_encoded_count.
     u64 group_count = (blob.byte_count + 2u) / 3u;
     u64 group_index = 0;
@@ -762,6 +764,12 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     buster_x86_metadata_tables_decoding = true;
     buster_x86_metadata_decode_string_pool();
+    WORK_LEDGER_RECORD(TARGET_X86_POOL_BYTES_COPIED, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
+    WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED,
+                       (u64)BUSTER_X86_GENERATED_OPERAND_COUNT + BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT + BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT +
+                           BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT + BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT + BUSTER_X86_GENERATED_IFORM_RANGE_COUNT +
+                           BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT +
+                           BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_COUNT);
     // Each blob is decoded whole into the scratch array, copied out into its
     // typed cache, and three of its records are then re-read through the
     // generated reader as the layout check described at the flat readers.
@@ -849,6 +857,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_coverage(void)
         }
         BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_coverage_records, BUSTER_X86_GENERATED_COVERAGE_COUNT, buster_x86_generated_coverage_at,
                                        buster_x86_metadata_coverages_equal);
+        WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, BUSTER_X86_GENERATED_COVERAGE_COUNT);
         buster_x86_metadata_coverage_decoded = true;
     }
 }
@@ -1445,6 +1454,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataVa
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u16 buster_x86_metadata_fill_nul_distance(u32 offset)
 {
     BUSTER_CHECK_SERIAL_INITIALIZATION();
+    WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, 1);
     u16 distance = buster_x86_metadata_nul_distance_at(buster_x86_metadata_pool_bytes, BUSTER_X86_GENERATED_STRING_POOL_SIZE, offset);
     buster_x86_metadata_pool_nul_distances[offset] = distance;
     buster_x86_metadata_pool_nul_known[offset / 64u] |= (u64)1 << (offset % 64u);
@@ -1466,6 +1476,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset
     {
         return false;
     }
+    WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_READS, 1);
     u16 distance = buster_x86_metadata_nul_distance(offset);
     if (distance == UINT16_MAX)
     {
@@ -9090,6 +9101,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_apx_ndd_projection(BusterX86Metadat
 
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_FORM_SELECTIONS, 1);
     BusterX86MetadataSelectResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
         .form_id = UINT32_MAX,
@@ -10031,6 +10043,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX8
 BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86MetadataMachineExactToken token,
                                                                     BusterX86MetadataMachineExactQuery query)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_METADATA_ENCODES, 1);
     BusterX86MetadataEmitResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
         .form_id = UINT32_MAX,
@@ -12816,6 +12829,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         // offset would store, so no lane ever fills one.
         buster_x86_metadata_fill_nul_distances(buster_x86_metadata_pool_bytes, buster_x86_metadata_pool_nul_distances,
                                                BUSTER_X86_GENERATED_STRING_POOL_SIZE);
+        WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
         memset(buster_x86_metadata_pool_nul_known, 0xff, sizeof(buster_x86_metadata_pool_nul_known));
         for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
         {

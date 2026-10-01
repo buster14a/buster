@@ -183,6 +183,9 @@ typedef enum ObjectRelocationKind
     // resolves the pair by relaxation to ADRP/ADD of the symbol itself.
     OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21,
     OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
+    // ELF data differences: S + A - P over a full 64-bit field.
+    OBJECT_RELOCATION_X86_64_PC64,
+    OBJECT_RELOCATION_AARCH64_PREL64,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 

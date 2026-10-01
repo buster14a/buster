@@ -234,7 +234,7 @@ static bool account_case(char const* label, uint32_t operation, uint32_t signal_
     account_fault = fault;
     if (ok)
     {
-        BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1,
+        BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
                                    .operation = operation, .stage = BQ_BROKER_OUTER,
                                    .signal_number = signal_number,
                                    .job = 1, .attempt = 2};

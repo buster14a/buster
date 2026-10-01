@@ -20,6 +20,8 @@ IDE, nor a request to restore the removed custom-language editor.
 The [platform/backend guide](../agents/platform.md) owns native-surface boundaries,
 backend inclusion, TrueType limits and the current dependency contract. Source
 presence, build integration, test coverage and product support are different facts.
+Raster-image recognition and decoding has a separate [media home](media.md);
+using that library from a graphical product is an explicit consumer decision.
 
 ## Validation and future consumers
 
