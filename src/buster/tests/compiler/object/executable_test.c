@@ -1,7 +1,9 @@
 // Ordinary mutable globals in an in-memory executable: independent OS mapping
 // queries, PC-relative and absolute addressing, zero-fill and aligned cleanup.
 #include <buster/lib/system_headers.h>
+#if BUSTER_LINUX || BUSTER_ANDROID
 #include <stdio.h>
+#endif
 #if BUSTER_APPLE
 #include <mach/mach_vm.h>
 #endif
