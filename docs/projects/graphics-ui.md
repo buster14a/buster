@@ -32,6 +32,16 @@ its runnable entry point and supported backend/platform combinations, and report
 actual rendering/lifecycle validation. Do not add unused UI or font dependencies
 to the compiler merely to make this area appear active.
 
+`./build.sh build --config Release -t test_ui_utf8` runs a separate headless UI
+component executable when tests and libc are enabled on desktop targets. It uses
+the production `ui_core` module to check Unicode scalar text-event activation and
+underline draw commands, including UTF-8 width/scalar boundaries and per-byte
+replacement of malformed input. Native rendering calls are counted and must
+remain unused. Desktop `test_all` and `test_units` include this component gate;
+the compiler has no added UI, window, or rendering dependency. The retained
+`ui_test.c` suite is not registered by this target, and these headless checks do
+not establish device rendering or a supported graphical application.
+
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
 

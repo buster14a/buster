@@ -129,23 +129,24 @@ BUSTER_GLOBAL_LOCAL u64 ui_utf8_sequence_length(String8 string, u64 position)
 BUSTER_GLOBAL_LOCAL u32 ui_utf8_codepoint_at(String8 string, u64 position)
 {
     u64 length = ui_utf8_sequence_length(string, position);
+    u32 result;
     if (length == 0)
     {
-        return 0xfffdu;
+        result = 0xfffdu;
     }
-    u8 first = (u8)string.pointer[position];
-    u32 result = first;
-    if (length >= 2)
+    else
     {
-        result = (result & 0x1fu) << 6 | ((u8)string.pointer[position + 1] & 0x3fu);
-    }
-    if (length >= 3)
-    {
-        result = (result & 0x0fu) << 6 | ((u8)string.pointer[position + 2] & 0x3fu);
-    }
-    if (length == 4)
-    {
-        result = (result & 0x07u) << 6 | ((u8)string.pointer[position + 3] & 0x3fu);
+        u8 first = (u8)string.pointer[position];
+        result = first;
+        if (length >= 2)
+        {
+            u32 first_mask = length == 2 ? 0x1fu : length == 3 ? 0x0fu : 0x07u;
+            result &= first_mask;
+        }
+        for (u64 index = 1; index < length; index += 1)
+        {
+            result = result << 6 | ((u8)string.pointer[position + index] & 0x3fu);
+        }
     }
     return result;
 }
