@@ -200,8 +200,8 @@ with tempfile.TemporaryDirectory(prefix="frame-controller-", dir=os.environ["RUN
 
     def newline_manifest():
         log = root / "manifest.log"
-        for ending in (b"\\n", b"\\r\\n", b"\\r"):
-            raw = b"malformed negative control --\\xff\\xfe" + ending + ending.join(line.encode("ascii") for line in native_manifest_lines()) + ending
+        for ending in (b"\n", b"\r\n", b"\r"):
+            raw = b"malformed negative control --\xff\xfe" + ending + ending.join(line.encode("ascii") for line in native_manifest_lines()) + ending
             log.write_bytes(raw)
             parsed = g["manifest"](log)
             check(len(parsed["compile"]) == 3456 and len(parsed["runtime"]) == 8 and parsed["operations"] == {"buster_compile": "3456", "positive_compile": "48"}, "newline-normalized manifest must preserve exact populations")
@@ -216,7 +216,7 @@ with tempfile.TemporaryDirectory(prefix="frame-controller-", dir=os.environ["RUN
         quota = [line.replace("positive_compile calls=48", "positive_compile calls=47") for line in rows]
         for invalid in (changed, missing, quota):
             log = root / "invalid-manifest.log"
-            log.write_bytes(b"\\r\\n".join(line.encode("ascii") for line in invalid) + b"\\r\\n")
+            log.write_bytes(b"\r\n".join(line.encode("ascii") for line in invalid) + b"\r\n")
             rejected = False
             try:
                 g["manifest"](log)
