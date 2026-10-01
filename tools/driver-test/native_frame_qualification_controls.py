@@ -183,5 +183,47 @@ with tempfile.TemporaryDirectory(prefix="frame-controller-", dir=os.environ["RUN
         check(attempted["attempted"] == ["A1"] and terminal["unexecuted_samples"] == list(g["SAMPLES"][1:]), "only later arms are unexecuted")
     execute("attempted A1 survives error reporting failure", attempted_sample)
 
-print(json.dumps({"controls": 8, "failures": failures}, ensure_ascii=True), flush=True)
+    def native_manifest_lines():
+        platforms = ("linux", "macos", "windows", "android", "ios", "uefi")
+        native_fixtures = (0, 1, 2, 4, 5, 7, 8, 9)
+        lines = []
+        for target, cpus, fixtures in (("x86_64-", range(3), range(10)), ("aarch64-", range(1), range(4, 10))):
+            for platform, allocator, frontend, pic, cpu, fixture in itertools.product(platforms, range(4), range(2), range(2), cpus, fixtures):
+                runtime = target == "x86_64-" and platform == "windows" and allocator == frontend == pic == cpu == 0 and fixture in native_fixtures
+                lines.append("NATIVE_FRAME_VECTOR_COMPILE_V1 target=" + target + platform + " allocator=" + str(allocator) + " frontend=" + str(frontend) + " pic=" + str(pic) + " cpu=" + str(cpu) + " fixture=" + str(fixture) + " error=0 classification=" + ("runtime" if runtime else "compile-only"))
+        for fixture in native_fixtures:
+            lines.append("NATIVE_FRAME_VECTOR_CASE_V1 id=x86_64-windows.allocator-0.frontend-0.pic-0.cpu-0.fixture-" + str(fixture) + " classification=runtime batch_size=8 status=pass")
+        lines.append("NATIVE_FRAME_VECTOR_BATCH_V1 enabled=1 cases=8 batches=1 batch_size=8 executions=1")
+        lines.append("DRIVER_OPERATION_TIMING_V1 fixture=native_frame_vectors operation=buster_compile calls=3456 duration_ns=0 measurement=inclusive-wall status=completed")
+        lines.append("DRIVER_OPERATION_TIMING_V1 fixture=native_frame_vectors operation=positive_compile calls=48 duration_ns=0 measurement=inclusive-wall status=completed")
+        return lines
+
+    def newline_manifest():
+        log = root / "manifest.log"
+        for ending in (b"\\n", b"\\r\\n", b"\\r"):
+            raw = b"malformed negative control --\\xff\\xfe" + ending + ending.join(line.encode("ascii") for line in native_manifest_lines()) + ending
+            log.write_bytes(raw)
+            parsed = g["manifest"](log)
+            check(len(parsed["compile"]) == 3456 and len(parsed["runtime"]) == 8 and parsed["operations"] == {"buster_compile": "3456", "positive_compile": "48"}, "newline-normalized manifest must preserve exact populations")
+            check(log.read_bytes() == raw, "parsing must not alter raw capture")
+    execute("LF CRLF bare CR and malformed-byte manifest", newline_manifest)
+
+    def manifest_refusals():
+        rows = native_manifest_lines()
+        changed = list(rows)
+        changed[0] = rows[1].replace("error=0", "error=1")
+        missing = [line for line in rows if "CASE_V1 id=" not in line or "fixture-0 " not in line]
+        quota = [line.replace("positive_compile calls=48", "positive_compile calls=47") for line in rows]
+        for invalid in (changed, missing, quota):
+            log = root / "invalid-manifest.log"
+            log.write_bytes(b"\\r\\n".join(line.encode("ascii") for line in invalid) + b"\\r\\n")
+            rejected = False
+            try:
+                g["manifest"](log)
+            except RuntimeError:
+                rejected = True
+            check(rejected, "duplicate cell, missing runtime ID and changed quota must fail")
+    execute("manifest holes and duplicate cell identity fail closed", manifest_refusals)
+
+print(json.dumps({"controls": 10, "failures": failures}, ensure_ascii=True), flush=True)
 sys.exit(bool(failures))

@@ -45,6 +45,7 @@ def command(argv, cwd, environment, log, show=True):
     global PRODUCER_DRAIN_UNRESOLVED
     announce("COMMAND", json.dumps([str(item) for item in argv], ensure_ascii=True))
     started = time.monotonic()
+    prior_unresolved = PRODUCER_DRAIN_UNRESOLVED
     child = None
     process_status = None
     errors = []
@@ -53,6 +54,9 @@ def command(argv, cwd, environment, log, show=True):
         # Keep malformed native test bytes exactly. Do not decode/echo a live
         # child's stdout through the inherited Windows console encoding.
         with log.open("wb") as output:
+            # Publish ownership uncertainty before launch so interruption cannot
+            # race sample cleanup even before the child handle is returned.
+            PRODUCER_DRAIN_UNRESOLVED = True
             child = subprocess.Popen(argv, cwd=cwd, env=environment,
                                      stdout=output, stderr=subprocess.STDOUT)
             drained = False
@@ -78,7 +82,7 @@ def command(argv, cwd, environment, log, show=True):
                     errors.append("capture: " + repr(error))
     except Exception as error:
         errors.append("launch/capture: " + repr(error))
-    PRODUCER_DRAIN_UNRESOLVED = PRODUCER_DRAIN_UNRESOLVED or not drained
+    PRODUCER_DRAIN_UNRESOLVED = prior_unresolved or not drained
     result = {"argv": [str(item) for item in argv],
               "exit_status": process_status if not errors and process_status is not None else 1,
               "process_exit_status": process_status, "owned_child_drained": drained,
@@ -189,7 +193,7 @@ def coverage(output, environment):
 
 
 def manifest(path):
-    text = path.read_bytes().decode("utf-8", errors="backslashreplace")
+    text = path.read_bytes().decode("utf-8", errors="backslashreplace").replace("\r\n", "\n").replace("\r", "\n")
     rows = re.findall(r"^NATIVE_FRAME_VECTOR_CASE_V1 id=(\S+) classification=(\S+).*status=(\S+)$", text, re.MULTILINE)
     if not rows or len({row[0] for row in rows}) != len(rows) or any(row[2] != "pass" for row in rows):
         raise RuntimeError("Missing, duplicated or failing per-case manifest: " + str(path))
