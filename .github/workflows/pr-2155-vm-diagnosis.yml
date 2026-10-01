@@ -1,0 +1,53 @@
+name: PR 2155 bounded VM diagnosis
+on:
+  push:
+    branches: [codex/2155-diagnose-vm-bounds]
+permissions:
+  contents: read
+concurrency:
+  group: pr-2155-bounded-vm-diagnosis
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 447935fe886f32d8ce6c0bf680ba4a445e447428
+          persist-credentials: false
+      - name: Build the inspected source compiler on the hosted runner
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 447935fe886f32d8ce6c0bf680ba4a445e447428
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build generate --cc clang --ci --linker DEFAULT
+          ./build/build build --config Release -t ide
+      - name: Diagnose the two unchanged source controls
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostic
+          cat > diagnostic/constant-bound-controls.c <<'EOF'
+          typedef int T; struct P { int x; }; enum { A = 4, B = sizeof(long) + 1, C = _Alignof(struct P), D = A ? 1 : 2 }; int a1[sizeof(long) + 1]; int a2[sizeof((long) + 1)]; int a3[sizeof(T[3]) / sizeof(T)]; int a4[(T)3 + -1]; int a5[sizeof(int*) * 2]; int a6[sizeof(struct P*)]; int a7[__builtin_offsetof(struct P, x) + 1]; int a8[sizeof(const volatile int)]; int a9[sizeof(int[2][3])]; int a10[(A > 1) ? A : 1]; int a11[sizeof "ab" "c"]; int a12[_Generic(1, int: 2, default: 3)]; int a13[sizeof(__typeof__(a1))]; int a14[sizeof(int (*)[4])]; int a15[sizeof((struct P){1})]; int a16[sizeof(int (*)(void))]; int a17[1 ? : 2]; void f1(int n, int a[static 4], int b[const n], int c[*], int d[const static 2]); void f2(int n, int a[n][n + 1]); long x = sizeof(long) + 1; _Static_assert(sizeof(long) + 1 > 4, ""); struct S { int m[A + 1]; char c[sizeof(struct P) * 2]; }; int g(void) { int n = 3; int v[n + 1]; int w[({ 2; })]; return (int)(sizeof v + sizeof w); }
+          EOF
+          cat > diagnostic/portable-offset-bound.c <<'EOF'
+          struct Simple { int first; char second[6]; long third; };
+          #define OFFSET(type, member) ((unsigned long)((char *)&(((type *)0)->member) - (char *)0))
+          static char sized[OFFSET(struct Simple, third)];
+          EOF
+          for source in diagnostic/*.c; do
+            printf '\nSOURCE %s\n' "$source"
+            build/Release/ide cc -fsyntax-only -std=gnu17 "$source" > "$source.stdout" 2> "$source.stderr"
+            result=$?
+            printf 'syntax_status=%s\n' "$result"
+            cat "$source.stdout" "$source.stderr"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr-2155-bounded-vm-diagnosis
+          path: diagnostic/
+          if-no-files-found: error
+          retention-days: 7
