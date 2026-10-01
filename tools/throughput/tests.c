@@ -236,17 +236,48 @@ static int test_child(int argc, char** argv)
         for (int i = 3; i < argc; ++i) printf("%s\n", argv[i]);
     }
 #ifndef _WIN32
-    else if (!strcmp(argv[2], "summary-write-failure") && argc == 4)
+    else if (argc == 4 && (!strcmp(argv[2], "summary-write-failure") ||
+                           !strcmp(argv[2], "summary-write-setup-failure")))
     {
-        /* Restrict only this child so buffered report writes fail at close. */
-        struct rlimit limit;
-        int ok = getrlimit(RLIMIT_FSIZE, &limit) == 0;
+        /* The native one-byte limit also truncates the redirected child log.
+         * Save each outcome, restore the limit after comparison closes its
+         * streams, then publish diagnostics. Setup failure is not a write test. */
+        int resource = !strcmp(argv[2], "summary-write-failure") ? RLIMIT_FSIZE : -1;
+        struct rlimit saved;
+        char const* stage = "getrlimit";
+        int ok = getrlimit(resource, &saved) == 0;
+        int setup_error = ok ? 0 : errno;
+        int comparison = -1, comparison_error = 0, restore_status = -1, restore_error = 0;
         if (ok)
         {
-            limit.rlim_cur = 1;
-            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+            stage = "signal";
+            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR;
+            if (!ok) setup_error = errno;
         }
-        result = ok && tp_compare(argv[3]) == 2 ? 0 : 1;
+        if (ok)
+        {
+            struct rlimit limit = saved;
+            limit.rlim_cur = 1;
+            stage = "setrlimit";
+            ok = setrlimit(resource, &limit) == 0;
+            if (!ok) setup_error = errno;
+        }
+        if (ok)
+        {
+            stage = "compare";
+            comparison = tp_compare(argv[3]);
+            comparison_error = errno;
+            restore_status = setrlimit(resource, &saved);
+            if (restore_status != 0) restore_error = errno;
+        }
+        /* A failed diagnostic write under the injected limit sets stream
+         * error flags. Clear only the log streams, never the report streams. */
+        clearerr(stdout);
+        clearerr(stderr);
+        int reported = fprintf(stderr, "\nSUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=%d last_errno=%d\n",
+                               stage, setup_error, comparison, restore_status, restore_error, comparison_error) >= 0;
+        if (fflush(stderr) != 0) reported = 0;
+        result = ok && comparison == 2 && restore_status == 0 && reported ? 0 : 1;
     }
 #endif
     else result = 2;
@@ -1360,17 +1391,48 @@ static void test_summary_cleanup(char const* root)
 static void test_summary_write_failure(char const* executable, char const* root)
 {
     char directory[TP_PATH_CAP], log[TP_PATH_CAP];
-    int paths_ok = tp_path(directory, root, "summary-write-failure") &&
-                   tp_path(log, root, "summary-write-failure.log");
+    int paths_ok = tp_path(directory, root, "summary-write-failure");
     CHECK(paths_ok);
     if (paths_ok)
     {
         CHECK(test_bundle(directory, 0));
-        char* command[] = {(char*)executable, "child", "summary-write-failure", directory, NULL};
-        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);
-        test_summaries(directory, 0);
-        CHECK(tp_completion(directory, 1, 20, 1, 0));
+        CHECK(tp_compare(directory) == 0);
+        test_summaries(directory, 1);
+        char const* modes[] = {"summary-write-failure", "summary-write-setup-failure"};
+        char const* logs[] = {"summary-write-failure.log", "summary-write-setup-failure.log"};
+        for (unsigned mode = 0; mode < 2; ++mode)
+        {
+            int log_ok = tp_path(log, root, logs[mode]);
+            CHECK(log_ok);
+            if (log_ok)
+            {
+                char* command[] = {(char*)executable, "child", (char*)modes[mode], directory, NULL};
+                TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+                CHECK_CHILD_EXIT(child, mode ? 1 : 0, log);
+                /* Require a complete diagnostic after the one-byte write
+                 * limit, including for the deliberately invalid setup. */
+                FILE* file = fopen(log, "rb");
+                CHECK(file != NULL);
+                if (file)
+                {
+                    char diagnostic[1024], expected[256];
+                    size_t length = fread(diagnostic, 1, sizeof(diagnostic) - 1, file);
+                    diagnostic[length] = 0;
+                    CHECK(!ferror(file) && feof(file));
+                    CHECK(fclose(file) == 0);
+                    snprintf(expected, sizeof(expected),
+                             "SUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=0",
+                             mode ? "getrlimit" : "compare", mode ? EINVAL : 0, mode ? -1 : 2, mode ? -1 : 0);
+                    CHECK(strstr(diagnostic, expected) != NULL);
+                }
+            }
+            /* A real write failure removes reports; a setup failure never
+             * enters comparison and must leave the existing reports alone. */
+            test_summaries(directory, mode != 0);
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+            CHECK(tp_compare(directory) == 0);
+            test_summaries(directory, 1);
+        }
     }
 }
 #endif
