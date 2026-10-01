@@ -23,9 +23,10 @@
 #define BQ_WORKER_BUNDLE_CONTROL_ENTRIES 3u
 /* The worker-phase-N receipts a retirement job's BQPHASE2 channel leaves in
  * the result root (bq_worker_phase_accept publishes one per acknowledged
- * phase: PREPARING, RETIREMENT_READY, SETTLING, MEASURING and MEASURED). They
- * are bundle objects, so the retirement store plan reserves them too. */
-#define BQ_WORKER_RETIREMENT_PHASE_RECEIPTS 5u
+ * phase: PREPARING, RETIREMENT_READY, SETTLING, MEASURING, AA_MEASURED and
+ * MEASURED). They are bundle objects, so the retirement store plan reserves
+ * them too. */
+#define BQ_WORKER_RETIREMENT_PHASE_RECEIPTS 6u
 #define BQ_WORKER_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
 /* The fixed retirement population needs millions of paired records. This is

@@ -3,7 +3,9 @@
  * and its context chain, published as the producer publishes them.
  *
  * bq_coordinator_fixture_authority publishes a one-shard execution receipt
- * into the result directory (the store root), issues the authority into the
+ * (its shard named as the A/A stage's sample shard, so the AA_MEASURED
+ * attestation finds it, #1021) into the result directory (the store root),
+ * issues the authority into the
  * attempt's retirement-authority/ and writes the chain
  * (bq_retirement_context_chain_format, BQ-RETIREMENT-CONTEXT-CHAIN-V2)
  * naming the given A, ready and row-plan digests with the authority's plan
@@ -18,6 +20,12 @@
 
 #define BQ_COORDINATOR_FIXTURE_PLAN "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #define BQ_COORDINATOR_FIXTURE_CONTEXT "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+/* (#1021) The one shard the fixture publishes is the A/A stage's only sample
+ * shard (bq_retirement_coordinator_aa_attest reads it), and its digest, the
+ * SHA-256 of "{}\n", is the AA_MEASURED digest and the carried A/A raw
+ * digest. */
+#define BQ_COORDINATOR_FIXTURE_AA_SHARD "retirement-samples-aa-0000.jsonl"
+#define BQ_COORDINATOR_FIXTURE_AA_SHA256 "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
 
 /* Well-formed carried values that no campaign produced. */
 BUSTER_GLOBAL_LOCAL BqRetirementContextChainCarried bq_coordinator_fixture_carried(void)
@@ -36,6 +44,7 @@ BUSTER_GLOBAL_LOCAL BqRetirementContextChainCarried bq_coordinator_fixture_carri
         memset(digests[index], "0123456789abcdef"[index % 16u], 64);
         digests[index][64] = 0;
     }
+    memcpy(carried.stages[0].raw, BQ_COORDINATOR_FIXTURE_AA_SHA256, 65);
     return carried;
 }
 
@@ -57,7 +66,7 @@ BUSTER_GLOBAL_LOCAL bool bq_coordinator_fixture_authority(int result_directory, 
     bool opened = authority >= 0 && tp_retirement_store_open(&store, result_directory, files, 4);
     ok = opened && tp_retirement_store_plan(&store, 2, 2048, 3, 1024);
     char const* bodies[2] = {"{}\n", receipt};
-    char const* paths[2] = {"shard.jsonl", TP_RETIREMENT_EXECUTION_RECEIPT_PATH};
+    char const* paths[2] = {BQ_COORDINATOR_FIXTURE_AA_SHARD, TP_RETIREMENT_EXECUTION_RECEIPT_PATH};
     for (u32 index = 0; ok && index < 2; index += 1)
     {
         if (index == 1)
@@ -66,7 +75,8 @@ BUSTER_GLOBAL_LOCAL bool bq_coordinator_fixture_authority(int result_directory, 
                 "{\"attempt\":%" PRIu64 ",\"boot_id\":\"boot-1\",\"bound_at_ns\":1000,\"completed_at_ns\":2000,"
                 "\"context_sha256\":\"%s\",\"execution_plan_sha256\":\"%s\",\"invocations\":1,"
                 "\"job_id\":\"%s\",\"schema\":\"buster-native-retirement-execution-receipt-v1\","
-                "\"shards\":[{\"bytes\":3,\"path\":\"shard.jsonl\",\"records\":1,\"sha256\":\"%s\"}],\"version\":1}\n",
+                "\"shards\":[{\"bytes\":3,\"path\":\"" BQ_COORDINATOR_FIXTURE_AA_SHARD "\",\"records\":1,"
+                "\"sha256\":\"%s\"}],\"version\":1}\n",
                 (uint64_t)token, BQ_COORDINATOR_FIXTURE_CONTEXT, BQ_COORDINATOR_FIXTURE_PLAN, label, shard_digest);
             ok = length > 0 && (size_t)length < sizeof(receipt);
         }

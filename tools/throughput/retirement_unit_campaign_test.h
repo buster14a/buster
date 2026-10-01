@@ -261,7 +261,9 @@ static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, cha
         "\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
-        "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
+        "\"native_target\":\"x86_64-unknown-linux-gnu\","
+        "\"phase_receipt_sha256\":\"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\","
+        "\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
         "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\","
         "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
         admitted, 1, 2, family, cpu);
@@ -1336,7 +1338,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     if (scenario == TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST) receipt_sha = test_unit_campaign_receipt;
     BqRetirementUnitCampaignAdmission admission = {plan_sha, context_sha, driver.post_aa_sha256, receipt_sha,
         (unsigned char const*)receipt->aa_receipt, strlen(receipt->aa_receipt),
-        scenario == TEST_UNIT_CAMPAIGN_DENIED ? 0 : 1};
+        scenario == TEST_UNIT_CAMPAIGN_DENIED ? 0 : 1, NULL};
     if (scenario == TEST_UNIT_CAMPAIGN_STALE_ADMISSION) admission.context_sha256 = test_unit_campaign_ready;
     if (scenario == TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION) admission.post_aa_sha256 = context_sha;
     if (ok)

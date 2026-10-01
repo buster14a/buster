@@ -10,11 +10,12 @@
  * an eligible synthetic policy in zen5_aa_evaluator.py's canonical form);
  * the band over the derived family's A/A intervals from a synthetic A/A
  * spool (bq_test_aa_band: rows inside the band admitted with every member
- * assessed, an exact cell outside the band and a bootstrap aggregate whose
+ * assessed, rows whose canonical lines are not the attested AA_MEASURED
+ * digest refused (#1021), an exact cell outside the band and a bootstrap aggregate whose
  * interval crosses it refused, a plan of another P refused, and unbounded or crossing bounds
  * outside bq_retirement_aa_inside); and the v2 receipt from the binding
  * context's identities (bq_test_aa_receipt: exact canonical bytes and
- * digest, a context of another family or an identity needing escapes
+ * digest, no receipt without a phase receipt digest, a context of another family or an identity needing escapes
  * refused).
  *
  * Map: bq_test_aa_policy_bytes (the synthetic policy document),
@@ -26,6 +27,7 @@
 #define BQ_TEST_AA_POLICY_BYTES 4096u
 #define BQ_TEST_AA_ARENA_BYTES (UINT64_C(1) << 30)
 #define BQ_TEST_AA_FAMILY "5555555555555555555555555555555555555555555555555555555555555555"
+#define BQ_TEST_AA_PHASE "9999999999999999999999999999999999999999999999999999999999999999"
 
 /* A buster-zen5-aa-policy-v1 document as the evaluator's canonical_bytes
  * writes it (sorted keys, compact separators, ASCII, one line feed), with
@@ -168,6 +170,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_aa_spool_fill(BqTestAaSpool* spool, FILE* file,
     u64 per_unit = (u64)TP_RETIREMENT_ROUNDS * 60u;
     *spool = (BqTestAaSpool){0};
     for (u32 row = 0; row < 3; row += 1) spool->rows[row].id = row;
+    spool->rows[0].metrics = TP_RETIREMENT_SAMPLE_RUNTIME;
     spool->groups[0].object = TP_RETIREMENT_NONE;
     spool->groups[1].object = 0;
     spool->samples = (TpRetirementSamples){.spool = file, .rows = spool->rows, .groups = spool->groups,
@@ -194,6 +197,30 @@ BUSTER_GLOBAL_LOCAL bool bq_test_aa_spool_fill(BqTestAaSpool* spool, FILE* file,
              fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes);
     }
     ok = ok && fflush(file) == 0;
+    return ok;
+}
+
+/* The spool's canonical A/A row digest as lane D exports it (the AA_MEASURED
+ * digest): every row record, then the batch record of group 1 (object 0),
+ * through lane D's encoders. */
+BUSTER_GLOBAL_LOCAL bool bq_test_aa_spool_digest(BqTestAaSpool* spool, char digest[SHA256_HEX_CAPACITY])
+{
+    u64 per_unit = (u64)TP_RETIREMENT_ROUNDS * 60u;
+    Sha256 hash;
+    sha256_init(&hash);
+    bool ok = true;
+    for (u64 ordinal = 0; ok && ordinal < 4u * per_unit; ordinal += 1)
+    {
+        uint64_t values[TP_RETIREMENT_SAMPLE_VALUES];
+        char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
+        u32 unit = (u32)(ordinal / per_unit), round = (u32)(ordinal / 60u % 2u), pair = (u32)(ordinal % 60u);
+        ok = tp_retirement_sample_read(&spool->samples, ordinal, values);
+        size_t length = !ok ? 0 : unit == 3 ? tp_retirement_batch_record(line, sizeof(line), 1, round, pair, values) :
+            tp_retirement_sample_record(line, sizeof(line), unit, round, pair, spool->rows[unit].metrics, values);
+        ok = ok && length;
+        if (ok) sha256_add(&hash, line, (u64)length);
+    }
+    if (ok) sha256_finish_hex(&hash, (char8*)digest);
     return ok;
 }
 
@@ -226,8 +253,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_aa_band(void)
          * pair over the object group: nine exact cells. */
         BQ_CHECK(built && family.cells_total == 9 && family.bootstrap > 0 && family.runtime_count == 1 &&
                  family.object_count == 1);
-        BQ_CHECK(bq_test_aa_spool_fill(&spool, file, mode) &&
-                 bq_retirement_aa_ratios(&spool.samples, &family, 60, arena, ratios));
+        char attested[SHA256_HEX_CAPACITY] = {0};
+        BQ_CHECK(bq_test_aa_spool_fill(&spool, file, mode) && bq_test_aa_spool_digest(&spool, attested) &&
+                 bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, ratios));
         TpRetirementPlan plan = {4260881u, TP_RETIREMENT_STATISTICS_VERSION, family.bootstrap, family.cells_total, 60,
                                  TP_RETIREMENT_MIN_RESAMPLES, 1};
         bool admitted = built && ratios[0] && bq_retirement_aa_band_check(&plan, &family, ratios, &policy, arena, &band);
@@ -238,13 +266,39 @@ BUSTER_GLOBAL_LOCAL void bq_test_aa_band(void)
             TpRetirementPlan other = plan;
             other.pairs_per_round = 62;
             BQ_CHECK(!bq_retirement_aa_band_check(&other, &family, ratios, &policy, arena, &band));
-            /* A spool that is not finished, or of another row, refuses. */
+            /* (#1021) Rows whose canonical lines are not the attested ones
+             * refuse: another attested digest, or one record changed after
+             * the attestation. */
             double* unused[TP_RETIREMENT_COMPOSE_METRICS] = {0};
+            char forged[SHA256_HEX_CAPACITY];
+            memcpy(forged, attested, sizeof(forged));
+            forged[0] = forged[0] == 'a' ? 'b' : 'a';
+            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, forged, arena, unused));
+            uint64_t values[TP_RETIREMENT_SAMPLE_VALUES];
+            unsigned char bytes[TP_RETIREMENT_SAMPLE_RECORD_BYTES];
+            bool read = tp_retirement_sample_read(&spool.samples, 130, values);
+            values[1] += 1;
+            for (u32 index = 0; index < TP_RETIREMENT_SAMPLE_VALUES; index += 1)
+                tp_retirement_sample_pack(bytes + index * 8u, values[index]);
+            BQ_CHECK(read && fseeko(file, (off_t)(130u * sizeof(bytes)), SEEK_SET) == 0 &&
+                     fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes) && fflush(file) == 0 &&
+                     !bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, unused));
+            values[1] -= 1;
+            for (u32 index = 0; index < TP_RETIREMENT_SAMPLE_VALUES; index += 1)
+                tp_retirement_sample_pack(bytes + index * 8u, values[index]);
+            BQ_CHECK(fseeko(file, (off_t)(130u * sizeof(bytes)), SEEK_SET) == 0 &&
+                     fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes) && fflush(file) == 0 &&
+                     bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, unused));
+            /* A spool that is not finished, of another row or another runtime
+             * flag refuses. */
             spool.samples.finished = 0;
-            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, arena, unused));
+            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, unused));
             spool.samples.finished = 1;
+            spool.rows[0].metrics = 0;
+            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, unused));
+            spool.rows[0].metrics = TP_RETIREMENT_SAMPLE_RUNTIME;
             spool.rows[2].id = 7;
-            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, arena, unused));
+            BQ_CHECK(!bq_retirement_aa_ratios(&spool.samples, &family, 60, attested, arena, unused));
         }
         else
         {
@@ -299,12 +353,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_aa_receipt(Arena* arena)
         "\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},\"family_sha256\":\"" BQ_TEST_AA_FAMILY "\","
         "\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\",\"logical_cpu\":3,"
         "\"machine_id\":\"zen5-9700x-01\",\"native_only\":true,\"native_target\":\"x86_64-unknown-linux-gnu\","
+        "\"phase_receipt_sha256\":\"" BQ_TEST_AA_PHASE "\","
         "\"profile_id\":\"zen5-9700x-native\",\"profile_version\":\"profile-v1\","
         "\"schema\":\"buster-native-retirement-aa-admission-v2\",\"service_id\":\"retirement-9700x\",\"version\":2}";
     bq_digest(expected, (u32)strlen(expected), (char8*)expected_digest);
     BQ_CHECK(parsed && bq_retirement_aa_identities(&context, BQ_TEST_AA_FAMILY, &identities) &&
-             bq_retirement_aa_receipt_render(&policy, &identities, 3, BQ_TEST_AA_FAMILY, receipt, &length, digest) &&
+             bq_retirement_aa_receipt_render(&policy, &identities, 3, BQ_TEST_AA_FAMILY, BQ_TEST_AA_PHASE, receipt,
+                                             &length, digest) &&
              length == strlen(expected) && !memcmp(receipt, expected, length) && !strcmp(digest, expected_digest));
+    /* (#1021) No phase receipt digest, no receipt. */
+    BQ_CHECK(!bq_retirement_aa_receipt_render(&policy, &identities, 3, BQ_TEST_AA_FAMILY, NULL, receipt, &length,
+                                              digest) && !length && !digest[0] &&
+             !bq_retirement_aa_receipt_render(&policy, &identities, 3, BQ_TEST_AA_FAMILY, "short", receipt, &length,
+                                              digest) && !length);
     /* A context binding another family, or an identity that would need
      * escaping, renders nothing. */
     BQ_CHECK(!bq_retirement_aa_identities(&context, "8888888888888888888888888888888888888888888888888888888888888888",
@@ -317,8 +378,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_aa_receipt(Arena* arena)
     /* No policy digest, no receipt. */
     BqRetirementAaPolicy unpinned = policy;
     unpinned.sha256[0] = 0;
-    BQ_CHECK(!bq_retirement_aa_receipt_render(&unpinned, &identities, 3, BQ_TEST_AA_FAMILY, receipt, &length, digest) &&
-             !length && !digest[0]);
+    BQ_CHECK(!bq_retirement_aa_receipt_render(&unpinned, &identities, 3, BQ_TEST_AA_FAMILY, BQ_TEST_AA_PHASE, receipt,
+                                              &length, digest) && !length && !digest[0]);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_retirement_aa_admission(void)

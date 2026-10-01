@@ -255,8 +255,10 @@ SERVICE_RECEIPT_SCHEMA = "buster-native-retirement-service-receipt-v1"
 PROFILE_SCHEMA = "buster-native-retirement-host-profile-v1"
 QUALIFICATION_SCHEMA = "buster-native-retirement-host-qualification-v1"
 # (#426 plan step 6) Version 2 adds the pinned #426 A/A policy digest, the
-# policy's current-job equivalence band exactly as recorded and the per-job
-# decision; version 1 is refused. Only an admission writes a receipt.
+# policy's current-job equivalence band exactly as recorded, the per-job
+# decision and (#1021) the digest of the service's AA_MEASURED phase receipt
+# that attested the A/A rows; version 1 is refused. Only an admission writes
+# a receipt.
 AA_SCHEMA = "buster-native-retirement-aa-admission-v2"
 AA_VERSION = 2
 AA_DECISION = "admitted"
@@ -5824,8 +5826,8 @@ def _check_execution_evidence(root, binding):
         "schema", "version", "machine_id", "profile_id", "profile_version", "service_id",
         "logical_cpu", "native_target", "admitted", "native_only",
         "baseline_source_commit", "baseline_source_tree", "lease_protocol",
-        "family_sha256", "aa_policy_sha256", "equivalence_band", "aa_decision"),
-        "aa_admission_receipt")
+        "family_sha256", "aa_policy_sha256", "equivalence_band", "aa_decision",
+        "phase_receipt_sha256"), "aa_admission_receipt")
     if admission["schema"] != AA_SCHEMA or type(admission["version"]) is not int or \
             admission["version"] != AA_VERSION:
         _fail("A/A admission schema/version is not the admitted #437 receipt")
@@ -5834,6 +5836,7 @@ def _check_execution_evidence(root, binding):
     if admission["aa_decision"] != AA_DECISION:
         _fail("A/A admission receipt does not record an admitted decision")
     _sha(admission["aa_policy_sha256"], "aa_admission_receipt.aa_policy_sha256")
+    _sha(admission["phase_receipt_sha256"], "aa_admission_receipt.phase_receipt_sha256")
     band = _keys(admission["equivalence_band"], ("lower", "upper"),
                  "aa_admission_receipt.equivalence_band")
     for bound in ("lower", "upper"):

@@ -1357,8 +1357,8 @@ D's driver in `<attempt>/retirement-campaign/` (private `work`, `logs`,
    `bq_retirement_unit_handoff_declared`), D's five documents as prior
    entries at their measured sizes, and the result root's worker-written
    entries as external entries (`BQ_RETIREMENT_WORKER_RESULT_ENTRIES`: the
-   three control files, the five `BQPHASE2` `worker-phase-N` receipts,
-   `worker-phase-5` included, and PR 3's binding and A/A admission receipt,
+   three control files, the six `BQPHASE2` `worker-phase-N` receipts,
+   `worker-phase-5` and `worker-phase-6` included, and PR 3's binding and A/A admission receipt,
    `BQ_RETIREMENT_WORKER_BINDING_ENTRIES`, each at the per-file cap; and the
    evidence files the pinned binding context names, at their exact count and
    bytes, `bq_retirement_worker_evidence_measure`, at most
@@ -1441,29 +1441,36 @@ were decided by OPUS-CLOUD on #36.
    - `aa_policy_sha256`;
    - `equivalence_band`, the band strings exactly as the policy records
      them;
-   - `aa_decision` `admitted`.
+   - `aa_decision` `admitted`;
+   - `phase_receipt_sha256` (#1021), the SHA-256 of the coordinator's
+     published AA_MEASURED receipt.
 
    The driver checks the schema, version, decision, CPU, target and family
    (`bq_retirement_unit_campaign_receipt`). Lane F's #511 validator requires
    v2 with exactly these keys: it checks the digest form, the band form and
    order, and the decision, and it refuses v1.
 
-The admission is still refused in production. The decision is the unit's
-own: the rows come from this unit's private spool, and no #1021 phase
-authenticates them to the coordinator. The BQPHASE2 sequence has no phase
-between A/A and A/B, and the worker-phase receipts acknowledge only
-PREPARING, RETIREMENT_READY, SETTLING, MEASURING and MEASURED. So
-`bq_retirement_unit_campaign_admit` has no production transition into A/B.
-An admitted decision stops there with
-`BQ_RETIREMENT_WORKER_CAMPAIGN_AA_PHASE_UNAUTHENTICATED`, and a refused one
-stops earlier with `BQ_RECIPE_MISMATCH`. The receipt carries no phase-receipt
-digest until such a phase exists.
+The decision is computed only from A/A rows the service attested (#1021,
+[the attested A/A boundary](#coordinator-side-881-pr-4)). The rows come from
+the unit's spool, and they count only when their canonical lines hash to the
+AA_MEASURED digest that the coordinator verified against the published A/A
+shards and acknowledged. An admitted decision enters A/B through the
+campaign's production transition over that digest. A refused one stops with
+`BQ_RECIPE_MISMATCH` and writes no receipt. The receipt also carries
+`phase_receipt_sha256`, the digest of the coordinator's `worker-phase-6`
+receipt, and the finalization checks it. Production still never starts: the
+installed profile is blocked and pins no policy.
 
 The preparation fixture (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`) compiles
-none of `retirement_aa_admission.c`. It enters A/B through the driver's
-fixture admission with a v2 receipt stand-in
+none of `retirement_aa_admission.c`. Its campaign (job 82) takes the full
+attested path: AA_MEASURED through the real coordinator, the
+`worker-phase-6` receipt, and the production transition into A/B. Only the
+policy decision is replaced, by a v2 receipt stand-in
 (`bq_retirement_worker_campaign_fixture_receipt`) whose test policy digest
-and band are not a #426 decision. `bq_test_retirement_aa_admission`
+and band are not a #426 decision but whose `phase_receipt_sha256` is the
+real receipt's. Lane D's own driver fixture
+(`retirement_unit_campaign_test.h`) runs on a BQPHASE1 channel, which has no
+AA_MEASURED, and keeps the campaign's fixture transition. `bq_test_retirement_aa_admission`
 (`retirement_aa_admission_tests.h`, in the service self-test) covers the
 production layers over synthetic inputs:
 - the policy, in the evaluator's canonical bytes, refused for another digest;
@@ -1758,10 +1765,11 @@ a packet never selects it. The smoke recipe keeps `BQPHASE1` byte for byte.
 | 48–79 | none | SHA-256 digest (raw bytes) |
 
 The version-2 sequence is PREPARING, RETIREMENT_READY (5), SETTLING,
-MEASURING, MEASURED. `bq_phase_next` gives the only successor. The
-RETIREMENT_READY packet carries the ready record's digest and the MEASURED
-packet carries the receipt authority's digest. Each must be nonzero, and
-every other phase carries 32 zero bytes. Parsing is strict: a packet of any
+MEASURING, AA_MEASURED (6, #1021), MEASURED. `bq_phase_next` gives the only
+successor. The RETIREMENT_READY packet carries the ready record's digest,
+the AA_MEASURED packet the A/A stage's canonical row digest and the MEASURED
+packet the receipt authority's digest. Each must be nonzero, and every other
+phase carries 32 zero bytes. Parsing is strict: a packet of any
 other size, the other version's magic, an unknown or out-of-order phase, a
 missing, zero or unwanted digest, or an ancillary descriptor is a protocol
 failure (`BQ_WORKER_MISMATCH`). Digests travel as 64 lowercase hex digits
@@ -1780,6 +1788,63 @@ for three reasons:
 Its receipt is `worker-phase-5`, with `protocol=BQPHASE2` and a
 `digest-sha256=` line. `bq_worker_phases_validate` follows the channel's
 own sequence, so a retirement job's final validation also requires it.
+
+**The attested A/A boundary (#1021).** The service attests the A/A rows
+between A/A and A/B, so the unit's A/A admission cannot rest on rows only the
+unit has seen.
+
+1. **The packet.** When lane D's A/A stage has finished, the producer
+   publishes its sample shards into the result store. The driver then sends
+   AA_MEASURED (`bq_retirement_unit_campaign_aa_attest`) carrying the A/A
+   stage's raw numeric digest (`TpRetirementSamples.raw_sha256`). That digest
+   is the SHA-256 of the canonical `row-round-pair` lines and then the
+   `group-round-pair` lines that lane D's encoders wrote to those shards.
+2. **The attestation.** Before acknowledging, `bq_worker_phase_accept` calls
+   `bq_retirement_coordinator_aa_attest`. It reads
+   `retirement-samples-aa-NNNN.jsonl` and then
+   `retirement-batches-aa-NNNN.jsonl`, each numbered contiguously from 0000,
+   in the result root. Each must be a single-link regular file owned by the
+   service, within the store's per-file cap and unchanged across the read.
+   Their concatenation must hash to the packet's digest, and at least one row
+   shard must exist. A pending cancellation or an expired execution deadline
+   before or after the read withholds the acknowledgement. Only then does it
+   write the `worker-phase-6` record and receipt, keep the digest in the
+   finalization (`retirement_aa_sha256`) and acknowledge.
+3. **Its place in the sequence.** AA_MEASURED keeps the job in MEASURING, so
+   the four-phase queue journal is unchanged. The unit's acknowledgement
+   window for it is the job's remaining execution deadline, as for MEASURED
+   (`bq_phase_ack_deadline`), because the read covers every A/A shard. The
+   read runs between the stages: no A/B child exists until the
+   acknowledgement.
+4. **The unit's admission.**
+   - The producer hashes the published `worker-phase-6` receipt
+     (`bq_retirement_worker_phase_receipt`). It must be this job's and
+     attempt's BQPHASE2 phase-6 receipt ending in the attested digest.
+   - Production admission (`bq_retirement_aa_admission_decide`) re-encodes
+     every A/A spool record with lane D's encoders in export order. It uses
+     the ratios only if those lines hash to the attested digest.
+   - The v2 admission receipt binds the receipt's digest as
+     `phase_receipt_sha256`, which the driver checks
+     (`bq_retirement_unit_campaign_phase_receipt`).
+   - A/B is then entered through the campaign's production transition
+     `tp_retirement_campaign_admit_aa`. It requires the attested digest to
+     still be the finished A/A stage's raw digest.
+5. **The MEASURED handoff.** `bq_retirement_coordinator_handoff` requires
+   the context chain's A/A raw digest to be the attested one.
+6. **Finalization.** `bq_retirement_coordinator_finalize` checks the chain's
+   A/A raw digest again. After the derivation,
+   `bq_retirement_coordinator_admission_phase` requires the result's
+   admission receipt to name the SHA-256 of the coordinator's own
+   `worker-phase-6` queue record (`bq_worker_phase_record_sha256`).
+
+A missing, out-of-order, replayed or forged AA_MEASURED, or one whose digest
+is not the published shards', is a protocol failure (`BQ_WORKER_MISMATCH`)
+and never reaches A/B.
+
+Old journals still replay. Neither the frame layout, its size nor the queue
+journal changes. BQPHASE1 is untouched. A retirement attempt recorded before
+this change (none can exist while the recipe is blocked) has no
+`worker-phase-6`, so its finalization fails closed.
 
 **The authority handoff before MEASURED.** Before acknowledging a version-2
 MEASURED, and before writing its record and receipt,
@@ -1857,9 +1922,10 @@ makes the loss explicit.
 
 What remains unverifiable by the coordinator, bound only by digest: the bind
 time, the stage facts and log chains (measurement outputs the post-sample
-record and the receipt also bind), the untimed records' contents and the
-fixture's A/A admission receipt (production A/B is refused: no #1021 phase
-authenticates the A/A rows).
+record and the receipt also bind; the A/A stage's raw digest is the
+exception, attested against the published shards at AA_MEASURED), the
+untimed records' contents and the admission receipt's policy decision (the
+coordinator checks only that it names its own AA_MEASURED receipt).
 The two pending binding phases are lane F's.
 
 On the producer side, the version-2 MEASURED acknowledgement window
@@ -1892,8 +1958,9 @@ the run. Its fresh finalization has no digests, so
 coordinator's own durable records:
 
 - A from the queue's `preparation-<id>` record;
-- the ready and authority digests from the queue's `worker-phase-5` and
-  `worker-phase-4` records (`bq_worker_phase_record_digest`).
+- the ready, A/A row and authority digests from the queue's
+  `worker-phase-5`, `worker-phase-6` and `worker-phase-4` records
+  (`bq_worker_phase_record_digest`).
 
 A missing or malformed record leaves its digest empty, which fails closed.
 When a retirement success is already durable (FINALIZING or later) and its

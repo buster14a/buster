@@ -476,6 +476,7 @@ class BindingTests(unittest.TestCase):
             "schema": binding.AA_SCHEMA, "version": binding.AA_VERSION,
             "aa_decision": binding.AA_DECISION, "aa_policy_sha256": "8" * 64,
             "equivalence_band": {"lower": "0.98", "upper": "1.02"},
+            "phase_receipt_sha256": "9" * 64,
             "machine_id": "zen5-9700x-01", "profile_id": "zen5-9700x-native",
             "profile_version": "profile-v1", "service_id": "retirement-9700x",
             "admitted": True, "native_only": True,
@@ -2209,8 +2210,8 @@ class BindingTests(unittest.TestCase):
     def test_aa_admission_v2_binds_policy_band_and_decision(self):
         # (#426 plan step 6) The receipt is version 2 only: v1, a missing or
         # malformed policy digest, a band outside 0 < lower < 1 < upper or not
-        # in the evaluator's decimal form, and any decision but "admitted"
-        # are refused.
+        # in the evaluator's decimal form, any decision but "admitted", and
+        # (#1021) a missing or malformed phase receipt digest are refused.
         record, contents = self.make_record()
         mutations = {
             "v1 schema": lambda value: value.update(
@@ -2229,7 +2230,10 @@ class BindingTests(unittest.TestCase):
             "zero lower": lambda value: value["equivalence_band"].update(lower="0"),
             "no decision": lambda value: value.pop("aa_decision"),
             "refused decision": lambda value: value.update(aa_decision="refused"),
-            "extra field": lambda value: value.update(phase_receipt_sha256="9" * 64),
+            "extra field": lambda value: value.update(aa_rows_sha256="9" * 64),
+            "no phase receipt": lambda value: value.pop("phase_receipt_sha256"),
+            "short phase receipt": lambda value: value.update(phase_receipt_sha256="9" * 63),
+            "null phase receipt": lambda value: value.update(phase_receipt_sha256=None),
         }
         for name, mutate in mutations.items():
             candidate = copy.deepcopy(record)

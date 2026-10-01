@@ -339,11 +339,15 @@ the attempt:
    `bq_retirement_campaign_run`; transcript and metrics shards rotate onto
    service-supplied streams; then the metrics writer, transcript and numeric
    export finish, the stage must be ready and the post-A/A digest is formed.
-7. `bq_retirement_unit_campaign_admit`: production refuses and leaves the
-   attempt awaiting authority. The producer decides from the pinned #426
-   policy first (`retirement_aa_admission.c`, see `RETIREMENT_PREPARATION.md`),
-   but no #1021 phase authenticates the A/A rows to the coordinator, so
-   nothing can authorize A/B. Only the functional fixture build
+7. `bq_retirement_unit_campaign_aa_attest` (#1021): AA_MEASURED with the
+   A/A stage's raw digest, acknowledged only after the coordinator rehashed
+   the published A/A shards; then `bq_retirement_unit_campaign_admit`: the
+   producer decides from the pinned #426 policy over rows hashing to that
+   digest (`retirement_aa_admission.c`, see `RETIREMENT_PREPARATION.md`) and
+   enters A/B through `tp_retirement_campaign_admit_aa`, which requires the
+   attested digest to still be the A/A stage's. Without it production
+   refuses and leaves the attempt awaiting authority. Only the functional
+   fixture build, on lane D's own BQPHASE1 fixture channel
    (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`, rejected with
    `BQ_SERVICE_INSTALLED`, as is the campaign's own fixture macro) enters A/B
    through the campaign's fixture stand-in, and only with this campaign's

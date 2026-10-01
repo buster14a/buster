@@ -23,8 +23,11 @@
  *              documents sized (bq_retirement_unit_campaign_documents_measure,
  *              retained as documents-sized.txt, bq_retirement_worker_sized_write),
  *              lane E's store plan (bq_retirement_worker_store_plan), attach,
- *              documents, A/A, admission, post-A/A document, freeze, A/B and
- *              READY on the post-sample record stream
+ *              documents, A/A, the attested A/A boundary (#1021:
+ *              AA_MEASURED, bq_retirement_unit_campaign_aa_attest, and the
+ *              coordinator's receipt, bq_retirement_worker_phase_receipt),
+ *              admission, post-A/A document, freeze, A/B and READY on the
+ *              post-sample record stream
  *   MEASURED   (#881 PR 3) bq_retirement_worker_compose
  *              (retirement_worker_compose.c): the binding, composition, the
  *              receipt authority and context chain, MEASURED carrying the
@@ -34,10 +37,11 @@
  * receipts, the binding and its admission receipt; and the evidence files
  * the pinned binding context names, bq_retirement_worker_evidence_measure). Production A/A
  * admission decides from the pinned #426 policy and this job's A/A intervals
- * (bq_retirement_aa_admission_decide, retirement_aa_admission.c), but no
- * #1021 phase authenticates the A/A rows, so the driver still refuses
- * production A/B; the preparation fixture compiles the driver's fixture
- * admission and supplies the receipt stand-in
+ * over the rows the coordinator attested as AA_MEASURED
+ * (bq_retirement_aa_admission_decide, retirement_aa_admission.c, #1021) and
+ * enters A/B through the campaign's production transition over that digest;
+ * the preparation fixture takes the same attested path with a receipt
+ * stand-in for the policy decision
  * (bq_retirement_worker_campaign_fixture_receipt).
  *
  * Entry point: bq_retirement_worker_campaign_run. Release in reverse on
@@ -116,7 +120,7 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_directories[BQ_RETIRE
 /* Staged streams of one attempt: never more than the store holds. */
 #define BQ_RETIREMENT_WORKER_STREAMS_MAX TP_RETIREMENT_STORE_FILES
 /* The result root's worker-written entries (the control files: manifest,
- * bundle and outcome; the coordinator's five BQPHASE2 worker-phase-N
+ * bundle and outcome; the coordinator's six BQPHASE2 worker-phase-N
  * receipts; and the producer's #511 binding document and A/A admission
  * receipt, retirement_worker_compose.c) are inventoried beside the store's
  * files, so the store plan reserves them as external entries, each at the
@@ -147,8 +151,11 @@ BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES + BQ_RETIREMENT_WORKER_EVIDE
                 BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_FILES <= BQ_WORKER_BUNDLE_ENTRY_CAP);
 BUSTER_CT_CHECK(BQ_RETIREMENT_WORKER_RESULT_ENTRIES >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
-/* One receipt per BQPHASE2 phase, RETIREMENT_READY the last-numbered. */
-BUSTER_CT_CHECK(BQ_WORKER_RETIREMENT_PHASE_RECEIPTS == BQ_PHASE_RETIREMENT_READY);
+/* One receipt per BQPHASE2 phase, AA_MEASURED the last-numbered. */
+BUSTER_CT_CHECK(BQ_WORKER_RETIREMENT_PHASE_RECEIPTS == BQ_PHASE_AA_MEASURED);
+/* A coordinator worker-phase-N receipt is at most this many bytes
+ * (bq_worker_phase_accept formats it into 512). */
+#define BQ_RETIREMENT_WORKER_PHASE_RECEIPT_CAP 512u
 /* The untimed records stream's store path. */
 #define BQ_RETIREMENT_WORKER_UNTIMED_PATH "retirement-untimed-batches.jsonl"
 /* A/A and A/B writer tags and sample-shard prefixes: A/A's are retained
@@ -161,8 +168,8 @@ BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_sample_tags[TP_RETIRE
  * receipt stand-in over the driver's family and the campaign's CPU, defined
  * by the preparation fixture (retirement_worker_unit_tests.h). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
-    TpRetirementCampaign const* campaign, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
-    u32* length, char digest[SHA256_HEX_CAPACITY]);
+    TpRetirementCampaign const* campaign, char const phase_receipt[SHA256_HEX_CAPACITY],
+    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* length, char digest[SHA256_HEX_CAPACITY]);
 #endif
 
 BUSTER_GLOBAL_LOCAL void* bq_retirement_worker_allocate(Arena* arena, u64 count, u64 size)
@@ -911,8 +918,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_measure(Arena* arena, 
  * (retirement_aa_admission.c): the pinned #426 policy, the band over the
  * family's A/A intervals and, on admission, the v2 receipt. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_aa_admission_decide(BqRetirementWorkerCampaign* campaign,
-    BqRetirementCampaignUnitStore const* unit, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
-    u32* receipt_bytes, char receipt_sha256[SHA256_HEX_CAPACITY]);
+    BqRetirementCampaignUnitStore const* unit, char const phase_receipt_sha256[SHA256_HEX_CAPACITY],
+    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* receipt_bytes,
+    char receipt_sha256[SHA256_HEX_CAPACITY]);
 #endif
 
 /* Composition, the authority and MEASURED (retirement_worker_compose.c). */
@@ -1292,16 +1300,50 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_documents_sized(BqRetirementWorker
     return ok;
 }
 
-/* The documents, A/A, the admission, the post-A/A document, the freeze, A/B
- * and READY on the staged post-sample record; each finished stage's streams
- * are published. Production admission decides from the pinned #426 policy
+/* (#1021) The coordinator's AA_MEASURED receipt as it published it into the
+ * result root (`worker-phase-6`, the bytes of its queue record): this job's
+ * and attempt's BQPHASE2 receipt for phase 6 ending in exactly the attested
+ * digest. Its SHA-256 is the admission receipt's phase_receipt_sha256. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_phase_receipt(int result_root, BqPhaseChannel const* phases,
+    char const attested[SHA256_HEX_CAPACITY], char digest[SHA256_HEX_CAPACITY])
+{
+    char name[32], identity[128], tail[96], body[BQ_RETIREMENT_WORKER_PHASE_RECEIPT_CAP + 1] = {0};
+    snprintf(name, sizeof(name), "worker-phase-%u", BQ_PHASE_AA_MEASURED);
+    int identity_length = phases ? snprintf(identity, sizeof(identity), "schema=1\nprotocol=BQPHASE2\njob-id=%" PRIu64
+                                            "\nattempt-token=%" PRIu64 "\n", phases->job, phases->attempt) : -1;
+    int tail_length = attested ? snprintf(tail, sizeof(tail), "\ndigest-sha256=%s\n", attested) : -1;
+    int file = result_root >= 0 ? openat(result_root, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    u32 length = 0;
+    bool ok = file >= 0 && identity_length > 0 && (size_t)identity_length < sizeof(identity) && tail_length > 0 &&
+              (size_t)tail_length < sizeof(tail) && tp_retirement_digest(attested) && fstat(file, &info) == 0 &&
+              S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_size > tail_length &&
+              (u64)info.st_size <= BQ_RETIREMENT_WORKER_PHASE_RECEIPT_CAP &&
+              bq_read_file(file, (u8*)body, (u32)info.st_size, &length) && length == (u32)info.st_size;
+    if (file >= 0 && close(file) != 0) ok = false;
+    char phase_line[32];
+    snprintf(phase_line, sizeof(phase_line), "\nphase=%u\n", BQ_PHASE_AA_MEASURED);
+    ok = ok && !memchr(body, 0, length) && !strncmp(body, identity, (size_t)identity_length) &&
+         strstr(body, phase_line) && !memcmp(body + length - (u32)tail_length, tail, (size_t)tail_length) &&
+         strstr(body, "\ndigest-sha256=") == body + length - (u32)tail_length;
+    if (ok) bq_digest(body, length, (char8*)digest);
+    else digest[0] = 0;
+    return ok;
+}
+
+/* The documents, A/A, the attested A/A boundary, the admission, the
+ * post-A/A document, the freeze, A/B and READY on the staged post-sample
+ * record; each finished stage's streams are published. Once A/A's are, the
+ * driver sends AA_MEASURED with the A/A stage's raw digest, which the
+ * coordinator attests against the published shards before acknowledging
+ * (#1021, bq_retirement_unit_campaign_aa_attest); its published receipt's
+ * digest is the admission's phase receipt (bq_retirement_worker_phase_receipt).
+ * Production admission then decides from the pinned #426 policy over rows
+ * whose canonical lines hash to the attested digest
  * (bq_retirement_aa_admission_decide): a missing pin, another policy, a
- * policy that is not eligible or A/A intervals outside its band refuse
- * (BQ_RECIPE_MISMATCH, no receipt). An admitted decision still has no #1021
- * phase authority over the A/A rows, so the driver refuses without a failure
- * of its own and the campaign stops there
- * (BQ_RETIREMENT_WORKER_CAMPAIGN_AA_PHASE_UNAUTHENTICATED). */
-#define BQ_RETIREMENT_WORKER_CAMPAIGN_AA_PHASE_UNAUTHENTICATED BQ_UNSUPPORTED
+ * policy that is not eligible, other rows or A/A intervals outside its band
+ * refuse (BQ_RECIPE_MISMATCH, no receipt). An admitted decision enters A/B
+ * through the campaign's production transition over the attested digest. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWorkerCampaign* campaign,
     BqRetirementCampaignUnitStore const* unit, BqRetirementUnitCampaignDocumentSources const* sources)
 {
@@ -1314,18 +1356,24 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWor
     if (result == BQ_OK && !bq_retirement_unit_campaign_stage(driver, campaign->commands.commands, count, &streams))
         result = BQ_WORKER_FAILED;
     if (result == BQ_OK && !bq_retirement_worker_stage_publish(campaign, 0)) result = BQ_IO;
+    char phase_receipt[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK && !bq_retirement_unit_campaign_aa_attest(driver)) result = BQ_WORKER_MISMATCH;
+    if (result == BQ_OK &&
+        !bq_retirement_worker_phase_receipt(sources->directory, driver->phases, driver->aa_attested_sha256,
+                                            phase_receipt))
+        result = BQ_WORKER_MISMATCH;
     BqRetirementUnitCampaignAdmission admission = {campaign->plan_sha256, campaign->context_sha256,
-        driver->post_aa_sha256, NULL, NULL, 0, 0};
+        driver->post_aa_sha256, NULL, NULL, 0, 0, NULL};
     char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], receipt_sha256[SHA256_HEX_CAPACITY] = {0};
     u32 receipt_bytes = 0;
 #if defined(BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA)
     bool decided = result == BQ_OK &&
-                   bq_retirement_worker_campaign_fixture_receipt(driver, &campaign->campaign, receipt, &receipt_bytes,
-                                                                 receipt_sha256);
+                   bq_retirement_worker_campaign_fixture_receipt(driver, &campaign->campaign, phase_receipt, receipt,
+                                                                 &receipt_bytes, receipt_sha256);
     (void)unit;
 #else
-    if (result == BQ_OK) result = bq_retirement_aa_admission_decide(campaign, unit, receipt, &receipt_bytes,
-                                                                    receipt_sha256);
+    if (result == BQ_OK) result = bq_retirement_aa_admission_decide(campaign, unit, phase_receipt, receipt,
+                                                                    &receipt_bytes, receipt_sha256);
     bool decided = result == BQ_OK;
 #endif
     if (decided)
@@ -1334,9 +1382,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWor
         admission.receipt = (unsigned char const*)receipt;
         admission.receipt_bytes = receipt_bytes;
         admission.admitted = 1;
+        admission.phase_receipt_sha256 = phase_receipt;
     }
-    if (result == BQ_OK && !bq_retirement_unit_campaign_admit(driver, &admission))
-        result = driver->failure.reason ? BQ_RECIPE_MISMATCH : BQ_RETIREMENT_WORKER_CAMPAIGN_AA_PHASE_UNAUTHENTICATED;
+    if (result == BQ_OK && !bq_retirement_unit_campaign_admit(driver, &admission)) result = BQ_RECIPE_MISMATCH;
     /* The admitted receipt's bytes, which the binding names: an admission
      * without them, or with more than the driver's receipt cap, refuses
      * here rather than at composition. */

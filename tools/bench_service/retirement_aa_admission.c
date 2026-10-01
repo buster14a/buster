@@ -19,6 +19,10 @@
  * decimals with 0 < lower < 1 < upper. An unreadable or unowned file refuses
  * with BQ_CONFIGURATION_MISMATCH.
  *
+ * The rows are the A/A stage's finished spool, and only rows whose canonical
+ * lines (lane D's encoders, in export order) hash to the AA_MEASURED digest
+ * the coordinator attested against the published A/A sample shards and
+ * acknowledged (#1021, bq_retirement_unit_campaign_aa_attest) are used.
  * The band applies to this job's A/A rows as #1188 specifies: every member of
  * the derived #619 family (tp_retirement_compose_family, the composer's own),
  * in each round and pooled, through tp_retirement_assess with the frozen
@@ -29,15 +33,18 @@
  * their nearest doubles (strtod in the service's C locale). Only an
  * admission renders the v2 receipt (BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA):
  * the v1 identities from the pinned binding context, the policy digest, the
- * band strings as the policy records them and the decision.
+ * band strings as the policy records them, the decision and the digest of the
+ * coordinator's published AA_MEASURED receipt (phase_receipt_sha256).
  *
  * The fixture build (BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA) compiles none of
  * this; it presents bq_retirement_worker_campaign_fixture_receipt instead.
  *
- * Authority: the decision is the unit's own. The rows are read from the A/A
- * stage's private spool in this unit, and no #1021 phase authenticates them
- * to the coordinator between A/A and A/B, so the driver still refuses
- * production A/B (bq_retirement_unit_campaign_admit).
+ * Authority: the policy decision is the unit's, over rows the service
+ * attested. An admission enters A/B only through the campaign's production
+ * transition over that attested digest (bq_retirement_unit_campaign_admit,
+ * tp_retirement_campaign_admit_aa), and the coordinator's finalization
+ * requires the admission receipt to name its own AA_MEASURED receipt
+ * (bq_retirement_coordinator_finalize).
  *
  * Map: BqRetirementAaPolicy, bq_retirement_aa_decimal,
  * bq_retirement_aa_policy_check (pin, digest and fields over given bytes),
@@ -216,19 +223,28 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_ratio(u64 candidate, u64 baseline, dou
  * cell-major [cell][round][pair] (tp_retirement_ratio_index's order). Lane
  * D's row record holds the row's wall, peak-memory and runtime pairs and an
  * object group's batch record (after every row record) its process wall and
- * RSS pairs; the spool's rows and object groups must be the family's, in
- * order. A zero or non-finite ratio refuses. */
+ * RSS pairs; the spool's rows, their runtime flags and its object groups must
+ * be the family's, in order. Every record is re-encoded with lane D's own
+ * canonical encoders (tp_retirement_sample_record, tp_retirement_batch_record)
+ * in export order, and the lines must hash to `attested`, the AA_MEASURED
+ * digest the coordinator attested against the published A/A shards (#1021):
+ * the ratios come only from values whose canonical lines are those rows. A
+ * zero or non-finite ratio refuses. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_ratios(TpRetirementSamples* samples, TpRetirementComposeFamily const* family,
-    unsigned pairs, Arena* arena, double* ratios[TP_RETIREMENT_COMPOSE_METRICS])
+    unsigned pairs, char const attested[SHA256_HEX_CAPACITY], Arena* arena,
+    double* ratios[TP_RETIREMENT_COMPOSE_METRICS])
 {
     u64 per_unit = (u64)TP_RETIREMENT_ROUNDS * pairs;
     TpRetirementComposeLayout const* layout = family ? family->layout : NULL;
-    bool ok = samples && layout && arena && ratios && pairs && !samples->failed && samples->finished &&
-              samples->rows && samples->groups && samples->row_count == layout->row_count &&
-              samples->group_count == layout->group_count && samples->object_count == family->object_count &&
+    bool ok = samples && layout && arena && ratios && pairs && attested && tp_retirement_digest(attested) &&
+              !samples->failed && samples->finished && samples->rows && samples->groups &&
+              samples->row_count == layout->row_count && samples->group_count == layout->group_count &&
+              samples->object_count == family->object_count &&
               samples->row_records == (u64)samples->row_count * per_unit &&
               samples->expected == samples->row_records + (u64)samples->object_count * per_unit;
-    for (u32 row = 0; ok && row < layout->row_count; row += 1) ok = samples->rows[row].id == layout->rows[row].id;
+    for (u32 row = 0; ok && row < layout->row_count; row += 1)
+        ok = samples->rows[row].id == layout->rows[row].id &&
+             ((samples->rows[row].metrics & TP_RETIREMENT_SAMPLE_RUNTIME) != 0) == (layout->rows[row].runtime != 0);
     for (u32 group = 0; ok && group < layout->group_count; group += 1)
         ok = samples->groups[group].object == (family->group_object[group] == TP_RETIREMENT_COMPOSE_NONE ?
                                                TP_RETIREMENT_NONE : family->group_object[group]);
@@ -238,6 +254,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_ratios(TpRetirementSamples* samples, T
                                                                         sizeof(double)) : NULL;
         ok = ok && ratios[metric];
     }
+    Sha256 hash;
+    sha256_init(&hash);
     u32 units = ok ? samples->row_count + samples->object_count : 0;
     for (u32 unit = 0; ok && unit < units; unit += 1)
     {
@@ -248,8 +266,17 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_ratios(TpRetirementSamples* samples, T
         for (u64 index = 0; ok && index < per_unit; index += 1)
         {
             uint64_t values[TP_RETIREMENT_SAMPLE_VALUES] = {0};
+            char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
+            unsigned round = (unsigned)(index / pairs), pair = (unsigned)(index % pairs);
             u64 slot = (u64)cell * per_unit + index;
-            ok = tp_retirement_sample_read(samples, base + index, values) &&
+            ok = tp_retirement_sample_read(samples, base + index, values);
+            size_t length = !ok ? 0 : batch ?
+                tp_retirement_batch_record(line, sizeof(line), family->object_groups[cell], round, pair, values) :
+                tp_retirement_sample_record(line, sizeof(line), samples->rows[cell].id, round, pair,
+                                            samples->rows[cell].metrics, values);
+            ok = ok && length;
+            if (ok) sha256_add(&hash, line, (u64)length);
+            ok = ok &&
                  bq_retirement_aa_ratio(values[1], values[0], &ratios[batch ? TP_RETIREMENT_BATCH_WALL_TIME :
                                                                           TP_RETIREMENT_WALL_TIME][slot]) &&
                  bq_retirement_aa_ratio(values[3], values[2], &ratios[batch ? TP_RETIREMENT_BATCH_PEAK_RSS :
@@ -258,6 +285,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_ratios(TpRetirementSamples* samples, T
                 ok = bq_retirement_aa_ratio(values[5], values[4],
                                             &ratios[TP_RETIREMENT_GENERATED_RUNTIME][(u64)runtime * per_unit + index]);
         }
+    }
+    char computed[SHA256_HEX_CAPACITY] = {0};
+    if (ok)
+    {
+        sha256_finish_hex(&hash, (char8*)computed);
+        ok = !strcmp(computed, attested);
     }
     return ok;
 }
@@ -416,19 +449,23 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_identities(BqRetirementWorkerBindingCo
  * and its digest. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_receipt_render(BqRetirementAaPolicy const* policy,
     BqRetirementAaIdentities const* identities, int logical_cpu, char const family_sha256[SHA256_HEX_CAPACITY],
-    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* length, char digest[SHA256_HEX_CAPACITY])
+    char const phase_receipt_sha256[SHA256_HEX_CAPACITY], char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
+    u32* length, char digest[SHA256_HEX_CAPACITY])
 {
-    int written = policy && identities && family_sha256 && logical_cpu >= 0 && policy->sha256[0] ?
+    int written = policy && identities && family_sha256 && logical_cpu >= 0 && policy->sha256[0] &&
+                  phase_receipt_sha256 && tp_retirement_digest(phase_receipt_sha256) ?
         snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
             "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\",\"aa_policy_sha256\":\"%s\","
             "\"admitted\":true,\"baseline_source_commit\":\"%s\",\"baseline_source_tree\":\"%s\","
             "\"equivalence_band\":{\"lower\":\"%s\",\"upper\":\"%s\"},\"family_sha256\":\"%s\","
             "\"lease_protocol\":\"" BQ_RETIREMENT_AA_LEASE_PROTOCOL "\",\"logical_cpu\":%d,\"machine_id\":\"%s\","
-            "\"native_only\":true,\"native_target\":\"" BQ_RETIREMENT_AA_NATIVE_TARGET "\",\"profile_id\":\"%s\","
+            "\"native_only\":true,\"native_target\":\"" BQ_RETIREMENT_AA_NATIVE_TARGET "\",\"phase_receipt_sha256\":\"%s\","
+            "\"profile_id\":\"%s\","
             "\"profile_version\":\"%s\",\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"%s\","
             "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
             policy->sha256, identities->baseline_commit, identities->baseline_tree, policy->lower, policy->upper,
-            family_sha256, logical_cpu, identities->machine_id, identities->profile_id, identities->profile_version,
+            family_sha256, logical_cpu, identities->machine_id, phase_receipt_sha256, identities->profile_id,
+            identities->profile_version,
             identities->service_id) : -1;
     bool ok = written > 0 && written < (int)BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX;
     if (ok) bq_digest(receipt, (u32)written, (char8*)digest);
@@ -443,8 +480,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_aa_receipt_render(BqRetirementAaPolicy co
  * BQ_RECIPE_MISMATCH (policy, family, rows or band), BQ_CONFIGURATION_MISMATCH
  * (installed files) and no receipt. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_aa_admission_decide(BqRetirementWorkerCampaign* campaign,
-    BqRetirementCampaignUnitStore const* unit, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
-    u32* receipt_bytes, char receipt_sha256[SHA256_HEX_CAPACITY])
+    BqRetirementCampaignUnitStore const* unit, char const phase_receipt_sha256[SHA256_HEX_CAPACITY],
+    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* receipt_bytes,
+    char receipt_sha256[SHA256_HEX_CAPACITY])
 {
     BqRetirementAaPolicy policy = {0};
     TpRetirementComposeFamily family = {0};
@@ -459,7 +497,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_aa_admission_decide(BqRetirementWorker
     if (result == BQ_OK &&
         !(tp_retirement_compose_family(&campaign->compose_layout, campaign->arena, &family) &&
           bq_retirement_aa_ratios(&campaign->stages[0].samples, &family, campaign->plan.pairs_per_round,
-                                  campaign->arena, ratios) &&
+                                  campaign->driver.aa_attested_sha256, campaign->arena, ratios) &&
           bq_retirement_aa_band_check(&campaign->plan, &family, ratios, &policy, campaign->arena, &band)))
         result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_worker_binding_import(campaign->arena, unit->installed, unit->profile,
@@ -467,7 +505,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_aa_admission_decide(BqRetirementWorker
     if (result == BQ_OK &&
         !(bq_retirement_aa_identities(&context, campaign->driver.family_sha256, &identities) &&
           bq_retirement_aa_receipt_render(&policy, &identities, campaign->campaign.cpu, campaign->driver.family_sha256,
-                                          receipt, receipt_bytes, receipt_sha256)))
+                                          phase_receipt_sha256, receipt, receipt_bytes, receipt_sha256)))
         result = BQ_RECIPE_MISMATCH;
     bq_retirement_worker_binding_release(&context);
     if (result != BQ_OK)

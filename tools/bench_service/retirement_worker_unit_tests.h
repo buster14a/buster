@@ -158,26 +158,27 @@
  * presents (retirement_worker_campaign.c declares it under
  * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA (v2)
  * keys in sorted order with test identities, a test policy digest and band,
- * over the driver's family and the campaign's CPU; its identities are the
+ * over the driver's family, the campaign's CPU and the coordinator's real
+ * AA_MEASURED receipt digest (#1021); its identities are the
  * ones the fixture's binding context binds
  * (retirement_binding_context_fixture.py). It is test data, not a #426
  * decision: the production receipt comes from bq_retirement_aa_admission_decide. */
 #define BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
-    TpRetirementCampaign const* campaign, char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX],
-    u32* length, char digest[SHA256_HEX_CAPACITY])
+    TpRetirementCampaign const* campaign, char const phase_receipt[SHA256_HEX_CAPACITY],
+    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* length, char digest[SHA256_HEX_CAPACITY])
 {
-    int written = driver && campaign ? snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
+    int written = driver && campaign && phase_receipt ? snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
         "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\",\"aa_policy_sha256\":\""
         BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "\",\"admitted\":true,\"baseline_source_commit\":\"%040d\","
         "\"baseline_source_tree\":\"%040d\",\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
-        "\"native_target\":\"x86_64-unknown-linux-gnu\",\"profile_id\":\"fixture-profile\","
-        "\"profile_version\":\"fixture-profile-v1\","
+        "\"native_target\":\"x86_64-unknown-linux-gnu\",\"phase_receipt_sha256\":\"%s\","
+        "\"profile_id\":\"fixture-profile\",\"profile_version\":\"fixture-profile-v1\","
         "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\","
         "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
-        1, 2, driver->family_sha256, campaign->cpu) : -1;
+        1, 2, driver->family_sha256, campaign->cpu, phase_receipt) : -1;
     bool ok = written > 0 && written < (int)BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX;
     if (ok) bq_digest(receipt, (u32)written, (char8*)digest);
     *length = ok ? (u32)written : 0;
@@ -2687,6 +2688,21 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fi
     memcpy(finalization.retirement_authority_sha256, other_authority, SHA256_HEX_CAPACITY);
     BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_WORKER_MISMATCH);
     memcpy(finalization.retirement_authority_sha256, authority, SHA256_HEX_CAPACITY);
+    /* (#1021) The AA_MEASURED digest, reloaded from worker-phase-6, must be
+     * the chain's A/A raw digest, and the admission receipt must name the
+     * coordinator's own AA_MEASURED receipt. */
+    char const* aa = composed->finalization.retirement_aa_sha256;
+    char other_aa[SHA256_HEX_CAPACITY], phase_receipt[SHA256_HEX_CAPACITY] = {0};
+    memcpy(other_aa, aa, SHA256_HEX_CAPACITY);
+    bq_prep_worker_unit_flip(other_aa);
+    BQ_PREP_CHECK(tp_retirement_digest(aa) && !strcmp(finalization.retirement_aa_sha256, aa));
+    memcpy(finalization.retirement_aa_sha256, other_aa, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_WORKER_MISMATCH);
+    memcpy(finalization.retirement_aa_sha256, aa, SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(queued && bq_worker_phase_record_sha256(queue, queued, BQ_PHASE_AA_MEASURED, phase_receipt) &&
+                  bq_retirement_coordinator_admission_phase(composed->result_directory, phase_receipt) &&
+                  !bq_retirement_coordinator_admission_phase(composed->result_directory, other_aa) &&
+                  bq_worker_retirement_finalize(queue, queued, &finalization) == BQ_OK);
     /* The execution deadline (backend clock) before the replay, which then
      * never runs (a tampered digest would fail it), and after it. */
     finalization.execution_deadline = 1000;
@@ -2712,6 +2728,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_coordinator(BqPrepOracleFixture* fi
     BQ_PREP_CHECK(queued && bq_worker_retirement_finalize(queue, queued, &recovered) == BQ_OK &&
                   !strcmp(recovered.retirement_preparation_sha256, attempt->digest) &&
                   !strcmp(recovered.retirement_ready_sha256, channel_digest) &&
+                  !strcmp(recovered.retirement_aa_sha256, aa) &&
                   !strcmp(recovered.retirement_authority_sha256, authority));
     /* A tampered durable READY record: a success that was already durable is
      * held for reconciliation, never rewritten as a failure. The genuine
@@ -3052,7 +3069,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_live_handoff(BqPrepOracleFixture* f
               socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0 &&
               bq_phase_init_version(&channel, pair[0], id, token, BQ_PHASE_VERSION_2) &&
               bq_prep_worker_unit_aside(queue->directory_fd, measured, true);
-    channel.sequence = BQ_PHASE_MEASURING;
+    channel.sequence = BQ_PHASE_AA_MEASURED;
     ok = ok && bq_phase_make_digest(&channel, BQ_PHASE_MEASURED, digest, message);
     BQ_PREP_CHECK(ok);
     BqWorkerBackend clock = {.clock = bq_prep_worker_unit_clock};
@@ -3064,6 +3081,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_worker_unit_live_handoff(BqPrepOracleFixture* f
     memcpy(finalization.result_root, composed->finalization.result_root, sizeof(finalization.result_root));
     memcpy(finalization.retirement_preparation_sha256, attempt->digest, SHA256_HEX_CAPACITY);
     memcpy(finalization.retirement_ready_sha256, composed->finalization.retirement_ready_sha256, SHA256_HEX_CAPACITY);
+    memcpy(finalization.retirement_aa_sha256, composed->finalization.retirement_aa_sha256, SHA256_HEX_CAPACITY);
     bq_prep_worker_unit_clock_mode = 0;
     u8 bytes[512];
     u32 size = 0;
@@ -3235,6 +3253,17 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
                       bq_prep_worker_unit_ready(attempt->attempt, digest) &&
                       !strcmp(digest, composed->finalization.retirement_ready_sha256) &&
                       composed->finalization.retirement_authority_sha256[0]);
+        /* (#1021) The authenticated A/A boundary: the coordinator attested
+         * AA_MEASURED over the published A/A shards, the unit's driver kept
+         * the acknowledged digest, which is the A/A stage's raw numeric
+         * digest, and the admitted receipt names the coordinator's
+         * AA_MEASURED receipt. */
+        char phase_receipt[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(composed && queued && tp_retirement_digest(composed->finalization.retirement_aa_sha256) &&
+                      bq_retirement_coordinator_aa_attest(composed->result_directory,
+                          composed->finalization.retirement_aa_sha256) == BQ_OK &&
+                      bq_worker_phase_record_sha256(&fixture->queue, queued, BQ_PHASE_AA_MEASURED, phase_receipt) &&
+                      bq_retirement_coordinator_admission_phase(composed->result_directory, phase_receipt));
         bool measured = composed && composed->joined == BQ_OK && queued;
         /* The finalization: the replay, the journalled authority and its
          * derivation (M1). */
@@ -3245,7 +3274,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_worker_unit(void)
          * before timing, the post-sample record and every stream kind of
          * both stages published unchanged, every composer output, the
          * binding and admission receipt, the 39 evidence files the binding
-         * context names, the five worker-phase receipts and the manifest and
+         * context names, the six worker-phase receipts and the manifest and
          * bundle, and nothing else. */
         BqPrepWorkerUnitResult result = measured ? bq_prep_worker_unit_result(composed->result_root, attempt->attempt) :
                                         (BqPrepWorkerUnitResult){0};
