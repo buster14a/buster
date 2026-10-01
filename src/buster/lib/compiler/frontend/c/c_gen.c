@@ -2727,10 +2727,10 @@ struct CIntegerIrBuilder
     IrProgram* program;
     IrModule* module;
     IrFunction* function;
-    // Only unsigned int bit-field values need a promotion fact absent from
+    // Narrow bit-fields can need a promotion fact absent from
     // their canonical type. Allocate lazily; ordinary functions pay no table.
-    u8* unsigned_bit_field_values;
-    u32 unsigned_bit_field_value_capacity;
+    u8* bit_field_promotions;
+    u32 bit_field_value_capacity;
     CIrVlaArrayType* vla_array_types;
     CIrVlaSavedBound* vla_saved_bounds;
     IrTypeId* vla_c_types;
@@ -4657,13 +4657,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrTypeId
     {
         builder->failure_message = S8("C IR value capacity exhausted");
     }
-    if (result.value < builder->unsigned_bit_field_value_capacity)
+    if (result.value < builder->bit_field_value_capacity)
     {
         // Speculative lowering can reuse a value id after rolling back.
-        builder->unsigned_bit_field_values[result.value] = 0;
+        builder->bit_field_promotions[result.value] = 0;
     }
     return result;
 }
+
+// Zero is the ordinary declared type; only a different promotion needs a row.
+typedef enum CIrBitFieldPromotion
+{
+    C_IR_BIT_FIELD_PROMOTION_NONE,
+    C_IR_BIT_FIELD_PROMOTION_INT,
+    C_IR_BIT_FIELD_PROMOTION_UNSIGNED_INT,
+} CIrBitFieldPromotion;
 
 BUSTER_C_INTERNAL IrTypeId c_ir_integer_promoted_value_type(CIntegerIrBuilder* builder, IrValueId value)
 {
@@ -4673,40 +4681,54 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_promoted_value_type(CIntegerIrBuilder* b
         result = builder->function->values[value.value].canonical_type;
         IrType* type = ir_type_from_id(&builder->program->types, result);
         if (type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM ||
-                     (type->kind == IR_TYPE_INTEGER && type->bit_width < 32) ||
-                     (type->kind == IR_TYPE_INTEGER && type->bit_width == 32 && !type->is_signed &&
-                      value.value < builder->unsigned_bit_field_value_capacity && builder->unsigned_bit_field_values[value.value])))
+                     (type->kind == IR_TYPE_INTEGER && type->bit_width < 32)))
         {
             result = builder->s32_type;
+        }
+        else if (type && type->kind == IR_TYPE_INTEGER && value.value < builder->bit_field_value_capacity &&
+                 builder->bit_field_promotions[value.value])
+        {
+            result = builder->bit_field_promotions[value.value] == C_IR_BIT_FIELD_PROMOTION_INT
+                         ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
         }
     }
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_unsigned_bit_field_promotes_to_int(CIntegerIrBuilder* builder, IrField const* field)
+BUSTER_C_INTERNAL CIrBitFieldPromotion c_ir_bit_field_promotion(CIntegerIrBuilder* builder, IrField const* field)
 {
     IrType* type = field ? ir_type_from_id(&builder->program->types, field->type) : 0;
-    return field && field->is_bit_field && field->bit_width && field->bit_width < 32 && type && type->kind == IR_TYPE_INTEGER &&
-           type->bit_width == 32 && !type->is_signed;
+    CIrBitFieldPromotion result = C_IR_BIT_FIELD_PROMOTION_NONE;
+    if (field && field->is_bit_field && field->bit_width && field->bit_width <= 32 && type && type->kind == IR_TYPE_INTEGER &&
+        type->bit_width >= 32)
+    {
+        bool signed_promotion = field->bit_width < 32 || type->is_signed;
+        if (type->bit_width > 32 || signed_promotion != type->is_signed)
+        {
+            result = signed_promotion ? C_IR_BIT_FIELD_PROMOTION_INT : C_IR_BIT_FIELD_PROMOTION_UNSIGNED_INT;
+        }
+    }
+    return result;
 }
 
-BUSTER_C_INTERNAL void c_ir_mark_unsigned_bit_field_value(CIntegerIrBuilder* builder, IrValueId value, IrField const* field)
+BUSTER_C_INTERNAL void c_ir_mark_bit_field_value(CIntegerIrBuilder* builder, IrValueId value, IrField const* field)
 {
-    if (value.value < builder->function->value_count && c_ir_unsigned_bit_field_promotes_to_int(builder, field))
+    CIrBitFieldPromotion promotion = c_ir_bit_field_promotion(builder, field);
+    if (value.value < builder->function->value_count && promotion != C_IR_BIT_FIELD_PROMOTION_NONE)
     {
-        if (value.value >= builder->unsigned_bit_field_value_capacity)
+        if (value.value >= builder->bit_field_value_capacity)
         {
             u32 capacity = builder->function->value_capacity;
             u8* values = arena_allocate(builder->arena, u8, capacity);
             memset(values, 0, capacity);
-            if (builder->unsigned_bit_field_value_capacity)
+            if (builder->bit_field_value_capacity)
             {
-                memcpy(values, builder->unsigned_bit_field_values, builder->unsigned_bit_field_value_capacity);
+                memcpy(values, builder->bit_field_promotions, builder->bit_field_value_capacity);
             }
-            builder->unsigned_bit_field_values = values;
-            builder->unsigned_bit_field_value_capacity = capacity;
+            builder->bit_field_promotions = values;
+            builder->bit_field_value_capacity = capacity;
         }
-        builder->unsigned_bit_field_values[value.value] = 1;
+        builder->bit_field_promotions[value.value] = (u8)promotion;
     }
 }
 
@@ -7408,7 +7430,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
     // field type into arithmetic, returns, and call arguments.
     IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
     IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
-    c_ir_mark_unsigned_bit_field_value(builder, result, field);
+    c_ir_mark_bit_field_value(builder, result, field);
     return result;
 }
 
@@ -7570,7 +7592,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
         {
             value = c_ir_emit_cast(builder, value, result_type, source);
         }
-        c_ir_mark_unsigned_bit_field_value(builder, value, field);
+        c_ir_mark_bit_field_value(builder, value, field);
     }
 
     return value;
@@ -7614,11 +7636,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* b
         }
         // An identity conversion can reuse an RHS bit-field value. Its
         // promotion fact belongs to the destination field after assignment.
-        if (result.value < builder->unsigned_bit_field_value_capacity)
+        if (result.value < builder->bit_field_value_capacity)
         {
-            builder->unsigned_bit_field_values[result.value] = 0;
+            builder->bit_field_promotions[result.value] = 0;
         }
-        c_ir_mark_unsigned_bit_field_value(builder, result, field);
+        c_ir_mark_bit_field_value(builder, result, field);
     }
     return result;
 }
@@ -21968,9 +21990,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     value = c_ir_emit_cast(builder, value, builder->f64_type, source);
                 }
-                else if (c_ir_integer_promoted_value_type(builder, value).value != value_type_id.value)
+                else
                 {
-                    value = c_ir_emit_cast(builder, value, builder->s32_type, source);
+                    IrTypeId promoted_type = c_ir_integer_promoted_value_type(builder, value);
+                    if (promoted_type.value != value_type_id.value)
+                    {
+                        value = c_ir_emit_cast(builder, value, promoted_type, source);
+                    }
                 }
             }
             if (value.value == IR_ID_UNDERLYING_INVALID)
@@ -23022,9 +23048,9 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         }
         // An explicit cast produces an ordinary value even when no machine
         // conversion is needed. It must not retain the operand's bit-field.
-        if (result.value < builder->unsigned_bit_field_value_capacity)
+        if (result.value < builder->bit_field_value_capacity)
         {
-            builder->unsigned_bit_field_values[result.value] = 0;
+            builder->bit_field_promotions[result.value] = 0;
         }
         // Canonical scalar pointers flatten pointer-to-VLA types. An explicit
         // cast such as (char *)&rows[i] must discard both row stride and the
@@ -23876,7 +23902,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     // and the usual arithmetic conversions. Only the existing atomic RMW path
     // needs a destination-typed operand here; non-atomic stores/results convert
     // after c_ir_apply_operation, not before it (C17 6.5.16.2).
-    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+    else if (atomic && !pointer_arithmetic && c_ir_bit_field_promotion(builder, c_ir_bit_field_from_place(builder, place)) == C_IR_BIT_FIELD_PROMOTION_NONE)
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;
@@ -27083,9 +27109,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         bool final_member = index + 2 == end ||
                             (index + 3 == end && (c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_PLUS_PLUS) ||
                                                  c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_MINUS_MINUS)));
-        if (promote_bit_fields && final_member && c_ir_unsigned_bit_field_promotes_to_int(builder, member.field))
+        if (promote_bit_fields && final_member)
         {
-            *type = builder->s32_type;
+            CIrBitFieldPromotion promotion = c_ir_bit_field_promotion(builder, member.field);
+            if (promotion != C_IR_BIT_FIELD_PROMOTION_NONE)
+            {
+                *type = promotion == C_IR_BIT_FIELD_PROMOTION_INT ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+            }
         }
         index += 2;
     }

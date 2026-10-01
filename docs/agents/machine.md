@@ -14,6 +14,14 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- System V indirect variadic calls keep the vector-register count in AL
+  through the call instruction. The canonical emitter reloads the callee from
+  its frame home into caller-saved R10 after argument staging; the MIR allocators
+  reserve the same indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  checks counts 0/1/8 and floating arguments crossing the register/stack boundary
+  against aligned foreign assembly and host-compiled `va_arg` callees. It covers
+  both frontend forms and every allocator on all four System V x86-64 targets;
+  matching desktop hosts execute the mixed objects.
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory-effect, fixed-register, tie, early-clobber, register-clobber, and
   implicit-vector-scratch membership in `MachineOpcodeInfo`, accessed through the
