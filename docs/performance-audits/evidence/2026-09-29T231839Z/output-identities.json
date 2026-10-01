@@ -1,0 +1,3346 @@
+[
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1020,
+          "name": ".text",
+          "sha256": "2c821cb3c3deab4551fd9dd935ebed6defa149c85238db6ef92a00341ddc6676"
+        }
+      ],
+      "object_bytes": 4408,
+      "object_sha256": "b15ca2e55092df6270404bfe224321fb1222ef2524212820d7756a3d289354cb",
+      "text": [
+        {
+          "bytes": 1020,
+          "name": ".text",
+          "sha256": "2c821cb3c3deab4551fd9dd935ebed6defa149c85238db6ef92a00341ddc6676"
+        }
+      ],
+      "text_bytes": 1020
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "38d802b1d33c2cb4d75babb7e05e77b0a7e94889fba7a808d573d47610a910ca"
+        }
+      ],
+      "object_bytes": 4760,
+      "object_sha256": "47c5842643fc6d7678398be4c0e2f76e02587608b35b532c7edd1683c64934d6",
+      "text": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "38d802b1d33c2cb4d75babb7e05e77b0a7e94889fba7a808d573d47610a910ca"
+        }
+      ],
+      "text_bytes": 1372
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1020,
+          "name": ".text",
+          "sha256": "2c821cb3c3deab4551fd9dd935ebed6defa149c85238db6ef92a00341ddc6676"
+        }
+      ],
+      "object_bytes": 4408,
+      "object_sha256": "b15ca2e55092df6270404bfe224321fb1222ef2524212820d7756a3d289354cb",
+      "text": [
+        {
+          "bytes": 1020,
+          "name": ".text",
+          "sha256": "2c821cb3c3deab4551fd9dd935ebed6defa149c85238db6ef92a00341ddc6676"
+        }
+      ],
+      "text_bytes": 1020
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "38d802b1d33c2cb4d75babb7e05e77b0a7e94889fba7a808d573d47610a910ca"
+        }
+      ],
+      "object_bytes": 4760,
+      "object_sha256": "47c5842643fc6d7678398be4c0e2f76e02587608b35b532c7edd1683c64934d6",
+      "text": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "38d802b1d33c2cb4d75babb7e05e77b0a7e94889fba7a808d573d47610a910ca"
+        }
+      ],
+      "text_bytes": 1372
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1068,
+          "name": ".text",
+          "sha256": "b628d12ed60c8d1742511a97d526e8b4d8bf2ed8d795634351c6ab5bfc7bb1b6"
+        }
+      ],
+      "object_bytes": 4456,
+      "object_sha256": "0c2d3d69c7ac99df7180c85a3b389c25411ac826b56b33aa597d8e1934398844",
+      "text": [
+        {
+          "bytes": 1068,
+          "name": ".text",
+          "sha256": "b628d12ed60c8d1742511a97d526e8b4d8bf2ed8d795634351c6ab5bfc7bb1b6"
+        }
+      ],
+      "text_bytes": 1068
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "object_bytes": 4424,
+      "object_sha256": "3a9a0dbffa2c1911300f15b2f919e5282645ce4b9b0dcce02e9071e555b195ac",
+      "text": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "text_bytes": 1036
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "object_bytes": 4424,
+      "object_sha256": "3a9a0dbffa2c1911300f15b2f919e5282645ce4b9b0dcce02e9071e555b195ac",
+      "text": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "text_bytes": 1036
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "d971755f96ac07b01fc5ee5e37840b02a433ef3db2aa226a9b4868cde2b1646e"
+        }
+      ],
+      "object_bytes": 4760,
+      "object_sha256": "27a0e7b93e83bcd2bf407c112922e32b5da28b6b72088eeeaed0777137d7f88b",
+      "text": [
+        {
+          "bytes": 1372,
+          "name": ".text",
+          "sha256": "d971755f96ac07b01fc5ee5e37840b02a433ef3db2aa226a9b4868cde2b1646e"
+        }
+      ],
+      "text_bytes": 1372
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "object_bytes": 4424,
+      "object_sha256": "3a9a0dbffa2c1911300f15b2f919e5282645ce4b9b0dcce02e9071e555b195ac",
+      "text": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "text_bytes": 1036
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "object_bytes": 4424,
+      "object_sha256": "3a9a0dbffa2c1911300f15b2f919e5282645ce4b9b0dcce02e9071e555b195ac",
+      "text": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "text_bytes": 1036
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "object_bytes": 4376,
+      "object_sha256": "4ef324cd748e1aadd0fe4f7c9f5462a14d38957573a7a32fc2e6dc975eb7c174",
+      "text": [
+        {
+          "bytes": 988,
+          "name": ".text",
+          "sha256": "fc5257665c9e9b6fe5707ce2de9ef53b2897b771677ac01d6aa0fc6ee72ee521"
+        }
+      ],
+      "text_bytes": 988
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "interactions",
+    "frontend": "memory-form",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "object_bytes": 4424,
+      "object_sha256": "3a9a0dbffa2c1911300f15b2f919e5282645ce4b9b0dcce02e9071e555b195ac",
+      "text": [
+        {
+          "bytes": 1036,
+          "name": ".text",
+          "sha256": "4c3fb16a10c04d737266034c46e707ea6fd8734aefd959aa9d79cb7c5473aa01"
+        }
+      ],
+      "text_bytes": 1036
+    },
+    "semantics": {
+      "link_status": 0,
+      "matches_clang": true,
+      "status": 0,
+      "stdout_sha256": "640b05df1009f682dcec2990c9429a69a12bba2159dde34adeb44668aa4791d2"
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "canonical_fast",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "object_bytes": 4680,
+      "object_sha256": "8fce4e5e9a199b6a3c1b6957f9597aaf357690f3d3b727e03d1e6c3c576c992c",
+      "text": [
+        {
+          "bytes": 1465,
+          "name": ".text",
+          "sha256": "a0eb6b30513ced628877dcc27ea729b23d4bf97663c4707ec5041d39148026cb"
+        }
+      ],
+      "text_bytes": 1465
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "string",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "object_bytes": 122616,
+      "object_sha256": "6cea07c93c4f89a8fec0c5b9842ceb86a51243963fa787d07d37f157b6a8f5ef",
+      "text": [
+        {
+          "bytes": 91624,
+          "name": ".text",
+          "sha256": "d1e2993f8667510cc795355901022864dd73435c27706cf146b998df21747b41"
+        }
+      ],
+      "text_bytes": 91624
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "integer",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "object_bytes": 6936,
+      "object_sha256": "5423c8ca4baa004bac5a1fda0952c4dcb4f1a548b603b2676ce128de06fb61d7",
+      "text": [
+        {
+          "bytes": 2898,
+          "name": ".text",
+          "sha256": "37bedbddeee5ab52ea4354ead4fc92d7df1b934a201598c4512e545942ea1640"
+        }
+      ],
+      "text_bytes": 2898
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "backend_pressure",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "object_bytes": 1417864,
+      "object_sha256": "dbe1130d0a20cdf1829888194ed2957930b16c4a3e7ffb877dc8c21de16df0c2",
+      "text": [
+        {
+          "bytes": 1396729,
+          "name": ".text",
+          "sha256": "101e0b8259f5d2c1a654867dff282fbae20eaff937cab95311d15cea6d8890a7"
+        }
+      ],
+      "text_bytes": 1396729
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "control_flow",
+    "frontend": "direct-ssa",
+    "allocator": "quality",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "object_bytes": 731168,
+      "object_sha256": "5d50d4b46cd87c5b8b0828c4bdc01a1197a027ca6adfe1ea0b900faf953605fb",
+      "text": [
+        {
+          "bytes": 722937,
+          "name": ".text",
+          "sha256": "1c52928124a51e5f79662bb29cb612bdc7d9c8689232e019d13febcbff0f73a0"
+        }
+      ],
+      "text_bytes": 722937
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "large_function",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "object_bytes": 126352,
+      "object_sha256": "94c4888e2f4c3ec5d5df2c871cee49dee65e4f7c6659ed721f490bc0edb83a70",
+      "text": [
+        {
+          "bytes": 123975,
+          "name": ".text",
+          "sha256": "82ee535701fca32cf7a699e5a309999c7280d1738f7a81879568fef281afee9c"
+        }
+      ],
+      "text_bytes": 123975
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "many_functions",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "object_bytes": 106720,
+      "object_sha256": "d3c562e48526eb0e84f57038cce9e209d71587da7e13e3ab6467a30857e1bf85",
+      "text": [
+        {
+          "bytes": 57330,
+          "name": ".text",
+          "sha256": "7fe47d33ffc6b3f2aa4bc9144ff812b7ac3f35d99d978746a213a230256657cd"
+        }
+      ],
+      "text_bytes": 57330
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "symbol_table",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "object_bytes": 248248,
+      "object_sha256": "619e72d52a17f98addf1cdfc6cdcffc9e96fd56010941e3494c7cb06ceea3b6f",
+      "text": [
+        {
+          "bytes": 43054,
+          "name": ".text",
+          "sha256": "daeb883a1f90337e3fa4df099e89da172d22782510e60d6d172f4aef823fffbb"
+        }
+      ],
+      "text_bytes": 43054
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "tiny_startup",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "object_bytes": 2408,
+      "object_sha256": "3d4d37e7dcef36139698862d60d536450dfb480779ac0676046a82e065e8af0f",
+      "text": [
+        {
+          "bytes": 46,
+          "name": ".text",
+          "sha256": "4c801264459c7a9e9f08f2a6d4e3293b3665b5034563328454917bf7dff9862f"
+        }
+      ],
+      "text_bytes": 46
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "unity",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "object_bytes": 38339688,
+      "object_sha256": "704e7267d8e652e513a19f1b93e29056ae2e8f243b076c1c78ee83d71bc4bd47",
+      "text": [
+        {
+          "bytes": 21638362,
+          "name": ".text",
+          "sha256": "d042bad1416badee864124f67337131f12544b5f2cddf2d2f51dbc3a2f00186d"
+        }
+      ],
+      "text_bytes": 21638362
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FPAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "PFAD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPfd",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FADPFADP",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  },
+  {
+    "source": "cjson",
+    "frontend": "direct-ssa",
+    "allocator": "fast",
+    "schedule": "FAPfD",
+    "artifact": {
+      "executable_sections": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "object_bytes": 77552,
+      "object_sha256": "9751793319d90f21c4790a21353b3dbc1ce0056743327e716da726fd7e12aec8",
+      "text": [
+        {
+          "bytes": 54777,
+          "name": ".text",
+          "sha256": "41912744c28968a3816694f09c97f82e084f438dc9e4b5c08709c8d136feab2b"
+        }
+      ],
+      "text_bytes": 54777
+    }
+  }
+]

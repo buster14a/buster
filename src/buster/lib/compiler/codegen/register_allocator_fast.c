@@ -1683,7 +1683,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
 // name are found in different places — and own the row ranges of the touches
 // themselves; this only widens them.
 BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
-                                                        u64 const* writes, u32 words, u32* starts, u32* ends)
+                                                        u64 const* writes, u32 words, u32* starts, u32* ends, u64* occupied_blocks)
 {
     u32 block_count = function->block_count;
     u64 plane = (u64)block_count * words;
@@ -1748,6 +1748,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
         MachineBlock const* block = function->blocks + block_index;
         u64 const* block_in = live_in + (u64)block_index * words;
         u64 const* block_out = live_out + (u64)block_index * words;
+        u64 const* block_reads = reads + (u64)block_index * words;
+        u64 const* block_writes = writes + (u64)block_index * words;
         u32 last = block->instruction_count ? block->first_instruction + block->instruction_count - 1u : block->first_instruction;
         // An object arriving live occupies the block from its first row, and
         // one leaving live occupies it through its last; an object born and
@@ -1768,8 +1770,20 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
                 leaving &= leaving - 1u;
                 ends[object] = BUSTER_MAX(ends[object], last);
             }
+            if (occupied_blocks)
+            {
+                u32 block_words = (block_count + 63u) / 64u;
+                u64 present = block_reads[word] | block_writes[word] | block_in[word] | block_out[word];
+                while (present)
+                {
+                    u32 object = 64u * word + trailing_zeroes_u64(present);
+                    present &= present - 1u;
+                    occupied_blocks[(u64)object * block_words + block_index / 64u] |= UINT64_C(1) << (block_index & 63u);
+                }
+            }
         }
     }
+
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -1908,7 +1922,7 @@ bool machine_fast_close_live_ranges_test(Arena* arena)
                                                    MACHINE_FAST_CLOSE_TEST_WORD_COUNT, reference_starts, reference_ends);
     arena_set_position(arena, arena_position);
     machine_fast_close_live_ranges(arena, &function, &prepass, reads, writes, MACHINE_FAST_CLOSE_TEST_WORD_COUNT,
-                                   actual_starts, actual_ends);
+                                   actual_starts, actual_ends, 0);
     arena_set_position(arena, arena_position);
     bool result = true;
     for (u32 slot = 0; slot < MACHINE_FAST_CLOSE_TEST_SLOT_COUNT; slot += 1)
@@ -1918,6 +1932,15 @@ bool machine_fast_close_live_ranges_test(Arena* arena)
     return result;
 }
 #endif
+typedef struct MachineFastBlockObjects MachineFastBlockObjects;
+struct MachineFastBlockObjects
+{
+    u32 count;
+    u32* ids;
+    u64* occupied;
+    u32 block_words;
+};
+
 // The edit stream is a compact memory program for virtual-register homes. A
 // reload before the first spill in a block reads the value that arrived from a
 // predecessor; a spill covers that incoming value for every later point in the
@@ -1927,10 +1950,12 @@ bool machine_fast_close_live_ranges_test(Arena* arena)
 // fixed point then closes each home over exactly the blocks in which its stored
 // contents can be live. A dense home index keeps the block bitsets proportional
 // to spilled values rather than to every virtual register in a large function.
-BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass,
-                                                        MachineStackPlacement const* placement, u32 const* row_blocks, u8 const* slot_needed,
-                                                        u8 const* home_opaque, u32* home_starts, u32* home_ends)
+BUSTER_GLOBAL_LOCAL MachineFastBlockObjects machine_fast_close_home_ranges(Arena* arena, MachineFunction const* function,
+                                                                           MachineFastPrepass const* prepass, MachineStackPlacement const* placement,
+                                                                           u32 const* row_blocks, u8 const* slot_needed, u8 const* home_opaque,
+                                                                           u32* home_starts, u32* home_ends, bool record_occupancy)
 {
+    MachineFastBlockObjects result = {0};
     u32 value_count = function->virtual_register_count;
     u32 value_axis = value_count ? value_count : 1u;
     u32 home_count = 0;
@@ -1944,6 +1969,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFun
         u32* home_values = arena_allocate(arena, u32, home_count);
         u32* starts = arena_allocate(arena, u32, home_count);
         u32* ends = arena_allocate(arena, u32, home_count);
+        u32 block_words = (function->block_count + 63u) / 64u;
+        u64* occupied = record_occupancy ? arena_allocate(arena, u64, (u64)home_count * block_words) : 0;
+        if (occupied)
+        {
+            memset(occupied, 0, (u64)home_count * block_words * sizeof(*occupied));
+            result = (MachineFastBlockObjects){.count = home_count, .ids = home_values,
+                                               .occupied = occupied, .block_words = block_words};
+        }
         memset(home_objects, 0xff, (u64)value_axis * sizeof(*home_objects));
         u32 object = 0;
         for (u32 value = 0; value < value_count; value += 1)
@@ -2011,7 +2044,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFun
             }
             first = limit;
         }
-        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends);
+        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends, occupied);
         for (u32 home = 0; home < home_count; home += 1)
         {
             u32 value = home_values[home];
@@ -2019,6 +2052,251 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFun
             home_ends[value] = ends[home];
         }
     }
+    return result;
+}
+
+typedef struct MachineFastSlotTouch MachineFastSlotTouch;
+struct MachineFastSlotTouch
+{
+    u32 slot;
+    u32 offset;
+    u32 size;
+    u8 operand;
+    u8 writes;
+};
+
+typedef struct MachineFastFrameAddresses MachineFastFrameAddresses;
+struct MachineFastFrameAddresses
+{
+    u32* slots;
+    u32* offsets;
+};
+
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pointer_width(u16 opcode)
+{
+    u32 width = 0;
+    switch (opcode)
+    {
+        case MACHINE_X64_LOAD_PTR8:
+        case MACHINE_X64_STORE_PTR8:
+        case MACHINE_A64_LOAD_PTR8:
+        case MACHINE_A64_STORE_PTR8: width = 1; break;
+        case MACHINE_X64_LOAD_PTR16:
+        case MACHINE_X64_STORE_PTR16:
+        case MACHINE_A64_LOAD_PTR16:
+        case MACHINE_A64_STORE_PTR16: width = 2; break;
+        case MACHINE_X64_LOAD_PTR32:
+        case MACHINE_X64_STORE_PTR32:
+        case MACHINE_A64_LOAD_PTR32:
+        case MACHINE_A64_STORE_PTR32: width = 4; break;
+        case MACHINE_X64_LOAD_PTR64:
+        case MACHINE_X64_STORE_PTR64:
+        case MACHINE_A64_LOAD_PTR64:
+        case MACHINE_A64_STORE_PTR64: width = 8; break;
+        default: break;
+    }
+    return width;
+}
+
+// Keep frame-copy source and destination effects separate: one row can read
+// one object and overwrite another. The byte census below decides whether a
+// partial write covers everything a later access can observe. Pointer
+// destinations/sources cannot alias a shareable object whose address was
+// never formed.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_touches(MachineFunction const* function, MachineInstruction const* instruction,
+                                                   MachineFastFrameAddresses const* addresses, MachineFastSlotTouch touches[2])
+{
+    u32 count = 0;
+    MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
+    u32 pointer_width = machine_fast_pointer_width(instruction->opcode);
+    bool pointer_store = instruction->opcode == MACHINE_X64_STORE_PTR8 || instruction->opcode == MACHINE_X64_STORE_PTR16 ||
+                         instruction->opcode == MACHINE_X64_STORE_PTR32 || instruction->opcode == MACHINE_X64_STORE_PTR64 ||
+                         instruction->opcode == MACHINE_A64_STORE_PTR8 || instruction->opcode == MACHINE_A64_STORE_PTR16 ||
+                         instruction->opcode == MACHINE_A64_STORE_PTR32 || instruction->opcode == MACHINE_A64_STORE_PTR64;
+    if (addresses && addresses->slots && pointer_width)
+    {
+        MachineRef pointer = instruction->operands[pointer_store ? 0 : 1];
+        u32 value = machine_ref_payload(pointer);
+        u32 slot = machine_ref_kind(pointer) == MACHINE_REF_VIRTUAL_REGISTER && value < function->virtual_register_count
+                       ? addresses->slots[value]
+                       : UINT32_MAX;
+        u32 base = slot < function->stack_slot_count ? addresses->offsets[value] : UINT32_MAX;
+        if (slot < function->stack_slot_count && base <= function->stack_slot_sizes[slot] &&
+            instruction->payload <= function->stack_slot_sizes[slot] - base &&
+            pointer_width <= function->stack_slot_sizes[slot] - base - instruction->payload)
+        {
+            access = (MachineScheduleMemoryAccess){.kind = MACHINE_SCHEDULE_MEMORY_STACK_RANGE, .stack_slot = slot,
+                                                   .offset = base + instruction->payload, .size = pointer_width};
+        }
+    }
+    if (access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE)
+    {
+        bool direct_store = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_STACK_SLOT;
+        u8 operand = (u8)(direct_store || pointer_store ? 0u : 1u);
+        touches[count++] = (MachineFastSlotTouch){.slot = access.stack_slot, .offset = access.offset, .size = access.size,
+                                                  .operand = operand, .writes = (u8)(direct_store || pointer_store)};
+    }
+    else
+    {
+        bool from_frame = instruction->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
+                          instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+        bool from_pointer = instruction->opcode == MACHINE_X64_COPY_FRAME_FROM_PTR ||
+                            instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR;
+        bool to_pointer = instruction->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME ||
+                          instruction->opcode == MACHINE_A64_COPY_PTR_FROM_FRAME;
+        if (from_frame || from_pointer)
+        {
+            MachineRef destination = instruction->operands[0];
+            u32 slot = machine_ref_payload(destination);
+            if (machine_ref_kind(destination) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                instruction->payload <= function->stack_slot_sizes[slot])
+            {
+                touches[count++] = (MachineFastSlotTouch){.slot = slot, .size = instruction->payload, .operand = 0, .writes = 1};
+            }
+        }
+        if (from_frame || to_pointer)
+        {
+            MachineRef source = instruction->operands[1];
+            u32 slot = machine_ref_payload(source);
+            if (machine_ref_kind(source) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                instruction->payload <= function->stack_slot_sizes[slot])
+            {
+                touches[count++] = (MachineFastSlotTouch){.slot = slot, .size = instruction->payload, .operand = 1};
+            }
+        }
+    }
+    return count;
+}
+
+// A frame address can join ordinary slot coloring only when every use of its
+// SSA value is a bounded scalar access through that exact address. Any copy,
+// edge transfer, call argument, arithmetic, or unproved memory form may retain
+// or reinterpret the pointer, so the object keeps dedicated storage.
+BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_addresses(Arena* arena, MachineFunction const* function,
+                                                                                   u8* addressed, u8* safe)
+{
+    u32 value_axis = function->virtual_register_count ? function->virtual_register_count : 1u;
+    u32* value_slots = arena_allocate(arena, u32, value_axis);
+    u32* value_offsets = arena_allocate(arena, u32, value_axis);
+    memset(value_slots, 0xff, (u64)value_axis * sizeof(*value_slots));
+    memset(value_offsets, 0xff, (u64)value_axis * sizeof(*value_offsets));
+    memset(addressed, 0, function->stack_slot_count);
+    memset(safe, 1, function->stack_slot_count);
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        MachineInstruction const* instruction = function->instructions + row;
+        if (instruction->opcode == MACHINE_X64_LEA_FRAME || instruction->opcode == MACHINE_A64_LEA_FRAME)
+        {
+            MachineRef frame = instruction->operands[1];
+            u32 slot = machine_ref_payload(frame);
+            if (machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count)
+            {
+                addressed[slot] = 1;
+                MachineRef result = instruction->operands[0];
+                u32 value = machine_ref_payload(result);
+                bool ordinary = instruction->payload <= function->stack_slot_sizes[slot] &&
+                                machine_ref_kind(result) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                value < function->virtual_register_count &&
+                                !function->virtual_registers[value].flags &&
+                                machine_point_instruction(function->virtual_registers[value].definition_point) == row;
+                if (ordinary && value_slots[value] == UINT32_MAX)
+                {
+                    value_slots[value] = slot;
+                    value_offsets[value] = instruction->payload;
+                }
+                else
+                {
+                    safe[slot] = 0;
+                    if (value < function->virtual_register_count && value_slots[value] < function->stack_slot_count)
+                    {
+                        safe[value_slots[value]] = 0;
+                    }
+                }
+            }
+        }
+    }
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        MachineInstruction const* instruction = function->instructions + row;
+        if (instruction->opcode == MACHINE_X64_MOV_RR || instruction->opcode == MACHINE_A64_MOV_RR)
+        {
+            MachineRef source = instruction->operands[1];
+            MachineRef destination = instruction->operands[0];
+            u32 source_value = machine_ref_payload(source);
+            u32 destination_value = machine_ref_payload(destination);
+            if (machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER && source_value < function->virtual_register_count &&
+                value_slots[source_value] != UINT32_MAX && machine_ref_kind(destination) == MACHINE_REF_VIRTUAL_REGISTER &&
+                destination_value < function->virtual_register_count && !function->virtual_registers[destination_value].flags &&
+                machine_point_instruction(function->virtual_registers[destination_value].definition_point) == row)
+            {
+                u32 slot = value_slots[source_value];
+                bool compatible = value_slots[destination_value] == UINT32_MAX ||
+                                  (value_slots[destination_value] == slot &&
+                                   value_offsets[destination_value] == value_offsets[source_value]);
+                if (!compatible)
+                {
+                    safe[slot] = 0;
+                    if (value_slots[destination_value] < function->stack_slot_count)
+                    {
+                        safe[value_slots[destination_value]] = 0;
+                    }
+                }
+                value_slots[destination_value] = slot;
+                value_offsets[destination_value] = value_offsets[source_value];
+            }
+        }
+    }
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        MachineInstruction const* instruction = function->instructions + row;
+        MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
+        bool load_pointer = instruction->opcode == MACHINE_X64_LOAD_PTR8 || instruction->opcode == MACHINE_X64_LOAD_PTR16 ||
+                            instruction->opcode == MACHINE_X64_LOAD_PTR32 || instruction->opcode == MACHINE_X64_LOAD_PTR64 ||
+                            instruction->opcode == MACHINE_A64_LOAD_PTR8 || instruction->opcode == MACHINE_A64_LOAD_PTR16 ||
+                            instruction->opcode == MACHINE_A64_LOAD_PTR32 || instruction->opcode == MACHINE_A64_LOAD_PTR64;
+        bool store_pointer = instruction->opcode == MACHINE_X64_STORE_PTR8 || instruction->opcode == MACHINE_X64_STORE_PTR16 ||
+                             instruction->opcode == MACHINE_X64_STORE_PTR32 || instruction->opcode == MACHINE_X64_STORE_PTR64 ||
+                             instruction->opcode == MACHINE_A64_STORE_PTR8 || instruction->opcode == MACHINE_A64_STORE_PTR16 ||
+                             instruction->opcode == MACHINE_A64_STORE_PTR32 || instruction->opcode == MACHINE_A64_STORE_PTR64;
+        for (u32 operand = 0; operand < MACHINE_INSTRUCTION_OPERAND_COUNT; operand += 1)
+        {
+            MachineRef reference = instruction->operands[operand];
+            u32 value = machine_ref_payload(reference);
+            if (machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER && value < function->virtual_register_count &&
+                value_slots[value] != UINT32_MAX)
+            {
+                u32 slot = value_slots[value];
+                bool definition = (instruction->opcode == MACHINE_X64_LEA_FRAME || instruction->opcode == MACHINE_A64_LEA_FRAME) &&
+                                  operand == 0 && machine_point_instruction(function->virtual_registers[value].definition_point) == row;
+                bool copy_definition = (instruction->opcode == MACHINE_X64_MOV_RR || instruction->opcode == MACHINE_A64_MOV_RR) &&
+                                       operand == 0 && machine_point_instruction(function->virtual_registers[value].definition_point) == row;
+                bool copy_source = (instruction->opcode == MACHINE_X64_MOV_RR || instruction->opcode == MACHINE_A64_MOV_RR) &&
+                                   operand == 1 && machine_ref_kind(instruction->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                   machine_ref_payload(instruction->operands[0]) < function->virtual_register_count &&
+                                   value_slots[machine_ref_payload(instruction->operands[0])] == slot &&
+                                   value_offsets[machine_ref_payload(instruction->operands[0])] == value_offsets[value];
+                u32 width = machine_fast_pointer_width(instruction->opcode);
+                bool pointer_use = (load_pointer && operand == 1) || (store_pointer && operand == 0);
+                bool bounded = pointer_use && value_offsets[value] <= function->stack_slot_sizes[slot] &&
+                               instruction->payload <= function->stack_slot_sizes[slot] - value_offsets[value] &&
+                               width <= function->stack_slot_sizes[slot] - value_offsets[value] - instruction->payload &&
+                               (access.kind != MACHINE_SCHEDULE_MEMORY_STACK_RANGE || access.stack_slot == slot);
+                safe[slot] &= (u8)(definition || copy_definition || copy_source || bounded);
+            }
+        }
+    }
+    for (u32 source = 0; source < function->edge_copy_source_count; source += 1)
+    {
+        MachineRef reference = function->edge_copy_sources[source];
+        u32 value = machine_ref_payload(reference);
+        if (machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER && value < function->virtual_register_count &&
+            value_slots[value] != UINT32_MAX)
+        {
+            safe[value_slots[value]] = 0;
+        }
+    }
+    MachineFastFrameAddresses result = {.slots = value_slots, .offsets = value_offsets};
+    return result;
 }
 
 // The selector's frame objects close the same way, but only the ones the color
@@ -2032,10 +2310,15 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFun
 // bits, and a shareable slot's range, do not depend on which other objects are
 // closed alongside it. Returns the number of objects closed over.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass,
-                                                       u8 const* slot_fixed, u32* slot_starts, u32* slot_ends)
+                                                       u8 const* slot_fixed, u32* slot_starts, u32* slot_ends,
+                                                       MachineFastFrameAddresses const* addresses, MachineFastBlockObjects* block_objects)
 {
     u32 slot_count = function->stack_slot_count;
     u32 object_count = 0;
+    if (block_objects)
+    {
+        *block_objects = (MachineFastBlockObjects){0};
+    }
     for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
     {
         object_count += !slot_fixed[slot_index] && slot_starts[slot_index] != UINT32_MAX;
@@ -2046,6 +2329,16 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
         u32* object_slots = arena_allocate(arena, u32, object_count);
         u32* starts = arena_allocate(arena, u32, object_count);
         u32* ends = arena_allocate(arena, u32, object_count);
+        u64* observed_bytes = arena_allocate(arena, u64, object_count);
+        memset(observed_bytes, 0, (u64)object_count * sizeof(*observed_bytes));
+        u32 block_words = (function->block_count + 63u) / 64u;
+        u64* occupied = block_objects ? arena_allocate(arena, u64, (u64)object_count * block_words) : 0;
+        if (occupied)
+        {
+            memset(occupied, 0, (u64)object_count * block_words * sizeof(*occupied));
+            *block_objects = (MachineFastBlockObjects){.count = object_count, .ids = object_slots,
+                                                       .occupied = occupied, .block_words = block_words};
+        }
         u32 object = 0;
         for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
         {
@@ -2057,6 +2350,27 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
                 starts[object] = slot_starts[slot_index];
                 ends[object] = slot_ends[slot_index];
                 object += 1;
+            }
+        }
+        // Only bytes a later access can observe need the old object value.
+        // A narrow store can therefore define the entire useful contents of
+        // a wider slot. Escaping or otherwise unproved objects are fixed and
+        // excluded above.
+        for (u32 row = 0; row < function->instruction_count; row += 1)
+        {
+            MachineFastSlotTouch touches[2];
+            u32 count = machine_fast_slot_touches(function, function->instructions + row, addresses, touches);
+            for (u32 touch = 0; touch < count; touch += 1)
+            {
+                MachineFastSlotTouch access = touches[touch];
+                u32 named = slot_objects[access.slot];
+                if (named != UINT32_MAX && !access.writes && function->stack_slot_sizes[access.slot] <= 64)
+                {
+                    for (u32 byte = access.offset; byte < access.offset + access.size; byte += 1)
+                    {
+                        observed_bytes[named] |= UINT64_C(1) << byte;
+                    }
+                }
             }
         }
         u32 words = (object_count + 63u) / 64u;
@@ -2076,22 +2390,33 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
             for (u32 offset = block->instruction_count; offset; offset -= 1)
             {
                 MachineInstruction const* instruction = function->instructions + block->first_instruction + offset - 1u;
-                MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
-                bool bounded = access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE && access.stack_slot < slot_count;
-                u32 slot_index = bounded ? access.stack_slot : 0;
-                u32 named = bounded ? slot_objects[slot_index] : UINT32_MAX;
-                bool tracked = named != UINT32_MAX;
-                u32 word = tracked ? named / 64u : 0;
-                bool stores = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_STACK_SLOT;
-                bool covers = tracked && stores && access.offset == 0 && access.size >= function->stack_slot_sizes[slot_index];
-                u64 bit = (u64)tracked << (named & 63u);
-                u64 covering = covers ? bit : 0;
-                u64 reading = bit & ~covering;
-                block_reads[word] = (block_reads[word] | reading) & ~covering;
-                block_writes[word] = (block_writes[word] | covering) & ~reading;
+                MachineFastSlotTouch touches[2];
+                u32 touch_count = machine_fast_slot_touches(function, instruction, addresses, touches);
+                for (u32 touch = 0; touch < touch_count; touch += 1)
+                {
+                    MachineFastSlotTouch const* access = touches + touch;
+                    u32 named = slot_objects[access->slot];
+                    if (named != UINT32_MAX)
+                    {
+                        u32 word = named / 64u;
+                        u64 bit = UINT64_C(1) << (named & 63u);
+                        bool covers = access->writes && !access->offset && access->size >= function->stack_slot_sizes[access->slot];
+                        if (access->writes && !covers && function->stack_slot_sizes[access->slot] <= 64)
+                        {
+                            u64 written = 0;
+                            for (u32 byte = access->offset; byte < access->offset + access->size; byte += 1)
+                            {
+                                written |= UINT64_C(1) << byte;
+                            }
+                            covers = !(observed_bytes[named] & ~written);
+                        }
+                        block_reads[word] = (block_reads[word] | (covers ? 0 : bit)) & ~(covers ? bit : 0);
+                        block_writes[word] = (block_writes[word] | (covers ? bit : 0)) & ~(covers ? 0 : bit);
+                    }
+                }
             }
         }
-        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends);
+        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends, occupied);
         for (u32 closed = 0; closed < object_count; closed += 1)
         {
             u32 slot_index = object_slots[closed];
@@ -2103,20 +2428,21 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
 }
 
 #if BUSTER_INCLUDE_TESTS
-// A frame of many fixed slots around four shareable ones, over a chain with a
+// A frame of many fixed slots around five shareable ones, over a chain with a
 // back edge. The closure must track exactly the shareable slots — its planes
 // are as wide as that count, whatever the fixed population — and give them the
 // ranges a closure over every slot gives them. The third slot is read at the
 // loop header before the latch writes it, so its range has to open at entry;
-// the fourth is sixteen bytes written eight at a time, a store that covers
-// nothing and therefore reads, so it is live around the whole loop too.
+// the fourth is sixteen bytes written eight at a time and read in both halves,
+// so it is live around the loop. The fifth is eight bytes wide but observed
+// only in its first byte: a one-byte store defines all useful data.
 bool machine_fast_close_slot_ranges_test(Arena* arena)
 {
     enum
     {
         MACHINE_FAST_SLOT_RANGE_TEST_BLOCK_COUNT = 64,
         MACHINE_FAST_SLOT_RANGE_TEST_FIXED_COUNT = 1000,
-        MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT = 4,
+        MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT = 5,
         MACHINE_FAST_SLOT_RANGE_TEST_SLOT_COUNT = MACHINE_FAST_SLOT_RANGE_TEST_FIXED_COUNT + MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT,
     };
     u32 const block_count = MACHINE_FAST_SLOT_RANGE_TEST_BLOCK_COUNT;
@@ -2130,6 +2456,8 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
     MachineRef local = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 1u);
     MachineRef carried = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 2u);
     MachineRef partial = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 3u);
+    MachineRef narrow = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 4u);
+    MachineRef fixed = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
     for (u32 block_index = 0; block_index < block_count; block_index += 1)
     {
@@ -2148,6 +2476,9 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64, .operands = {local, rax}});
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, local}});
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, carried}});
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME8, .operands = {narrow, rax}});
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                                                       .payload = 1, .operands = {fixed, narrow}});
         }
         else if (block_index == 2)
         {
@@ -2156,6 +2487,8 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         else if (block_index == 3)
         {
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, partial}});
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .payload = 8,
+                                                                       .operands = {rdx, partial}});
         }
         else if (block_index == latch)
         {
@@ -2241,8 +2574,8 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         actual_starts[slot] = reference_starts[slot];
         actual_ends[slot] = reference_ends[slot];
     }
-    u32 reference_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, no_fixed, reference_starts, reference_ends);
-    u32 actual_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, slot_fixed, actual_starts, actual_ends);
+    u32 reference_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, no_fixed, reference_starts, reference_ends, 0, 0);
+    u32 actual_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, slot_fixed, actual_starts, actual_ends, 0, 0);
     result = result && reference_objects == slot_count && actual_objects == MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT;
     for (u32 slot = fixed_count; slot < slot_count; slot += 1)
     {
@@ -2252,6 +2585,9 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
     u32 latch_last = latch_block->first_instruction + latch_block->instruction_count - 1u;
     result = result && actual_starts[fixed_count + 2u] == 0 && actual_ends[fixed_count + 2u] == latch_last;
     result = result && actual_starts[fixed_count + 3u] == 0 && actual_ends[fixed_count + 3u] == latch_last;
+    MachineBlock const* local_block = function.blocks + 1;
+    result = result && actual_starts[fixed_count + 4u] >= local_block->first_instruction &&
+             actual_ends[fixed_count + 4u] < local_block->first_instruction + local_block->instruction_count;
     return result;
 }
 #endif
@@ -2462,6 +2798,83 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_color_slots(Arena* arena, MachineFunction c
         }
     }
     return group_count;
+}
+
+// A convex row interval makes unrelated arms of a large dispatcher appear to
+// overlap. Keep one bit per block occupied by each object's reads, writes, or
+// live contents, and choose a color whose occupied blocks are disjoint. A
+// block-level conflict is conservative even when two objects use separate
+// rows inside that block. This scan stores color occupancy, not pairwise
+// interference; a bounded comparison budget preserves compiler throughput.
+#define MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT BUSTER_MB(3)
+#define MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT 25000000u
+BUSTER_GLOBAL_LOCAL u32 machine_fast_color_block_objects(Arena* arena, MachineFunction const* function,
+                                                         MachineFastBlockObjects const* objects, bool homes, bool vector_pool,
+                                                         u32* colors, u32* group_sizes, u32* group_alignments)
+{
+    u64 scratch_mark = arena->position;
+    u32 group_count = 0;
+    bool valid = true;
+    u64 comparisons = 0;
+    u64 cells = (u64)objects->count * objects->block_words;
+    u64* group_occupied = arena_allocate(arena, u64, cells ? cells : 1u);
+    for (u32 object = 0; valid && object < objects->count; object += 1)
+    {
+        u32 id = objects->ids[object];
+        bool is_vector = homes && function->virtual_registers[id].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        if (homes && is_vector != vector_pool)
+        {
+            continue;
+        }
+        u64 const* occupied = objects->occupied + (u64)object * objects->block_words;
+        u32 size = homes ? (is_vector ? 64u : 8u) : function->stack_slot_sizes[id];
+        u32 alignment = homes ? (is_vector ? 16u : 8u) :
+                               (function->stack_slot_alignments ? function->stack_slot_alignments[id] : 8u);
+        u32 selected = UINT32_MAX;
+        for (u32 group = 0; valid && group < group_count; group += 1)
+        {
+            u64 const* group_bits = group_occupied + (u64)group * objects->block_words;
+            bool overlaps = false;
+            for (u32 word = 0; valid && !overlaps && word < objects->block_words; word += 1)
+            {
+                comparisons += 1;
+                valid = comparisons <= MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT;
+                overlaps = (occupied[word] & group_bits[word]) != 0;
+            }
+            if (valid && !overlaps)
+            {
+                selected = group;
+                break;
+            }
+        }
+        if (valid)
+        {
+            if (selected == UINT32_MAX)
+            {
+                selected = group_count++;
+                memset(group_occupied + (u64)selected * objects->block_words, 0,
+                       (u64)objects->block_words * sizeof(*group_occupied));
+                if (!homes)
+                {
+                    group_sizes[selected] = size;
+                    group_alignments[selected] = alignment;
+                }
+            }
+            else if (!homes)
+            {
+                group_sizes[selected] = BUSTER_MAX(group_sizes[selected], size);
+                group_alignments[selected] = BUSTER_MAX(group_alignments[selected], alignment);
+            }
+            u64* group_bits = group_occupied + (u64)selected * objects->block_words;
+            for (u32 word = 0; word < objects->block_words; word += 1)
+            {
+                group_bits[word] |= occupied[word];
+            }
+            colors[id] = selected;
+        }
+    }
+    arena_set_position(arena, scratch_mark);
+    return valid ? group_count : UINT32_MAX;
 }
 
 // `pinned_registers` holds a physical register per virtual register that
@@ -3368,11 +3781,11 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // the machine CFG from the allocator's own reload/spill memory program;
         // this includes values that enter before their first lexical spill and
         // values whose home lifetime crosses the block where they were defined.
-        // The closure is enabled only for a direct acyclic block chain. A
-        // branch, join, loop, indirect edge, or inline-assembly landing has
-        // path-specific edge repairs whose equal-point edits cannot be
-        // represented by one linear range without a dedicated proof. Keep the
-        // older per-home guard for those shapes until that proof exists.
+        // A direct acyclic block chain can use compact row ranges. On a
+        // branching CFG, rows from unrelated arms cannot be compared as one
+        // interval; the bounded block colorer below uses the closure's exact
+        // occupied blocks instead. Where that bound is exceeded, retain the
+        // older local-home rule.
         bool linear_cfg = true;
         u32* outgoing_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1u);
         memset(outgoing_counts, 0, (u64)(function->block_count ? function->block_count : 1u) * sizeof(*outgoing_counts));
@@ -3391,6 +3804,41 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     outgoing_counts[source] += 1;
                     linear_cfg &= outgoing_counts[source] <= 1u;
                 }
+            }
+        }
+        u32* pool_indices = arena_allocate(arena, u32, value_count);
+        memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
+        u32 home_count = 0;
+        for (u32 value = 0; value < function->virtual_register_count; value += 1)
+        {
+            home_count += slot_needed[value] && !home_opaque[value];
+        }
+        u32 home_block_words = (function->block_count + 63u) / 64u;
+        u64 home_plane_bytes = (u64)function->block_count * ((home_count + 63u) / 64u) * sizeof(u64);
+        u64 home_color_bytes = (u64)home_count * home_block_words * sizeof(u64);
+        bool block_color_homes = reuse_frame_storage && !linear_cfg && home_count &&
+                                 home_plane_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
+                                 home_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT;
+        u32 block_pool_size = UINT32_MAX;
+        u32 block_vector_pool_size = UINT32_MAX;
+        if (block_color_homes)
+        {
+            u64 scratch_mark = arena->position;
+            u32* branch_starts = arena_allocate(arena, u32, value_count);
+            u32* branch_ends = arena_allocate(arena, u32, value_count);
+            memcpy(branch_starts, home_starts, (u64)value_count * sizeof(*branch_starts));
+            memcpy(branch_ends, home_ends, (u64)value_count * sizeof(*branch_ends));
+            MachineFastBlockObjects objects = machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed,
+                                                                              home_opaque, branch_starts, branch_ends, true);
+            block_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, false, pool_indices, 0, 0);
+            if (block_pool_size != UINT32_MAX)
+            {
+                block_vector_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, true, pool_indices, 0, 0);
+            }
+            arena_set_position(arena, scratch_mark);
+            if (block_pool_size == UINT32_MAX || block_vector_pool_size == UINT32_MAX)
+            {
+                memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
             }
         }
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
@@ -3414,16 +3862,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         }
         if (reuse_frame_storage && linear_cfg)
         {
-            machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed, home_opaque, home_starts, home_ends);
+            machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed, home_opaque, home_starts,
+                                           home_ends, false);
         }
         // The selector's frame objects share the homes' argument, over wider
         // ranges: a slot's storage has to hold from its first touched row
         // through every row where what was written to it may still be read,
         // and two slots whose ranges miss each other never hold a live object
         // at once. What the rows cannot see keeps its own storage: a slot
-        // whose address the frame address row hands to a register, one an
-        // inline-assembly transaction or a variadic fetch owns, a
-        // volatile-tainted one, and the fixed outgoing argument area. Debug
+        // whose address may escape, one an inline-assembly transaction or a
+        // variadic fetch owns, a volatile-tainted one, and the fixed outgoing
+        // argument area. A bounded address used only for known scalar
+        // accesses has the same lifetime as direct slot accesses. Debug
         // records name slots too, but what they name may not decide layout:
         // the code a build emits with debug information has to be the code it
         // emits without.
@@ -3436,6 +3886,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32* group_alignments = arena_allocate(arena, u32, slot_axis);
         u32* group_offsets = arena_allocate(arena, u32, slot_axis);
         bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0;
+        u8* slot_addressed = arena_allocate(arena, u8, slot_axis);
+        u8* address_safe = arena_allocate(arena, u8, slot_axis);
+        memset(slot_addressed, 0, slot_axis);
+        memset(address_safe, 0, slot_axis);
+        MachineFastFrameAddresses frame_addresses = coalesce_slots
+                                                         ? machine_fast_certify_frame_addresses(arena, function, slot_addressed, address_safe)
+                                                         : (MachineFastFrameAddresses){0};
         memset(slot_starts, 0xff, (u64)slot_axis * sizeof(*slot_starts));
         memset(slot_ends, 0, (u64)slot_axis * sizeof(*slot_ends));
         memset(slot_fixed, coalesce_slots ? 0 : 1, slot_axis);
@@ -3444,7 +3901,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         {
             MachineInstruction const* instruction = function->instructions + row;
             bool addresses = instruction->opcode == description->frame_address_opcode;
-            MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
+            MachineFastSlotTouch touches[2];
+            u32 touch_count = machine_fast_slot_touches(function, instruction, &frame_addresses, touches);
+            for (u32 touch = 0; touch < touch_count; touch += 1)
+            {
+                u32 named = touches[touch].slot;
+                slot_starts[named] = BUSTER_MIN(slot_starts[named], row);
+                slot_ends[named] = BUSTER_MAX(slot_ends[named], row);
+            }
             for (u32 operand_index = 0; operand_index < MACHINE_INSTRUCTION_OPERAND_COUNT; operand_index += 1)
             {
                 MachineRef operand = instruction->operands[operand_index];
@@ -3455,10 +3919,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     // direction are proven. A row naming a slot any other way
                     // is a touch it cannot account for, so that slot keeps its
                     // own storage.
-                    bool proven = access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE && access.stack_slot == named;
+                    bool proven = false;
+                    for (u32 touch = 0; touch < touch_count; touch += 1)
+                    {
+                        proven |= touches[touch].slot == named && touches[touch].operand == operand_index;
+                    }
                     slot_starts[named] = BUSTER_MIN(slot_starts[named], row);
                     slot_ends[named] = BUSTER_MAX(slot_ends[named], row);
-                    slot_fixed[named] |= (u8)(addresses || !proven);
+                    slot_fixed[named] |= (u8)(!addresses && !proven);
                 }
             }
         }
@@ -3476,22 +3944,46 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         }
         for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
         {
+            slot_fixed[slot_index] |= (u8)(slot_addressed[slot_index] && !address_safe[slot_index]);
             slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != 0);
             slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
         }
+        u32 shareable_slots = 0;
+        for (u32 slot = 0; coalesce_slots && slot < function->stack_slot_count; slot += 1)
+        {
+            shareable_slots += !slot_fixed[slot] && slot_starts[slot] != UINT32_MAX;
+        }
+        u32 block_words = (function->block_count + 63u) / 64u;
+        u64 slot_plane_bytes = (u64)function->block_count * ((shareable_slots + 63u) / 64u) * sizeof(u64);
+        u64 slot_color_bytes = (u64)shareable_slots * block_words * sizeof(u64);
+        bool block_color_slots = coalesce_slots && !linear_cfg && shareable_slots &&
+                                 slot_plane_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
+                                 slot_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT;
+        MachineFastBlockObjects slot_blocks = {0};
         if (coalesce_slots)
         {
-            machine_fast_close_slot_ranges(arena, function, prepass, slot_fixed, slot_starts, slot_ends);
+            machine_fast_close_slot_ranges(arena, function, prepass, slot_fixed, slot_starts, slot_ends, &frame_addresses,
+                                           block_color_slots ? &slot_blocks : 0);
         }
-        u32 group_count =
-            machine_fast_color_slots(arena, function, slot_fixed, slot_starts, slot_ends, slot_groups, group_sizes, group_alignments);
+        u32 group_count = slot_blocks.count
+                              ? machine_fast_color_block_objects(arena, function, &slot_blocks, false, false, slot_groups, group_sizes,
+                                                                 group_alignments)
+                              : UINT32_MAX;
+        if (group_count == UINT32_MAX)
+        {
+            memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));
+            group_count = machine_fast_color_slots(arena, function, slot_fixed, slot_starts, slot_ends, slot_groups, group_sizes,
+                                                   group_alignments);
+        }
         // Two pools, one per home width: the eight-byte scalar homes and the
         // sixty-four-byte vector ones, so a rarely spilled vector never widens
         // the slots the scalar homes share.
-        u32* pool_indices = arena_allocate(arena, u32, value_count);
-        memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
-        u32 pool_size = machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, false, pool_indices);
-        u32 vector_pool_size = machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, true, pool_indices);
+        u32 pool_size = block_pool_size != UINT32_MAX && block_vector_pool_size != UINT32_MAX
+                            ? block_pool_size
+                            : machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, false, pool_indices);
+        u32 vector_pool_size = block_pool_size != UINT32_MAX && block_vector_pool_size != UINT32_MAX
+                                   ? block_vector_pool_size
+                                   : machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, true, pool_indices);
         // The pushed callee-saved registers sit between the frame base and the
         // slots, so every offset starts past them, and the stack allocation
         // keeps sixteen-alignment across an odd push count.
@@ -3562,7 +4054,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         }
         placement.edge_copy_temporary_offset = running;
         running += (u32)edge_copy_temporary_size;
-        placement.frame_size = ((running - pool_base + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+        u32 push_parity = (push_count & 1u) ? 8u : 0u;
+        placement.frame_size = ((running - pool_base + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
         if (function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
