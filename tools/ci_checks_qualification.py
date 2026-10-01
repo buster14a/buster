@@ -12,7 +12,7 @@ JSON campaign schema (all paths relative to the campaign, unless noted):
      "run":REF, "conditions":REF, "desktops":[{"job":"Windows x86-64 checks",
        "coverage":REF, "result":REF, "phases":REF,
        "phase_directory":"retained/matrix-phases",
-       "tests":[{"row_id":"exact coverage row ID", "manifest":REF,
+       "tests":[{"row_id":"exact coverage row ID", "manifest":REF, "observation":REF,
                  "log_sha256":"64 lowercase hex"}]}]}]}
 REF = {"path":"retained/file.json", "sha256":"64 lowercase hex"}.
 run is one complete run object from github_ci_time.py collect, including jobs
@@ -24,7 +24,12 @@ complete matrix-phases directory. Native journals are replayed, not trusted
 because their summary says complete. Their summary digest binds the replay.
 tests contains one ci_unit_tests_measure.py sample manifest for every selected
 runtime row, with a retained log (relative to that manifest) and its digest.
-Its elapsed_us must equal the native test phase, and its toolchain identity is
+Each test also binds the native buster-desktop-unit-observation-v1 receipt at
+<phase_directory>.parent/unit-observations/<taskID>/observation.json. Its adjacent
+inventory.log/test.log bytes, binary hash, source/run identity and command must
+match the same phase and sample; the independent inventory query is replayed.
+The manifest log must be that exact retained test.log. Its elapsed_us must equal
+the native test phase, and its toolchain identity is
 {compiler,path_hash,identity,target,version} from that row's detected capability.
 Its runner_image is {image_os,image_version,runner}, matching conditions below.
 The native inventory includes disabled audits; modules and assertions must pass.
@@ -33,25 +38,34 @@ conditions is {"schema":"buster-ci-checks-conditions-v1", "run_id":123,
  "jobs":{"exact GitHub job name":{"job_id":456,"image_os":"windows25",
  "image_version":"20260928.194.1","runner":"windows-2025",
  "toolchains":{...},"caches":{"BUSTER_CI_ZIG_CACHE_HIT":"true",...}}}}.
-It covers every job, including the optional main-reuse decision, and records
-actual retained image/toolchain/cache observations. Empty toolchains/caches are
+It covers every executed job and records actual retained image/toolchain/cache
+observations. The optional main-reuse decision may be skipped on dispatch: it
+adds zero runner seconds and has no conditions entry. Empty toolchains/caches are
 explicit only for jobs using none. Missing/unknown observations fail pending.
 Split checks conditions map to their platform's combined checks role; all three
 must match that role. Other job conditions must match across every sample.
+
+Native phase journals report CPU time and peak RSS as unknown. This consumer
+can meet or reject timing/census thresholds, but cannot accept either issue's
+full resource/deadline/cleanup/reliability contract. Positive timing results
+stay pending until actual resource observations and that review are retained.
 
 SHA-256 binds retained bytes, not their origin: collect these records from the
 actual run/artifacts. This consumer cannot authenticate manually invented API
 or provenance records. It issues an offline measurement verdict, never closes
 an issue, dispatches CI, changes defaults or substitutes for CI complete.
 An empty samples array is a useful pending template; no fake valid runs ship.
-Exit 0 = both performance contracts met; 1 = complete but contract rejected;
-2 = pending (missing, invalid or incomparable evidence). Output is JSON.
+Exit 1 = a complete timing contract rejected; 2 = qualification pending
+(including positive timing without resource/reliability review). Output is JSON.
 """
 import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+import ntpath
+import os
 from pathlib import Path
+import posixpath
 import re
 import statistics
 import sys
@@ -59,6 +73,7 @@ import sys
 import ci_matrix_phases as phases
 import ci_summary_core as coverage_tools
 import ci_unit_tests_measure as units
+import ci_unit_tests_campaign as unit_campaign
 import github_ci_time as github
 
 SCHEMA = "buster-ci-checks-qualification-v1"
@@ -106,6 +121,10 @@ def known(value):
     return result
 
 
+def skipped_reuse(job):
+    return job.get("name") == github.MAIN_REUSE_JOB and job.get("status") == "completed" and job.get("conclusion") == "skipped" and job.get("run_attempt") == 1
+
+
 def timing(run, variant):
     layout = "split" if variant == "split-overlap" else "combined"
     expected = Counter(github.combination_jobs(layout))
@@ -121,19 +140,22 @@ def timing(run, variant):
     measured, reason = github.measure(run)
     require(reason is None, "ineligible GitHub attempt: " + str(reason))
     created = github.timestamp(run["created_at"])
-    ends, starts, busy, queues = [], [], 0.0, {}
+    ends, starts, busy, queues, skipped = [], [], 0.0, {}, []
     require(len({job["id"] for job in jobs}) == len(jobs), "duplicate GitHub job ID")
     for job in jobs:
-        require(job.get("status") == "completed" and job.get("conclusion") == "success" and job.get("run_attempt") == 1, "job failed, skipped, deferred or rerun")
-        queued, start, end = (github.timestamp(job.get(key)) for key in ("created_at", "started_at", "completed_at"))
-        require(all(t is not None for t in (queued, start, end)) and created <= queued <= start < end, "missing/non-monotonic GitHub queue timestamps")
-        ends.append(end)
-        starts.append(start)
-        busy += (end - start).total_seconds()
-        queues[job["name"]] = (start - queued).total_seconds()
+        if skipped_reuse(job):
+            skipped.append(job["name"])
+        else:
+            require(job.get("status") == "completed" and job.get("conclusion") == "success" and job.get("run_attempt") == 1, "job failed, skipped, deferred or rerun")
+            queued, start, end = (github.timestamp(job.get(key)) for key in ("created_at", "started_at", "completed_at"))
+            require(all(t is not None for t in (queued, start, end)) and created <= queued <= start < end, "missing/non-monotonic GitHub queue timestamps")
+            ends.append(end)
+            starts.append(start)
+            busy += (end - start).total_seconds()
+            queues[job["name"]] = (start - queued).total_seconds()
     measured.update(elapsed_seconds=(max(ends) - created).total_seconds(), runner_seconds=busy,
                     initial_queue_seconds=(min(starts) - created).total_seconds(), job_queue_seconds=queues,
-                    job_count=len(jobs))
+                    job_count=len(jobs), skipped_metadata_jobs=skipped)
     return measured
 
 
@@ -141,9 +163,10 @@ def conditions(root, reference, run):
     data = record(root, reference)
     require(data.get("schema") == "buster-ci-checks-conditions-v1" and str(data.get("run_id")) == str(run["id"]), "conditions run/schema mismatch")
     entries = data.get("jobs", {})
-    require(set(entries) == {job["name"] for job in run["jobs"]}, "missing exact-job image/toolchain/cache conditions")
+    executed = [job for job in run["jobs"] if not skipped_reuse(job)]
+    require(set(entries) == {job["name"] for job in executed}, "missing exact-job image/toolchain/cache conditions")
     normalized = {}
-    for job in run["jobs"]:
+    for job in executed:
         entry = entries[job["name"]]
         require(entry.get("job_id") == job["id"], "conditions job ID mismatch")
         require(all(known(entry.get(k)) for k in ("image_os", "image_version", "runner")), "missing runner image/version/label")
@@ -155,6 +178,33 @@ def conditions(root, reference, run):
         require(key not in normalized or normalized[key] == value, "split jobs have different runner/cache conditions")
         normalized[key] = value
     return entries, normalized
+
+
+def observation(root, item, test, unit, manifest_path, event, identity):
+    path = retained(root, test["observation"])
+    expected = (root / item["phase_directory"]).parent / "unit-observations" / event["id"] / "observation.json"
+    require(path.resolve() == expected.resolve(), "observation is not the exact native task sidecar")
+    value = phases.read(path)
+    require(value.get("schema") == "buster-desktop-unit-observation-v1", "unknown native unit observation schema")
+    require(all(value.get(k) == event[k] for k in ("id", "epoch_us", "pid", "argv")), "unit observation phase identity/command mismatch")
+    require(all(value.get(k) == identity[k] for k in ("source_revision", "run_id", "run_attempt")), "unit observation source/run mismatch")
+    require(type(value.get("test_result")) is int and value["test_result"] == 0 and value.get("binary_unchanged") is True and value.get("capture_complete") is True,
+            "native unit observation failed, incomplete or binary changed")
+    binary = event["argv"][2] if len(event["argv"]) > 2 and event["argv"][1] == "test_units_partitioned" else event["argv"][0]
+    source_path = identity.get("source_path")
+    paths = (ntpath if identity["platform"] == "windows" else posixpath) if source_path else os.path
+    source_directory = paths.dirname(source_path) if source_path else os.getcwd()
+    require(isinstance(value.get("binary_path"), str) and bool(value["binary_path"]), "missing observed native binary path")
+    observed_path = paths.normcase(paths.normpath(paths.join(source_directory, value["binary_path"])))
+    expected_path = paths.normcase(paths.normpath(paths.join(source_directory, binary)))
+    require(observed_path == expected_path and value.get("binary_sha256") == unit["identity"]["binary_sha256"], "native test binary/path mismatch")
+    require(value.get("inventory_file") == "inventory.log" and value.get("log_file") == "test.log", "native observation sidecar filenames changed")
+    inventory_path = retained(path.parent, {"path": "inventory.log", "sha256": value.get("inventory_sha256")})
+    log_path = retained(path.parent, {"path": "test.log", "sha256": value.get("log_sha256")})
+    manifest = phases.read(manifest_path)
+    require((manifest_path.parent / manifest["log"]).resolve() == log_path.resolve() and test["log_sha256"] == value["log_sha256"], "manifest did not consume the native test log")
+    require(unit["inventory"] == unit_campaign.inventory(inventory_path), "native independent inventory differs from test manifest")
+    return value
 
 
 def desktop(root, item, run, condition, variant):
@@ -209,10 +259,12 @@ def desktop(root, item, run, condition, variant):
         provenance = unit["identity"]
         require(provenance["source_revision"] == run["head_sha"] and all(provenance[k] == identity[k] for k in ("platform", "architecture")) and
                 all(provenance[k] == row[k] for k in ("configuration", "sanitize", "fuzz")) and provenance["cpu_budget"] == report["cpu_budget"], "test source/configuration/budget mismatch")
+        require(provenance["table_audits"] == (row["unity"] if report["scheduler"] == "pooled" else True), "runtime table audit policy differs from source-bound row")
         require(provenance["toolchain"] == {k: cap[k] for k in CAP_KEYS} and provenance["runner_image"] == {k: condition[k] for k in ("image_os", "image_version", "runner")}, "test toolchain/image mismatch")
         tree = next(t for t in report["trees"] if test["row_id"] in t["rows"])
         event = next(e for e in report["events"] if e["id"] == phases.task_id(tree["id"], "test", row["configuration"]))
         require(unit["wall_us"] == event["end_us"] - event["child_start_us"] and unit["test_workers"] == int(event["test_jobs"]), "test census is not the native invocation interval/quota")
+        observation(root, item, test, unit, manifest_path, event, identity)
         census[test["row_id"]] = {"inventory": unit["inventory"], "skipped_table_audits": unit["skipped_table_audits"],
             "external": unit["external"], "modules": {name: {k: module[k] for k in ("index", "assertions", "passed", "failed", "status")} for name, module in unit["modules"].items()}}
     caps = [{k: cap.get(k) for k in ("id", *CAP_KEYS, "state", "reason")} for cap in capabilities.values()]
@@ -252,7 +304,9 @@ def sample(root, item):
 
 def qualify(path):
     path = Path(path)
-    output = {"schema": SCHEMA, "status": "pending", "performance_accepted": False, "errors": [], "samples": [], "issues": {}}
+    output = {"schema": SCHEMA, "status": "pending", "performance_accepted": False,
+              "timing_status": "pending", "timing_contract_met": False,
+              "resource_review": "pending", "errors": [], "samples": [], "issues": {}}
     try:
         campaign = phases.read(path)
         require(campaign.get("schema") == SCHEMA and campaign.get("repository") == "buster14a/buster", "unknown campaign schema/repository")
@@ -275,10 +329,13 @@ def qualify(path):
             candidate = medians[variant]
             wall_ratio, runner_ratio = candidate[metric] / baseline[metric], candidate["runner_seconds"] / baseline["runner_seconds"]
             accepted = wall_ratio <= ratio and runner_ratio <= 1.05
-            output["issues"][issue] = {"status": "accepted" if accepted else "rejected", "variant": variant, "metric": metric,
+            output["issues"][issue] = {"status": "pending" if accepted else "rejected",
+                                       "timing_status": "accepted" if accepted else "rejected", "variant": variant, "metric": metric,
                                        "time_ratio": wall_ratio, "maximum_time_ratio": ratio, "runner_seconds_ratio": runner_ratio, "maximum_runner_seconds_ratio": 1.05}
-        output.update(status="accepted" if all(i["status"] == "accepted" for i in output["issues"].values()) else "rejected",
-                      performance_accepted=all(i["status"] == "accepted" for i in output["issues"].values()), medians=medians,
+        timing_met = all(i["timing_status"] == "accepted" for i in output["issues"].values())
+        output.update(status="pending" if timing_met else "rejected",
+                      timing_status="accepted" if timing_met else "rejected", timing_contract_met=timing_met,
+                      pending_reviews=["CPU time and peak RSS observations", "resource/deadline/cleanup/reliability comparison"], medians=medians,
                       head_sha=reference["head_sha"], workflow_blob_sha=reference["workflow_blob_sha"],
                       samples=[{k: o[k] for k in ("variant", "run_id", "timing")} for o in observations])
     except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration) as error:
@@ -292,7 +349,7 @@ def main():
     args = parser.parse_args()
     report = qualify(args.campaign)
     print(json.dumps(report, indent=2) + "\n", end="")
-    return {"accepted": 0, "rejected": 1, "pending": 2}[report["status"]]
+    return {"rejected": 1, "pending": 2}[report["status"]]
 
 
 if __name__ == "__main__":

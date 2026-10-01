@@ -1013,6 +1013,12 @@ class CompletionGateTests(unittest.TestCase):
         admission = re.search(r"^          BUSTER_MATRIX_TEST_ADMISSION: (.+)$", windows, re.M).group(1)
         self.assertEqual(workflow.count("BUSTER_MATRIX_TEST_ADMISSION:"), 1)
         self.assertEqual(admission, "${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}")
+        capture = "${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}"
+        self.assertEqual(workflow.count("BUSTER_CI_CHECKS_EVIDENCE:"), 2)
+        for title in ("Combination matrix (Linux, macOS)", "Combination matrix (Windows)"):
+            step = desktop.split(f"      - name: {title}\n", 1)[1].split("      - name:", 1)[0]
+            observed = re.search(r"^          BUSTER_CI_CHECKS_EVIDENCE: (.+)$", step, re.M).group(1)
+            self.assertEqual(observed, capture)
 
     def timing_sample(self, checks_layout="combined"):
         jobs = self.sample(checks_layout)

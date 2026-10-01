@@ -1,7 +1,12 @@
 // Desktop matrix observation only. Included by build.c after coverage/scheduler
 // definitions. matrix_phase_begin/tree/plan bind policy; matrix_phase_run owns
 // child exit/timing authority. No observation changes graph edges or quotas.
+// matrix_unit_observation_* retains same-binary inventory and actual test logs
+// only for explicitly enabled qualification; ordinary child streams stay direct.
 #define MATRIX_PHASE_MAX_TASKS 96
+#define MATRIX_UNIT_INVENTORY_LIMIT BUSTER_MB(1)
+#define MATRIX_UNIT_LOG_LIMIT BUSTER_MB(64)
+#define MATRIX_UNIT_QUERY_TIMEOUT_US (30ull * 1000000ull)
 
 typedef struct MatrixPhaseTree MatrixPhaseTree;
 struct MatrixPhaseTree
@@ -341,6 +346,124 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_finish(Arena* arena, ProcessResul
     return result;
 }
 
+typedef struct MatrixUnitObservation MatrixUnitObservation;
+struct MatrixUnitObservation
+{
+    String8 directory, binary, binary_hash, inventory_hash;
+    u64 binary_bytes;
+    bool enabled, valid, fresh;
+};
+
+BUSTER_GLOBAL_LOCAL bool matrix_unit_capture_clean(ProcessSpawnResult spawn, ProcessWaitResult wait)
+{
+    bool result = spawn.handle && spawn.failure == PROCESS_SPAWN_FAILURE_NONE && !wait.timed_out &&
+        !wait.termination_requested && !wait.forcibly_terminated && !wait.capture_limit_exceeded &&
+        !wait.output_truncated && !wait.capture_failed && !wait.process_tree_cleanup_failed &&
+        !wait.process_group_reservation_retained && !wait.process_group_ownership_lost && !wait.dropped_total;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessSpawnOptions matrix_unit_capture_options(u64 limit)
+{
+    ProcessSpawnOptions options = {.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .new_process_group = 1, .search_path = 1, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE};
+    options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = limit;
+    options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = limit;
+    options.capture_limits.total = limit;
+    return options;
+}
+
+BUSTER_GLOBAL_LOCAL MatrixUnitObservation matrix_unit_observation_begin(Arena* arena, String8 root, String8 id, SliceString8 argv)
+{
+    MatrixUnitObservation result = {.enabled = string_equal(os_get_environment_variable(S8("BUSTER_CI_CHECKS_EVIDENCE")), S8("1")) &&
+        (string_ends_with_sequence(id, S8("-test-Debug")) || string_ends_with_sequence(id, S8("-test-Release")))};
+    if (result.enabled)
+    {
+        if (argv.length >= 3 && string_equal(argv.pointer[1], S8("test_units_partitioned"))) { result.binary = argv.pointer[2]; }
+        else if (argv.length >= 2 && string_equal(argv.pointer[1], S8("test"))) { result.binary = argv.pointer[0]; }
+        if (result.binary.length) { result.binary = os_path_absolute_lexical(arena, result.binary, true); }
+        result.directory = path_join(arena, path_join(arena, path_parent(arena, root), S8("unit-observations")), id);
+        result.valid = result.binary.length && !path_exists(arena, result.directory) &&
+            os_get_environment_variable(S8("GITHUB_RUN_ID")).length && os_get_environment_variable(S8("GITHUB_RUN_ATTEMPT")).length;
+        if (result.valid)
+        {
+            make_directory_recursive(arena, path_parent(arena, result.directory));
+            OsDirectoryCreateResult created = os_make_directory_exclusive(result.directory);
+            result.fresh = !created.error.v && created.created && !created.already_exists;
+            result.valid = result.fresh;
+            FileMapRead map = file_map_read(arena, result.binary, (FileReadOptions){.map_required = 1});
+            result.valid = result.valid && map.mapped_pointer && map.bytes.pointer && map.bytes.length;
+            if (result.valid)
+            {
+                result.binary_bytes = map.bytes.length;
+                result.binary_hash = stage_object_sha256_bytes(arena, map.bytes.pointer, map.bytes.length);
+            }
+            file_map_unmap(map);
+        }
+        if (result.valid)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys, inherited_values = program_state->input.environment_values;
+            SliceString8 keys = {.pointer = arena_allocate(arena, String8, inherited_keys.length + 2), .length = 2};
+            SliceString8 values = {.pointer = arena_allocate(arena, String8, inherited_keys.length + 2), .length = 2};
+            keys.pointer[0] = S8("BUSTER_TEST_MODULE_GROUP"); values.pointer[0] = S8("inventory");
+            keys.pointer[1] = S8("BUSTER_TEST_TABLE_AUDITS"); values.pointer[1] = S8("0");
+            for (u64 i = 0; i < inherited_keys.length; i += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[i], keys.pointer[0]) && !string_equal(inherited_keys.pointer[i], keys.pointer[1]))
+                {
+                    keys.pointer[keys.length++] = inherited_keys.pointer[i];
+                    values.pointer[values.length++] = inherited_values.pointer[i];
+                }
+            }
+            String8 query[] = {result.binary, S8("test"), S8("--verbose=1"), S8("--ci=1")};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(query), keys, values,
+                matrix_unit_capture_options(MATRIX_UNIT_INVENTORY_LIMIT));
+            ProcessWaitResult wait = {.result = PROCESS_RESULT_NOT_EXISTENT};
+            if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, MATRIX_UNIT_QUERY_TIMEOUT_US); }
+            String8 streams[] = {BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR])};
+            String8 inventory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(streams), false);
+            result.inventory_hash = stage_object_sha256_bytes(arena, (u8*)inventory.pointer, inventory.length);
+            String8 after_hash = {0};
+            result.valid = matrix_unit_capture_clean(spawn, wait) && wait.result == PROCESS_RESULT_SUCCESS && !wait.platform_status &&
+                inventory.length && matrix_phase_write(arena, result.directory, S8("inventory.log"), inventory) &&
+                stage_object_sha256_file(arena, result.binary, &after_hash) && string_equal(result.binary_hash, after_hash);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool matrix_unit_observation_finish(Arena* arena, MatrixUnitObservation observation, String8 id,
+    u64 epoch, u64 pid, SliceString8 argv, ProcessSpawnResult spawn, ProcessWaitResult wait)
+{
+    bool result = true;
+    if (observation.enabled)
+    {
+        String8 streams[] = {BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR])};
+        String8 log = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(streams), false);
+        String8 log_hash = stage_object_sha256_bytes(arena, (u8*)log.pointer, log.length), after_hash = {0};
+        bool unchanged = observation.valid && stage_object_sha256_file(arena, observation.binary, &after_hash) && string_equal(observation.binary_hash, after_hash);
+        bool log_published = observation.fresh && matrix_phase_write(arena, observation.directory, S8("test.log"), log);
+        result = unchanged && matrix_unit_capture_clean(spawn, wait) && log_published;
+        String8 source = os_get_environment_variable(S8("BUSTER_TEST_SOURCE_REVISION"));
+        if (!source.length) { source = os_get_environment_variable(S8("GITHUB_SHA")); }
+        String8 receipt = string_format(arena,
+            S8("{{\"schema\":\"buster-desktop-unit-observation-v1\",\"id\":{S8},\"epoch_us\":{u64},\"pid\":{u64},\"source_revision\":{S8},\"run_id\":{S8},\"run_attempt\":{S8},\"binary_path\":{S8},\"binary_sha256\":{S8},\"binary_bytes\":{u64},\"inventory_sha256\":{S8},\"log_sha256\":{S8},\"argv\":{S8},\"inventory_file\":\"inventory.log\",\"log_file\":\"test.log\",\"binary_unchanged\":{S8},\"test_result\":{u32},\"capture_complete\":{S8}}}\n"),
+            matrix_coverage_json_escape(arena, id), epoch, pid, matrix_coverage_json_escape(arena, source),
+            matrix_coverage_json_escape(arena, os_get_environment_variable(S8("GITHUB_RUN_ID"))),
+            matrix_coverage_json_escape(arena, os_get_environment_variable(S8("GITHUB_RUN_ATTEMPT"))),
+            matrix_coverage_json_escape(arena, observation.binary), matrix_coverage_json_escape(arena, observation.binary_hash), observation.binary_bytes,
+            matrix_coverage_json_escape(arena, observation.inventory_hash), matrix_coverage_json_escape(arena, log_hash), matrix_phase_array(arena, argv),
+            unchanged ? S8("true") : S8("false"), (u32)wait.result, matrix_unit_capture_clean(spawn, wait) ? S8("true") : S8("false"));
+        result = observation.fresh && matrix_phase_write(arena, observation.directory, S8("observation.json"), receipt) && result;
+        for (u32 stream = STANDARD_STREAM_OUTPUT; stream <= STANDARD_STREAM_ERROR; stream += 1)
+        {
+            OsFileTransferResult replay = os_file_write_checked(os_get_standard_stream((StandardStream)stream), wait.streams[stream]);
+            result = !replay.error.v && replay.transferred == wait.streams[stream].length && result;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 args)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
@@ -356,6 +479,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 ar
     {
         String8 root = args.pointer[0], id = args.pointer[1];
         SliceString8 argv = {.pointer = args.pointer + 5, .length = args.length - 5};
+        MatrixUnitObservation observation = matrix_unit_observation_begin(arena, root, id, argv);
         u64 pid = os_get_current_process_id(), start = os_now_microseconds();
         String8 stem = string_format(arena, S8("{S8}.{u64}"), id, pid);
         String8 common = string_format(arena, S8("\"id\":{S8},\"epoch_us\":{u64},\"pid\":{u64},\"start_us\":{u64},\"argv\":{S8}"),
@@ -365,11 +489,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 ar
         if (!path_exists(arena, path_join(arena, root, start_name)) && matrix_phase_write(arena, root, start_name, started))
         {
             u64 child_start = os_now_microseconds();
-            ProcessSpawnResult spawn = os_process_spawn(argv, (SliceString8){0}, (SliceString8){0},
-                (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = timeout != 0, .search_path = 1});
+            ProcessSpawnOptions options = observation.enabled ? matrix_unit_capture_options(MATRIX_UNIT_LOG_LIMIT) :
+                (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = timeout != 0, .search_path = 1};
+            options.use_process_environment = 1;
+            ProcessSpawnResult spawn = os_process_spawn(argv, (SliceString8){0}, (SliceString8){0}, options);
             ProcessWaitResult wait = {.result = PROCESS_RESULT_NOT_EXISTENT};
             if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, timeout * 1000000); }
             u64 end = os_now_microseconds();
+            bool observed = matrix_unit_observation_finish(arena, observation, id, epoch, pid, argv, spawn, wait);
+            if (!observed && wait.result == PROCESS_RESULT_SUCCESS) { wait.result = PROCESS_RESULT_FAILED; }
             String8 status = wait.timed_out ? S8("timeout") : wait.result == PROCESS_RESULT_SUCCESS ? S8("success") : S8("failure");
             String8 completed = string_format(arena,
                 S8("{{{S8},\"state\":{S8},\"child_start_us\":{u64},\"end_us\":{u64},\"publication_start_us\":{u64},\"result\":{u32},\"platform_status\":{u32},\"spawned\":{u32},\"timed_out\":{u32},\"termination_requested\":{u32},\"forcibly_terminated\":{u32},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\",\"test_jobs\":{S8},\"ctest_jobs\":\"not-applicable\"}}\n"),
@@ -378,7 +506,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 ar
                 matrix_coverage_json_escape(arena, os_get_environment_variable(S8("BUSTER_TEST_JOBS")).length ?
                     os_get_environment_variable(S8("BUSTER_TEST_JOBS")) : S8("unknown")));
             bool published = matrix_phase_write(arena, root, string_format(arena, S8("{S8}.end.json"), stem), completed);
-            result = published && !wait.timed_out ? wait.result : PROCESS_RESULT_FAILED;
+            result = published && observed && !wait.timed_out ? wait.result : PROCESS_RESULT_FAILED;
         }
     }
     if (result != PROCESS_RESULT_SUCCESS) { string_print(S8("error: matrix phase worker or evidence failed\n")); }

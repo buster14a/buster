@@ -290,6 +290,16 @@ dispatches already bypass main-push reuse. Split completion additionally checks
 the exact API branch identity. Historical timing keeps combined and split job
 cohorts separate; admission A/B conclusions require native phase metadata.
 
+Only the combination steps on these exact dispatch refs enable
+`BUSTER_CI_CHECKS_EVIDENCE=1`. The native phase observer then retains each
+runtime invocation's independent module inventory, binary SHA-256 and test log
+in `unit-observations/<task-id>/` beside `matrix-phases/`. These receipts bind
+the native task, argv, source, run and attempt; the binary must stay unchanged
+through inventory and execution. Canonical Release and serial fallback receive
+the same evidence capture. Ordinary runs retain their original stream behavior.
+The inventory query and evidence overhead are part of the qualification cohort;
+all three variants use it. No tests run during the independent inventory query.
+
 Each variant needs three complete first attempts with matching source, runner
 images, toolchains and cache conditions. Compare queue-inclusive whole-workflow
 wall time, total runner seconds, exact policy/module/assertion census and all
@@ -299,9 +309,13 @@ job duration alone does not meet the contract. The implementation and local
 controls do not assert a measured speedup or close either research issue.
 
 `python3 tools/ci_checks_qualification.py <campaign.json>` reads digest-bound
-retained evidence and emits an independent qualification verdict. Its module
+retained evidence and emits an independent timing/census verdict. Its module
 docstring defines the campaign format. Missing or incomparable observations
-remain `pending`; complete campaigns can meet or reject each issue's contract.
+remain `pending`; complete campaigns can meet or reject each timing threshold.
+Native phase CPU time and peak RSS remain unknown, so positive timing leaves
+overall qualification `pending` and `performance_accepted=false`. Actual
+resource observations and a resource/deadline/cleanup/reliability comparison
+are still required before either issue can be accepted.
 The tool records invocation binary/driver hashes within each sample while
 comparing source/policy, toolchains, conditions and exact census across runs;
 it does not require independently linked executables to have identical bytes.

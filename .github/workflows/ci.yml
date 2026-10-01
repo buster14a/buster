@@ -314,6 +314,7 @@ jobs:
             tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
             tools/coverage_manifest_test.py=coverage-manifest.log
             tools/matrix_shard_test.py=matrix-shard.log
+            tools/matrix_unit_observation_test.py=matrix-unit-observation.log
             tests/ci_tools_test.py=workflow-tools.log
             tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
             tools/ci_matrix_phases_test.py=matrix-phases-test.log
@@ -497,6 +498,7 @@ jobs:
         id: combinations_unix
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
         if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
@@ -513,6 +515,7 @@ jobs:
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
           BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
