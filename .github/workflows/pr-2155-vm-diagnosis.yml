@@ -6,7 +6,7 @@ permissions:
   contents: read
 concurrency:
   group: pr-2155-bounded-vm-diagnosis
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   diagnose:
     runs-on: ubuntu-26.04
@@ -14,12 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 0b1fdfea003551a20f8588f1b18f4d75d747e653
+          ref: 9fc72ab6ccf2ab72bedd4787f5928ba73f0df9a5
           persist-credentials: false
       - name: Build the inspected source compiler on the hosted runner
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 0b1fdfea003551a20f8588f1b18f4d75d747e653
+          test "$(git rev-parse HEAD)" = 9fc72ab6ccf2ab72bedd4787f5928ba73f0df9a5
           mkdir -p diagnostic
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
@@ -56,16 +56,19 @@ jobs:
           cat > diagnostic/case-5-gnu23-invalid.c <<'EOF'
           struct S { int x; long y; }; char a[(unsigned long)((char *)&(((struct S *)((unsigned char)256 - 256))->y) - (char *)0)];
           EOF
-          cat > diagnostic/case-6-gnu17-invalid.c <<'EOF'
-          int n; int a[n ?: 2];
+          cat > diagnostic/case-6-gnu23-invalid.c <<'EOF'
+          struct S { char a[1]; }; char a[(unsigned long)((char *)&(((struct S *)0)->a[0x8000000000000000ULL]) - (char *)0)];
           EOF
           cat > diagnostic/case-7-gnu17-invalid.c <<'EOF'
-          struct S { int x; long y; }; struct S *p; char a[(unsigned long)((char *)&p->y - (char *)0)];
+          int n; int a[n ?: 2];
           EOF
           cat > diagnostic/case-8-gnu17-invalid.c <<'EOF'
+          struct S { int x; long y; }; struct S *p; char a[(unsigned long)((char *)&p->y - (char *)0)];
+          EOF
+          cat > diagnostic/case-9-gnu17-invalid.c <<'EOF'
           int n; struct S { int a[4]; }; char a[(unsigned long)((char *)&(((struct S *)0)->a[n]) - (char *)0)];
           EOF
-          cat > diagnostic/case-9-gnu23-invalid.c <<'EOF'
+          cat > diagnostic/case-10-gnu23-invalid.c <<'EOF'
           void f(int n) { struct S { int a[4]; }; extern char a[(unsigned long)((char *)&(((struct S *)0)->a[n]) - (char *)0)]; }
           EOF
           failures=0
