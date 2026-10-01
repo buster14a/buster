@@ -6,6 +6,8 @@
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
+// machine_test_source_scan_writers carries source-authority brace state per body;
+// machine_test_source_writer_guards pins its sanitized token/guard classifications.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -13,6 +15,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
@@ -962,32 +965,10 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_brace(Mach
     return parent;
 }
 
-BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_writer(MachineX64SourceSpan source, MachineX64SourceSpan body,
-                                                                                u64 writer_offset, MachineX64SourceArch default_arch)
+// Only unknown brace contexts need the existing statement/ternary look-back.
+BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_statement(MachineX64SourceSpan source, MachineX64SourceSpan body,
+                                                                                 u64 writer_offset, MachineX64SourceArch default_arch)
 {
-    MachineX64SourceArch stack[256] = {0};
-    u32 depth = 0;
-    MachineX64SourceArch current = default_arch;
-    MachineX64SourceArch last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
-    for (u64 offset = body.start; offset < writer_offset && offset < body.end; offset += 1)
-    {
-        if (source.bytes[offset] == '{')
-        {
-            if (depth < BUSTER_ARRAY_LENGTH(stack))
-            {
-                stack[depth++] = current;
-                current = machine_test_source_arch_for_brace(source, body, offset, current, last_closed);
-                last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
-            }
-        }
-        else if (source.bytes[offset] == '}' && depth)
-        {
-            last_closed = current;
-            current = stack[--depth];
-        }
-    }
-    if (current != MACHINE_X64_SOURCE_ARCH_UNKNOWN) return current;
-
     // A ternary architecture guard (the code-buffer alignment path is the
     // important example) has no enclosing brace.  Restrict the look-back to
     // the current statement so a previous branch cannot classify a .byte/data
@@ -1005,6 +986,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_writer(Mac
     {
         if (source.bytes[offset] == '?') question = offset;
     }
+    MachineX64SourceArch ternary_arch = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
     if (question != UINT64_MAX)
     {
         for (u64 offset = question + 1; offset < body.end; offset += 1)
@@ -1018,49 +1000,167 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_writer(Mac
         MachineX64SourceArch condition_arch = machine_test_source_arch_markers(source, statement_start, question);
         if (condition_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN)
         {
-            if (writer_offset < colon) return condition_arch;
-            if (colon != UINT64_MAX && writer_offset > colon) return machine_test_source_arch_inverse(condition_arch);
+            if (writer_offset < colon) ternary_arch = condition_arch;
+            if (colon != UINT64_MAX && writer_offset > colon) ternary_arch = machine_test_source_arch_inverse(condition_arch);
         }
     }
-    MachineX64SourceArch marker_arch = machine_test_source_arch_markers(source, statement_start, writer_offset);
     MachineX64SourceArch result;
-    if (marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN)
+    if (ternary_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN)
     {
-        result = marker_arch;
+        result = ternary_arch;
     }
     else
     {
-        result = default_arch;
+        MachineX64SourceArch marker_arch = machine_test_source_arch_markers(source, statement_start, writer_offset);
+        result = marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN ? marker_arch : default_arch;
     }
 
     return result;
 }
 
+// Carry the same bounded brace state once per body, and recognize all writer
+// spellings at identifier boundaries. A writer never restarts the brace walk.
 BUSTER_GLOBAL_LOCAL void machine_test_source_scan_writers(MachineX64SourceSpan source, MachineX64SourceSpan body,
-                                                            MachineX64SourceArch default_arch, String8 const* writers, u32 writer_count,
-                                                            bool* has_x86, bool* has_aarch64, bool* has_unknown)
+                                                         MachineX64SourceArch default_arch, String8 const* writers, u32 writer_count,
+                                                         bool* has_x86, bool* has_aarch64, bool* has_unknown)
 {
-    for (u32 writer_index = 0; writer_index < writer_count; writer_index += 1)
+    MachineX64SourceArch stack[256] = {0};
+    u32 depth = 0;
+    MachineX64SourceArch current = default_arch;
+    MachineX64SourceArch last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+    for (u64 offset = body.start; offset < body.end; offset += 1)
     {
-        String8 writer = writers[writer_index];
-        for (u64 offset = body.start; offset + writer.length <= body.end; offset += 1)
+        u8 byte = source.bytes[offset];
+        if (byte == '{')
         {
-            if (!machine_test_source_token_at(source, offset, writer)) continue;
-            MachineX64SourceArch arch = machine_test_source_arch_for_writer(source, body, offset, default_arch);
-            if (arch == MACHINE_X64_SOURCE_ARCH_X86)
+            if (depth < BUSTER_ARRAY_LENGTH(stack))
             {
-                if (has_x86) *has_x86 = true;
-            }
-            else if (arch == MACHINE_X64_SOURCE_ARCH_AARCH64)
-            {
-                if (has_aarch64) *has_aarch64 = true;
-            }
-            else if (has_unknown)
-            {
-                *has_unknown = true;
+                stack[depth++] = current;
+                current = machine_test_source_arch_for_brace(source, body, offset, current, last_closed);
+                last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
             }
         }
+        else if (byte == '}' && depth)
+        {
+            last_closed = current;
+            current = stack[--depth];
+        }
+        else if (machine_test_source_identifier_start(byte) &&
+                 (offset == body.start || !machine_test_source_identifier_continue(source.bytes[offset - 1])))
+        {
+            u64 end = offset + 1;
+            while (end < body.end && machine_test_source_identifier_continue(source.bytes[end])) end += 1;
+            for (u32 writer_index = 0; writer_index < writer_count; writer_index += 1)
+            {
+                String8 writer = writers[writer_index];
+                if (writer.length != end - offset || !machine_test_source_token_at(source, offset, writer)) continue;
+                MachineX64SourceArch arch = current != MACHINE_X64_SOURCE_ARCH_UNKNOWN
+                                               ? current
+                                               : machine_test_source_arch_for_statement(source, body, offset, default_arch);
+                if (arch == MACHINE_X64_SOURCE_ARCH_X86)
+                {
+                    if (has_x86) *has_x86 = true;
+                }
+                else if (arch == MACHINE_X64_SOURCE_ARCH_AARCH64)
+                {
+                    if (has_aarch64) *has_aarch64 = true;
+                }
+                else if (has_unknown)
+                {
+                    *has_unknown = true;
+                }
+                break;
+            }
+            offset = end - 1;
+        }
     }
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_source_writer_guards(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct MachineSourceGuardCase MachineSourceGuardCase;
+    struct MachineSourceGuardCase
+    {
+        String8 source;
+        MachineX64SourceArch default_arch;
+        u32 expected;
+    };
+    // Bits 1/2/4 mean x86/AArch64/unknown. These are independent goldens,
+    // including legacy lexical guards rather than a new C control-flow parser.
+    MachineSourceGuardCase cases[] = {
+        {S8("{ codegen_emit_u8(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ if (a == CPU_ARCH_X86_64) { codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 1},
+        {S8("{ if (a == CPU_ARCH_AARCH64) { codegen_emit_u32(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 2},
+        {S8("{ if (a == CPU_ARCH_X86_64) { codegen_emit_u8(b, 0); } else { codegen_emit_u64(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 3},
+        {S8("{ if (a == CPU_ARCH_AARCH64) { codegen_emit_u8(b, 0); } else { codegen_emit_u32(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 3},
+        {S8("{ if (a == CPU_ARCH_X86_64) { if (a == CPU_ARCH_AARCH64) { codegen_emit_u32(b, 0); } codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 3},
+        {S8("{ codegen_emit_u8(b, 0); }"), MACHINE_X64_SOURCE_ARCH_X86, 1},
+        {S8("{ codegen_emit_u8(b, 0); }"), MACHINE_X64_SOURCE_ARCH_AARCH64, 2},
+        {S8("{ if (a == CPU_ARCH_X86_64) { codegen_emit_u8(b, 0); } else { codegen_emit_u64(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_AARCH64, 3},
+        {S8("{ if (CPU_ARCH_X86_64 || CPU_ARCH_AARCH64) { codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ if (a == CPU_ARCH_X86_64) { codegen_emit_u8(b, 0); } else if (a == CPU_ARCH_AARCH64) { codegen_emit_u32(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 3},
+        {S8("{ if (a == CPU_ARCH_X86_64) codegen_emit_u8(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 1},
+        {S8("{ a = CPU_ARCH_X86_64; codegen_emit_u8(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ a == CPU_ARCH_X86_64 ? codegen_emit_u8(b, 0) : 0; }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 1},
+        {S8("{ a == CPU_ARCH_X86_64 ? 0 : codegen_emit_u32(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 2},
+        {S8("{ a == CPU_ARCH_AARCH64 ? codegen_emit_u8(b, 0) : codegen_emit_u64(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 3},
+        {S8("{ a ? codegen_emit_u8(b, 0) : codegen_emit_u32(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ if (CPU_ARCH_X86_64_suffix || prefix_CPU_ARCH_AARCH64) { codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ prefix_codegen_emit_u8(b, 0); codegen_emit_u32_suffix(b, 0); 7codegen_emit_u64(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 0},
+        {S8("{ /* codegen_emit_u8(b, 0); */ // codegen_emit_u32(b, 0);\n }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 0},
+        {S8("{ s = \"codegen_emit_u8(\\\"CPU_ARCH_X86_64\\\"); { }\"; c = '}'; }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 0},
+        {S8("{ if (/* CPU_ARCH_X86_64 */ a) { codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 4},
+        {S8("{ if (a == CPU_ARCH_X86_64) { /* } CPU_ARCH_AARCH64 { */ codegen_emit_u8(b, 0); } }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 1},
+        {S8("{ if (a == CPU_ARCH_X86_64) { codegen_emit_u8(b, 0); } if (a == CPU_ARCH_AARCH64) { codegen_emit_u32(b, 0); } codegen_emit_u64(b, 0); }"), MACHINE_X64_SOURCE_ARCH_UNKNOWN, 7},
+    };
+    String8 writers[] = {S8("codegen_emit_u8"), S8("codegen_emit_u32"), S8("codegen_emit_u64")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        MachineSourceGuardCase test = cases[index];
+        // Nonzero body starts preserve source-relative token boundaries.
+        String8 input = string_format(temporary.arena, S8("prefix; {S8} suffix;"), test.source);
+        u8* sanitized = machine_test_source_sanitize(temporary.arena, (ByteSlice){.pointer = (u8*)input.pointer, .length = input.length});
+        MachineX64SourceSpan source = {.bytes = sanitized, .length = input.length, .end = input.length};
+        MachineX64SourceSpan body = source;
+        body.start = S8("prefix; ").length;
+        body.end = body.start + test.source.length;
+        bool x86 = false;
+        bool aarch64 = false;
+        bool unknown = false;
+        machine_test_source_scan_writers(source, body, test.default_arch, writers, BUSTER_ARRAY_LENGTH(writers), &x86, &aarch64, &unknown);
+        u32 actual = (x86 ? 1u : 0u) | (aarch64 ? 2u : 0u) | (unknown ? 4u : 0u);
+        BUSTER_TEST_RAW(arguments, actual == test.expected, test.source);
+        // Optional outputs and an empty writer list remain valid callers.
+        machine_test_source_scan_writers(source, body, test.default_arch, writers, BUSTER_ARRAY_LENGTH(writers), 0, 0, 0);
+        x86 = false;
+        aarch64 = false;
+        unknown = false;
+        machine_test_source_scan_writers(source, body, test.default_arch, writers, 0, &x86, &aarch64, &unknown);
+        BUSTER_TEST(arguments, !x86 && !aarch64 && !unknown);
+        scratch_end(temporary);
+    }
+    // Preserve the legacy stack limit rather than silently changing guard
+    // classification when an opening brace cannot be pushed.
+    for (u32 depth = 254; depth <= 260; depth += 2)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 guard = S8("if (a == CPU_ARCH_AARCH64) { codegen_emit_u8(b, 0); }");
+        u64 length = depth * 2u + guard.length;
+        u8* bytes = arena_allocate(temporary.arena, u8, length);
+        memset(bytes, '{', depth);
+        memcpy(bytes + depth, guard.pointer, guard.length);
+        memset(bytes + depth + guard.length, '}', depth);
+        MachineX64SourceSpan body = {.bytes = bytes, .length = length, .end = length};
+        bool x86 = false;
+        bool aarch64 = false;
+        bool unknown = false;
+        machine_test_source_scan_writers(body, body, MACHINE_X64_SOURCE_ARCH_X86, writers, BUSTER_ARRAY_LENGTH(writers), &x86, &aarch64, &unknown);
+        BUSTER_TEST(arguments, x86 == (depth >= 256) && aarch64 == (depth < 256) && !unknown);
+        scratch_end(temporary);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audit(Arena* arena)
@@ -2755,6 +2855,106 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_edge_index(UnitTestArgument
             BUSTER_TEST(arguments, placement.valid && !placement.edit_count && !placement.frame_size);
             previous_bytes = bytes;
             arena_set_position(arena, start);
+        }
+    }
+    return result;
+}
+
+// A frame address is invariant: a slot whose address a row takes keeps its own
+// storage for the whole function. Once register pressure evicts such a value,
+// FAST and QUALITY recompute it from its defining row instead of storing it
+// and reading it back. The address is taken first, then more loaded values
+// than either target has allocatable registers stay live, and the address is
+// used again across a block boundary: it is never spilled, every reload of it
+// is a frame rematerialization, and the placement still encodes.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_address_rematerialization(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum
+    {
+        FRAME_REMATERIALIZE_PRESSURE = 32,
+        FRAME_REMATERIALIZE_SLOT_COUNT = 3,
+    };
+    for (u32 target = 0; target < 2; target += 1)
+    {
+        bool aarch64 = target == 1;
+        u16 lea_frame = aarch64 ? MACHINE_A64_LEA_FRAME : MACHINE_X64_LEA_FRAME;
+        u16 load_frame = aarch64 ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME;
+        u16 store_frame = aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64;
+        u16 store_pointer = aarch64 ? MACHINE_A64_STORE_PTR64 : MACHINE_X64_STORE_PTR64;
+        u16 jump = aarch64 ? MACHINE_A64_B : MACHINE_X64_JMP;
+        u16 return_opcode = aarch64 ? MACHINE_A64_RET : MACHINE_X64_RET;
+        MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+        u32 address = machine_builder_virtual_register(
+            &builder, (MachineVirtualRegister){.definition_point = machine_point_make(0, MACHINE_POINT_AFTER),
+                                               .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        MachineRef address_ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address);
+        MachineRef pressure[FRAME_REMATERIALIZE_PRESSURE];
+        for (u32 index = 0; index < FRAME_REMATERIALIZE_PRESSURE; index += 1)
+        {
+            u32 value = machine_builder_virtual_register(
+                &builder, (MachineVirtualRegister){.definition_point = machine_point_make(1u + index, MACHINE_POINT_AFTER),
+                                                   .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+            pressure[index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+        }
+        machine_builder_block_begin(&builder);
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = lea_frame, .payload = 8,
+                                                                   .operands = {address_ref, machine_ref_make(MACHINE_REF_STACK_SLOT, 0)}});
+        for (u32 index = 0; index < FRAME_REMATERIALIZE_PRESSURE; index += 1)
+        {
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = load_frame,
+                                                                       .operands = {pressure[index], machine_ref_make(MACHINE_REF_STACK_SLOT, 1)}});
+        }
+        for (u32 index = 0; index < FRAME_REMATERIALIZE_PRESSURE; index += 1)
+        {
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = store_frame,
+                                                                       .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 2), pressure[index]}});
+        }
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = jump, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+        machine_builder_block_end(&builder, (MachineBlock){0});
+        machine_builder_edge(&builder, (MachineEdge){.source_block = 0, .destination_block = 1});
+        machine_builder_block_begin(&builder);
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = store_pointer, .operands = {address_ref, address_ref}});
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = return_opcode});
+        machine_builder_block_end(&builder, (MachineBlock){0});
+        MachineFunction function = machine_function_builder_finish(arena, &builder);
+        function.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
+        function.immediates = arena_allocate(arena, u64, 1);
+        function.immediate_count = 1;
+        function.stack_slot_sizes = arena_allocate(arena, u32, FRAME_REMATERIALIZE_SLOT_COUNT);
+        function.stack_slot_alignments = arena_allocate(arena, u32, FRAME_REMATERIALIZE_SLOT_COUNT);
+        for (u32 slot = 0; slot < FRAME_REMATERIALIZE_SLOT_COUNT; slot += 1)
+        {
+            function.stack_slot_sizes[slot] = slot == 0 ? 16u : 8u;
+            function.stack_slot_alignments[slot] = 8;
+        }
+        function.stack_slot_count = FRAME_REMATERIALIZE_SLOT_COUNT;
+        function.returns_twice_absence_certified = true;
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            MachineStackPlacement placement =
+                mode == 0 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+            BUSTER_TEST(arguments, placement.valid);
+            u32 address_spills = 0;
+            u32 address_reloads = 0;
+            u32 address_rematerializations = 0;
+            u32 foreign_rematerializations = 0;
+            for (u32 index = 0; index < placement.edit_count; index += 1)
+            {
+                MachineEdit edit = placement.edits[index];
+                address_spills += edit.kind == MACHINE_EDIT_SPILL && edit.subject == address;
+                address_reloads += edit.kind == MACHINE_EDIT_RELOAD && edit.subject == address;
+                address_rematerializations += edit.kind == MACHINE_EDIT_REMATERIALIZE_FRAME && edit.subject == address;
+                foreign_rematerializations += edit.kind == MACHINE_EDIT_REMATERIALIZE_FRAME && edit.subject != address;
+            }
+            BUSTER_TEST(arguments, address_spills == 0 && address_reloads == 0 && foreign_rematerializations == 0);
+            BUSTER_TEST(arguments, address_rematerializations != 0);
+            BUSTER_TEST(arguments, placement.rematerialize_count >= address_rematerializations);
+            MachineEncodeResult encoded =
+                aarch64 ? machine_encode_aarch64(arena, &function, &placement) : machine_encode_x86_64(arena, &function, &placement);
+            BUSTER_TEST(arguments, encoded.valid);
         }
     }
     return result;
@@ -6340,13 +6540,16 @@ BUSTER_GLOBAL_LOCAL u32 machine_test_debug_random(u32* state, u32 bound)
 // below cover what the lookups replaced: values in zero, one, two and more
 // virtual registers, promoted (mutable) places, parameters whose place is only
 // an IR_OPCODE_ARGUMENT result, canonical locals past the place array, and
-// place-less locals that emit one value per block.
+// place-less locals that emit one value per block. The second half of the
+// cases attaches no local_values to any block, as canonical construction
+// never does, so only parameters give place-less locals their block values.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     enum
     {
-        CASE_COUNT = 48,
+        CASE_COUNT = 96,
+        DENSE_CASE_COUNT = 48,
         VALUE_COUNT = 40,
         BLOCK_COUNT = 5,
         LOCAL_COUNT = 10,
@@ -6398,7 +6601,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
                 local_values[local_index] = choice < VALUE_COUNT ? (IrValueId){.value = choice} : IR_VALUE_ID_INVALID;
             }
             blocks[block_index] = (IrBlock){
-                .local_values = local_values,
+                .local_values = case_index < DENSE_CASE_COUNT ? local_values : 0,
                 .first_instruction = {.value = block_index * (VALUE_COUNT / BLOCK_COUNT)},
                 .id = {.value = block_index},
             };
@@ -6489,6 +6692,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
         }
         scratch_end(temporary);
     }
+    return result;
+}
+
+// A place-less local per block, each filled by that block's one parameter:
+// the table matches the whole-array reference, and in the counting build the
+// work is three entry visits per block (fill, row, reset), not every
+// unresolved local twice per block.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_sparse_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SPARSE_BLOCKS = 256 };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrType types[] = {
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 64, .layout = {.resolved = true, .size = 8, .alignment = 8}},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrValue* values = arena_allocate(temporary.arena, IrValue, SPARSE_BLOCKS);
+    IrInstruction* instructions = arena_allocate(temporary.arena, IrInstruction, SPARSE_BLOCKS);
+    u64* immediates = arena_allocate(temporary.arena, u64, SPARSE_BLOCKS);
+    IrBlock* blocks = arena_allocate(temporary.arena, IrBlock, SPARSE_BLOCKS);
+    IrCfgBlock* cfg_blocks = arena_allocate(temporary.arena, IrCfgBlock, SPARSE_BLOCKS);
+    IrCfgParameter* cfg_parameters = arena_allocate(temporary.arena, IrCfgParameter, SPARSE_BLOCKS);
+    IrDebugLocal* debug_locals = arena_allocate(temporary.arena, IrDebugLocal, SPARSE_BLOCKS);
+    u32* stack_slots = arena_allocate(temporary.arena, u32, SPARSE_BLOCKS);
+    u32* indirect_slots = arena_allocate(temporary.arena, u32, SPARSE_BLOCKS);
+    for (u32 index = 0; index < SPARSE_BLOCKS; index += 1)
+    {
+        // Constants with no canonical local leave every debug local place-less.
+        immediates[index] = index;
+        values[index] = (IrValue){.definition = {.value = index}, .canonical_type = {.value = 0}};
+        instructions[index] = (IrInstruction){
+            .opcode = IR_OPCODE_CONSTANT_INTEGER,
+            .result = {.value = index},
+            .canonical_local = IR_LOCAL_ID_INVALID,
+            .immediates = immediates + index,
+            .immediate_count = 1,
+        };
+        blocks[index] = (IrBlock){.first_instruction = {.value = index}, .id = {.value = index}};
+        cfg_blocks[index] = (IrCfgBlock){.first_instruction = index, .instruction_count = 1, .parameter_offset = index, .parameter_count = 1};
+        cfg_parameters[index] = (IrCfgParameter){.canonical_local = {.value = index}, .value = {.value = index}};
+        debug_locals[index] = (IrDebugLocal){.id = {.value = index}, .type = {.value = 0}};
+        stack_slots[index] = UINT32_MAX;
+        indirect_slots[index] = UINT32_MAX;
+    }
+    IrPublishedCfg published = {.blocks = cfg_blocks, .parameters = cfg_parameters, .block_count = SPARSE_BLOCKS,
+                                .parameter_count = SPARSE_BLOCKS};
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .blocks = blocks,
+        .debug_locals = debug_locals,
+        .published_cfg = &published,
+        .instruction_count = SPARSE_BLOCKS,
+        .value_count = SPARSE_BLOCKS,
+        .block_count = SPARSE_BLOCKS,
+        .local_count = SPARSE_BLOCKS,
+        .debug_local_count = SPARSE_BLOCKS,
+    };
+    MachineFunction indexed = {0};
+    MachineFunction reference = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, stack_slots, indirect_slots);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_VALUE_BLOCKS] - before.values[IR_CONSTRUCTION_DEBUG_VALUE_BLOCKS] == SPARSE_BLOCKS);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_VALUE_LOCAL_VISITS] - before.values[IR_CONSTRUCTION_DEBUG_VALUE_LOCAL_VISITS] ==
+                           3u * SPARSE_BLOCKS);
+#endif
+    bool reference_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &reference, stack_slots, indirect_slots);
+    BUSTER_TEST(arguments, indexed_built && reference_built);
+    BUSTER_TEST(arguments, indexed.debug_value_count == SPARSE_BLOCKS && reference.debug_value_count == SPARSE_BLOCKS);
+    if (indexed_built && reference_built && indexed.debug_value_count == SPARSE_BLOCKS && reference.debug_value_count == SPARSE_BLOCKS)
+    {
+        bool same = true;
+        for (u32 index = 0; index < SPARSE_BLOCKS; index += 1)
+        {
+            MachineDebugValue a = indexed.debug_values[index];
+            MachineDebugValue b = reference.debug_values[index];
+            same = same && a.local.value == index && a.first_instruction == index && a.instruction_count == 1 &&
+                   a.local.value == b.local.value && a.first_instruction == b.first_instruction &&
+                   a.instruction_count == b.instruction_count && a.kind == b.kind && a.constant == b.constant;
+        }
+        BUSTER_TEST(arguments, same);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -7183,6 +7474,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
+    BUSTER_TEST_FIXTURE(arguments, machine_test_source_writer_guards);
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_encode_into_caller_buffer);
     BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
@@ -7190,6 +7482,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
@@ -7219,6 +7512,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
@@ -8355,6 +8649,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 267);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
+    // The gang prewarm resolves every registered closed-set query: 336
+    // registrations share 267 signatures, and no entry is left pending for a
+    // worker lane to fill.
+    BUSTER_TEST(arguments, metadata_shape_cache.registered_queries == 336);
+    BUSTER_TEST(arguments, metadata_shape_cache.resolved_rows == metadata_shape_cache.prepared_rows);
+    BUSTER_TEST(arguments, metadata_shape_cache.pending_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
     // records.  The source audit below validates their shape and ownership;

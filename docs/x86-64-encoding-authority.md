@@ -31,7 +31,7 @@ Paths below are relative to `src/buster/lib/` unless stated otherwise.
 | `compiler/assembly/assembly.c` | Intel/AT&T parsing and inline/global assembly become physical operands, then `assembly_x86_metadata_select_source_form` / `assembly_x86_metadata_emit`. Final ordinary bytes use metadata. |
 | The same assembler's size/legality paths | Source `LEA` and `MOVZX`/`MOVSX`/`MOVSXD` now bypass the handwritten size functions: checked metadata selection supplies length, displacement width and form for both layout and emission. [LEA Intel and AT&T oracle](x86-64-source-layout-oracle.s); [move-extension oracle](x86-64-source-move-extend-oracle.s). The other families still call `assembly_x86_memory_displacement_size`, `memory_encoding_size`, `instruction_size`, `general_instruction_size`, `size_*`, `evex_*`, `apx_*`, `amd_*`, `amx_*`, or `mask_instruction_size`, duplicating size, immediate, address, suffix, feature and operand decisions. AMD/vector form tables are not another final byte packer, but they remain independent encoding-decision authorities to migrate separately. |
 | `compiler/codegen/codegen.c` | `codegen_canonical_x64_metadata_emit*` and relocation helpers adapt canonical lowering to metadata. Query, immediate/displacement, and byte-template caches are derived emission routes. Scalar/SIMD/x87/EVEX helpers and ABI expansion choose operations; they must not invent fields. Inline/global assembly rejoins the source assembler. |
-| `compiler/codegen/machine.c`, `machine_x86_64.c` | Exact DIRECT/FAMILY recipes, shape caches, prevalidated register/memory/immediate templates, and EXPANSION switch. `machine_x86_64_exact_prewarm` prepares exact shapes. The registry has 126 rows: 47 DIRECT, 50 FAMILY, 29 EXPANSION, plus documented LEA_BLOCK, INDIRECT_BRANCH and LOAD_SYMBOL_GOT surfaces. These are dispatch/expansion paths, not 126 encoders. |
+| `compiler/codegen/machine.c`, `machine_x86_64.c` | Exact DIRECT/FAMILY recipes, shape caches, prevalidated register/memory/immediate templates, and EXPANSION switch. `machine_x86_64_exact_prewarm` prepares exact shapes; it registers the closed expansion-shape set and resolves each shape on its first serial lookup, and `machine_x86_64_exact_prewarm_all_shapes` resolves every shape before a gang. The registry has 126 rows: 47 DIRECT, 50 FAMILY, 29 EXPANSION, plus documented LEA_BLOCK, INDIRECT_BRANCH and LOAD_SYMBOL_GOT surfaces. These are dispatch/expansion paths, not 126 encoders. |
 | `x86_64.c` | `x86_64_encode_register_operation` already sends ordinary register operations through metadata, including extended-register variants. CPU-identification constants are not instruction emission. |
 | `compiler/jit/jit.c` | `jit_emit_thunks` encodes the indirect JMP through metadata; its embedded target address is data. |
 | `compiler/link/link.c` | `link_x86_emit`, `link_x86_emit_push_imm32`, ELF/PE startup, import/PLT stubs, and Mach-O destructor runners generally use metadata. Object-format and ABI policy remain here. Exceptions are enumerated below. |
@@ -59,6 +59,15 @@ Its zero forbidden-writer result was not proof of universal unification. The
 registry now classifies the two TLS APIs as metadata authorities and removes
 the old canonical TLS “neutral fixed sequence” exception. The remaining raw
 sites are explicit migration work, not hidden behind that counter.
+
+`machine_test_source_scan_writers` walks each sanitized body once, carrying
+the existing 256-entry architecture brace stack and recognizing all writer
+spellings at identifier boundaries. Unknown brace contexts retain the lexical
+statement/ternary look-back; this is not a C control-flow analysis. The
+`machine_test_source_writer_guards` fixture pins comments, strings, token
+boundaries, nested/else/ternary guards, unknown/default architecture and the
+stack limit. The [#1887 audit](performance-audits/2026-09-29T184335Z.md)
+records the reference differential, work census and scoped timing comparison.
 
 Mach-O dyld bind opcodes, unwind records, hashes, AArch64 words, target-address
 payloads and source `.byte` directives are not x86 instruction authorities.
@@ -206,7 +215,16 @@ by a fixed-disp32 LEA; its final four bytes contain the thread-pointer offset.
 The IE envelope stays seven bytes, and all 16 GPR destinations are derived from
 metadata. Small and zero values do not shrink these ABI-sized envelopes.
 
-The implementation prepares GD, local-exec and IE templates independently.
+`buster_x86_metadata_relax_tls_local_dynamic` owns the local-dynamic envelope
+foreign `-fPIC` objects carry (this compiler never emits it): a seven-byte
+`lea rdi, [rip + x@tlsld]` then a five-byte direct `call` or, under
+`-fno-plt`, a six-byte `call [rip + helper]`. Both calls and the LEA are
+derived from metadata like the GD templates; the call opcode bytes select the
+12- or 13-byte envelope. The replacement is the local-exec FS MOV to RAX behind
+three or four data16 prefixes, with no offset field: each variable's DTPOFF32
+supplies its own offset.
+
+The implementation prepares GD, local-exec, IE and LD templates independently.
 An object-only GD compile derives only its LEA and CALL, not all 36 forms used
 across every recipe. Ordinary non-TLS compiles never initialize this cache.
 `prewarm_all_forms` prepares every group for parallel test consumers.

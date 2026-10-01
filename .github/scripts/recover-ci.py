@@ -40,9 +40,13 @@ REQUIRED_WORKFLOW_PATHS = {
     "Native retirement merge admission": "api-migration-policy.yml",
     "Main integration admission": "merge-queue-admission.yml",
 }
-# #1810's short-lived publisher uses this exact-head marker without a workflow
-# check suite. A check with the same name and an unrelated marker is ignored.
-RECONCILED_CHECK_MARKERS = {"Main integration admission": "buster-merge-queue-admission-v1:"}
+# The event-driven admission reconciler (#1807) publishes this check through the
+# Checks API, outside any workflow-run check suite. It is bound instead by an
+# exact-head external ID; see check_marker in tools/merge_queue_admission.py.
+RECONCILED_CHECK_MARKERS = {
+    "Main integration admission": "buster-merge-queue-admission-v1:",
+    "Native retirement merge admission": "buster-native-retirement-admission-v1:",
+}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 # #1866: run 36571009755 left this step in progress for over 30 minutes past
 # its 5-minute timeout. Budgets mirror the step's ci.yml timeout-minutes for
@@ -53,10 +57,14 @@ WORKFLOW_TOOLS_STEP = "Workflow tool regression tests"
 WORKFLOW_TOOLS_BUDGET_SECONDS = {
     "Linux x86-64 release": 2 * 60,
     "Linux AArch64 release": 2 * 60,
-    "macOS x86-64 release": 5 * 60,
     "macOS AArch64 release": 5 * 60,
     "Windows x86-64 release": 5 * 60,
     "Windows AArch64 release": 5 * 60,
+}
+# Old workflow revisions can still finish after the Apple CI policy changes.
+# Preserve their deadline and the #1866 incident replay outside the live matrix.
+HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS = {
+    "macOS x86-64 release": 5 * 60,
 }
 STEP_DEADLINE_GRACE_SECONDS = 10 * 60
 # Passes keep no state, so normal cancellation gets this long, inside the pass
@@ -328,7 +336,8 @@ def step_deadline_candidates(run, jobs, now):
         # A finished run's stale step metadata is never cancellation authority.
         jobs = []
     for job in jobs:
-        budget = WORKFLOW_TOOLS_BUDGET_SECONDS.get(job.get("name"))
+        budget = WORKFLOW_TOOLS_BUDGET_SECONDS.get(
+            job.get("name"), HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS.get(job.get("name")))
         steps = job.get("steps")
         if budget is None or job.get("status") != "in_progress" or not isinstance(steps, list):
             continue
@@ -488,7 +497,9 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
         if status == "completed":
             if conclusion is None:
                 raise ValueError("Completed CI job has no conclusion.")
-            if conclusion != "success":
+            # A job whose `if:` excludes merge groups (Main CI reuse decision,
+            # #1808) completes as skipped; CI complete still requires every shard.
+            if conclusion not in ("success", "skipped"):
                 failed.append(job.get("name", "unnamed"))
         elif conclusion is not None:
             raise ValueError("Incomplete CI job already has a conclusion.")

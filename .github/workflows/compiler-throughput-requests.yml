@@ -1,0 +1,31 @@
+name: Compiler throughput requests
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit or ref
+        default: main
+        required: true
+        type: string
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+# Manual and scheduled measurements share one bounded queue, including when
+# both target main. A full queue rejects the new run without replacing an
+# accepted pending request; the caller's run records that cancellation.
+concurrency:
+  group: compiler-throughput-requests
+  queue: max
+  cancel-in-progress: false
+
+# This caller runs no steps. Every job of the called workflow checks out with
+# `persist-credentials: false` and sets its own `timeout-minutes:` bound.
+jobs:
+  measurement:
+    uses: ./.github/workflows/compiler-throughput.yml
+    with:
+      baseline_ref: ${{ inputs.baseline_ref || 'main' }}

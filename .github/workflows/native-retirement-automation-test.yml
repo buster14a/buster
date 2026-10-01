@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/native-retirement-automation.json'
       - '.github/workflows/native-retirement-automation*.yml'
+      - '.github/workflows/native-retirement-catch-up.yml'
       - '.github/workflows/native-retirement-integration.yml'
       - 'tools/native_retirement_automation*.py'
       - 'tools/native_retirement_controller*.py'

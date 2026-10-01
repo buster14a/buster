@@ -203,18 +203,6 @@ def _policy(platform: str, architecture: str) -> dict[str, Any]:
             },
             *common_exclusions,
         ]
-    elif platform == "ios" and architecture == "x86_64":
-        abi = "x86_64"
-        execution = "compile-link-bundle"
-        artifact_kind = "app-bundle"
-        exclusions = [
-            {
-                "capability": "runtime-execution",
-                "state": "excluded",
-                "reason": "github-macos-26-intel-xcode-26-runtime-does-not-provide-reliable-x86_64-execution",
-            },
-            *common_exclusions,
-        ]
     elif platform == "ios" and architecture == "aarch64":
         abi = "arm64"
         execution = "runtime"
@@ -281,14 +269,13 @@ def _workflow_mobile_lanes(path: Path = WORKFLOW_PATH) -> list[dict[str, str]]:
     )
     lanes = [match.groupdict() for match in expression.finditer(mobile)]
     expected = {
-        ("Android x86-64", "android", "x86_64"),
-        ("iOS x86-64", "ios", "x86_64"),
-        ("iOS AArch64", "ios", "aarch64"),
+        ("Android x86-64", "ubuntu-26.04", "android", "x86_64"),
+        ("iOS AArch64", "macos-26", "ios", "aarch64"),
     }
-    observed = {(lane["name"], lane["os"], lane["arch"]) for lane in lanes}
-    if len(lanes) != 3 or observed != expected or any(not lane["runner"].strip() for lane in lanes):
+    observed = {(lane["name"], lane["runner"], lane["os"], lane["arch"]) for lane in lanes}
+    if len(lanes) != 2 or observed != expected or any(not lane["runner"].strip() for lane in lanes):
         raise MobileCoverageError(
-            "the mobile workflow must contain exactly Android x86-64, iOS x86-64, and iOS AArch64 lanes"
+            "the mobile workflow must contain exactly Android x86-64 and iOS AArch64 lanes"
         )
     required_fragments = (
         "./android/test_ci.sh --all",
@@ -695,30 +682,6 @@ def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) ->
     if not sdk_path or not sdk_version:
         raise MobileCoverageError("iOS simulator SDK identity is incomplete")
 
-    if architecture == "x86_64":
-        for config in CONFIGURATIONS:
-            expected = f"iOS {config} x86-64 simulator bundle built and linked successfully."
-            if lines.count(expected) != 1:
-                raise MobileCoverageError(f"iOS x86-64 {config} bundle receipt is missing or duplicated")
-        skip = (
-            "iOS x86-64 execution skipped on GitHub macos-26-intel: Xcode 26 simulator runtimes "
-            "do not provide reliable Intel execution coverage."
-        )
-        if lines.count(skip) != 1:
-            raise MobileCoverageError("iOS x86-64 build-only rationale is missing or duplicated")
-        return {
-            "kind": "ios-simulator",
-            "execution": "compile-link-bundle",
-            "sdk_path": sdk_path,
-            "sdk_version": sdk_version,
-            "runtime_id": "",
-            "runtime_version": "",
-            "device_name": "",
-            "udid": "",
-            "state": "not-run",
-            "reason": "github-macos-26-intel-xcode-26-runtime-does-not-provide-reliable-x86_64-execution",
-        }
-
     for config in CONFIGURATIONS:
         if lines.count(f"iOS {config} tests passed.") != 1:
             raise MobileCoverageError(f"iOS arm64 {config} runtime receipt is missing or duplicated")
@@ -1095,7 +1058,7 @@ def validate_manifest(manifest: Any, environment: Mapping[str, str]) -> list[str
 def run_self_test() -> int:
     lanes = _workflow_mobile_lanes()
     case_count = 0
-    for platform, architecture in (("android", "x86_64"), ("ios", "x86_64"), ("ios", "aarch64")):
+    for platform, architecture in (("android", "x86_64"), ("ios", "aarch64")):
         policy = _policy(platform, architecture)
         lane_id = f"mobile/{platform}/{architecture}/source={'1' * 40}/run=1/attempt=1"
         manifest = {
@@ -1152,7 +1115,7 @@ def run_self_test() -> int:
         mutations.append(("missing-release", missing_release))
         wrong_execution = copy.deepcopy(manifest)
         wrong_execution["expected"][0]["execution"] = (
-            "compile-link-bundle" if platform != "ios" or architecture != "x86_64" else "runtime"
+            "compile-link-bundle"
         )
         mutations.append(("wrong-execution", wrong_execution))
         wrong_count = copy.deepcopy(manifest)
@@ -1177,7 +1140,7 @@ def run_self_test() -> int:
             if not _validate_policy_contract(mutation, platform, architecture):
                 raise MobileCoverageError(f"self-test accepted {name} mutation for {platform}/{architecture}")
             case_count += 1
-    if len(lanes) != 3:
+    if len(lanes) != 2:
         raise MobileCoverageError("self-test workflow lane census changed")
     for disposition in (
         "first-attempt-success",
@@ -1356,7 +1319,7 @@ def main() -> int:
         except (MobileCoverageError, OSError, ValueError, TypeError, KeyError) as error:
             print(f"MOBILE_COVERAGE_SELF_TEST failure: {error}", file=sys.stderr)
             return 1
-        print(f"MOBILE_COVERAGE_SELF_TEST success cases={cases} workflow_lanes=3")
+        print(f"MOBILE_COVERAGE_SELF_TEST success cases={cases} workflow_lanes=2")
         return 0
     return 2
 

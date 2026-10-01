@@ -1,8 +1,80 @@
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/os.h>
 #include <buster/lib/file.h>
+
+// Integer wire coverage: llvm_bitcode_test_integer_encoding exhausts the
+// scalar operand boundary; llvm_bitcode_test_integer reads complete serialized
+// modules and llvm_bitcode_test_consumers keeps independent Clang execution.
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer_operand_matches(u64 encoded, u64 bits, u32 width)
+{
+    // Inverse of LLVM's Signed VBRs, not a second implementation of the writer:
+    // https://llvm.org/docs/BitCodeFormat.html#signed-vbrs
+    // The reserved operand 1 denotes INT64_MIN before declared-width truncation.
+    u64 decoded = encoded >> 1;
+    if (encoded == 1)
+    {
+        decoded = UINT64_C(1) << 63;
+    }
+    else if (encoded & 1)
+    {
+        decoded = 0 - decoded;
+    }
+    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    return (decoded & mask) == (bits & mask);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_encoding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Exact wire values prevent a matching round-trip mistake at signed minima.
+    u32 widths[] = {1, 8, 16, 32, 64};
+    u64 expected[] = {3, 257, 65537, UINT64_C(4294967297), 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    {
+        u64 sign = UINT64_C(1) << (widths[index] - 1);
+        BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand(sign, widths[index]) == expected[index]);
+    }
+
+    u32 exhaustive_count = 0;
+    for (u32 width = 1; width <= 64; width += 1)
+    {
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        if (width <= 16)
+        {
+            // All 131,070 patterns across widths 1..16, through the actual
+            // operand encoder. Constant stack storage; no full-module emission.
+            for (u64 bits = 0; bits <= mask; bits += 1)
+            {
+                u64 encoded = llvm_bitcode_test_integer_operand(bits, width);
+                BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(encoded, bits, width));
+                exhaustive_count += 1;
+            }
+        }
+
+        // Also exercise discarded high bits at the narrow widths, and every
+        // sign boundary through i64. UINT64_MAX must truncate before encoding.
+        u64 boundaries[] = {0, 1, sign - 1, sign, sign + 1, mask, UINT64_MAX};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(boundaries); index += 1)
+        {
+            u64 encoded = llvm_bitcode_test_integer_operand(boundaries[index], width);
+            BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(encoded, boundaries[index], width));
+        }
+
+        if (width < 64)
+        {
+            // Historical #222 mutation: operand 1 for a narrow sign bit must
+            // be rejected by this same oracle. At i64 it is the positive control.
+            BUSTER_TEST(arguments, !llvm_bitcode_test_integer_operand_matches(1, sign, width));
+        }
+    }
+    BUSTER_TEST(arguments, exhaustive_count == 131070);
+    BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(1, UINT64_C(1) << 63, 64));
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArguments* arguments)
 {
@@ -1540,10 +1612,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
     return result;
 }
 
+// Collection records each constant instruction's pool value id and value
+// numbering reads it, so searches of the locked pool come from the module's
+// auxiliary constants alone, not from its constant rows. Two modules that
+// differ only in 60 more constant rows must search the locked pool equally
+// often, while their pools differ by exactly those 60 constants.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_constant_handoff(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 constant_counts[] = {4, 64};
+    LlvmBitcodeStats stats[BUSTER_ARRAY_LENGTH(constant_counts)] = {0};
+    bool emitted_all = true;
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(constant_counts); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = S8("typedef unsigned long long u64;\nu64 chain(u64 a)\n{\n    u64 r = a;\n");
+        for (u32 index = 0; index < constant_counts[variant]; index += 1)
+        {
+            source = string_format(arena, S8("{S8}    r = r * a + {u32}u;\n"), source, 1001 + index);
+        }
+        source = string_format(arena, S8("{S8}    return r;\n}}\n"), source);
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-constant-handoff"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-constant-handoff"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool success = emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
+        emitted_all &= success;
+        stats[variant] = emitted.llvm_bitcode.stats;
+        scratch_end(temporary);
+    }
+    if (emitted_all)
+    {
+        BUSTER_TEST(arguments, stats[1].constant_count - stats[0].constant_count == constant_counts[1] - constant_counts[0]);
+        BUSTER_TEST(arguments, stats[1].locked_constant_searches == stats[0].locked_constant_searches);
+        BUSTER_TEST(arguments, stats[0].constant_searches > stats[0].locked_constant_searches);
+    }
+    return result;
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_integer_encoding);
 
     IrType types[3] = {0};
     types[0] = (IrType){
@@ -1740,6 +1856,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult integer_counts = llvm_bitcode_test_integer_counts(arguments);
     result.test_count += integer_counts.test_count;
     result.succeeded_test_count += integer_counts.succeeded_test_count;
+    UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
+    result.test_count += constant_handoff.test_count;
+    result.succeeded_test_count += constant_handoff.succeeded_test_count;
     UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
     result.test_count += indexed_lookups.test_count;
     result.succeeded_test_count += indexed_lookups.succeeded_test_count;

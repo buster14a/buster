@@ -9,7 +9,6 @@ self-hosted-runner:
     - ubuntu-26.04
     - ubuntu-26.04-arm
     - macos-26
-    - macos-26-intel
     - windows-11-arm
     # Custom labels of the dedicated self-hosted Ryzen 9700X runner used
     # only by the fixed service dispatch workflow.

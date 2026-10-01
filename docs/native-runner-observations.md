@@ -11,7 +11,10 @@ step, or turn a correctness failure into a success.
 Each native job initializes one immutable observation root at
 `$RUNNER_TEMP/buster-ci/native-observation`.  The pre-pack records are included
 in the existing `native-ci-logs.tar.gz` archive.  After the archive attempt,
-`tools/ci_native_observation.py finalize` writes the authoritative
+`tools/ci_native_observation.py package` (the workflow's `Pack native logs`
+step) records the `evidence_packing` phase and then runs `finalize` with the
+lane's `PACKAGE_REQUIRED_PHASES` entry; a packing failure finalizes an
+incomplete observation and still fails the step.  `finalize` writes the authoritative
 `native-observation.json` both into that root and beside the archive,
 `result.json`, and `summary.md` in the directory passed to
 `actions/upload-artifact`.  A packing failure therefore leaves the final

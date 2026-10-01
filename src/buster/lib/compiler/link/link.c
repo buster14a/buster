@@ -20,6 +20,11 @@
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
 //
+// link_objects places every input section of its own name that is spelled as
+// a C identifier after the ordinary sections of its kind, one name at a time,
+// and defines the `__start_NAME`/`__stop_NAME` references GNU `ld` would
+// (link_section_sets_define, issue 1276); its output is one section per kind.
+//
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
 // a **hosted** stub calls the C runtime's `exit` and lets it terminate the
@@ -36,7 +41,8 @@
 //
 // `__attribute__((constructor))` follows the same split. A writer with an
 // entry stub calls the registered functions from it and takes the two array
-// sections off the object first (link_initializer_plan_build), because every
+// sections off the object first (link_initializer_plan_build). Its collector
+// joins relocations to slots in bounded linear work using output storage; every
 // writer places every non-debug section it is given. Mach-O has no stub and
 // needs none for its constructors: it keeps `__DATA,__mod_init_func`, gives
 // it a section command of the type dyld dispatches on, and lets the loader
@@ -59,7 +65,12 @@
 // describe those final copy-slot definitions too: link_elf_output_symbol uses
 // the writer's import indices and emitted dynamic values without changing the
 // input ObjectFile. The .bss section header includes the slots already covered
-// by the writable segment; no loaded bytes or program headers move.
+// by the writable segment; no loaded bytes or program headers move. Whether an
+// import is data at all is a fact about its definition: GCC, Clang and GNU as
+// leave every undefined symbol STT_NOTYPE, so before writer selection
+// link_elf_classify_untyped_imports imports an untyped reference that a library
+// defines, but publishes as no object, as a function -- a copy slot for a
+// function copies its code into .bss and interposes it (GitHub #1242).
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
@@ -412,20 +423,6 @@ enum
     LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
 };
 
-// One function an image has to call before or after `main`, as the merged
-// object spells it: the symbol its `.init_array`/`.fini_array` slot is
-// relocated against, plus that relocation's addend.  Buster's own objects
-// name the function itself with a zero addend; Clang's name the section
-// symbol plus the function's offset inside it, which is why the addend is
-// carried rather than assumed away.
-typedef struct LinkInitializerEntry LinkInitializerEntry;
-struct LinkInitializerEntry
-{
-    s64 addend;
-    u32 symbol;
-    u32 reserved;
-};
-
 // Every initializer of an image, in the order it runs.  The linker writes the
 // entry point itself -- there is no libc startup object in an image it
 // produces, so nothing else would walk the arrays -- and it knows every
@@ -445,29 +442,150 @@ struct LinkInitializerPlan
     u32 destructor_count;
 };
 
-// The entries of one array section, ordered by slot.  A slot with no
-// relocation is a null pointer, which every startup implementation skips and
-// which this therefore drops too.
+// Sparse arrays must not turn an otherwise untouched output reservation into
+// resident pages. Sort only a small prefix of matching relocation indices;
+// the dense path below uses the full reservation as its slot table instead.
+// A prefix has at most E/32 entries. With 32-bit slot/relocation identities,
+// its worst-case heap height is at most 32, keeping sorting work bounded by E.
+enum
+{
+    LINK_INITIALIZER_SPARSE_RATIO = 32,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_initializer_slot_above(LinkInitializerEntry left, LinkInitializerEntry right)
+{
+    // During sparse collection, reserved is the slot and symbol the original
+    // relocation index. The tie-break keeps the incumbent's first match.
+    return left.reserved > right.reserved || (left.reserved == right.reserved && left.symbol > right.symbol);
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slot_sift(LinkInitializerEntry* entries, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_initializer_slot_above(entries[child + 1], entries[child]))
+        {
+            child += 1;
+        }
+        if (!link_initializer_slot_above(entries[child], entries[root]))
+        {
+            break;
+        }
+        LinkInitializerEntry swapped = entries[root];
+        entries[root] = entries[child];
+        entries[child] = swapped;
+        root = child;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slots_sort(LinkInitializerEntry* entries, u32 count)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_initializer_slot_sift(entries, count, root - 1);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkInitializerEntry swapped = entries[0];
+        entries[0] = entries[remaining - 1];
+        entries[remaining - 1] = swapped;
+        link_initializer_slot_sift(entries, remaining - 1, 0);
+    }
+}
+
+// The entries of one array section, ordered by slot. The caller reserves one
+// output entry per complete slot and bounds that capacity to UINT32_MAX.
+// Missing relocations are omitted and the first matching ABSOLUTE64 wins.
+// All transient keys/occupancy live in that existing output reservation, and
+// reserved is zero in every returned entry. No input metadata is changed.
 BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
 {
     u32 count = 0;
-    u64 length = object->sections[kind].data.length;
-    for (u64 offset = 0; offset + OBJECT_INITIALIZER_ENTRY_SIZE <= length; offset += OBJECT_INITIALIZER_ENTRY_SIZE)
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    if (slots == 1)
     {
-        for (u32 index = 0; index < object->relocation_count; index += 1)
+        // Keep the common one-entry case's early exit and avoid table setup.
+        for (u32 index = 0; index < object->relocation_count && !count; index += 1)
         {
             ObjectRelocation relocation = object->relocations[index];
-            if (relocation.section == (u32)kind && relocation.offset == offset && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
+            if (relocation.section == (u32)kind && relocation.offset == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
             {
-                entries[count++] = (LinkInitializerEntry){
-                    .addend = relocation.addend,
-                    .symbol = relocation.symbol,
-                };
-                break;
+                entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
             }
         }
     }
-    for (u32 index = 0; reverse && index * 2 + 1 < count; index += 1)
+    else if (slots && object->relocation_count)
+    {
+        u64 sparse_capacity = slots / LINK_INITIALIZER_SPARSE_RATIO;
+        bool dense = sparse_capacity == 0;
+        for (u32 index = 0; !dense && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && slot < slots)
+            {
+                if (count == sparse_capacity)
+                {
+                    dense = true;
+                }
+                else
+                {
+                    entries[count++] = (LinkInitializerEntry){.symbol = index, .reserved = (u32)slot};
+                }
+            }
+        }
+        if (dense)
+        {
+            count = 0;
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                entries[slot].reserved = 0;
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                    relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0)
+                {
+                    u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                    if (slot < slots && !entries[slot].reserved)
+                    {
+                        entries[slot] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol, .reserved = 1};
+                    }
+                }
+            }
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                if (entries[slot].reserved)
+                {
+                    LinkInitializerEntry entry = entries[slot];
+                    entry.reserved = 0;
+                    // count <= slot: compaction cannot overwrite an unread entry.
+                    entries[count++] = entry;
+                }
+            }
+        }
+        else
+        {
+            link_initializer_slots_sort(entries, count);
+            u32 prefix_count = count;
+            u32 previous_slot = UINT32_MAX;
+            count = 0;
+            for (u32 index = 0; index < prefix_count; index += 1)
+            {
+                LinkInitializerEntry key = entries[index];
+                if (key.reserved != previous_slot)
+                {
+                    ObjectRelocation relocation = object->relocations[key.symbol];
+                    entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+                    previous_slot = key.reserved;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; reverse && index < count / 2; index += 1)
     {
         LinkInitializerEntry swapped = entries[index];
         entries[index] = entries[count - 1 - index];
@@ -476,6 +594,13 @@ BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, Obj
 
     return count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 link_initializer_entries_collect_test(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    return link_initializer_entries_collect(object, kind, entries, reverse);
+}
+#endif
 
 // Reads the two array sections into a plan and hands back the same object
 // with them, and the relocations that filled them, removed: the writers below
@@ -1839,7 +1964,8 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
+BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64 const* section_offsets,
+                                                    ObjectSectionKind const* output_kinds, Arena* arena)
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
@@ -1850,7 +1976,7 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
         {
             return false;
         }
-        ObjectSectionKind kind = object->sections[source->section].kind;
+        ObjectSectionKind kind = output_kinds[source->section];
         if (kind >= OBJECT_SECTION_COUNT)
         {
             return false;
@@ -1987,6 +2113,83 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
     }
 }
 
+// One linker set of a merge: every input section named `name`, a C
+// identifier, placed together at [start, end) of the merged section of `kind`
+// (link_objects, issue 1276).
+typedef struct LinkSectionSet LinkSectionSet;
+struct LinkSectionSet
+{
+    String8 name;
+    u64 start;
+    u64 end;
+    ObjectSectionKind kind;
+    u32 reserved;
+};
+
+// Whether an input section is a member of a linker set: a section of its own
+// past the kinds, named by a C identifier.
+BUSTER_GLOBAL_LOCAL bool link_section_is_set(ObjectFile* object, u32 section_index)
+{
+    ObjectSection* section = object->sections + section_index;
+    return section_index >= OBJECT_SECTION_COUNT && object_section_kind_can_be_named(section->kind) && object_section_name_is_c_identifier(section->name);
+}
+
+// Appends one input section to the merged section of `kind`, aligned, and
+// hands back where it went.
+BUSTER_GLOBAL_LOCAL bool link_section_place(ObjectSection* section, ObjectSectionKind kind, u64* section_sizes, u32* section_alignments, u64* offset)
+{
+    u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
+    u64 aligned = 0;
+    bool result = align_forward_checked(section_sizes[kind], section->alignment, &aligned) && section_size <= UINT64_MAX - aligned;
+    if (result)
+    {
+        *offset = aligned;
+        section_sizes[kind] = aligned + section_size;
+        section_alignments[kind] = BUSTER_MAX(section_alignments[kind], section->alignment);
+    }
+
+    return result;
+}
+
+// GNU `ld` defines `__start_NAME` and `__stop_NAME` at the two ends of every
+// output section named by a C identifier, for the references that ask and for
+// no others, and so does this merge: an undefined reference, weak or strong,
+// to the bound of a set some input placed becomes a hidden definition there.
+// A name no input placed stays undefined, strong references to it are refused
+// and weak ones resolve to zero, as under `ld`. A program's own definition of
+// the name is left alone.
+BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count)
+{
+    String8 start_prefix = S8("__start_");
+    String8 stop_prefix = S8("__stop_");
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count && set_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool start = string_starts_with_sequence(symbol->name, start_prefix);
+        bool stop = !start && string_starts_with_sequence(symbol->name, stop_prefix);
+        if (symbol->section != OBJECT_SECTION_UNDEFINED || (!start && !stop))
+        {
+            continue;
+        }
+        String8 prefix = start ? start_prefix : stop_prefix;
+        String8 set_name = string_slice(symbol->name, prefix.length, symbol->name.length);
+        for (u32 set = 0; set < set_count; set += 1)
+        {
+            if (string_equal(sets[set].name, set_name))
+            {
+                symbol->section = (u32)sets[set].kind;
+                symbol->value = start ? sets[set].start : sets[set].end;
+                symbol->size = 0;
+                symbol->kind = OBJECT_SYMBOL_DATA;
+                symbol->weak = false;
+                symbol->hidden = true;
+                symbol->thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                break;
+            }
+        }
+    }
+}
+
 LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
 {
     LinkObjectResult result = {0};
@@ -2007,12 +2210,18 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     u64 total_symbols = 0;
     u64 total_relocations = 0;
     u64 total_debug_modules = 0;
-    u64 offset_count = (u64)object_count * OBJECT_SECTION_COUNT;
-    u64* section_offsets = arena_allocate(arena, u64, offset_count);
+    // Every input section's slot in `section_offsets` and `output_kinds`. An
+    // object's slots start at `section_slots[object_index]`, and it has at
+    // least OBJECT_SECTION_COUNT of them however few sections it carries, so a
+    // kind-indexed read through its slice stays inside it. The sections past
+    // OBJECT_SECTION_COUNT are the named ones (issue 1276).
+    u64* section_slots = arena_allocate(arena, u64, (u64)object_count + 1);
+    u64 set_section_count = 0;
+    section_slots[0] = 0;
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        if (object->error != OBJECT_ERROR_NONE || !object->sections || object->section_count > OBJECT_SECTION_COUNT ||
+        if (object->error != OBJECT_ERROR_NONE || !object->sections ||
             (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
             (object->comdat_count && !object->comdats) || (object->debug_module_count && !object->debug_modules))
         {
@@ -2041,17 +2250,97 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            u32 alignment = section->alignment;
-            u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = 0;
-            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
+            set_section_count += link_section_is_set(object, section_index);
+        }
+        section_slots[object_index + 1] = section_slots[object_index] + BUSTER_MAX(object->section_count, (u32)OBJECT_SECTION_COUNT);
+    }
+    u64* section_offsets = arena_allocate(arena, u64, section_slots[object_count]);
+    memset(section_offsets, 0, sizeof(*section_offsets) * section_slots[object_count]);
+    ObjectSectionKind* output_kinds = arena_allocate(arena, ObjectSectionKind, section_slots[object_count]);
+    // Every ordinary section is laid out first, in input order, and each
+    // linker set after them, whole: `__start_NAME` and `__stop_NAME` bound one
+    // contiguous range, so every input section of one name goes in together,
+    // sets in the order their names first appear. A set's members share one
+    // kind: their own when they agree, and otherwise writable data, which is
+    // where `ld`'s one output section of mixed flags would be writable too;
+    // code cannot share a set with data. link_section_sets_define gives the
+    // bounds to the references that ask for them.
+    LinkSectionSet* sets = arena_allocate(arena, LinkSectionSet, set_section_count ? set_section_count : 1);
+    u32 set_count = 0;
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
             {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
+                ObjectSection* section = &object->sections[section_index];
+                bool set_member = link_section_is_set(object, section_index);
+                if (pass == 0)
+                {
+                    output_kinds[section_slots[object_index] + section_index] = section->kind;
+                }
+                if (pass == 0 && !set_member)
+                {
+                    if (!link_section_place(section, section->kind, section_sizes, section_alignments,
+                                            &section_offsets[section_slots[object_index] + section_index]))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                }
+                if (pass == 1 && set_member)
+                {
+                    u32 set = 0;
+                    while (set < set_count && !string_equal(sets[set].name, section->name))
+                    {
+                        set += 1;
+                    }
+                    if (set == set_count)
+                    {
+                        sets[set_count++] = (LinkSectionSet){
+                            .name = section->name,
+                            .kind = section->kind,
+                        };
+                    }
+                    else if (sets[set].kind != section->kind)
+                    {
+                        if (sets[set].kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
+                        {
+                            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                            result.symbol = link_string_copy(arena, section->name);
+                            return result;
+                        }
+                        sets[set].kind = OBJECT_SECTION_DATA;
+                    }
+                }
             }
-            section_offsets[(u64)object_index * OBJECT_SECTION_COUNT + section_index] = aligned;
-            section_sizes[section->kind] = aligned + section_size;
-            section_alignments[section->kind] = BUSTER_MAX(section_alignments[section->kind], alignment);
+        }
+    }
+    for (u32 set = 0; set < set_count; set += 1)
+    {
+        LinkSectionSet* current = sets + set;
+        bool first = true;
+        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        {
+            ObjectFile* object = &objects[object_index];
+            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+            {
+                ObjectSection* section = &object->sections[section_index];
+                if (link_section_is_set(object, section_index) && string_equal(section->name, current->name))
+                {
+                    u64* offset = &section_offsets[section_slots[object_index] + section_index];
+                    output_kinds[section_slots[object_index] + section_index] = current->kind;
+                    if (!link_section_place(section, current->kind, section_sizes, section_alignments, offset))
+                    {
+                        result.error = LINK_ERROR_INVALID_INPUT;
+                        return result;
+                    }
+                    current->start = first ? *offset : current->start;
+                    current->end = section_sizes[current->kind];
+                    first = false;
+                }
+            }
         }
     }
     LinkComdatPlan comdat_plan = {0};
@@ -2075,7 +2364,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* section = object->sections + section_index;
-            ObjectSectionKind kind = section->kind;
+            ObjectSectionKind kind = output_kinds[section_index];
             if (!aliased_sections[kind])
             {
                 aliased_sections[kind] = section;
@@ -2151,7 +2440,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = objects + object_index;
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule source = object->debug_modules[module_index];
@@ -2166,29 +2455,37 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* source = &object->sections[section_index];
-            if (source->data.length && !alias_section_data[source->kind])
+            if (source->data.length && !alias_section_data[kinds[section_index]])
             {
-                memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
+                memcpy(result.object.sections[kinds[section_index]].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
             }
             // The priorities of an initializer array travel with its entries.
             // An offset that is not a whole number of entries cannot name one,
             // and only an input section aligned under
-            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.
+            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.  The kinds'
+            // sections carry them in initializer_priorities; a named one past
+            // OBJECT_SECTION_COUNT -- a section attribute's `.init_array.101`
+            // or `.preinit_array` (issue 1276) -- spells one priority for all
+            // of its entries in its name.
             u32 slot = source->kind == OBJECT_SECTION_FINI_ARRAY;
             u32* merged = source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
                               ? result.object.initializer_priorities[slot]
                               : 0;
-            u32* priorities = merged ? object->initializer_priorities[slot] : 0;
-            if (priorities && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            bool kind_section = section_index < OBJECT_SECTION_COUNT;
+            u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
+            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                         : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
                 {
-                    merged[first + entry] = priorities[entry];
+                    merged[first + entry] = priorities ? priorities[entry] : named_priority;
                 }
             }
         }
@@ -2266,7 +2563,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             {
                 destination_index = result.object.symbol_count++;
                 if (!link_symbol_definition_set(&result.object.symbols[destination_index], source, object,
-                                                section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                                                section_offsets + section_slots[object_index], output_kinds + section_slots[object_index], arena))
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
@@ -2326,9 +2623,20 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 u8 merged_thread_local_state = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
                                                    ? destination_thread_local_state
                                                    : source_thread_local_state;
+                // An undefined symbol's kind is only what its references
+                // claim. A typed reference -- a C declaration, an ELF STT_FUNC
+                // or STT_OBJECT one -- outranks an untyped one whichever input
+                // arrives first; otherwise another toolchain's STT_NOTYPE
+                // reference, read as data, decides what a declaration knows.
+                if (!destination_defined && !source_defined && destination_thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                    source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+                {
+                    destination->kind = source->kind;
+                }
                 if (source_replaces)
                 {
-                    if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                    if (!link_symbol_definition_set(destination, source, object, section_offsets + section_slots[object_index],
+                                                    output_kinds + section_slots[object_index], arena))
                     {
                         result.error = LINK_ERROR_INVALID_INPUT;
                         return result;
@@ -2347,7 +2655,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation source = object->relocations[relocation_index];
@@ -2365,8 +2674,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            ObjectSectionKind kind = object->sections[source.section].kind;
-            source.section = (u32)kind;
+            source.section = (u32)kinds[source.section];
             source.offset += offsets[object->relocations[relocation_index].section];
             source.symbol = symbol_maps[object_index][source.symbol];
             source.comdat = 0;
@@ -2374,6 +2682,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     link_initializer_arrays_order(arena, &result.object);
+    link_section_sets_define(&result.object, sets, set_count);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)
@@ -2645,6 +2954,8 @@ ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
 //
 //   general-dynamic, sixteen bytes starting four before the patched field:
 //     66 48 8d 3d <r32>  66 66 48 e8 <r32>
+//   or, from an object compiled with -fno-plt,
+//     66 48 8d 3d <r32>  66 48 ff 15 <r32>   call [rip + __tls_get_addr@GOTPCREL]
 //   becomes
 //     64 48 8b 04 25 00000000    mov rax, fs:0
 //     48 8d 80 <tpoff>           lea rax, [rax + tpoff]
@@ -2668,28 +2979,84 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relax_thread_local(u8* bytes, u64 field_offset
     return result;
 }
 
-// Whether this relocation is the call half of a general-dynamic pair the
-// relaxation above rewrote. Both halves come out of one selected row eight
-// bytes apart, in that order, so the TLSGD site is the whole test; the name
-// check only keeps the scan off every other rel32 in the object.
+// Local dynamic's module-address sequence relaxed the same way, which is ld's
+// LD->LE transition:
+//     48 8d 3d <r32>  e8 <r32>          lea rdi, [rip + x@tlsld]; call __tls_get_addr
+//     48 8d 3d <r32>  ff 15 <r32>       ... call [rip + __tls_get_addr@GOTPCREL]
+//   becomes, at the same length,
+//     66 66 66 [66] 64 48 8b 04 25 00000000   mov rax, fs:0
+// The call returned the block's address, and in the initial executable that
+// block ends at the thread pointer, so each DTPOFF32 that follows is resolved
+// to the variable's offset from the thread pointer instead of from the block.
+BUSTER_GLOBAL_LOCAL bool link_elf_relax_local_dynamic(u8* bytes, u64 field_offset, u64 section_start, u64 section_end)
+{
+    u32 prefix_size = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
+    bool result = false;
+    if (bytes && section_start <= field_offset && field_offset <= section_end && prefix_size <= field_offset - section_start &&
+        BUSTER_X86_METADATA_TLS_LD_SIZE - prefix_size <= section_end - field_offset)
+    {
+        u64 available = section_end - field_offset + prefix_size;
+        u32 capacity = (u32)BUSTER_MIN(available, (u64)BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE);
+        result = buster_x86_metadata_relax_tls_local_dynamic(bytes + field_offset - prefix_size, capacity) != 0;
+    }
+    return result;
+}
+
+// A symbol's offset inside the image's one thread-local block: .tdata, then
+// .tbss at .tdata's size rounded to .tbss's alignment.  This is the DTP
+// offset DTPOFF32/DTPOFF64 name, before any addend.
+BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_offset(ObjectFile* object, ObjectSymbol const* symbol)
+{
+    u64 initialized_size = align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
+                                         BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, 1u));
+    return symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
+}
+
+// Whether this relocation is the __tls_get_addr call of a general- or
+// local-dynamic sequence the relaxations above rewrote. General dynamic's
+// halves come out of one selected row eight bytes apart, in that order, so the
+// TLSGD site is the whole test, whether the call is direct or goes through the
+// GOT slot (-fno-plt). A local-dynamic call follows its TLSLD field by five
+// bytes when direct and six through the GOT slot.
+// The name check only keeps the scan off every other rel32 in the object.
 BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile* object, ObjectRelocation* relocation, ObjectSymbol* symbol)
 {
-    u32 field_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
-    if ((relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32) || relocation->offset < field_delta ||
-        !string_equal(symbol->name, S8("__tls_get_addr")))
+    u32 general_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
+    u32 local_delta = BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
+    u32 local_indirect_delta = BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
+    bool direct = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+    bool indirect = object_relocation_kind_is_x86_got(relocation->kind);
+    bool result = false;
+    if ((direct || indirect) && string_equal(symbol->name, S8("__tls_get_addr")))
     {
-        return false;
-    }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* candidate = object->relocations + index;
-        if (candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD && candidate->section == relocation->section &&
-            candidate->offset == relocation->offset - field_delta)
+        for (u32 index = 0; !result && index < object->relocation_count; index += 1)
         {
-            return true;
+            ObjectRelocation* candidate = object->relocations + index;
+            u64 delta = candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD ? general_delta
+                        : candidate->kind == OBJECT_RELOCATION_X86_64_TLSLD ? (direct ? local_delta : local_indirect_delta)
+                                                                           : 0;
+            result = delta && candidate->section == relocation->section && candidate->offset <= UINT64_MAX - delta &&
+                     candidate->offset + delta == relocation->offset;
         }
     }
-    return false;
+    return result;
+}
+
+// Whether every reference to this symbol is a __tls_get_addr call the
+// relaxations delete, so an executable has no use for the name at all.  A
+// -fno-plt object reaches the function only through a GOT load, which leaves
+// it typed as data, and importing it would then ask the loader for a copy
+// relocation of a function.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(ObjectFile* object, u32 symbol_index)
+{
+    ObjectSymbol* symbol = object->symbols + symbol_index;
+    bool result = string_equal(symbol->name, S8("__tls_get_addr"));
+    for (u32 index = 0; result && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_branch_encode(A64Opcode opcode, s64 displacement, u32* word)
@@ -3005,9 +3372,11 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes)
+BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, OsError* error)
 {
-    return file_publish_executable(path, bytes);
+    FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    *error = published.error;
+    return published.status == FILE_PUBLISH_PUBLISHED;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
@@ -3782,7 +4151,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            u64 width = object_relocation_kind_width(relocation->kind);
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result->error = LINK_ERROR_RELOCATION;
@@ -3835,6 +4204,28 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                     return;
                 }
                 link_write_u32(bytes, slot, (u32)value);
+            }
+            // A thread-local variable's DWARF location is its offset in the
+            // module's block, which DW_OP_form_tls_address turns into an
+            // address: GCC writes it with DTPOFF32, Clang with DTPOFF64.
+            else if ((relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64) &&
+                     (symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO))
+            {
+                u64 value = 0;
+                if (!link_address_addend(link_elf_thread_local_offset(object, symbol), relocation->addend, &value) ||
+                    (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 && value > UINT32_MAX))
+                {
+                    result->error = LINK_ERROR_RELOCATION;
+                    return;
+                }
+                if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+                {
+                    link_write_u64(bytes, slot, value);
+                }
+                else
+                {
+                    link_write_u32(bytes, slot, (u32)value);
+                }
             }
             else
             {
@@ -4509,7 +4900,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -4552,7 +4943,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
             got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
@@ -4674,9 +5075,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -5048,7 +5450,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(exports, symbol))
+        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(object, symbol_index))
         {
             continue;
         }
@@ -5190,7 +5592,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // zero, and re-deriving that per relocation would rescan every
         // library's exports for every reference to an absent weak name.
         if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
-            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && !object_relocation_kind_is_x86_got(relocation->kind) &&
+            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PC64 && !object_relocation_kind_is_x86_got(relocation->kind) &&
             relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -5626,18 +6028,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        // The call in a general-dynamic pair is gone once the pair is relaxed
-        // into local-exec, and __tls_get_addr with it: the sequence eight
-        // bytes back is what makes this call that call rather than a written
-        // one, and an image this linker produces has no dynamic thread-local
-        // storage for a real call to reach.
+        // The call in a general- or local-dynamic sequence is gone once the
+        // sequence is relaxed into local-exec, and __tls_get_addr with it:
+        // the TLSGD or TLSLD field just before is what makes this call that
+        // call rather than a written one, and an image this linker produces
+        // has no dynamic thread-local storage for a real call to reach.
         if (link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol))
         {
             continue;
@@ -5674,7 +6076,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // entry on first use.  Reject every other undefined relocation so
             // data imports cannot be mistaken for callable symbols.
             if (import_index == UINT32_MAX ||
-                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
+                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PC64 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
                  !object_relocation_kind_is_x86_got(relocation->kind) && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -5725,7 +6127,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
             got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
@@ -5781,10 +6193,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             }
             link_write_u64(bytes, output_offset, value);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
         {
             if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            if (!link_elf_relax_local_dynamic(bytes, output_offset, section_offsets[relocation->section],
+                                              section_offsets[relocation->section] + section->data.length))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32)
+        {
+            // A DTPOFF32 outside code is not one a relaxed local-dynamic
+            // sequence reads, so its block-relative meaning would be needed.
+            if ((symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO) ||
+                (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 && relocation->section != OBJECT_SECTION_TEXT))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -5795,18 +6226,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
                                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
             u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
-            // Local-exec patches a field the addend belongs to. The other two
-            // name a rip-relative operand whose -4 is about the instruction,
-            // not about the offset from the thread pointer, and relaxing them
-            // replaces that operand outright.
-            s64 thread_local_addend = relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ? relocation->addend : 0;
+            // Local-exec patches a field the addend belongs to, and so does a
+            // DTPOFF32 once its local-dynamic sequence reads the thread
+            // pointer. The other two name a rip-relative operand whose -4 is
+            // about the instruction, not about the offset from the thread
+            // pointer, and relaxing them replaces that operand outright.
+            bool field = relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32;
+            s64 thread_local_addend = field ? relocation->addend : 0;
             s64 value = 0;
             if (!link_address_difference(symbol_offset, thread_local_size, thread_local_addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
             }
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
+            if (field)
             {
                 link_write_u32(bytes, output_offset, (u32)(s32)value);
             }
@@ -5966,9 +6399,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -6000,8 +6434,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 // and every model is relaxed to local-exec exactly as the fixed-address
 // writer does.  A shared object's block does not, so general-dynamic keeps its
 // __tls_get_addr call and gets a DTPMOD64/DTPOFF64 slot pair, initial-exec a
-// TPOFF64 slot and DF_STATIC_TLS, and local-exec is refused.  Thread-local
-// definitions bind here too.
+// TPOFF64 slot and DF_STATIC_TLS, and local-exec is refused.  Local dynamic
+// keeps its call too and shares one pair for the whole image -- DTPMOD64 and
+// a zero offset, so the call answers with the block's address -- to which each
+// DTPOFF32 adds its variable's offset in the block.  Thread-local definitions
+// bind here too.
 //
 // Layout, file offsets equal to addresses:
 //   R+X: headers, [PIE entry stub], .text, .plt, .eh_frame_hdr, .eh_frame,
@@ -6063,6 +6500,7 @@ typedef enum LinkElfPicAction
     LINK_ELF_PIC_ACTION_LOCAL_EXEC,
     LINK_ELF_PIC_ACTION_TLS_RELAX,
     LINK_ELF_PIC_ACTION_TLS_SLOT,
+    LINK_ELF_PIC_ACTION_DTP_OFFSET,
 } LinkElfPicAction;
 
 typedef struct LinkElfPicImage LinkElfPicImage;
@@ -6091,6 +6529,8 @@ struct LinkElfPicImage
     u32 import_count;
     u32 export_count;
     u32 dynamic_relocation_count;
+    // The local-dynamic module pair's first slot, or UINT32_MAX.
+    u32 local_dynamic_slot;
     LinkError error;
     bool shared;
     bool static_tls;
@@ -6100,15 +6540,6 @@ struct LinkElfPicImage
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* symbol)
 {
     return symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
-}
-
-// A symbol's offset inside the image's one thread-local block: .tdata, then
-// .tbss at .tdata's size rounded to .tbss's alignment.
-BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_offset(ObjectFile* object, ObjectSymbol const* symbol)
-{
-    u64 initialized_size = align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
-                                         BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, 1u));
-    return symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
 }
 
 // The index link_elf_section_table_append gives a loaded section: its
@@ -6270,6 +6701,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         {
             switch (relocation->kind)
             {
+            case OBJECT_RELOCATION_X86_64_PC64:
             case OBJECT_RELOCATION_X86_64_PC32:
             case OBJECT_RELOCATION_X86_64_PLT32:
                 if (symbol_class & LINK_ELF_PIC_SYMBOL_IMPORTED)
@@ -6281,7 +6713,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 {
                     valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
                             !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
-                              relocation->kind == OBJECT_RELOCATION_X86_64_PC32);
+                              (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
                 }
                 action = LINK_ELF_PIC_ACTION_PC32;
                 break;
@@ -6323,6 +6755,22 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             case OBJECT_RELOCATION_X86_64_TPOFF32:
                 valid = !image->shared && is_thread_local;
                 action = LINK_ELF_PIC_ACTION_LOCAL_EXEC;
+                break;
+            // In an executable a DTPOFF32 in code follows a relaxed
+            // local-dynamic sequence and is local exec's offset; in a shared
+            // object it stays the offset in the block.
+            case OBJECT_RELOCATION_X86_64_DTPOFF32:
+                valid = is_thread_local && (image->shared || relocation->section == OBJECT_SECTION_TEXT);
+                action = image->shared ? LINK_ELF_PIC_ACTION_DTP_OFFSET : LINK_ELF_PIC_ACTION_LOCAL_EXEC;
+                break;
+            case OBJECT_RELOCATION_X86_64_TLSLD:
+                valid = is_thread_local;
+                action = image->shared ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
+                if (valid && image->shared && image->local_dynamic_slot == UINT32_MAX)
+                {
+                    image->local_dynamic_slot = link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_TLS_MODULE);
+                    link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_ZERO);
+                }
                 break;
             case OBJECT_RELOCATION_X86_64_GOTTPOFF:
             case OBJECT_RELOCATION_X86_64_TLSGD:
@@ -6500,7 +6948,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
         ObjectSection* section = object->sections + relocation->section;
         ObjectSymbol* symbol = object->symbols + relocation->symbol;
         u8 symbol_class = image->classes[relocation->symbol];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         bool valid = action == LINK_ELF_PIC_ACTION_SKIP ||
                      (relocation->offset <= section->data.length && width <= section->data.length - relocation->offset);
         u64 section_start = section_offsets[relocation->section];
@@ -6531,15 +6979,20 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
                 valid = valid && link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, place, section_start, section_end) ==
                                      BUSTER_X86_METADATA_GOT_PATCH_PC32;
             }
-            valid = valid && link_address_difference(target, place, relocation->addend, &displacement) && displacement >= INT32_MIN &&
-                    displacement <= INT32_MAX;
-            if (valid) link_write_u32(bytes, place, (u32)(s32)displacement);
+            valid = valid && link_address_difference(target, place, relocation->addend, &displacement) &&
+                    (relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || (displacement >= INT32_MIN && displacement <= INT32_MAX));
+            if (valid)
+            {
+                if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64) link_write_u64(bytes, place, (u64)displacement);
+                else link_write_u32(bytes, place, (u32)(s32)displacement);
+            }
             break;
         case LINK_ELF_PIC_ACTION_GOT_SLOT:
         case LINK_ELF_PIC_ACTION_TLS_SLOT:
         {
             u32 slot = action == LINK_ELF_PIC_ACTION_GOT_SLOT                      ? image->got_indices[relocation->symbol]
                        : relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ? image->dynamic_tls_indices[relocation->symbol]
+                       : relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ? image->local_dynamic_slot
                                                                              : image->static_tls_indices[relocation->symbol];
             valid = valid && slot < image->got_count &&
                     link_address_difference(got_offset + (u64)slot * sizeof(u64), place, relocation->addend, &displacement) &&
@@ -6589,11 +7042,22 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
             {
                 link_write_u32(bytes, place, (u32)(s32)displacement);
             }
+            else if (valid && relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+            {
+                valid = link_elf_relax_local_dynamic(bytes, place, section_start, section_end);
+            }
             else if (valid)
             {
                 valid = link_elf_relax_thread_local(bytes, place, section_start, section_end, relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD,
                                                     (s32)displacement);
             }
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_DTP_OFFSET:
+        {
+            u64 value = 0;
+            valid = valid && link_address_addend(link_elf_thread_local_offset(object, symbol), relocation->addend, &value) && value <= INT32_MAX;
+            if (valid) link_write_u32(bytes, place, (u32)value);
         }
         break;
         }
@@ -6633,7 +7097,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined"), S8_INITIALIZER("-z,defs"),
                                                      S8_INITIALIZER("defs")};
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
-    LinkElfPicImage image = {.object = object, .exports = exports, .shared = shared};
+    LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared};
     if ((options.dynamic_library_count && !options.dynamic_libraries) || options.dynamic_library_count == UINT32_MAX ||
         object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
         (object->relocation_count && !object->relocations) || object->symbol_count >= UINT32_MAX - 3 ||
@@ -6760,7 +7224,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         if (dynamic_string_size > UINT32_MAX) result.error = LINK_ERROR_INVALID_INPUT;
     }
     // Layout.  Every offset is also the address.
-    bool has_thread_local = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+    // The input checks above leave `sections` unproven on the error path.
+    bool has_thread_local = result.error == LINK_ERROR_NONE && (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                                                object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size);
     LinkElfEhFrameTable eh_frame_table = {0};
     if (result.error == LINK_ERROR_NONE)
     {
@@ -7102,9 +7568,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                           .dynamic = true,
                                       });
     }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7290,7 +7757,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -7341,11 +7808,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = 0;
-            if (section->alignment < 4 || (place_address & 3) ||
-                !link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -7427,9 +7903,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7842,9 +8319,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -9309,7 +9787,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                width = object_relocation_kind_width(relocation->kind);
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -9979,13 +10457,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -10015,6 +10495,7 @@ struct LinkUefiPeSection
 BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
 {
     return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+           kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
            kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
            kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
            kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
@@ -11174,13 +11655,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -12374,7 +12857,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            u64 width = object_relocation_kind_width(relocation->kind);
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -12442,7 +12925,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                width = object_relocation_kind_width(relocation->kind);
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -13029,9 +13512,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 page_size = BUSTER_MIN((u64)MACH_CODE_PAGE_SIZE, signature_offset - page_offset);
             link_sha256(arena, bytes + page_offset, page_size, bytes + hash_offset + slot * 32);
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
     return result;
@@ -13110,9 +13594,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
             memcpy(bytes + string_table_offset + 1, library, sizeof(library));
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
 
@@ -13214,6 +13699,48 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
+// GCC, Clang and GNU as leave every undefined symbol STT_NOTYPE, so an
+// external reference states nothing about what it names. object_read_elf64
+// records such a reference as data unless a PLT or branch relocation proves a
+// call, and marks it untyped by leaving its thread-local state unknown, which
+// Buster's own objects never do. A reference that only takes an address -- a
+// table of `malloc` and `free` hooks, `strlen` handed to another unit --
+// therefore arrives here as a data import, and the writers would reserve a
+// copy slot for a library function: the loader copies code bytes into .bss and
+// the executable exports the copy under the function's name, interposing the
+// library's own definition for every caller, libc's included.
+//
+// A reference resolves to its definition, and the export index holds every
+// definition: an untyped import that some library defines, but that no library
+// publishes as an object with storage, is not data. Only a complete index is
+// evidence -- a library that was not read defines whatever it defines -- so an
+// incomplete link keeps the classification it had.
+BUSTER_GLOBAL_LOCAL ObjectFile link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
+{
+    ObjectFile result = *object;
+    bool copied = false;
+    for (u32 index = 0; exports->exports_complete && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
+            symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+        {
+            LinkElfName* name = link_elf_name(exports, symbol->name, false);
+            if (name && name->version && name->data == UINT32_MAX)
+            {
+                if (!copied)
+                {
+                    result.symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                    memcpy(result.symbols, object->symbols, sizeof(*object->symbols) * object->symbol_count);
+                    copied = true;
+                }
+                result.symbols[index].kind = OBJECT_SYMBOL_FUNCTION;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -13243,6 +13770,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = normalized.error;
         if (result.error == LINK_ERROR_NONE)
         {
+            normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
             bool dynamic_image = options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;

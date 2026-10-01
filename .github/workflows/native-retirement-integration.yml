@@ -201,13 +201,28 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare pinned closure with trusted main tools
         run: |
           python3 trusted/tools/native_retirement_sdks.py \
-            --source-root "$GITHUB_WORKSPACE/integration"
+            --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct exact generated state and record evidence
         id: evidence
         run: |
@@ -334,9 +349,18 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct independently with trusted tools
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -350,6 +374,12 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prove the candidate authority accepts the trusted final state
         working-directory: integration
         run: |
@@ -474,9 +504,18 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct and compare without running candidate code
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -490,6 +529,12 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reauthorize immediately before the only mutation
         id: authorization
         shell: bash
@@ -611,6 +656,29 @@ jobs:
           printf '{\n  "status": "published",\n  "commit": "%s",\n  "tree": "%s",\n  "evidence_sha256": "%s"\n}\n' \
             "$commit" "$final_tree" "$evidence" \
             > "$RUNNER_TEMP/native-retirement/publication.json"
+          # A bot-owned catch-up (#1893) is queued by the writer, not its
+          # opener: GitHub starts no merge_group workflows for an entry that
+          # GITHUB_TOKEN enqueued, so enable auto-merge with the publication
+          # credential, replacing any enablement the built-in token made.
+          catch_up_owner=$(jq -r '"\(.user.login)/\(.user.type)"' <<<"$pr_json")
+          if [[ "$head_ref" == native-retirement/catch-up && "$catch_up_owner" == 'github-actions[bot]/Bot' ]]; then
+            if [[ "$AUTOMATIC_PR_CI" != true ]]; then
+              echo '::error::Published catch-up was not queued: enabling auto-merge requires NATIVE_RETIREMENT_PUBLICATION_TOKEN.'
+              exit 1
+            fi
+            node=$(jq -r '.node_id' <<<"$pr_json")
+            enabled_by=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '.auto_merge.enabled_by.login // ""')
+            if [[ -n "$enabled_by" ]]; then
+              # $id is a GraphQL variable, not a shell expansion.
+              # shellcheck disable=SC2016
+              GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+                -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' >/dev/null
+            fi
+            # shellcheck disable=SC2016
+            GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+              -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' >/dev/null
+          fi
       - name: Retain publication evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

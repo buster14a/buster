@@ -19,6 +19,15 @@
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
 //
+// __attribute__((section)) (issue 1276) is the one way a section of its own
+// name enters the model: codegen lays every named definition out after the
+// ordinary contents of its text or data image, and
+// object_from_canonical_codegen_module splits those tails off into sections
+// past OBJECT_SECTION_COUNT (object_named_section_plan). Only the ELF writer
+// and printer place them; object_read_elf64 keeps a C-identifier-named input
+// section the same way, because `__start_`/`__stop_` are spelled with that
+// name, and link_objects places those sets.
+//
 // __attribute__((alias)) arrives as IrModule.aliases and is turned into
 // symbols by object_from_canonical_codegen_module: an alias owns no storage,
 // so it takes its target's section, offset, size and kind and contributes
@@ -48,6 +57,8 @@
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
 //                                                  relocation mapping
+//   object_named_section_plan ..                   the sections `section`
+//   object_named_section_map                        attributes name
 //   object_initializer_section_name ..             how each format spells a
 //   object_reader_merge_initializer_arrays          constructor priority, and
 //                                                  the readers' merge of the
@@ -68,6 +79,10 @@
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
 //                                                  in ObjectWriteStatistics
+//   object_write_borrowing,                        the -c form: the planned
+//   object_artifact_slices                         ELF image names large
+//                                                  payloads in place instead
+//                                                  of copying them
 
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/object/object_internal.h>
@@ -729,6 +744,7 @@ void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatis
     total->image_bytes_zeroed += unit->image_bytes_zeroed;
     total->image_bytes_patched += unit->image_bytes_patched;
     total->payload_bytes_copied += unit->payload_bytes_copied;
+    total->payload_bytes_borrowed += unit->payload_bytes_borrowed;
     total->scratch_bytes += unit->scratch_bytes;
     total->retained_bytes += unit->retained_bytes;
     total->output_bytes += unit->output_bytes;
@@ -1364,7 +1380,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    return kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : object_relocation_kind_width(kind);
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -1696,6 +1712,12 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
         case OBJECT_RELOCATION_X86_64_PC32:
         case OBJECT_RELOCATION_X86_64_PLT32:
         case OBJECT_RELOCATION_AARCH64_PREL32:
@@ -1714,6 +1736,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSGD"));
             object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TLSLD:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSLD"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
@@ -2368,6 +2405,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
     {
         object_assembly_append_string(buffer, S8("@TLSGD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+    {
+        object_assembly_append_string(buffer, S8("@TLSLD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+    {
+        object_assembly_append_string(buffer, S8("@DTPOFF"));
     }
     else if (relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32)
     {
@@ -3933,6 +3978,31 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_next_internal_label(ObjectAssemblyBuffer
     return end;
 }
 
+// A section of its own name (issue 1276), which only an ELF object carries:
+// the flags and type are the ones object_write_elf64 gives its kind, and the
+// name is quoted unless it is spelled entirely in characters a bare section
+// name may use.
+BUSTER_GLOBAL_LOCAL void object_assembly_append_named_section_directive(ObjectAssemblyBuffer* buffer, ObjectSection* section)
+{
+    bool bare = section->name.length != 0;
+    for (u64 index = 0; index < section->name.length && bare; index += 1)
+    {
+        char8 byte = section->name.pointer[index];
+        bare = byte == '_' || byte == '.' || byte == '$' || code_unit_is_decimal(byte) || (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z');
+    }
+    String8 attributes = section->kind == OBJECT_SECTION_TEXT              ? S8(",\"ax\",@progbits\n")
+                         : section->kind == OBJECT_SECTION_READ_ONLY_DATA  ? S8(",\"a\",@progbits\n")
+                         : section->kind == OBJECT_SECTION_ZERO            ? S8(",\"aw\",@nobits\n")
+                         : section->kind == OBJECT_SECTION_FINI_ARRAY      ? S8(",\"aw\",@fini_array\n")
+                         : section->kind != OBJECT_SECTION_INIT_ARRAY      ? S8(",\"aw\",@progbits\n")
+                         : string_starts_with_sequence(section->name, S8(".preinit_array")) ? S8(",\"aw\",@preinit_array\n")
+                                                                                            : S8(",\"aw\",@init_array\n");
+    object_assembly_append_string(buffer, bare ? S8("\t.section ") : S8("\t.section \""));
+    object_assembly_append_string(buffer, section->name);
+    object_assembly_append_string(buffer, bare ? S8("") : S8("\""));
+    object_assembly_append_string(buffer, attributes);
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section_index)
 {
     ObjectSection* section = object->sections + section_index;
@@ -3946,7 +4016,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     {
         return;
     }
-    object_assembly_append_string(buffer, object_assembly_section_directive(target, section->kind));
+    if (section_index >= OBJECT_SECTION_COUNT)
+    {
+        object_assembly_append_named_section_directive(buffer, section);
+    }
+    else
+    {
+        object_assembly_append_string(buffer, object_assembly_section_directive(target, section->kind));
+    }
     if (section->alignment > 1)
     {
         object_assembly_append_string(buffer, S8("\t.p2align "));
@@ -4058,10 +4135,10 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
         for (u32 section_index = 0; section_index < object->section_count && valid; section_index += 1)
         {
             ObjectSection* section = object->sections + section_index;
-            valid = capacity <= UINT64_MAX - 256 && section->data.length <= (UINT64_MAX - capacity - 256) / 16;
+            valid = capacity <= UINT64_MAX - 256 - section->name.length && section->data.length <= (UINT64_MAX - capacity - 256 - section->name.length) / 16;
             if (valid)
             {
-                capacity += section->data.length * 16 + 256;
+                capacity += section->data.length * 16 + 256 + section->name.length;
                 valid = section->virtual_size <= (UINT64_MAX - capacity) / 2;
                 if (valid) capacity += section->virtual_size * 2;
             }
@@ -4272,6 +4349,31 @@ BUSTER_GLOBAL_LOCAL bool object_read_string_checked(ByteSlice bytes, u64 table_o
     return true;
 }
 
+// Whether a section name is spelled as a C identifier. GNU `ld` defines
+// `__start_NAME` and `__stop_NAME` around every such output section, which is
+// what makes one a linker set; a name starting with a dot never qualifies
+// (issue 1276).
+bool object_section_name_is_c_identifier(String8 name)
+{
+    bool result = name.length != 0 && !code_unit_is_decimal(name.pointer[0]);
+    for (u64 index = 0; index < name.length && result; index += 1)
+    {
+        char8 byte = name.pointer[index];
+        result = byte == '_' || code_unit_is_decimal(byte) || (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z');
+    }
+
+    return result;
+}
+
+// The kinds a section of its own name can be past OBJECT_SECTION_COUNT:
+// ordinary code and data. Everything else a name could state -- thread-local
+// storage, the initializer arrays, unwind and debug information -- is
+// either one per object or keyed by its kind alone.
+bool object_section_kind_can_be_named(ObjectSectionKind kind)
+{
+    return kind == OBJECT_SECTION_TEXT || kind == OBJECT_SECTION_READ_ONLY_DATA || kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO;
+}
+
 String8 object_section_name_for_kind(ObjectSectionKind kind)
 {
     String8 result;
@@ -4447,17 +4549,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     return result;
 }
 
-// The families this reader does not carry, by name, so a refusal says which
-// one it met. The supported vocabulary is deliberately absent: R_X86_64_64,
-// PC32, PLT32, 32, 32S, TPOFF32 and the three GOTPCREL spellings all read,
-// and the ones left here are the thread-local models -- general dynamic,
-// local dynamic and initial exec -- which this compiler neither emits nor
-// resolves.
 // The x86-64 ELF relocation vocabulary this file knows by name, which the
-// refusal above uses to say which one it met. Most of these read: the GOT
-// families and the initial-exec and general-dynamic thread-local pairs all
-// have a kind. R_X86_64_TLSLD is the one named here that has none -- local
-// dynamic is a model this compiler neither emits nor resolves.
+// refusal below uses to say which one it met.  Every one named here reads;
+// the table is what keeps a refusal of an unnamed type (TLSDESC, ...)
+// from being a bare number next to names the reader accepts.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
     switch (type)
@@ -4474,10 +4569,14 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32");
     case 11:
         return S8("R_X86_64_32S");
+    case 17:
+        return S8("R_X86_64_DTPOFF64");
     case 19:
         return S8("R_X86_64_TLSGD");
     case 20:
         return S8("R_X86_64_TLSLD");
+    case 21:
+        return S8("R_X86_64_DTPOFF32");
     case 22:
         return S8("R_X86_64_GOTTPOFF");
     case 23:
@@ -4563,11 +4662,21 @@ BUSTER_GLOBAL_LOCAL String8 object_initializer_section_name(Arena* arena, Object
 // -- the unsuffixed section, or a suffix that is not a priority in the
 // 0..65535 GNU range -- answers IR_INITIALIZER_PRIORITY_NONE, which is where
 // `ld` puts it: after every suffixed one.
-BUSTER_GLOBAL_LOCAL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind)
+//
+// A `.preinit_array` -- which only a section attribute or a foreign object
+// spells, and which this model keeps as an INIT_ARRAY (issue 1276) -- answers
+// priority zero whatever its suffix: `ld` runs that array before every
+// initializer, and zero is the priority only a GNU-reserved `constructor(0)`
+// can tie, which keeps input order.
+u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind)
 {
     String8 unsuffixed = object_section_name_for_kind(kind);
     u32 result = IR_INITIALIZER_PRIORITY_NONE;
-    if (name.length > unsuffixed.length + 1 && string_equal(string_slice(name, 0, unsuffixed.length), unsuffixed) && name.pointer[unsuffixed.length] == '.')
+    if (kind == OBJECT_SECTION_INIT_ARRAY && string_starts_with_sequence(name, S8(".preinit_array")))
+    {
+        result = 0;
+    }
+    else if (name.length > unsuffixed.length + 1 && string_equal(string_slice(name, 0, unsuffixed.length), unsuffixed) && name.pointer[unsuffixed.length] == '.')
     {
         u64 value = 0;
         bool digits = true;
@@ -4844,6 +4953,32 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         initializer_records = arena_allocate(arena, ObjectInitializerSection, section_count);
     }
     u32 initializer_record_count = 0;
+    // Every input section whose name is a C identifier keeps that name, as a
+    // section of its own past OBJECT_SECTION_COUNT, because the name is what
+    // `__start_NAME`/`__stop_NAME` bound (issue 1276): section_kinds holds
+    // the output slot, which for those is OBJECT_SECTION_COUNT plus the
+    // index here, and inputs sharing a name and kind share a slot.
+    String8* named_names = 0;
+    ObjectSectionKind* named_kinds = 0;
+    u64* named_sizes = 0;
+    u32* named_alignments = 0;
+    u32 named_count = 0;
+    if (read_ok)
+    {
+        if (!object_reader_arena_can_allocate_count(arena, section_count,
+                                                   sizeof(String8) + sizeof(ObjectSectionKind) + sizeof(u64) + sizeof(u32) + 32,
+                                                   BUSTER_ALIGN_OF(u64)))
+        {
+            read_ok = false;
+        }
+        else
+        {
+            named_names = arena_allocate(arena, String8, section_count);
+            named_kinds = arena_allocate(arena, ObjectSectionKind, section_count);
+            named_sizes = arena_allocate(arena, u64, section_count);
+            named_alignments = arena_allocate(arena, u32, section_count);
+        }
+    }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
     if (read_ok)
@@ -4887,14 +5022,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             {
                 unwind_type = section_type == 1 || (target.cpu_arch == CPU_ARCH_X86_64 && section_type == 0x70000001);
             }
-            // SHT_INIT_ARRAY and SHT_FINI_ARRAY.  Their type is what names
-            // them, not their section name: `ld` sorts `.init_array.NNNNN`
-            // into the array by priority and every one of those spellings is
-            // the same kind here.
+            // SHT_INIT_ARRAY, SHT_FINI_ARRAY and SHT_PREINIT_ARRAY.  Their
+            // type is what names them, not their section name: `ld` sorts
+            // `.init_array.NNNNN` into the array by priority and every one of
+            // those spellings is the same kind here.  A preinit array joins the
+            // initializers ahead of every priority
+            // (object_elf_initializer_section_priority, issue 1276).
             bool initializer_array = false;
             if (read_ok)
             {
-                initializer_array = section_type == 14 || section_type == 15;
+                initializer_array = section_type == 14 || section_type == 15 || section_type == 16;
             }
             bool ignored = false;
             if (read_ok)
@@ -4935,7 +5072,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             if (read_ok)
             {
                 kind = unwind                             ? OBJECT_SECTION_UNWIND
-                                         : initializer_array                  ? (section_type == 14 ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY)
+                                         : initializer_array                  ? (section_type == 15 ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY)
                                          : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                          : flags & 0x400                    ? (section_type == 8 ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                          : flags & 0x4                      ? OBJECT_SECTION_TEXT
@@ -4943,11 +5080,31 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                          : flags & 0x1                      ? OBJECT_SECTION_DATA
                                                                             : OBJECT_SECTION_READ_ONLY_DATA;
             }
+            u32 slot = (u32)kind;
+            if (read_ok && object_section_kind_can_be_named(kind) && object_section_name_is_c_identifier(name))
+            {
+                u32 named = 0;
+                while (named < named_count && !(named_kinds[named] == kind && string_equal(named_names[named], name)))
+                {
+                    named += 1;
+                }
+                if (named == named_count)
+                {
+                    named_names[named] = name;
+                    named_kinds[named] = kind;
+                    named_sizes[named] = 0;
+                    named_alignments[named] = 1;
+                    named_count += 1;
+                }
+                slot = OBJECT_SECTION_COUNT + named;
+            }
+            u64* slot_size = slot < OBJECT_SECTION_COUNT ? section_sizes + slot : named_sizes + (slot - OBJECT_SECTION_COUNT);
+            u32* slot_alignment = slot < OBJECT_SECTION_COUNT ? section_alignments + slot : named_alignments + (slot - OBJECT_SECTION_COUNT);
             u64 base = 0;
             if (read_ok)
             {
                 u64 aligned_base = 0;
-                if (!align_forward_checked(section_sizes[kind], alignment, &aligned_base) || size > UINT64_MAX - aligned_base)
+                if (!align_forward_checked(*slot_size, alignment, &aligned_base) || size > UINT64_MAX - aligned_base)
                 {
                     read_ok = false;
                 }
@@ -4958,10 +5115,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             }
             if (read_ok)
             {
-                section_kinds[section_index] = (u32)kind;
+                section_kinds[section_index] = slot;
                 section_bases[section_index] = base;
-                section_sizes[kind] = base + size;
-                section_alignments[kind] = BUSTER_MAX(section_alignments[kind], (u32)alignment);
+                *slot_size = base + size;
+                *slot_alignment = BUSTER_MAX(*slot_alignment, (u32)alignment);
                 if (initializer_array)
                 {
                     initializer_records[initializer_record_count++] = (ObjectInitializerSection){
@@ -4989,15 +5146,36 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     }
     if (read_ok)
     {
-        if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
+        if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT + named_count, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
         {
             read_ok = false;
         }
     }
     if (read_ok)
     {
-        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
-        result.section_count = OBJECT_SECTION_COUNT;
+        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT + named_count);
+        result.section_count = OBJECT_SECTION_COUNT + named_count;
+        // The named sections' bytes, bounded like the kinds' each on its own.
+        for (u32 named = 0; named < named_count && read_ok; named += 1)
+        {
+            bool zero_fill = object_section_kind_is_zero_fill(named_kinds[named]);
+            read_ok = object_reader_arena_can_allocate_bytes(arena, named_names[named].length, BUSTER_ALIGN_OF(char8)) &&
+                      (zero_fill || object_reader_arena_can_allocate_count(arena, named_sizes[named], sizeof(u8), BUSTER_ALIGN_OF(u8)));
+            if (read_ok)
+            {
+                result.sections[OBJECT_SECTION_COUNT + named] = (ObjectSection){
+                    .name = string_duplicate_arena(arena, named_names[named], false),
+                    .data =
+                        {
+                            .pointer = zero_fill ? 0 : arena_allocate(arena, u8, named_sizes[named]),
+                            .length = zero_fill ? 0 : named_sizes[named],
+                        },
+                    .virtual_size = named_sizes[named],
+                    .kind = named_kinds[named],
+                    .alignment = named_alignments[named],
+                };
+            }
+        }
         for (u32 kind = 0; kind < OBJECT_SECTION_COUNT && read_ok; kind += 1)
         {
             bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
@@ -5262,11 +5440,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 // AArch64 assembly need not annotate exported code labels
                 // with .type. Preserve explicit STT_OBJECT, but admit an
                 // untyped exported text label as a callable entry point.
+                ObjectSectionKind symbol_section_kind = section_index ? result.sections[section_kinds[section_index]].kind : OBJECT_SECTION_COUNT;
                 bool untyped_code = target.cpu_arch == CPU_ARCH_AARCH64 && symbol_type == 0 && binding != 0 &&
-                                    section_index && section_kinds[section_index] == OBJECT_SECTION_TEXT;
-                bool section_thread_local = section_index &&
-                                             (section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                              section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+                                    symbol_section_kind == OBJECT_SECTION_TEXT;
+                bool section_thread_local = symbol_section_kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                            symbol_section_kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
@@ -5440,6 +5618,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // facts pick the instruction the linker may write
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
+                                   : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
@@ -5447,7 +5626,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 43                        ? OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
                                    : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 17 ? OBJECT_RELOCATION_X86_64_DTPOFF64
                                    : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 20 ? OBJECT_RELOCATION_X86_64_TLSLD
+                                   : relocation_type == 21 ? OBJECT_RELOCATION_X86_64_DTPOFF32
                                    : relocation_type == 22 ? OBJECT_RELOCATION_X86_64_GOTTPOFF
                                    : relocation_type == 23 ? OBJECT_RELOCATION_X86_64_TPOFF32
                                                            : OBJECT_RELOCATION_COUNT;
@@ -5460,6 +5642,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         {
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
+                                   : relocation_type == 260                           ? OBJECT_RELOCATION_AARCH64_PREL64
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                                    : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
                                    : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
@@ -5479,19 +5662,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        relocation_width = object_relocation_kind_width(kind);
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
                     {
                         target_section_data = &result.sections[section_kinds[target_section]];
-                        if (kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-                            (target_section_data->alignment < 4 || source_offset > UINT64_MAX - section_bases[target_section] ||
-                             ((section_bases[target_section] + source_offset) & 3)))
-                        {
-                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                            read_ok = false;
-                        }
                     }
                     if (read_ok)
                     {
@@ -5575,7 +5751,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
+                                kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -5605,6 +5782,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                                     kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
@@ -9567,6 +9745,11 @@ bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
 }
 
+u32 object_relocation_kind_width(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : 4;
+}
+
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -9920,14 +10103,15 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
 }
 
 // Each FDE's initial location, as a PC-relative reference to the function it
-// describes. `text_symbol` is the local symbol covering the text section, or
-// UINT32_MAX to name the function itself. Under -fPIC it has to be the
+// describes. `section_symbols`, indexed by section, holds the local symbol
+// covering each text section -- `.text` and every named one (issue 1276) --
+// or is null to name the function itself. Under -fPIC it has to be the
 // former: an FDE naming a preemptible function is a PC-relative reference to
 // an interposable symbol, which `ld` refuses in a shared object for the same
 // reason it refuses one in the body -- and every consumer of these records
 // resolves the symbol's address plus the addend, so the section symbol with
 // the function's own offset names the identical byte.
-BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built, u32 text_symbol)
+BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built, u32 const* section_symbols)
 {
     if (!built.valid)
     {
@@ -9941,12 +10125,14 @@ BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiRes
         {
             return false;
         }
-        bool through_section = text_symbol < object->symbol_count && object->symbols[relocation.function].section == OBJECT_SECTION_TEXT;
+        u32 function_section = object->symbols[relocation.function].section;
+        u32 section_symbol = section_symbols && function_section < object->section_count ? section_symbols[function_section] : UINT32_MAX;
+        bool through_section = section_symbol < object->symbol_count;
         object->relocations[object->relocation_count++] = (ObjectRelocation){
             .addend = through_section ? (s64)object->symbols[relocation.function].value : 0,
             .offset = relocation.offset,
             .section = OBJECT_SECTION_UNWIND,
-            .symbol = through_section ? text_symbol : relocation.function,
+            .symbol = through_section ? section_symbol : relocation.function,
             .kind = object->target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
         };
     }
@@ -10650,6 +10836,8 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     {
         case OBJECT_RELOCATION_ABSOLUTE32:
         case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: *width = 4; return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
         case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
         default: *width = 4; return true;
     }
@@ -10666,6 +10854,211 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, column) == BUSTER_OFFSET_OF(Cod
 BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->file) == sizeof(((CodegenLineEntry*)0)->source));
 BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->line) == sizeof(((CodegenLineEntry*)0)->line));
 
+// A section a `section` attribute names (issue 1276). Codegen lays every
+// member of one name out together, after the ordinary contents of the image
+// it belongs to (codegen_section_group), so each is one range [start, end) of
+// the text, read-only, writable or zero-fill image `source`, and together the
+// ranges of one image are that image's tail. object_from_canonical_codegen_module
+// splits them off into sections past OBJECT_SECTION_COUNT, in plan order, of
+// `kind`: the image's own, or the initializer array an ELF name states
+// (object_elf_named_initializer_kind). A named section's offsets count from
+// `base`, `start` rounded down to the section's alignment, because a member's
+// alignment holds in image coordinates and has to hold in the section's too;
+// the bytes between the two are the section's own zero padding.
+typedef struct ObjectNamedSection ObjectNamedSection;
+struct ObjectNamedSection
+{
+    String8 name;
+    u64 base;
+    u64 start;
+    u64 end;
+    u32 alignment;
+    ObjectSectionKind source;
+    ObjectSectionKind kind;
+};
+
+typedef struct ObjectNamedSectionPlan ObjectNamedSectionPlan;
+struct ObjectNamedSectionPlan
+{
+    ObjectNamedSection* sections;
+    String8 diagnostic;
+    // Where each image's named tail starts, which is the length the image
+    // keeps; the image's whole length when it names nothing.
+    u64 tail_starts[OBJECT_SECTION_COUNT];
+    u32 count;
+    ObjectError error;
+};
+
+// The initializer array an ELF section name states, or OBJECT_SECTION_COUNT
+// for any other name: `.init_array`, `.fini_array` and `.preinit_array`, bare
+// or with the `.NNNNN` priority suffix `ld` sorts by. A preinit array is an
+// INIT_ARRAY here: its entries run before every other initializer
+// (object_elf_initializer_section_priority), and only its name tells the ELF
+// writer to give it SHT_PREINIT_ARRAY.
+BUSTER_GLOBAL_LOCAL ObjectSectionKind object_elf_named_initializer_kind(String8 name)
+{
+    ObjectSectionKind result = OBJECT_SECTION_COUNT;
+    String8 spellings[] = {
+        S8_INITIALIZER(".init_array"),
+        S8_INITIALIZER(".preinit_array"),
+        S8_INITIALIZER(".fini_array"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(spellings) && result == OBJECT_SECTION_COUNT; index += 1)
+    {
+        String8 spelling = spellings[index];
+        bool matches = string_starts_with_sequence(name, spelling) && (name.length == spelling.length || name.pointer[spelling.length] == '.');
+        result = !matches ? OBJECT_SECTION_COUNT : index == 2 ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+    }
+
+    return result;
+}
+
+// Adds one member at [start, end) of image `source` to the plan, into the
+// section of its name and image, which it opens when it is the first.
+BUSTER_GLOBAL_LOCAL void object_named_section_plan_add(ObjectNamedSectionPlan* plan, String8 name, ObjectSectionKind source, u64 start, u64 end,
+                                                       u32 alignment)
+{
+    u32 index = 0;
+    while (index < plan->count && !(plan->sections[index].source == source && string_equal(plan->sections[index].name, name)))
+    {
+        index += 1;
+    }
+    if (index == plan->count)
+    {
+        ObjectSectionKind initializer_kind = source == OBJECT_SECTION_TEXT ? OBJECT_SECTION_COUNT : object_elf_named_initializer_kind(name);
+        plan->sections[plan->count++] = (ObjectNamedSection){
+            .name = name,
+            .start = start,
+            .end = end,
+            .alignment = alignment,
+            .source = source,
+            .kind = initializer_kind != OBJECT_SECTION_COUNT ? initializer_kind : source,
+        };
+    }
+    ObjectNamedSection* section = plan->sections + index;
+    section->start = BUSTER_MIN(section->start, start);
+    section->end = BUSTER_MAX(section->end, end);
+    section->alignment = BUSTER_MAX(section->alignment, alignment);
+    plan->tail_starts[source] = BUSTER_MIN(plan->tail_starts[source], start);
+}
+
+// Where the `section` attributes of a module's definitions put them, checked
+// against the layout codegen promised: every named member in its image's tail,
+// every ordinary one ahead of it, and no two sections of one image sharing a
+// byte. Only ELF objects can carry a named section, and none carries a
+// thread-local one; the frontend refuses both first, with the declaration's
+// location, so these refusals are for IR that did not come through it.
+BUSTER_GLOBAL_LOCAL ObjectNamedSectionPlan object_named_section_plan(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
+{
+    ObjectNamedSectionPlan result = {0};
+    result.tail_starts[OBJECT_SECTION_TEXT] = module->code.length;
+    result.tail_starts[OBJECT_SECTION_READ_ONLY_DATA] = module->read_only_data.length;
+    result.tail_starts[OBJECT_SECTION_DATA] = module->writable_data.length;
+    result.tail_starts[OBJECT_SECTION_ZERO] = module->zero_fill_size;
+    u32 member_count = 0;
+    String8 refused = {0};
+    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol);
+        member_count += symbol && symbol->section_name.length;
+    }
+    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[global_index].symbol);
+        bool named = symbol && symbol->section_name.length;
+        member_count += named;
+        refused = named && module->globals[global_index].is_thread_local && !refused.length ? symbol->name : refused;
+    }
+    if (member_count && (object_format_for_target(target) != OBJECT_FORMAT_ELF64 || refused.length))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        result.diagnostic = refused.length ? string_format(arena, S8("thread-local '{S8}' names a section, which an object cannot place"), refused)
+                                           : S8("a section attribute names a section, which only an ELF object can place");
+    }
+    if (member_count && result.error == OBJECT_ERROR_NONE)
+    {
+        result.sections = arena_allocate(arena, ObjectNamedSection, member_count);
+        u32 text_alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
+        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        {
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol);
+            if (symbol && symbol->section_name.length)
+            {
+                u64 start = module->entries[entry_index].offset;
+                object_named_section_plan_add(&result, symbol->section_name, OBJECT_SECTION_TEXT, start, start + module->functions[entry_index].code_size,
+                                              text_alignment);
+            }
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            CodegenModuleGlobal global = module->globals[global_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global.symbol);
+            if (symbol && symbol->section_name.length)
+            {
+                ObjectSectionKind source = global.zero_fill ? OBJECT_SECTION_ZERO : global.read_only ? OBJECT_SECTION_READ_ONLY_DATA : OBJECT_SECTION_DATA;
+                object_named_section_plan_add(&result, symbol->section_name, source, global.offset, (u64)global.offset + global.size,
+                                              BUSTER_MAX(global.alignment, 1u));
+            }
+        }
+        bool valid = true;
+        for (u32 entry_index = 0; entry_index < module->entry_count && valid; entry_index += 1)
+        {
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol);
+            valid = (symbol && symbol->section_name.length) ||
+                    (u64)module->entries[entry_index].offset + module->functions[entry_index].code_size <= result.tail_starts[OBJECT_SECTION_TEXT];
+        }
+        for (u32 global_index = 0; global_index < module->global_count && valid; global_index += 1)
+        {
+            CodegenModuleGlobal global = module->globals[global_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global.symbol);
+            ObjectSectionKind source = global.zero_fill ? OBJECT_SECTION_ZERO : global.read_only ? OBJECT_SECTION_READ_ONLY_DATA : OBJECT_SECTION_DATA;
+            valid = (symbol && symbol->section_name.length) || global.is_thread_local ||
+                    (u64)global.offset + global.size <= result.tail_starts[source];
+        }
+        for (u32 index = 0; index < result.count && valid; index += 1)
+        {
+            ObjectNamedSection* section = result.sections + index;
+            section->base = section->start & ~(u64)(section->alignment - 1);
+            valid = BUSTER_IS_POWER_OF_TWO(section->alignment);
+            for (u32 other = 0; other < index && valid; other += 1)
+            {
+                ObjectNamedSection* earlier = result.sections + other;
+                valid = earlier->source != section->source || earlier->end <= section->start || section->end <= earlier->start;
+            }
+        }
+        result.error = valid ? OBJECT_ERROR_NONE : OBJECT_ERROR_INVALID_INPUT;
+    }
+
+    return result;
+}
+
+// The section a position in codegen image `source` lands in once the plan's
+// sections are split off, with `offset` rebased into it: the named section
+// with the greatest start at or below it, or the image itself below the tail.
+BUSTER_GLOBAL_LOCAL u32 object_named_section_map(ObjectNamedSectionPlan const* plan, ObjectSectionKind source, u64* offset)
+{
+    u32 result = (u32)source;
+    if (plan->count && (u32)source < OBJECT_SECTION_COUNT && *offset >= plan->tail_starts[source])
+    {
+        u32 best = UINT32_MAX;
+        for (u32 index = 0; index < plan->count; index += 1)
+        {
+            ObjectNamedSection const* section = plan->sections + index;
+            if (section->source == source && section->start <= *offset && (best == UINT32_MAX || section->start > plan->sections[best].start))
+            {
+                best = index;
+            }
+        }
+        if (best != UINT32_MAX)
+        {
+            result = OBJECT_SECTION_COUNT + best;
+            *offset -= plan->sections[best].base;
+        }
+    }
+
+    return result;
+}
+
 ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
 {
     ObjectFile result = {
@@ -10677,8 +11070,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         result.error = OBJECT_ERROR_INVALID_INPUT;
         return result;
     }
-    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
-    result.section_count = OBJECT_SECTION_COUNT;
+    // The sections `section` attributes name, split off the tails of the
+    // images below and appended past OBJECT_SECTION_COUNT (issue 1276).
+    ObjectNamedSectionPlan named = object_named_section_plan(arena, program, module, target);
+    if (named.error != OBJECT_ERROR_NONE)
+    {
+        result.error = named.error;
+        result.diagnostic = named.diagnostic;
+        return result;
+    }
+    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT + named.count);
+    result.section_count = OBJECT_SECTION_COUNT + named.count;
     u8* text = arena_allocate(arena, u8, module->code.length);
     if (module->code.length)
     {
@@ -10708,29 +11110,66 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         .data =
             {
                 .pointer = text,
-                .length = module->code.length,
+                .length = named.tail_starts[OBJECT_SECTION_TEXT],
             },
         .kind = OBJECT_SECTION_TEXT,
         .alignment = 16,
     };
     result.sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
         .name = S8(".rodata"),
-        .data = module->read_only_data,
+        .data =
+            {
+                .pointer = module->read_only_data.pointer,
+                .length = named.tail_starts[OBJECT_SECTION_READ_ONLY_DATA],
+            },
         .kind = OBJECT_SECTION_READ_ONLY_DATA,
         .alignment = read_only_alignment,
     };
     result.sections[OBJECT_SECTION_DATA] = (ObjectSection){
         .name = S8(".data"),
-        .data = module->writable_data,
+        .data =
+            {
+                .pointer = module->writable_data.pointer,
+                .length = named.tail_starts[OBJECT_SECTION_DATA],
+            },
         .kind = OBJECT_SECTION_DATA,
         .alignment = writable_alignment,
     };
     result.sections[OBJECT_SECTION_ZERO] = (ObjectSection){
         .name = S8(".bss"),
-        .virtual_size = module->zero_fill_size,
+        .virtual_size = named.tail_starts[OBJECT_SECTION_ZERO],
         .kind = OBJECT_SECTION_ZERO,
         .alignment = writable_alignment,
     };
+    // A named section takes its bytes from the tail of its image. They are
+    // copied rather than sliced, because the section's offsets count from
+    // `base`, which can lie below the first member.
+    for (u32 index = 0; index < named.count; index += 1)
+    {
+        ObjectNamedSection* plan = named.sections + index;
+        ByteSlice image = plan->source == OBJECT_SECTION_TEXT             ? (ByteSlice){.pointer = text, .length = module->code.length}
+                          : plan->source == OBJECT_SECTION_READ_ONLY_DATA ? module->read_only_data
+                          : plan->source == OBJECT_SECTION_DATA           ? module->writable_data
+                                                                          : (ByteSlice){0};
+        bool zero_fill = plan->source == OBJECT_SECTION_ZERO;
+        u64 size = plan->end - plan->base;
+        u8* bytes = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, size ? size : 1);
+        if (!zero_fill && image.pointer && plan->end > plan->start)
+        {
+            memcpy(bytes + (plan->start - plan->base), image.pointer + plan->start, plan->end - plan->start);
+        }
+        result.sections[OBJECT_SECTION_COUNT + index] = (ObjectSection){
+            .name = plan->name,
+            .data =
+                {
+                    .pointer = bytes,
+                    .length = zero_fill ? 0 : size,
+                },
+            .virtual_size = zero_fill ? size : 0,
+            .kind = plan->kind,
+            .alignment = plan->alignment,
+        };
+    }
     result.sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
         .name = S8(".tdata"),
         .data = module->thread_local_data,
@@ -10817,9 +11256,19 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 }
             }
         }
+        // A function split off into a named section (issue 1276) leaves the
+        // debug information, with its rows and locations: a unit here
+        // describes one text range from `.text`'s start, and those functions
+        // are the text image's tail, past what `.text` keeps.
+        u64 debug_text_end = named.tail_starts[OBJECT_SECTION_TEXT];
+        u32 debug_entry_count = 0;
+        while (debug_entry_count < module->entry_count && module->entries[debug_entry_count].offset < debug_text_end)
+        {
+            debug_entry_count += 1;
+        }
         DwarfFunction* functions = arena_allocate(arena, DwarfFunction, module->entry_count);
         DebugFunctionSeed* debug_functions = arena_allocate(arena, DebugFunctionSeed, module->entry_count);
-        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        for (u32 entry_index = 0; entry_index < debug_entry_count; entry_index += 1)
         {
             CodegenModuleEntry* entry = module->entries + entry_index;
             u64 end = entry->offset + module->functions[entry_index].code_size;
@@ -10840,12 +11289,35 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             };
         }
         u32 line_count = module->entry_count ? module->line_entry_count : 0;
+        DebugLocationSeed* debug_locations = module->debug_locations;
+        u32 debug_location_count = module->debug_location_count;
         // The module's own rows serve as the builders' input: DwarfLineEntry is
         // CodegenLineEntry field for field, and codegen recorded every source
         // already clamped to the program's source table (its
         // `line_source_limit`), which is the one thing a copy here used to do
         // to a million rows.
         DwarfLineEntry* lines = (DwarfLineEntry*)module->line_entries;
+        if (debug_text_end < module->code.length)
+        {
+            DwarfLineEntry* kept_lines = arena_allocate(arena, DwarfLineEntry, line_count ? line_count : 1);
+            u32 kept_line_count = 0;
+            for (u32 line_index = 0; line_index < line_count; line_index += 1)
+            {
+                kept_lines[kept_line_count] = lines[line_index];
+                kept_line_count += lines[line_index].code_offset < debug_text_end;
+            }
+            DebugLocationSeed* kept_locations = arena_allocate(arena, DebugLocationSeed, debug_location_count ? debug_location_count : 1);
+            u32 kept_location_count = 0;
+            for (u32 location_index = 0; location_index < debug_location_count; location_index += 1)
+            {
+                kept_locations[kept_location_count] = debug_locations[location_index];
+                kept_location_count += debug_locations[location_index].start < debug_text_end;
+            }
+            lines = kept_lines;
+            line_count = kept_line_count;
+            debug_locations = kept_locations;
+            debug_location_count = kept_location_count;
+        }
         if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
         {
             DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
@@ -10854,9 +11326,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                                    .producer = S8("buster"),
                                                                    .comp_dir = S8("."),
                                                                    .functions = debug_functions,
-                                                                   .locations = module->debug_locations,
-                                                                   .function_count = module->entry_count,
-                                                                   .location_count = module->debug_location_count,
+                                                                   .locations = debug_locations,
+                                                                   .function_count = debug_entry_count,
+                                                                   .location_count = debug_location_count,
                                                                });
             codeview = codeview_build(arena, (CodeviewInput){
                                                  .model = &debug_model,
@@ -10865,7 +11337,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                  .functions = functions,
                                                  .lines = lines,
                                                  .file_count = program->sources.count,
-                                                 .function_count = module->entry_count,
+                                                 .function_count = debug_entry_count,
                                                  .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
@@ -10882,9 +11354,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                                    .producer = S8("buster"),
                                                                    .comp_dir = S8("."),
                                                                    .functions = debug_functions,
-                                                                   .locations = module->debug_locations,
-                                                                   .function_count = module->entry_count,
-                                                                   .location_count = module->debug_location_count,
+                                                                   .locations = debug_locations,
+                                                                   .function_count = debug_entry_count,
+                                                                   .location_count = debug_location_count,
                                                                });
             dwarf = dwarf_build(arena, (DwarfInput){
                                            .model = &debug_model,
@@ -10894,9 +11366,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                            .file_paths = file_paths,
                                            .functions = functions,
                                            .lines = lines,
-                                           .code_size = module->code.length,
+                                           .code_size = debug_text_end,
                                            .file_count = program->sources.count,
-                                           .function_count = module->entry_count,
+                                           .function_count = debug_entry_count,
                                            .line_count = line_count,
                                            .language = 0x000c,
                                        });
@@ -10968,7 +11440,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     }
     result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
                                                              (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
-                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0));
+                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0) + named.count);
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry entry = module->entries[entry_index];
@@ -10979,11 +11451,13 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             return result;
         }
         u64 end = entry.offset + module->functions[entry_index].code_size;
+        u64 value = entry.offset;
+        u32 section = object_named_section_map(&named, OBJECT_SECTION_TEXT, &value);
         result.symbols[result.symbol_count++] = (ObjectSymbol){
             .name = symbol->link_name.length ? symbol->link_name : symbol->name,
-            .value = entry.offset,
+            .value = value,
             .size = end - entry.offset,
-            .section = OBJECT_SECTION_TEXT,
+            .section = section,
             .kind = OBJECT_SYMBOL_FUNCTION,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
@@ -11012,14 +11486,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             result.error = OBJECT_ERROR_INVALID_INPUT;
             return result;
         }
+        u64 value = global.offset;
+        ObjectSectionKind image = global.zero_fill         ? (global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_ZERO)
+                                  : global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_DATA
+                                  : global.read_only       ? OBJECT_SECTION_READ_ONLY_DATA
+                                                           : OBJECT_SECTION_DATA;
+        u32 section = object_named_section_map(&named, image, &value);
         result.symbols[result.symbol_count++] = (ObjectSymbol){
             .name = symbol->link_name.length ? symbol->link_name : symbol->name,
-            .value = global.offset,
+            .value = value,
             .size = global.size,
-            .section = global.zero_fill         ? (global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_ZERO)
-                       : global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_DATA
-                       : global.read_only       ? OBJECT_SECTION_READ_ONLY_DATA
-                                                : OBJECT_SECTION_DATA,
+            .section = section,
             .kind = OBJECT_SYMBOL_DATA,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
@@ -11191,6 +11668,13 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         {
             entry_by_symbol[source.symbol.value] = symbol_index;
         }
+        u64 relocation_offset = source.offset;
+        u32 relocation_section = object_named_section_map(&named,
+                                                          source.source == CODEGEN_MODULE_RELOCATION_CODE                ? OBJECT_SECTION_TEXT
+                                                          : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? OBJECT_SECTION_READ_ONLY_DATA
+                                                          : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? OBJECT_SECTION_THREAD_LOCAL_DATA
+                                                                                                                         : OBJECT_SECTION_DATA,
+                                                          &relocation_offset);
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
                                                object_relocation_kind_is_x86_got(kind) ||
@@ -11199,11 +11683,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
                                            ? -4
                                            : 0),
-            .offset = source.offset,
-            .section = source.source == CODEGEN_MODULE_RELOCATION_CODE                ? OBJECT_SECTION_TEXT
-                       : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? OBJECT_SECTION_READ_ONLY_DATA
-                       : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? OBJECT_SECTION_THREAD_LOCAL_DATA
-                                                                                      : OBJECT_SECTION_DATA,
+            .offset = relocation_offset,
+            .section = relocation_section,
             .symbol = symbol_index,
             .kind = kind,
         };
@@ -11240,10 +11721,12 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         // model that needs it and only when the debug sections did not
         // already contribute the same one, so an object built without -fPIC
         // keeps the symbol table it has always had.
-        u32 cfi_text_symbol = UINT32_MAX;
+        u32* cfi_section_symbols = 0;
         if (cfi.valid && module->position_independent)
         {
-            cfi_text_symbol = dwarf_text_symbol;
+            cfi_section_symbols = arena_allocate(arena, u32, result.section_count);
+            memset(cfi_section_symbols, 0xFF, sizeof(*cfi_section_symbols) * result.section_count);
+            u32 cfi_text_symbol = dwarf_text_symbol;
             if (cfi_text_symbol == UINT32_MAX)
             {
                 cfi_text_symbol = result.symbol_count++;
@@ -11253,8 +11736,24 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                     .kind = OBJECT_SYMBOL_FUNCTION,
                 };
             }
+            cfi_section_symbols[OBJECT_SECTION_TEXT] = cfi_text_symbol;
+            // A named text section gets a local symbol of its own, spelled
+            // like the section; it never enters the name index, so no
+            // reference can resolve to it by name.
+            for (u32 index = 0; index < named.count; index += 1)
+            {
+                if (named.sections[index].kind == OBJECT_SECTION_TEXT)
+                {
+                    cfi_section_symbols[OBJECT_SECTION_COUNT + index] = result.symbol_count;
+                    result.symbols[result.symbol_count++] = (ObjectSymbol){
+                        .name = named.sections[index].name,
+                        .section = OBJECT_SECTION_COUNT + index,
+                        .kind = OBJECT_SYMBOL_FUNCTION,
+                    };
+                }
+            }
         }
-        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_text_symbol))
+        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_section_symbols))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
         }
@@ -11276,13 +11775,17 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 {
     if (arch == CPU_ARCH_X86_64)
     {
-        return kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
+        return kind == OBJECT_RELOCATION_X86_64_PC64            ? 24
+               : kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
                : kind == OBJECT_RELOCATION_X86_64_PLT32         ? 4
                : kind == OBJECT_RELOCATION_X86_64_GOTPCREL      ? 9
                : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
                : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? 42
                : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? 43
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF64         ? 17
                : kind == OBJECT_RELOCATION_X86_64_TLSGD            ? 19
+               : kind == OBJECT_RELOCATION_X86_64_TLSLD            ? 20
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF32         ? 21
                : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF      ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32       ? 23
                : kind == OBJECT_RELOCATION_ABSOLUTE64           ? 1
@@ -11292,6 +11795,7 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     }
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
+           : kind == OBJECT_RELOCATION_AARCH64_PREL64               ? 260
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
            : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
@@ -11334,11 +11838,12 @@ BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 c
 // runtime and no PE linker looks at.
 //
 // The split is deliberately confined to the two writers: the returned
-// ObjectFile is a private copy whose extra sections are *appended* past
-// OBJECT_SECTION_COUNT, so every symbol's section index still means what it
-// meant and only the initializer relocations move.  Nothing else -- the
-// readers, link_objects, the JIT, the disassembly printer, the Mach-O writer
-// -- ever sees a section count other than OBJECT_SECTION_COUNT.
+// ObjectFile is a private copy whose extra sections are *appended* past the
+// ones it already has, so every symbol's section index still means what it
+// meant and only the initializer relocations move.  The sections an
+// ObjectFile carries past OBJECT_SECTION_COUNT on its own are the named ones
+// of issue 1276 (object_from_canonical_codegen_module, object_read_elf64),
+// which only ELF objects have; a priority group never becomes one of those.
 //
 // The split does not copy the relocations: `moves` records where each
 // grouped entry went, and object_initializer_relocation_place gives a
@@ -11582,6 +12087,22 @@ BUSTER_GLOBAL_LOCAL void object_image_zero_to(ObjectImageRange* range, u64 offse
     }
 }
 
+// A payload the image names in place instead of storing: the range stays
+// reserved but unwritten, so its pages are never touched, and the file writer
+// takes the section's own bytes for it (object_artifact_slices).
+BUSTER_GLOBAL_LOCAL void object_image_borrow(ObjectImageRange* range, u64 size)
+{
+    if (range->valid && size > range->end - range->position)
+    {
+        range->valid = false;
+    }
+    else if (range->valid)
+    {
+        range->position += size;
+        range->statistics->payload_bytes_borrowed += size;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void object_image_u8(ObjectImageRange* range, u8 value)
 {
     object_image_store(range, &value, sizeof(value));
@@ -11677,6 +12198,18 @@ struct ObjectElfPlan
     u64 section_header_offset;
     u64 size;
 };
+
+// st_info's type nibble for a symbol-table entry: STT_OBJECT 1, STT_FUNC 2,
+// STT_TLS 6. An undefined data symbol no input typed -- an undeclared
+// assembly reference, or an STT_NOTYPE one read from another toolchain --
+// stays STT_NOTYPE 0: stamping STT_OBJECT would invent the claim that makes a
+// linker copy a library function into the executable (GitHub #1242). Both ELF
+// writers share this so their bytes agree.
+BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
+{
+    bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+    return is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+}
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
@@ -11863,8 +12396,20 @@ BUSTER_GLOBAL_LOCAL void object_elf64_section_header(ObjectImageRange* range, u3
 // ELF index for the relocations, and `relocation_ranges` holds one cursor per
 // input section; both are scratch sized by the plan. Each relocation is
 // placed by `moves` as it is written, as the plan placed it when counting.
+// A payload this large costs more to copy and fault into the image than to
+// hand to the file writer as one more write.
+#define OBJECT_BORROWED_PAYLOAD_MINIMUM 4096
+
+BUSTER_GLOBAL_LOCAL bool object_elf64_payload_borrowable(ObjectSection const* section)
+{
+    return !object_section_kind_is_zero_fill(section->kind) && section->data.length >= OBJECT_BORROWED_PAYLOAD_MINIMUM;
+}
+
+// `borrowed` is null unless the caller borrows payloads; it then has room for
+// every borrowable payload, which the emitter records in file order.
 BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
-                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectWriteStatistics* statistics)
+                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectBorrowedPayload* borrowed,
+                                           u32* borrowed_count, ObjectWriteStatistics* statistics)
 {
     u32 input_count = object->section_count;
     u64 symbol_table = plan->offsets[plan->symbol_section];
@@ -11910,7 +12455,15 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
         object_image_zero_to(&payloads, plan->offsets[section + 1]);
-        if (!object_section_kind_is_zero_fill(source->kind))
+        if (borrowed && object_elf64_payload_borrowable(source))
+        {
+            borrowed[(*borrowed_count)++] = (ObjectBorrowedPayload){
+                .offset = payloads.position,
+                .bytes = source->data,
+            };
+            object_image_borrow(&payloads, source->data.length);
+        }
+        else if (!object_section_kind_is_zero_fill(source->kind))
         {
             object_image_store(&payloads, source->data.pointer, source->data.length);
             statistics->payload_bytes_copied += source->data.length;
@@ -11945,7 +12498,7 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectImageRange* slot = source->global ? &globals : &locals;
         symbol_indices[symbol] = source->global ? next_global++ : next_local++;
         object_image_u32(slot, name);
-        object_image_u8(slot, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1)));
+        object_image_u8(slot, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_image_u8(slot, source->hidden ? 2 : 0);
@@ -12008,10 +12561,12 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         }
         // SHT_INIT_ARRAY and SHT_FINI_ARRAY: the type is what tells `ld`
         // these are the arrays to concatenate into DT_INIT_ARRAY and
-        // DT_FINI_ARRAY rather than ordinary writable data.
+        // DT_FINI_ARRAY rather than ordinary writable data.  A section
+        // attribute's `.preinit_array` is an INIT_ARRAY to this model and
+        // its name is what keeps it SHT_PREINIT_ARRAY (issue 1276).
         else if (source->kind == OBJECT_SECTION_INIT_ARRAY)
         {
-            type = 14;
+            type = string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14;
         }
         else if (source->kind == OBJECT_SECTION_FINI_ARRAY)
         {
@@ -12049,13 +12604,19 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+// With `borrow_payloads`, each payload of at least
+// OBJECT_BORROWED_PAYLOAD_MINIMUM bytes is named in place (object_image_borrow)
+// rather than copied. The split's payloads are ranges of `object`'s own, so
+// they outlive this call's scratch arena; the borrowed table lives in `arena`
+// with the image, and only when some payload qualifies.
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, bool borrow_payloads, ObjectWriteStatistics* statistics)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
     // The plan, its tables and the priority split live only as long as this
-    // call; the image is the one allocation the caller's arena keeps.
+    // call; the caller's arena keeps the image and, when payloads are
+    // borrowed, their table.
     Arena* conflicts[] = {
         arena,
     };
@@ -12081,17 +12642,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         result.error =
             symbol_indices && relocation_ranges && object_reader_arena_can_allocate_bytes(arena, plan.size, 1) ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
+    u32 borrowable_count = 0;
+    for (u32 section = 0; borrow_payloads && result.error == OBJECT_ERROR_NONE && section < split_object.section_count; section += 1)
+    {
+        statistics->section_visits += 1;
+        borrowable_count += object_elf64_payload_borrowable(split_object.sections + section);
+    }
+    if (borrowable_count && !object_reader_arena_can_allocate_bytes(arena, (u64)borrowable_count * sizeof(ObjectBorrowedPayload) + plan.size,
+                                                                     BUSTER_ALIGN_OF(ObjectBorrowedPayload)))
+    {
+        result.error = OBJECT_ERROR_CAPACITY;
+    }
     if (result.error == OBJECT_ERROR_NONE)
     {
         u64 image_position = arena->position;
+        ObjectBorrowedPayload* borrowed = borrowable_count ? arena_allocate(arena, ObjectBorrowedPayload, borrowable_count) : 0;
+        u32 borrowed_count = 0;
         u8* image = arena_allocate(arena, u8, plan.size);
         statistics->image_bytes_reserved += plan.size;
-        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, statistics))
+        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, borrowed, &borrowed_count, statistics) &&
+            borrowed_count == borrowable_count)
         {
             result.bytes = (ByteSlice){
                 .pointer = image,
                 .length = plan.size,
             };
+            result.borrowed_payloads = borrowed;
+            result.borrowed_payload_count = borrowed_count;
         }
         else
         {
@@ -12392,7 +12969,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64_with_capacity(Ar
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
-        object_write_u8_at(&buffer, offset + 4, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1)));
+        object_write_u8_at(&buffer, offset + 4, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_write_u8_at(&buffer, offset + 5, source->hidden ? 2 : 0);
@@ -12427,10 +13004,12 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64_with_capacity(Ar
             }
             // SHT_INIT_ARRAY and SHT_FINI_ARRAY: the type is what tells `ld`
             // these are the arrays to concatenate into DT_INIT_ARRAY and
-            // DT_FINI_ARRAY rather than ordinary writable data.
+            // DT_FINI_ARRAY rather than ordinary writable data.  A section
+            // attribute's `.preinit_array` is an INIT_ARRAY to this model and
+            // its name is what keeps it SHT_PREINIT_ARRAY (issue 1276).
             else if (source->kind == OBJECT_SECTION_INIT_ARRAY)
             {
-                type = 14;
+                type = string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14;
             }
             else if (source->kind == OBJECT_SECTION_FINI_ARRAY)
             {
@@ -13307,8 +13886,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 }
 
 // Validates the object for `format` and dispatches to its writer. `reference`
-// selects the pre-plan ELF64 writer, which exists only in test builds.
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference)
+// selects the pre-plan ELF64 writer, which exists only in test builds;
+// `borrow_payloads` lets the planned ELF64 writer name large payloads in
+// place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference, bool borrow_payloads)
 {
     ObjectArtifact result = {
         .format = format,
@@ -13321,6 +13902,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     if ((object->section_count && !object->sections) || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
         (object->target.cpu_arch != CPU_ARCH_X86_64 && object->target.cpu_arch != CPU_ARCH_AARCH64))
     {
+        return result;
+    }
+    // A section of its own name (issue 1276) is an ELF writer's alone; the
+    // COFF and Mach-O writers lay out one section per kind.
+    if (format != OBJECT_FORMAT_ELF64 && object->section_count > OBJECT_SECTION_COUNT)
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;
     }
     for (u32 section = 0; section < object->section_count; section += 1)
@@ -13364,7 +13952,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         }
         if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
-            if ((source->offset & 3) || object->sections[source->section].alignment < 4)
+            if (format != OBJECT_FORMAT_ELF64 && ((source->offset & 3) || object->sections[source->section].alignment < 4))
             {
                 return result;
             }
@@ -13530,7 +14118,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 #endif
     if (format == OBJECT_FORMAT_ELF64)
     {
-        result = object_write_elf64(arena, object, &statistics);
+        result = object_write_elf64(arena, object, borrow_payloads, &statistics);
     }
     else if (format == OBJECT_FORMAT_COFF)
     {
@@ -13541,7 +14129,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         result = object_write_mach_o64(arena, object, &statistics);
     }
     // Whatever the writer took from the caller's arena beyond the image it
-    // reserved is scratch left behind; the planned writer takes none.
+    // reserved is scratch left behind; the planned writer takes none except
+    // a borrowing write's table of borrowed payloads.
     statistics.retained_bytes = arena->position - arena_start;
     statistics.scratch_bytes += statistics.retained_bytes - statistics.image_bytes_reserved;
     statistics.output_bytes = result.error == OBJECT_ERROR_NONE ? result.bytes.length : 0;
@@ -13551,13 +14140,48 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false);
+    return object_write_core(arena, object, format, false, false);
+}
+
+// The file-output form of object_write. Only an ELF image currently borrows
+// its section payloads; COFF and Mach-O images stay contiguous, so their
+// artifacts carry no borrowed ranges and yield one slice.
+ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format)
+{
+    return object_write_core(arena, object, format, false, true);
+}
+
+// The artifact's file in order: the image's own ranges interleaved with the
+// borrowed payloads, which ascend by offset because the writer placed them.
+// Empty image ranges are omitted; a contiguous artifact is one slice.
+ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out)
+{
+    u32 capacity = artifact.borrowed_payload_count * 2 + 1;
+    ByteSlice* slices = arena_allocate(arena, ByteSlice, capacity);
+    u32 count = 0;
+    u64 cursor = 0;
+    for (u32 index = 0; index < artifact.borrowed_payload_count; index += 1)
+    {
+        ObjectBorrowedPayload payload = artifact.borrowed_payloads[index];
+        if (payload.offset > cursor)
+        {
+            slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = payload.offset - cursor};
+        }
+        slices[count++] = payload.bytes;
+        cursor = payload.offset + payload.bytes.length;
+    }
+    if (artifact.bytes.length > cursor)
+    {
+        slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = artifact.bytes.length - cursor};
+    }
+    *slice_count_out = count;
+    return slices;
 }
 
 #if BUSTER_INCLUDE_TESTS
 ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* object)
 {
-    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true);
+    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true, false);
 }
 
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
@@ -13658,7 +14282,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 relocation_size = object_relocation_kind_width(relocation->kind);
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
         {
@@ -13799,6 +14423,9 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                  relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                  relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)

@@ -78,7 +78,12 @@ typedef enum ObjectSectionKind
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
+BUSTER_F_DECL bool object_section_name_is_c_identifier(String8 name);
+BUSTER_F_DECL bool object_section_kind_can_be_named(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
+// The GNU priority an ELF initializer array section's name spells, or
+// IR_INITIALIZER_PRIORITY_NONE; see the definition for `.preinit_array`.
+BUSTER_F_DECL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind);
 bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                   CodegenFunctionDescriptor* descriptor);
 
@@ -160,6 +165,17 @@ typedef enum ObjectRelocationKind
     // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
     // instruction begins four bytes before its relocated field.
     OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
+    // Local dynamic, which only foreign -fPIC objects carry: R_X86_64_TLSLD
+    // is a rip-relative field naming the module's DTPMOD64 pair -- one per
+    // image, whatever symbol it is written against -- and always opens
+    // `lea rdi, [rip + x@tlsld]` followed by a call to __tls_get_addr, direct
+    // (PC32/PLT32) or through its GOT slot (GOTPCREL*).  R_X86_64_DTPOFF32
+    // and DTPOFF64 are a variable's offset inside the module's thread-local
+    // block, added to the address that call returns; DTPOFF64 appears only in
+    // debug information.
+    OBJECT_RELOCATION_X86_64_TLSLD,
+    OBJECT_RELOCATION_X86_64_DTPOFF32,
+    OBJECT_RELOCATION_X86_64_DTPOFF64,
     // R_AARCH64_ADR_GOT_PAGE and R_AARCH64_LD64_GOT_LO12_NC: an ADRP of the
     // page holding the symbol's GOT slot and the 64-bit LDR of that slot.
     // LLVM reaches every extern-weak symbol this way, even under -fno-pic.
@@ -167,6 +183,9 @@ typedef enum ObjectRelocationKind
     // resolves the pair by relaxation to ADRP/ADD of the symbol itself.
     OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21,
     OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
+    // ELF data differences: S + A - P over a full 64-bit field.
+    OBJECT_RELOCATION_X86_64_PC64,
+    OBJECT_RELOCATION_AARCH64_PREL64,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -175,6 +194,9 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
+// The bytes a relocation of this kind patches: eight for the 64-bit data
+// forms, four for every other field this model carries.
+BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
 // The four AArch64 ELF page-address kinds object_aarch64_elf_page_relocate
 // accepts: the direct ADRP/ADD pair and the GOT ADRP/LDR pair.
@@ -292,6 +314,10 @@ struct ObjectDebugModule
     u64 types_size;
 };
 
+// `sections` holds one section per ObjectSectionKind, indexed by its kind,
+// and past OBJECT_SECTION_COUNT any sections of their own name: the ones
+// `__attribute__((section))` places and the C-identifier-named ones an ELF
+// object carries (issue 1276). Only ELF objects have those.
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {
@@ -331,16 +357,29 @@ struct ObjectFile
     u32* initializer_priorities[2];
 };
 
+// A section payload that an artifact names in place instead of copying. The
+// payload's bytes belong at file offset `offset` and stay owned by the
+// ObjectFile section they came from.
+typedef struct ObjectBorrowedPayload ObjectBorrowedPayload;
+struct ObjectBorrowedPayload
+{
+    u64 offset;
+    ByteSlice bytes;
+};
+
 // The work one object_write call did, counted where it happened rather than
 // estimated. "Visits" are reads of an input record by any loop, validation
 // included, so visits over count is the number of passes. Image bytes are
 // counted at every store, and `image_bytes_patched` counts stores over bytes
 // already stored, so a result with no patched bytes and as many stored bytes
-// as `output_bytes` wrote every byte of the file once. `scratch_bytes` is
-// every other arena byte the writer requested, released or not: tables,
-// copies, formatted names. `retained_bytes` is what the call left allocated
-// in the caller's arena, image included. object_write_statistics_add sums
-// them over the translation units of one invocation.
+// as `output_bytes` wrote every byte of the file once. A borrowing write
+// (object_write_borrowing) stores no bytes for the payloads it names in
+// place; `payload_bytes_borrowed` counts them, so its stored and borrowed
+// bytes together are the output. `scratch_bytes` is every other arena byte
+// the writer requested, released or not: tables, copies, formatted names.
+// `retained_bytes` is what the call left allocated in the caller's arena,
+// image included. object_write_statistics_add sums them over the
+// translation units of one invocation.
 typedef struct ObjectWriteStatistics ObjectWriteStatistics;
 struct ObjectWriteStatistics
 {
@@ -352,6 +391,7 @@ struct ObjectWriteStatistics
     u64 image_bytes_zeroed;
     u64 image_bytes_patched;
     u64 payload_bytes_copied;
+    u64 payload_bytes_borrowed;
     u64 scratch_bytes;
     u64 retained_bytes;
     u64 output_bytes;
@@ -361,6 +401,11 @@ typedef struct ObjectArtifact ObjectArtifact;
 struct ObjectArtifact
 {
     ByteSlice bytes;
+    // Nonzero only for object_write_borrowing. `bytes` then spans the whole
+    // file but leaves each borrowed range unwritten; object_artifact_slices
+    // yields the file in order, and the ObjectFile must outlive the artifact.
+    ObjectBorrowedPayload const* borrowed_payloads;
+    u32 borrowed_payload_count;
     ObjectError error;
     ObjectFormat format;
     ObjectWriteStatistics statistics;
@@ -390,6 +435,8 @@ BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, Obj
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out);
 BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
