@@ -322,9 +322,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The coverage/phase tools bind source_revision to GITHUB_SHA.
+          # Use the actual checkout for the pinned baseline subprocesses.
+          export GITHUB_SHA="$(git rev-parse HEAD)"
           git rev-parse HEAD > "$RUNNER_TEMP/frame-full/source.txt"
           git rev-parse HEAD:src >> "$RUNNER_TEMP/frame-full/source.txt"
-          printf '%s\n' "ImageOS=$ImageOS ImageVersion=$ImageVersion sample=${{ matrix.sample }} batch=$BUSTER_TEST_NATIVE_FRAME_BATCH" > "$RUNNER_TEMP/frame-full/image.txt"
+          printf '%s\n' "ImageOS=$ImageOS ImageVersion=$ImageVersion workflow_source=${{ github.sha }} sample=${{ matrix.sample }} batch=$BUSTER_TEST_NATIVE_FRAME_BATCH" > "$RUNNER_TEMP/frame-full/image.txt"
           lscpu > "$RUNNER_TEMP/frame-full/cpu.txt"
           clang --version > "$RUNNER_TEMP/frame-full/clang.txt"
           mkdir -p build
@@ -346,9 +349,12 @@ jobs:
             $Value = [Environment]::GetEnvironmentVariable($Name)
             if ($Value) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "$Name=$Value" }
           }
+          # Bind baseline coverage/phase receipts to the actual checkout.
+          $env:GITHUB_SHA = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git rev-parse HEAD | Set-Content (Join-Path $Logs 'source.txt')
           git rev-parse HEAD:src | Add-Content (Join-Path $Logs 'source.txt')
-          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion sample=${{ matrix.sample }} batch=$env:BUSTER_TEST_NATIVE_FRAME_BATCH" | Set-Content (Join-Path $Logs 'image.txt')
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion workflow_source=${{ github.sha }} sample=${{ matrix.sample }} batch=$env:BUSTER_TEST_NATIVE_FRAME_BATCH" | Set-Content (Join-Path $Logs 'image.txt')
           Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer, NumberOfLogicalProcessors, Family, Stepping | Format-List | Out-File (Join-Path $Logs 'cpu.txt')
           clang --version | Set-Content (Join-Path $Logs 'clang.txt')
           New-Item -ItemType Directory -Force build | Out-Null
