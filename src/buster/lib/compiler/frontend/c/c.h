@@ -318,6 +318,8 @@ struct CSourceMetrics
 {
     // Lexed aggregates count one per inclusion, unique aggregates one per
     // distinct path; a single lex reports 1.
+    // Raw cache hits preserve these conceptual counts; CSourceCacheStats
+    // reports physically avoided translation/lexing separately.
     u64 files;
     u64 bytes;
     u64 translated_bytes;
@@ -344,10 +346,12 @@ struct CSourceMetrics
 };
 
 // One distinct path of a unit's include closure, with how many times its
-// bytes were actually lexed and the scanned size of one lex. A `lex_count`
-// above one attributes the unit's include amplification — nothing suppressed
-// that file's re-inclusion — and `(lex_count - 1) * translated_bytes` of the
-// lexed aggregate is what re-reading it cost. Suppressed re-inclusions
+// bytes supplied a logical lex input and the translated size of that input.
+// Cache hits preserve these counts; CSourceCacheStats reports skipped physical
+// translation/scanning. A `lex_count` above one attributes include amplification:
+// nothing suppressed that file's re-inclusion. `(lex_count - 1) * translated_bytes`
+// of the lexed aggregate is repeated logical input, not measured reread/scan cost.
+// Suppressed re-inclusions
 // (#pragma once, #import, a recognized include guard) do not count: the rows
 // sum to the lexed aggregate, not to the #include directives reached. This
 // is deliberately not the token-carrying file table next to `map_entry`
@@ -523,6 +527,31 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
+// Optional raw translation/lex reuse, below all context-dependent preprocessing.
+// Metadata lives in owner; destroy releases the private payload reservation.
+// Any nonzero byte limit up to 64 MiB bounds retained payload; fixed
+// metadata/arena overhead is additional.
+// Use exclusively on the creating thread. A null cache preserves the ordinary
+// path. Results own their copies and remain valid after clear/destroy.
+typedef struct CSourceCache CSourceCache;
+typedef struct CSourceCacheStats CSourceCacheStats;
+struct CSourceCacheStats
+{
+    u64 hits;
+    u64 misses;
+    u64 bypasses;
+    u64 resets;
+    u64 reused_bytes;   // Raw bytes whose translation/lexing was skipped.
+    u64 reused_tokens;  // Raw rows, including newline and EOF markers.
+    u64 retained_bytes; // Charged payload, including allocation padding.
+    u64 byte_limit;
+    u32 entry_count;
+};
+BUSTER_F_DECL CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit);
+BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
+BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
+BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -571,6 +600,8 @@ struct CPreprocessOptions
     // committed pages. The result never references it (c_preprocess_seal).
     // Null gives the call a private phase arena of its own.
     Arena* phase_arena;
+    // Optional exclusive caller-owned raw lexical cache; never retained by results.
+    CSourceCache* source_cache;
 };
 
 

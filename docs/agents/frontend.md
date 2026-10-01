@@ -124,3 +124,11 @@ passes oversized sentinel lengths through preprocessing and all lexer entries,
 and checks bounded allocation, structured errors, shared-space exhaustion and
 valid empty/declaration controls. It never allocates or maps a multi-gigabyte
 source to exercise the limit.
+
+## Opt-in raw source reuse
+
+`CPreprocessOptions.source_cache` reuses only exact captured raw translation/lex
+results, before fresh symbol interning and preprocessing. It imports owned
+copies into the current phase/spelling arenas; no cache pointer reaches a sealed
+result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
+for the input model, limits, ownership, replay contract and pending cost gates.
