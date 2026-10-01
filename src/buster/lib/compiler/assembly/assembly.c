@@ -7012,7 +7012,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
 BUSTER_GLOBAL_LOCAL bool assembly_x86_source_layout_uses_metadata(AssemblyInstruction instruction)
 {
     AssemblyOpcode opcode = instruction.opcode;
-    bool result = opcode >= ASSEMBLY_OPCODE_X86_NOP && opcode <= ASSEMBLY_OPCODE_X86_CMOVCC;
+    bool result = (opcode >= ASSEMBLY_OPCODE_X86_NOP && opcode <= ASSEMBLY_OPCODE_X86_CMOVCC) ||
+                  opcode == ASSEMBLY_OPCODE_X86_EMMS;
     return result;
 }
 
@@ -10300,6 +10301,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_operand(AssemblyBuilder*
     if (operand.expression.has_symbol)
     {
         result->symbol = assembly_x86_metadata_symbol_name(builder, operand.expression.symbol);
+        AssemblyRegister reserved_register = {0};
+        if (assembly_numbered_register_parse(result->symbol, S8("cr"), UINT32_MAX, 64, ASSEMBLY_REGISTER_CONTROL, &reserved_register) ||
+            assembly_numbered_register_parse(result->symbol, S8("dr"), UINT32_MAX, 64, ASSEMBLY_REGISTER_DEBUG, &reserved_register))
+            return false;
         result->has_symbol = result->symbol.length != 0;
         result->addend = operand.expression.addend;
         return result->has_symbol;
@@ -10694,6 +10699,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
         !assembly_word_equal(candidate, S8("call")) && !assembly_word_equal(candidate, S8("call_near")))
     {
         return false;
+    }
+    if (has_handwritten_base && info.opcode == ASSEMBLY_OPCODE_X86_CMOVCC)
+    {
+        // The suffix describes the operand width; the condition alias remains
+        // syntax policy and uses the same condition identity as the parser.
+        static String8 const canonical[] = {
+            S8_INITIALIZER("cmovo"), S8_INITIALIZER("cmovno"), S8_INITIALIZER("cmovb"), S8_INITIALIZER("cmovnb"),
+            S8_INITIALIZER("cmovz"), S8_INITIALIZER("cmovnz"), S8_INITIALIZER("cmovbe"), S8_INITIALIZER("cmovnbe"),
+            S8_INITIALIZER("cmovs"), S8_INITIALIZER("cmovns"), S8_INITIALIZER("cmovp"), S8_INITIALIZER("cmovnp"),
+            S8_INITIALIZER("cmovl"), S8_INITIALIZER("cmovnl"), S8_INITIALIZER("cmovle"), S8_INITIALIZER("cmovnle"),
+        };
+        if (info.condition < BUSTER_ARRAY_LENGTH(canonical)) candidate = canonical[info.condition];
     }
     *base = candidate;
     if (base_info)
@@ -11906,6 +11923,17 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     AssemblyInstructionInfo mnemonic_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     bool is_push_mnemonic = assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info) &&
                             mnemonic_info.opcode == ASSEMBLY_OPCODE_X86_PUSH;
+    AssemblyOpcode source_opcode = mnemonic_info.opcode != ASSEMBLY_OPCODE_COUNT ? mnemonic_info.opcode : mnemonic_suffix_info.opcode;
+    if (source_opcode >= ASSEMBLY_OPCODE_X86_ADD && source_opcode <= ASSEMBLY_OPCODE_X86_IMUL)
+    {
+        // Symbolic arithmetic immediates remain outside the source/object
+        // policy. Metadata's physical relocation capability does not widen it.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
     // An unresolved PUSH immediate cannot be proven to fit the short form.
     // Reserve the architectural sign-extended imm32 relocation so linking a
     // normal symbol address does not depend on it happening to fit in 8 bits.
@@ -11964,15 +11992,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     // `movl $0xc2820000,-4(%rsp)` and `or $0x8000,%ax` each name a field whose
     // top bit is set. Re-express such a literal as the signed value that field
     // holds, so form selection sees a width it can encode instead of a
-    // magnitude past the signed maximum. Only the 16- and 32-bit widths need
-    // it: those are the IMMz fields whose literal is range-checked as signed,
-    // while a byte operand's immediate is the operand's own width and the
-    // unsigned spelling already fits it.
+    // magnitude past the signed maximum. Apply it at 8, 16 and 32 bits; metadata may
+    // use a signed field even when the source names the full-width bit pattern.
     for (u32 index = 0; index < operand_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand* immediate = physical + index;
         if (immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !immediate->has_value || immediate->value <= 0 ||
-            (immediate->width != 16 && immediate->width != 32))
+            (immediate->width != 8 && immediate->width != 16 && immediate->width != 32))
         {
             continue;
         }
@@ -12178,6 +12204,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
         }
+    }
+    AssemblyInstructionInfo source_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+        assembly_instruction_lookup(target, syntax, mnemonic, &source_info) &&
+        assembly_x86_source_layout_uses_metadata((AssemblyInstruction){.opcode = source_info.opcode}))
+    {
+        // Disabled shadow forms must not turn malformed migrated source into
+        // a missing-feature diagnostic. This read-only probe publishes no
+        // instruction and does not authorize the feature-disabled encoding.
+        String8 structural_features[] = {S8("*")};
+        BusterX86MetadataPhysicalQuery structural_query = query;
+        structural_query.operands = physical;
+        structural_query.features = (BusterX86MetadataFeatureInput){.names = structural_features, .count = 1};
+        String8 structural_mnemonic = mnemonic;
+        BusterX86MetadataSelectResult structural = assembly_x86_metadata_select_source_form(
+            structural_query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width,
+            operands, physical, operand_count, &structural_mnemonic);
+        if (structural.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+            structural.status != BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+            selection = structural;
     }
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
@@ -12782,6 +12828,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                 builder->result.diagnostic_count = diagnostic_count;
                 builder->output_count = output_count;
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
+                if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                    assembly_x86_source_layout_uses_metadata(builder->instructions[instruction_count]))
+                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
                 assembly_x86_metadata_diagnostic(builder, status, line, column, length);
                 return;
             }
