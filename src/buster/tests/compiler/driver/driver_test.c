@@ -23922,14 +23922,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
                 String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
                 BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_designator_continuation_source)));
+                bool native_allocator = !string_equal(c_lz4_regression_allocators[allocator_index], S8("-fregister-allocator=none"));
                 String8 fixture_command_line[] = {
-                    S8("-std=c17"), c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index],
-                    c_designator_optimizations[optimization_index], S8("-fverify-codegen"), S8("-fno-machine-fallback"),
+                    S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
+                    c_lz4_regression_allocators[allocator_index], S8("-fverify-codegen"),
+                    native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
                     S8("-o"), fixture_path, source_path,
                 };
-                CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                    fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
-                BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+                CompilerDriverInvocation fixture_invocation = compiler_driver_parse_arguments(
+                    fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line));
+                String8 selected_allocator = string_format(fixture_temporary.arena, S8("-fregister-allocator={S8}"),
+                    codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)fixture_invocation.register_allocator));
+                BUSTER_TEST_RAW(arguments, string_equal(selected_allocator, c_lz4_regression_allocators[allocator_index]), selected_allocator);
+                CompilerDriverResult fixture = compiler_driver_execute_invocation(fixture_temporary.arena, fixture_invocation);
+                BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(fixture_temporary.arena, S8("designator continuation {S8} {S8} {S8}: {S8}"),
+                        c_flat_initializer_frontends[frontend_index], c_designator_optimizations[optimization_index],
+                        selected_allocator, fixture.diagnostic));
+                BUSTER_TEST(arguments, fixture.codegen_statistics.verified_ir_module_count != 0 &&
+                                       (native_allocator || fixture.codegen_statistics.verified_mir_function_count == 0));
                 if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
                 {
                     String8 fixture_arguments[] = {fixture_path};
@@ -28012,7 +28023,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         String8 comma_special_flags[][3] = {
             {S8("-fno-canonical-local-promotion"), S8("-fno-target-local-promotion"), S8("-O0")},
-            {S8("-fverify-codegen"), S8("-fregister-allocator=quality"), S8("-O0")},
+            {S8("-O0"), S8("-fverify-codegen"), S8("-fregister-allocator=quality")},
         };
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(comma_sources); fixture_index += 1)
         {
@@ -28031,9 +28042,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 };
                 if (BUSTER_REQUIRE(arguments, file_write(comma_input, BUSTER_SLICE_TO_BYTE_SLICE(comma_sources[fixture_index]))))
                 {
+                    CompilerDriverInvocation comma_invocation = compiler_driver_parse_arguments(
+                        comma_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_command_line));
+                    BUSTER_TEST(arguments, comma_invocation.register_allocator ==
+                                           (mode_index ? CODEGEN_REGISTER_ALLOCATOR_QUALITY : CODEGEN_REGISTER_ALLOCATOR_FAST));
                     CompilerDriverResult comma_build = compiler_driver_execute_invocation(
-                        comma_arena,
-                        compiler_driver_parse_arguments(comma_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_command_line)));
+                        comma_arena, comma_invocation);
                     if (comma_build.error != COMPILER_DRIVER_ERROR_NONE)
                     {
                         arguments->show(arguments, S8("C_COMMA special fixture={u32} mode={u32} error={u32} diagnostic={S8}\n"),
