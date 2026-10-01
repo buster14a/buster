@@ -6982,7 +6982,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
 {
     UnitTestResult result = {0};
     String8 source = S8(
-        "#include <stdlib.h>\n"
+        "extern void *malloc(__SIZE_TYPE__);\n"
+        "extern void free(void *);\n"
         "static int calls;\n"
         "static int three(void) { calls++; return 3; }\n"
         "static int one(void) { calls++; return 1; }\n"
