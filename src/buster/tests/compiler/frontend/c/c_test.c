@@ -17544,7 +17544,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult tokens = c_preprocess(temporary.arena,
-                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
                                                "static double object;\n"
                                                "typedef __typeof__(*(double *)0) from_cast;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (double *)0)) same_arms;\n"
@@ -17560,7 +17560,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                                "typedef __typeof__(((struct Bits *)0)->one + 0) binary_add_bit;\n"
                                                "typedef __typeof__(((struct Bits *)0)->one << 1) left_shift_bit;\n"
                                                "typedef __typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional_bit;\n"
-                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"),
+                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->a) narrow_ull_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->b + 0) full_ull_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->e << 1) narrow_long_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->sn ? ((struct Bits *)0)->sn : ((struct Bits *)0)->sn) signed_narrow_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->sf) signed_full_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->wide) unpromoted_wide_bit;\n"
+                                               "typedef __typeof__(+(unsigned long long)((struct Bits *)0)->a) cast_wide_bit;\n"),
                                             (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
     CParseResult parse = c_parse(temporary.arena, tokens);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
@@ -17598,6 +17605,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
         {S8("left_shift_bit"), C_TYPE_INT, C_TYPE_VOID},
         {S8("conditional_bit"), C_TYPE_INT, C_TYPE_VOID},
         {S8("unary_plus_short_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("narrow_ull_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("full_ull_bit"), C_TYPE_UNSIGNED_INT, C_TYPE_VOID},
+        {S8("narrow_long_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("signed_narrow_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("signed_full_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unpromoted_wide_bit"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_VOID},
+        {S8("cast_wide_bit"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_VOID},
     };
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
     {
@@ -17638,17 +17652,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     // The semantic type attached to typeof must agree with the type carried
     // by the raw function signature on both supported desktop ABIs and both
     // lowering frontends.
-    String8 promotion_source = S8("struct Bits { unsigned int one:1; };\n"
+    String8 promotion_source = S8("struct Bits { unsigned int one:1; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
                                   "__typeof__(+((struct Bits *)0)->one) unary_plus(struct Bits *p) { return +p->one; }\n"
                                   "__typeof__(((struct Bits *)0)->one + 0) binary_add(struct Bits *p) { return p->one + 0; }\n"
                                   "__typeof__(((struct Bits *)0)->one << 1) left_shift(struct Bits *p) { return p->one << 1; }\n"
-                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n");
+                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n"
+                                  "__typeof__(+((struct Bits *)0)->a) narrow_ull(struct Bits *p) { return +p->a; }\n"
+                                  "__typeof__(((struct Bits *)0)->b + 0) full_ull(struct Bits *p) { return p->b + 0; }\n"
+                                  "__typeof__(((struct Bits *)0)->e << 1) narrow_long(struct Bits *p) { return p->e << 1; }\n"
+                                  "__typeof__(((struct Bits *)0)->sn ? ((struct Bits *)0)->sn : ((struct Bits *)0)->sn) signed_narrow(struct Bits *p) { return p->sn ? p->sn : p->sn; }\n"
+                                  "__typeof__(+((struct Bits *)0)->sf) signed_full(struct Bits *p) { return +p->sf; }\n"
+                                  "__typeof__(+((struct Bits *)0)->wide) unpromoted_wide(struct Bits *p) { return +p->wide; }\n"
+                                  "extern int take(int marker, ...);\n"
+                                  "int variadic_bits(struct Bits *p) { return take(0, p->a, p->b, p->sn); }\n");
     Target promotion_targets[] = {target_native, target_native};
     promotion_targets[0].cpu_arch = CPU_ARCH_X86_64;
     promotion_targets[0].os = OPERATING_SYSTEM_LINUX;
     promotion_targets[1].cpu_arch = CPU_ARCH_AARCH64;
     promotion_targets[1].os = OPERATING_SYSTEM_LINUX;
-    String8 promotion_names[] = {S8("unary_plus"), S8("binary_add"), S8("left_shift"), S8("conditional")};
+    struct
+    {
+        String8 name;
+        u32 bit_width;
+        bool is_signed;
+    } promotion_expected[] = {
+        {S8("unary_plus"), 32, true}, {S8("binary_add"), 32, true}, {S8("left_shift"), 32, true}, {S8("conditional"), 32, true},
+        {S8("narrow_ull"), 32, true}, {S8("full_ull"), 32, false}, {S8("narrow_long"), 32, true}, {S8("signed_narrow"), 32, true},
+        {S8("signed_full"), 32, true}, {S8("unpromoted_wide"), 64, false},
+    };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(promotion_targets); target_index += 1)
     {
         for (u32 frontend = 0; frontend < 2; frontend += 1)
@@ -17672,15 +17703,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                     IrProgram* program = lowered.program;
                     IrModule* module = program->modules;
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
-                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_names); name_index += 1)
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_expected); name_index += 1)
                     {
-                        IrFunction* function = c_test_find_ir_function(module, promotion_names[name_index]);
+                        IrFunction* function = c_test_find_ir_function(module, promotion_expected[name_index].name);
                         BUSTER_TEST(arguments, function != 0);
                         IrType* signature = function ? ir_type_from_id(&program->types, function->canonical_type) : 0;
                         IrType* return_type = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
                         BUSTER_TEST(arguments, return_type && return_type->kind == IR_TYPE_INTEGER &&
-                                                    return_type->bit_width == 32 && return_type->is_signed);
+                                                    return_type->bit_width == promotion_expected[name_index].bit_width &&
+                                                    return_type->is_signed == promotion_expected[name_index].is_signed);
                     }
+                    IrFunction* variadic = c_test_find_ir_function(module, S8("variadic_bits"));
+                    BUSTER_TEST(arguments, variadic != 0);
+                    u32 call_count = 0;
+                    if (variadic)
+                    {
+                        for (u32 row = 0; row < variadic->instruction_count; row += 1)
+                        {
+                            IrInstruction* call = variadic->instructions + row;
+                            if (call->opcode == IR_OPCODE_CALL)
+                            {
+                                call_count += 1;
+                                BUSTER_TEST(arguments, call->operand_count == 5);
+                                if (call->operand_count == 5)
+                                {
+                                    for (u32 argument = 0; argument < 3; argument += 1)
+                                    {
+                                        IrValueId value = call->operands[argument + 2];
+                                        BUSTER_TEST(arguments, value.value < variadic->value_count);
+                                        IrType* type = value.value < variadic->value_count
+                                                           ? ir_type_from_id(&program->types, variadic->values[value.value].canonical_type) : 0;
+                                        BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 &&
+                                                                    type->is_signed == (argument != 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, call_count == 1);
                 }
             }
             scratch_end(lowered_temporary);
@@ -17693,9 +17753,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     String8 runtime_source = buster_test_temporary_path(arguments->arena, S8("typeof-integer-promotions"), S8(".c"));
     String8 runtime_text = S8("#define IS_INT_TYPE(expression) _Generic((__typeof__(expression))0, int: 1, default: 0)\n"
                               "#define IS_UINT_TYPE(expression) _Generic((__typeof__(expression))0, unsigned int: 1, default: 0)\n"
-                              "struct Bits { unsigned int one:1; unsigned short us:3; };\n"
-                              "int main(void) { struct Bits bits = {1, 5}; struct Bits *p = &bits;\n"
-                              " unsigned char uc = 7; short s = 7; _Bool b = 1; int result = 0;\n"
+                              "#define IS_ULL_TYPE(expression) _Generic((__typeof__(expression))0, unsigned long long: 1, default: 0)\n"
+                              "static int promoted_arguments(int marker, ...) { __builtin_va_list ap; __builtin_va_start(ap, marker);\n"
+                              " int a = __builtin_va_arg(ap, int); unsigned int b = __builtin_va_arg(ap, unsigned int); int sn = __builtin_va_arg(ap, int);\n"
+                              " __builtin_va_end(ap); return a == 0 && b == 0 && sn == -3; }\n"
+                              "struct Bits { unsigned int one:1; unsigned short us:3; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
+                              "int main(void) { struct Bits bits = {1, 5, 0, 0, 0, -3, -3, 0}; struct Bits *p = &bits;\n"
+                              " unsigned char uc = 7; short s = 7; _Bool b = 1; volatile int one = 1; int result = 0;\n"
                               " result |= !IS_UINT_TYPE(p->one);\n"
                               " result |= !IS_INT_TYPE(+p->one);\n"
                               " result |= !IS_INT_TYPE(-p->one);\n"
@@ -17708,6 +17772,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                               " result |= !IS_INT_TYPE(+s);\n"
                               " result |= !IS_INT_TYPE(+b);\n"
                               " result |= !IS_INT_TYPE(uc ? uc : uc);\n"
+                              " result |= !IS_ULL_TYPE(p->a) || !IS_ULL_TYPE(+(unsigned long long)p->a);\n"
+                              " result |= !IS_INT_TYPE(+p->a) || !IS_UINT_TYPE(+p->b) || !IS_INT_TYPE(+p->e);\n"
+                              " result |= !IS_INT_TYPE(+p->sn) || !IS_INT_TYPE(+p->sf) || !IS_ULL_TYPE(+p->wide);\n"
+                              " result |= !IS_INT_TYPE(p->a + 0) || !IS_INT_TYPE(p->e << 1) || !IS_INT_TYPE(p->sn ? p->sn : p->sn);\n"
+                              " result |= (p->a - one < 0) != 1 || (long long)(p->a - one) != -1;\n"
+                              " result |= (p->b - one < 0) != 0 || (long long)(p->b - one) != 4294967295LL;\n"
+                              " result |= (p->e - one < 0) != 1 || (long long)(p->e - one) != -1;\n"
+                              " result |= (p->a - 7) / 2 != -3 || (p->e - 7) / 2 != -3;\n"
+                              " result |= sizeof(p->a + 0) != sizeof(int) || sizeof(p->e + 0) != sizeof(int) || sizeof(+p->a) != sizeof(int);\n"
+                              " result |= sizeof(+p->sn) != sizeof(int) || sizeof(+p->sf) != sizeof(int) || sizeof(+p->wide) != sizeof(long long);\n"
+                              " result |= !promoted_arguments(0, p->a, p->b, p->sn);\n"
+                              " result |= ((p->a = 0) - one < 0) != 1;\n"
+                              " result |= (long long)((p->b = 0) - one) != 4294967295LL;\n"
+                              " result |= ((p->sn = -3) - one) != -4;\n"
                               " return result; }\n");
     BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
     String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
@@ -26892,15 +26970,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         scratch_end(temporary);
     }
 
-    String8 failed_assertions[] = {
-        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"),
-        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"),
+    struct
+    {
+        String8 source;
+        CPreprocessDialect dialect;
+        u32 column;
+    } failed_assertions[] = {
+        {S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"), C_PREPROCESS_DIALECT_GNU17, 19},
+        {S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"), C_PREPROCESS_DIALECT_GNU17, 19},
+        {S8("struct S { int a; _Static_assert(0, \"must fail\"); int b; };\n"), C_PREPROCESS_DIALECT_C11, 19},
+        {S8("union U { int a; _Static_assert(0, \"must fail\"); char b[9]; };\n"), C_PREPROCESS_DIALECT_C11, 18},
+        {S8("struct S { int a; _Static_assert(0, \"must fail\"); int b; } a, b;\n"), C_PREPROCESS_DIALECT_C17, 19},
+        {S8("union U { int a; _Static_assert(0, \"must fail\"); char b[9]; } a, b;\n"), C_PREPROCESS_DIALECT_C17, 18},
+        {S8("struct S { int a; static_assert(0); int b; };\n"), C_PREPROCESS_DIALECT_C23, 19},
+        {S8("union U { int a; static_assert(0); char b[9]; };\n"), C_PREPROCESS_DIALECT_C23, 18},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(failed_assertions); case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, failed_assertions[case_index],
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        String8 source = failed_assertions[case_index].source;
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = failed_assertions[case_index].dialect});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, parse, target_native);
         u32 reported = 0;
@@ -26912,15 +27003,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
             if (diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED)
             {
                 reported += 1;
-                located = diagnostic.location.line == 1 && diagnostic.location.column == 19;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == failed_assertions[case_index].column;
             }
         }
-        BUSTER_TEST_RAW(arguments, reported == 1 && located, failed_assertions[case_index]);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, source);
         scratch_end(temporary);
     }
 
     {
-        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); };\nint n = sizeof(struct S);\n");
+        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); char c; };\n"
+                           "static_assert(sizeof(struct S) == 8 && __builtin_offsetof(struct S, c) == 4);\nint n = sizeof(struct S);\n");
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
@@ -26928,6 +27021,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
+        scratch_end(temporary);
+    }
+    // #1250 also lost the member following an assertion. Pin the reported
+    // x86-64 Linux layout in both the typed fold and canonical IR; native
+    // Windows bit-field allocation intentionally has a different answer.
+    Target layout_target = target_native;
+    layout_target.cpu_arch = CPU_ARCH_X86_64;
+    layout_target.os = OPERATING_SYSTEM_LINUX;
+    String8 layout_source = S8("struct I { unsigned b : 9; unsigned c : 7; char m; };\n"
+                              "struct O { struct I i; _Static_assert(sizeof(struct I) == 4 && __builtin_offsetof(struct I, m) == 2, \"I\"); int z; };\n"
+                              "struct S { _Static_assert(1, \"first\"); int a; _Static_assert(1, \"middle\"); int b; _Static_assert(1, \"last\"); };\n"
+                              "union U { int a; _Static_assert(1, \"middle\"); char b[9]; };\n"
+                              "_Static_assert(sizeof(struct O) == 8 && __builtin_offsetof(struct O, z) == 4, \"outer layout\");\n"
+                              "_Static_assert(sizeof(struct S) == 8 && __builtin_offsetof(struct S, b) == 4, \"struct layout\");\n"
+                              "_Static_assert(sizeof(union U) == 12 && __builtin_offsetof(union U, b) == 0, \"union layout\");\n"
+                              "struct O outer; struct S pair[2]; union U widest;\n"
+                              "int trailing_members(void) { struct S local[2]; local[1].b = 7; outer.z = local[1].b; widest.b[8] = 1; return outer.z + widest.b[8]; }\n");
+    struct
+    {
+        String8 tag;
+        u64 size;
+        u64 trailing_offset;
+    } layouts[] = {
+        {S8("O"), 8, 4},
+        {S8("S"), 8, 4},
+        {S8("U"), 12, 0},
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, layout_source,
+            (CPreprocessOptions){.target = layout_target, .data_layout = target_data_layout(layout_target), .dialect = C_PREPROCESS_DIALECT_C11});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("member-static-assert-layout.c"), preprocess, parse, layout_target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrProgram* program = lowered.program;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(layouts); case_index += 1)
+                {
+                    IrType* record = 0;
+                    for (u32 type_index = 0; type_index < program->types.count && !record; type_index += 1)
+                    {
+                        IrType* type = program->types.types + type_index;
+                        if (!type->is_volatile && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) &&
+                            string_equal(type->name, layouts[case_index].tag))
+                        {
+                            record = type;
+                        }
+                    }
+                    if (BUSTER_REQUIRE(arguments, record && record->layout.resolved && record->field_count == 2))
+                    {
+                        BUSTER_TEST(arguments, record->layout.size == layouts[case_index].size);
+                        BUSTER_TEST(arguments, record->fields[1].offset == layouts[case_index].trailing_offset);
+                    }
+                }
+            }
+        }
         scratch_end(temporary);
     }
     return result;

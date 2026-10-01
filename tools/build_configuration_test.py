@@ -115,6 +115,50 @@ endif()
 ''')
                     self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_project_call_handles_optional_apple_architectures(self):
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        start = cmake.index("include(cmake/TargetArchitecture.cmake)")
+        end = cmake.index("\nset(C_COMPILER_GNU OFF)", start)
+        caller = cmake[start:end].replace(
+            "include(cmake/TargetArchitecture.cmake)",
+            f'include("{ROOT.as_posix()}/cmake/TargetArchitecture.cmake")')
+        cases = [
+            ("Linux", "x86_64", None, "x86_64", "OFF", None),
+            ("Windows", "arm64", None, "arm64", "OFF", None),
+            ("Darwin", "arm64", None, "arm64", "OFF", None),
+            ("Darwin", "arm64", "x86_64", "x86_64", "ON", None),
+            ("Darwin", "arm64", "arm64;x86_64", None, None, "universal Apple builds are unsupported"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            for index, (system, host, requested, expected, cross, diagnostic) in enumerate(cases):
+                with self.subTest(system=system, requested=requested):
+                    source = Path(temporary) / str(index)
+                    source.mkdir()
+                    script = source / "CMakeLists.txt"
+                    optional = ''
+                    if requested is not None:
+                        optional = f'set(CMAKE_OSX_ARCHITECTURES "{requested}")'
+                    script.write_text(f'''cmake_minimum_required(VERSION 3.17)
+project(buster_optional_architecture LANGUAGES NONE)
+set(CMAKE_SYSTEM_NAME "{system}")
+set(CMAKE_SYSTEM_PROCESSOR "{host}")
+set(CMAKE_HOST_SYSTEM_PROCESSOR "{host}")
+set(CMAKE_CROSSCOMPILING OFF)
+{optional}
+{caller}
+message("selected=${{CMAKE_SYSTEM_PROCESSOR}} cross=${{BUSTER_CROSS_COMPILE}}")
+''')
+                    result = subprocess.run([CMAKE, "--warn-uninitialized", "-Werror=dev",
+                                             "-S", str(source), "-B", str(source / "build")],
+                                            capture_output=True, text=True, timeout=30)
+                    if diagnostic:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(diagnostic, " ".join(result.stderr.split()))
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(f"selected={expected} cross={cross}", result.stderr)
+                        self.assertNotIn("uninitialized variable", result.stdout + result.stderr)
+
     def test_universal_and_unsupported_architecture_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
