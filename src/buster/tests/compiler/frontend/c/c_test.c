@@ -17607,9 +17607,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                 .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
             CParseResult parse = c_parse(temporary.arena, tokens);
-            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-            if (tokens.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
             {
                 for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(expected); name_index += 1)
                 {
@@ -17631,16 +17629,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                     tokens, parse, target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
                     string_format(temporary.arena, S8("integer conversion lowering target={u32} frontend={u32}"), target_index, frontend));
-                BUSTER_TEST(arguments, lowered.program && lowered.program->module_count);
-                if (lowered.program && lowered.program->module_count)
+                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
                 {
                     IrProgram* program = lowered.program;
                     IrModule* module = program->modules;
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                     IrFunction* function = c_test_find_ir_function(module, S8("rank_operands"));
-                    BUSTER_TEST(arguments, function != 0);
                     u32 call_count = 0;
-                    if (function)
+                    if (BUSTER_REQUIRE(arguments, function != 0))
                     {
                         for (u32 row = 0; row < function->instruction_count; row += 1)
                         {
@@ -17648,19 +17644,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                             if (call->opcode == IR_OPCODE_CALL)
                             {
                                 call_count += 1;
-                                BUSTER_TEST(arguments, call->operand_count == BUSTER_ARRAY_LENGTH(expected) + 2);
-                                if (call->operand_count == BUSTER_ARRAY_LENGTH(expected) + 2)
+                                if (BUSTER_REQUIRE(arguments, call->operand_count == BUSTER_ARRAY_LENGTH(expected) + 2 && call->operands != 0))
                                 {
                                     for (u32 argument = 0; argument < BUSTER_ARRAY_LENGTH(expected); argument += 1)
                                     {
                                         IrValueId value = call->operands[argument + 2];
-                                        BUSTER_TEST(arguments, value.value < function->value_count);
-                                        IrType* type = value.value < function->value_count
-                                                           ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
-                                        String8 name = llp64 ? expected[argument].llp64_name : expected[argument].lp64_name;
-                                        BUSTER_TEST_RAW(arguments, type && type->kind == IR_TYPE_INTEGER && string_equal(type->name, name),
-                                            string_format(temporary.arena, S8("integer conversion CALL operand {S8}, target={u32} frontend={u32}"),
-                                                          expected[argument].name, target_index, frontend));
+                                        if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                        {
+                                            IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
+                                            String8 name = llp64 ? expected[argument].llp64_name : expected[argument].lp64_name;
+                                            BUSTER_TEST_RAW(arguments, type && type->kind == IR_TYPE_INTEGER && string_equal(type->name, name),
+                                                string_format(temporary.arena, S8("integer conversion CALL operand {S8}, target={u32} frontend={u32}"),
+                                                              expected[argument].name, target_index, frontend));
+                                        }
                                     }
                                 }
                             }
@@ -17739,7 +17735,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("integer conversion rank {S8} {S8} {S8} {S8}: {S8}"),
                                       dialects[dialect], allocator_modes[allocator], frontends[frontend], optimizations[optimization], compiled.diagnostic));
-                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
                     {
                         String8 run[] = {output};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
