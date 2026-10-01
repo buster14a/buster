@@ -1,0 +1,152 @@
+name: Temporary slider regression diagnostics
+
+on:
+  push:
+    branches:
+      - codex/1903-slider-diagnostic
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: f04897027ca4e49961ba48e7f66bfae091c2aacc
+  BASE_SHA: 1e3a87320b3b213355909f46c172006f2f959265
+  BUSTER_TEST_JOBS: '1'
+  CMAKE_BUILD_PARALLEL_LEVEL: '2'
+
+jobs:
+  slider:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED != 'false' }}
+    name: Slider ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: clang-release-split
+            config: Release
+            sanitize: --no-sanitize
+          - name: clang-asan-ubsan
+            config: Debug
+            sanitize: --sanitize
+    steps:
+      - name: Checkout exact PR candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: f04897027ca4e49961ba48e7f66bfae091c2aacc
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve hosted Clang and native build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/slider-diagnostic-evidence"
+          for tool in clang cmake ninja llvm-symbolizer rg; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install --no-install-recommends --yes clang llvm cmake ninja-build ripgrep
+              break
+            fi
+          done
+          if [[ '${{ matrix.sanitize }}' == '--sanitize' ]]; then
+            asan_runtime="$(clang --print-file-name=libclang_rt.asan-x86_64.so)"
+            if [[ ! -f "$asan_runtime" ]]; then
+              clang_major="$(clang --version | sed -n '1s/.*clang version \([0-9][0-9]*\).*/\1/p')"
+              test -n "$clang_major"
+              sudo apt-get update
+              sudo apt-get install --no-install-recommends --yes "libclang-rt-${clang_major}-dev"
+            fi
+            test -f "$(clang --print-file-name=libclang_rt.asan-x86_64.so)"
+          fi
+          clang --version | tee "$RUNNER_TEMP/slider-diagnostic-evidence/clang.txt"
+          cmake --version
+          ninja --version
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-sha.txt"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git show "${BASE_SHA}:src/buster/lib/ui_core.c" > "$RUNNER_TEMP/slider-base-ui_core.c"
+          git show "${BASE_SHA}:src/buster/lib/ui_builder.c" > "$RUNNER_TEMP/slider-base-ui_builder.c"
+          sha256sum src/buster/lib/ui_core.h src/buster/tests/ui_test_internal.h \
+            src/buster/tests/ui_slider_test.h src/buster/tests/ui_slider_test.c \
+            src/buster/tests/ui_slider_component_test.c > "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-test-sha256.txt"
+          sha256sum src/buster/lib/ui_core.c src/buster/lib/ui_builder.c \
+            "$RUNNER_TEMP/slider-base-ui_core.c" "$RUNNER_TEMP/slider-base-ui_builder.c" \
+            > "$RUNNER_TEMP/slider-diagnostic-evidence/source-identities.txt"
+
+      - name: Bootstrap existing native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub-hosted Clang bootstrap is the existing documented CI exception.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/slider-build-driver"
+
+      - name: Build exact candidate and run actual slider fixtures
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:symbolize=1
+          UBSAN_OPTIONS: halt_on_error=1:exitcode=87:print_stacktrace=1
+          LSAN_OPTIONS: detect_leaks=1:exitcode=86:print_suppressions=1
+          BUSTER_SANITIZER_POLICY_MODE: ${{ matrix.sanitize == '--sanitize' && 'fatal' || 'unsupported' }}
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/slider-build-driver"
+          "$driver" generate --build-directory build/slider-focused --cc clang --config '${{ matrix.config }}' \
+            '${{ matrix.sanitize }}' --ci --no-fuzz --no-lto --linker DEFAULT -- \
+            -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_UNITY_BUILD=OFF -DBUSTER_DEBUG_INFO=OFF \
+            2>&1 | tee "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-generate.log"
+          "$driver" build --build-directory build/slider-focused --config '${{ matrix.config }}' -t ui_slider_component_tests -- -j2 \
+            2>&1 | tee "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-build.log"
+          build/slider-focused/'${{ matrix.config }}'/ui_slider_component_tests \
+            2>&1 | tee "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-test.log"
+          rg --fixed-strings 'ui_slider_tests: 43/43 assertions passed; renderer_calls=0' \
+            "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-test.log"
+          printf 'Exact candidate `%s`: actual `ui_slider_tests` passed 43/43 (%s).\n' \
+            "$CANDIDATE_SHA" '${{ matrix.name }}' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require new tests to reject restored base production
+        if: ${{ matrix.sanitize == '--no-sanitize' }}
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:symbolize=1
+          UBSAN_OPTIONS: halt_on_error=1:exitcode=87:print_stacktrace=1
+          LSAN_OPTIONS: detect_leaks=1:exitcode=86:print_suppressions=1
+          BUSTER_SANITIZER_POLICY_MODE: ${{ matrix.sanitize == '--sanitize' && 'fatal' || 'unsupported' }}
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/slider-build-driver"
+          # This checkout belongs only to the temporary diagnostic job. Reuse
+          # the split graph so only the two restored production modules rebuild.
+          cp "$RUNNER_TEMP/slider-base-ui_core.c" src/buster/lib/ui_core.c
+          cp "$RUNNER_TEMP/slider-base-ui_builder.c" src/buster/lib/ui_builder.c
+          sha256sum --check "$RUNNER_TEMP/slider-diagnostic-evidence/candidate-test-sha256.txt"
+          expected_changes=$'src/buster/lib/ui_builder.c\nsrc/buster/lib/ui_core.c'
+          test "$(git diff --name-only)" = "$expected_changes"
+          git diff -- src/buster/lib/ui_core.c src/buster/lib/ui_builder.c > "$RUNNER_TEMP/slider-diagnostic-evidence/baseline-production-restore.patch"
+          "$driver" build --build-directory build/slider-focused --config '${{ matrix.config }}' -t ui_slider_component_tests -- -j2 \
+            2>&1 | tee "$RUNNER_TEMP/slider-diagnostic-evidence/baseline-build.log"
+          set +e
+          build/slider-focused/'${{ matrix.config }}'/ui_slider_component_tests \
+            2>&1 | tee "$RUNNER_TEMP/slider-diagnostic-evidence/baseline-test.log"
+          baseline_status="${PIPESTATUS[0]}"
+          set -e
+          # Require an assertion failure, rather than a crash or sanitizer exit.
+          test "$baseline_status" -eq 1
+          rg --fixed-strings 'ui_test_slider_keyboard_ownership:' \
+            "$RUNNER_TEMP/slider-diagnostic-evidence/baseline-test.log"
+          rg --fixed-strings 'ui_test_slider_release_chronology:' \
+            "$RUNNER_TEMP/slider-diagnostic-evidence/baseline-test.log"
+          printf 'Restored `%s` production with candidate tests: expected slider arrow and release assertion failures (%s).\n' \
+            "$BASE_SHA" '${{ matrix.name }}' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain focused diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: slider-diagnostic-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/slider-diagnostic-evidence
+          if-no-files-found: error
+          retention-days: 7
