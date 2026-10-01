@@ -1,0 +1,8 @@
+{
+  "base": "c9a6d233f3da1b647309b248325f37b2bfd6e0e1",
+  "original_ir_fast_sha256": "e4870147160adfca03d917080003839ef2408a30f02f97c78a48b5ee6e46d3b0",
+  "diagnostic_ir_fast_sha256": "d22a52f777c1a1bdc524608f6bb207a8e37f639a5a97f9eb9e6f8fad127a8ef0",
+  "diagnostic_ir_h_sha256": "356ba1ed8f6cf6046a53175be1f10b173338f51958b14b278ce92d57e32f930c",
+  "schedule_length_cap": 8,
+  "production_mutated": false
+}
