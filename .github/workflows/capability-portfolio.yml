@@ -11,7 +11,7 @@ concurrency:
 jobs:
   correctness:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 10
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: DaveGamble/cJSON
@@ -136,6 +137,20 @@ jobs:
         run: |
           set -euo pipefail
           .ci-tools/build test_quickjs --config Release "$PWD/external/quickjs" 2>&1 | tee evidence/quickjs.log
+      - name: Registered compiler regressions and full Release suite
+        id: units
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build build --config Release -t test_all 2>&1 | tee evidence/test-all.log
+      - name: Source size and whitespace
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check 133e11167a0e6818a6e226aedab68560add0673c HEAD
+          .ci-tools/build source_size --base 133e11167a0e6818a6e226aedab68560add0673c 2>&1 | tee evidence/source-size.log
       - name: Preserve independent outcomes
         if: always()
         shell: bash
@@ -147,9 +162,10 @@ jobs:
           STB: ${{ steps.stb.outcome }}
           LUA: ${{ steps.lua.outcome }}
           QUICKJS: ${{ steps.quickjs.outcome }}
+          UNITS: ${{ steps.units.outcome }}
         run: |
           mkdir -p evidence
-          printf 'compiler=%s\nselfhost=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\n' "$COMPILER" "$SELFHOST" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" | tee evidence/outcomes.txt
+          printf 'compiler=%s\nselfhost=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\nunits=%s\n' "$COMPILER" "$SELFHOST" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" "$UNITS" | tee evidence/outcomes.txt
           cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

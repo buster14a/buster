@@ -2475,6 +2475,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_released_phase_fill(Unit
 // The same sources reach the frontend through syntax-only and object actions.
 // Compare structured diagnostics as well as their rendered severity/location/
 // ordering; backend capability failures are deliberately absent from this corpus.
+// A genuine callback round-trips through void* with its original signature.
+// Exercise source linking and separate object linking in every native mode.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_void_function_pointer_roundtrip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8(
+        "typedef int (*F)(int);\n"
+        "static int hits;\n"
+        "static int add_one(int x) { hits += 1; return x + 1; }\n"
+        "static void *global_slot = add_one;\n"
+        "static F global_callback = (void *)add_one;\n"
+        "static void *return_slot(F f) { return f; }\n"
+        "static F return_callback(void *p) { return p; }\n"
+        "static int call_callback(F f, int x) { return f(x); }\n"
+        "static int call_slot(void *p, int x) { F f = p; return f(x); }\n"
+        "int main(void) {\n"
+        "    void *slot = add_one;\n"
+        "    F f = slot;\n"
+        "    int sum = f(10);\n"
+        "    slot = f; f = slot; sum += f(20);\n"
+        "    F recovered = return_callback(return_slot(f)); sum += recovered(30);\n"
+        "    sum += call_callback(slot, 40);\n"
+        "    sum += call_slot(f, 50);\n"
+        "    sum += global_callback(60);\n"
+        "    f = global_slot; sum += f(70);\n"
+        "    return sum != 287 || hits != 7 || f != add_one || slot != global_slot;\n"
+        "}\n");
+#define BUSTER_VOID_FUNCTION_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_VOID_FUNCTION_ALLOCATOR)};
+#undef BUSTER_VOID_FUNCTION_ALLOCATOR
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 route = 0; route < 2; route += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 input = buster_test_temporary_path(arena, S8("buster-void-function-roundtrip"), S8(".c"));
+                String8 object = buster_test_temporary_path(arena, S8("buster-void-function-roundtrip"), S8(".o"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-void-function-roundtrip"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                {
+                    String8 object_command[] = {
+                        S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), S8("-g0"),
+                        S8("-fverify-codegen"), allocators[mode], forms[form],
+                        S8("-c"), S8("-o"), object, input,
+                    };
+                    String8 source_command[] = {
+                        S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), S8("-g0"),
+                        S8("-fverify-codegen"), allocators[mode], forms[form],
+                        S8("-o"), output, input,
+                    };
+                    SliceString8 compile_command = route ? (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)
+                                                         : (SliceString8)BUSTER_ARRAY_TO_SLICE(source_command);
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, compile_command));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && route)
+                    {
+                        String8 link_command[] = {S8("-o"), output, object};
+                        compiled = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    }
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2529,6 +2616,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        // Callback storage is an explicit GNU extension on admitted native targets.
+        {S8("typedef int (*F)(int); void g(F f) { void *p = f; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("typedef int (*F)(int); void g(void *p) { F f = p; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("typedef int (*F)(int); void g(F f) { int *p = f; }\n"), false, true, S8("incompatible pointer types"), S8("-std=gnu17")},
+        {S8("typedef int (*F)(int); void g(int *p) { F f = p; }\n"), false, true, S8("incompatible pointer types"), S8("-std=gnu17")},
+        {S8("typedef int (*F)(int); int wrong(double); void g(void) { F f = wrong; }\n"), false, true, S8("incompatible function pointer type"), S8("-std=gnu17")},
+        {S8("typedef int (*F)(int); void g(const void *p) { F f = p; }\n"), false, true, S8("incompatible pointer types"), S8("-std=gnu17")},
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+        {S8("typedef int (*F)(int); void g(F f) { void *p = f; }\n"), true, true, {0}, S8("-std=gnu17")},
+        {S8("typedef int (*F)(int); void g(void *p) { F f = p; }\n"), true, true, {0}, S8("-std=gnu17")},
+        {S8("static int id(int x) { return x; } typedef int (*F)(int); F g(void) { F f = (void *)id; return f; }\n"), true, true, {0}, S8("-std=gnu17")},
+#endif
         {S8("int g(void) { return \"s\"; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(char *c) { int *q = c; return *q; }\n"), false, false, S8("cannot convert from 'char *' to 'int *'")},
         {S8("int g(void) { const int *source = 0; int *target = 0; target = source; return 0; }\n"), false, false, S8("cannot convert from 'const int *' to 'int *'")},
@@ -15300,6 +15399,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);

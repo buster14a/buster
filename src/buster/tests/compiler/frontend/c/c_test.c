@@ -29466,6 +29466,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
     return result;
 }
 
+// GNU callback storage is a target/dialect policy, not ISO pointer compatibility.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_function_pointer_policy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        Target target;
+        bool admitted;
+    } targets[] = {
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, true},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}, true},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, true},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, true},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, false},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_UEFI}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_UEFI}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS}, false},
+        {{.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING}, false},
+        {{.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_LINUX}, false},
+        {{.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX}, false},
+    };
+    struct
+    {
+        CPreprocessDialect dialect;
+        bool gnu;
+    } dialects[] = {
+        {C_PREPROCESS_DIALECT_GNU89, true},
+        {C_PREPROCESS_DIALECT_GNU99, true},
+        {C_PREPROCESS_DIALECT_GNU11, true},
+        {C_PREPROCESS_DIALECT_GNU17, true},
+        {C_PREPROCESS_DIALECT_GNU23, true},
+        {C_PREPROCESS_DIALECT_C99, false},
+        {C_PREPROCESS_DIALECT_C11, false},
+        {C_PREPROCESS_DIALECT_C17, false},
+        {C_PREPROCESS_DIALECT_C23, false},
+    };
+    struct
+    {
+        String8 source;
+        bool extension;
+        bool valid;
+    } cases[] = {
+        {S8("typedef int (*F)(int); void *g(F f) { void *p = f; return p; }"), true, true},
+        {S8("typedef int (*F)(int); F g(void *p) { F f = p; return f; }"), true, true},
+        {S8("static int id(int x) { return x; } typedef int (*F)(int); F g(void) { F f = (void *)id; return f; }"), true, true},
+        {S8("typedef int (*F)(int); void g(F f, void *p) { p = f; f = p; }"), true, true},
+        {S8("typedef int (*F)(int); void *g(F f) { return f; } F h(void *p) { return p; }"), true, true},
+        {S8("typedef int (*F)(int); void take_slot(void *); void take_callback(F); void g(F f, void *p) { take_slot(f); take_callback(p); }"), true, true},
+        {S8("static int id(int x) { return x; } void *slot = id; int (*callback)(int) = (void *)id;"), true, true},
+        {S8("typedef int (*F)(int); const void *g(F f) { const void *p = f; return p; }"), true, true},
+        {S8("typedef int (*F)(int); void g(F f) { int *p = f; }"), false, false},
+        {S8("typedef int (*F)(int); void g(int *p) { F f = p; }"), false, false},
+        {S8("typedef int (*F)(int); int wrong(double); void g(void) { F f = wrong; }"), false, false},
+        {S8("typedef int H(void); extern H *hook; extern int callback(const char *, int); void g(void) { hook = callback; }"), false, false},
+        {S8("typedef int (*F)(int); void g(const void *p) { F f = p; }"), false, false},
+        {S8("typedef int (*F)(int); void g(volatile void *p) { F f = p; }"), false, false},
+        {S8("typedef int (*F)(int); void g(void **p) { F *f = p; }"), false, false},
+        {S8("void g(const int *p) { void *q = p; }"), false, false},
+        {S8("typedef int (*F)(int); void g(F f) { F q = f; }"), false, true},
+        {S8("typedef int (*F)(int); void g(void) { F f = 0; void *p = 0; }"), false, true},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Target target = targets[target_index].target;
+                bool expected = cases[index].valid &&
+                                (!cases[index].extension || (targets[target_index].admitted && dialects[dialect_index].gnu));
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect_index].dialect});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count == 0) == expected,
+                    string_format(temporary.arena, S8("target={u32}/{u32} dialect={u32} source={S8}"),
+                                  (u32)target.cpu_arch, (u32)target.os, (u32)dialects[dialect_index].dialect, cases[index].source));
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29683,6 +29771,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
