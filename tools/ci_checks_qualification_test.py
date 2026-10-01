@@ -22,6 +22,43 @@ def reference(root, name, value):
     return {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
+def full_policy(platform):
+    """Full native row order, including exclusions, checked against real anchors."""
+    identity = dict(suite="desktop", platform=platform, architecture="x86_64")
+    rows = []
+
+    def add(compiler, config, sanitize=False, fuzz=False, exclusion=""):
+        row = dict(compiler=compiler, configuration=config, optimize=config == "Release", sanitize=sanitize, fuzz=fuzz,
+                   unity=compiler == "clang" and config == "Release" and not sanitize,
+                   execution="none" if exclusion else ("runtime" if compiler == "clang" else "compile-link"),
+                   state="excluded" if exclusion else "required", exclusion=exclusion)
+        row["id"] = qualification.coverage_tools._coverage_row_id(identity, row)
+        row["owner_shard"] = qualification.coverage_tools._coverage_row_owner(row)
+        rows.append(row)
+
+    for compiler in (("cl", "clang", "gcc", "zig") if platform == "windows" else ("clang", "gcc", "zig")):
+        if compiler != "clang":
+            add(compiler, "Release", exclusion="non-clang-portability-debug-only")
+            sanitizer_reason = "msvc-sanitizer-not-in-combination-matrix" if compiler == "cl" else "non-clang-sanitizer-not-in-combination-matrix"
+            fuzz_reason = "msvc-fuzz-not-in-combination-matrix" if compiler == "cl" else "non-clang-fuzz-not-in-combination-matrix"
+            for config in ("Debug", "Release"):
+                add(compiler, config, True, False, sanitizer_reason)
+                add(compiler, config, True, True, fuzz_reason)
+                add(compiler, config, False, True, fuzz_reason)
+            add(compiler, "Debug")
+        else:
+            add(compiler, "Debug", exclusion="sanitized-debug-covers-unsanitized-debug")
+            if platform == "macos":
+                reason = "apple-fuzzer-runtime-unavailable"
+                add(compiler, "Release", False, True, reason)
+                add(compiler, "Debug", True, True, reason)
+                add(compiler, "Release", True, True, reason)
+            add(compiler, "Release", False, platform != "macos")
+            add(compiler, "Debug", True, platform != "macos")
+            add(compiler, "Release", True, False)
+    return rows
+
+
 class QualificationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -189,52 +226,110 @@ class QualificationTests(unittest.TestCase):
                 self.assertFalse(result["performance_accepted"])
 
     def test_archived_native_journal_failure_cannot_be_hidden_by_complete_summary(self):
-        directory = self.root / "matrix-phases"
-        directory.mkdir()
-        coverage = phase_tests.fixture(directory)
-        coverage.update(kind="desktop-matrix-coverage", mode="ci")
-        result = dict(success=True, metadata=dict(GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1"))
-        summary = phases.analyze(directory, coverage)
-        result["matrix_phases"] = summary
-        item = dict(job="Windows x86-64 checks", phase_directory=directory.name, tests=[],
-                    coverage=reference(self.root, "coverage.json", coverage), result=reference(self.root, "result.json", result),
-                    phases=reference(self.root, "phases.json", summary))
+        item, _, condition = self.complete_desktop()
+        directory = self.root / item["phase_directory"]
         next(directory.glob("*.end.json")).unlink()
         with self.assertRaisesRegex(ValueError, "interrupted publication"):
-            qualification.desktop(self.root, item, self.run_fixture(), {}, "combined-overlap")
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
 
-    def complete_desktop(self, release=False, direct=False):
+    def complete_desktop(self, release=False, direct=False, shard=None):
+        shard = shard or ("release" if release else "checks")
+        release = shard == "release"
+        platform = "macos" if direct else "windows"
         directory = self.root / "matrix-phases"
         directory.mkdir()
-        coverage = phase_tests.fixture(directory, direct=direct)
-        coverage.update(kind="desktop-matrix-coverage", mode="ci")
-        coverage["identity"]["suite"] = "desktop"
-        plan = phases.read(directory / "plan.json")
-        for row, cap, tree in zip(coverage["expected"], coverage["detected"], plan["trees"]):
-            row.update(optimize=row["configuration"] == "Release", execution="runtime" if row["compiler"] == "clang" else "compile-link", exclusion="")
-            if release and row["compiler"] == "clang" and row["configuration"] == "Release":
-                row.update(sanitize=False, unity=True)
-                tree["sanitize"] = 0
-            row["owner_shard"] = qualification.coverage_tools._coverage_row_owner(row)
-            row["id"] = qualification.coverage_tools._coverage_row_id(coverage["identity"], row)
-            cap["id"] = row["id"]
-            tree["rows"] = [row["id"]]
+        identity = dict(lane_id=f"desktop/{shard}/{platform}/x86_64/source={'a' * 40}/run=123/attempt=1", suite="desktop", shard=shard,
+                        platform=platform, architecture="x86_64", source_revision="a" * 40, source_tree="b" * 40,
+                        source_hash="c" * 64, driver_hash="d" * 64, repository="buster14a/buster", run_id="123", run_attempt="1",
+                        workflow="CI", job="test", source_path="/retained/producer/build.c" if direct else r"C:\retained\producer\build.c")
+        expected = full_policy(platform)
+        selected = qualification.coverage_tools._coverage_selected_ids({r["id"]: r for r in expected}, shard)
+        policy = dict(version=1, row_count=len(expected), required_count=sum(r["state"] == "required" for r in expected),
+                      excluded_count=sum(r["state"] == "excluded" for r in expected),
+                      fingerprint=qualification.coverage_tools._coverage_policy_fingerprint(identity, expected))
+        self.assertEqual(tuple(policy[k] for k in ("row_count", "required_count", "excluded_count", "fingerprint")),
+                         (23, 5, 18, "63bcfb8fade23151") if direct else (28, 6, 22, "46ffb69c2ceae9c0"))
+        obligations = {name: dict(state="not-applicable", reason="owned-by-release-shard")
+                       for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
         if release:
-            coverage["identity"]["shard"] = plan["identity"]["shard"] = "release"
-            plan["trees"] = [tree for tree in plan["trees"] if tree["id"] == "tree1"]
-            plan["tasks"] = [task for task in plan["tasks"] if task["tree"] in ("tree1", "matrix")]
-            plan["outer_jobs"] = 1
-            kept = {task["id"] for task in plan["tasks"]}
-            for path in directory.iterdir():
-                if path.name not in ("plan.json", "terminal.json") and path.name.split(".", 1)[0] not in kept:
-                    path.unlink()
+            obligations = dict(self_host=dict(state="not-applicable" if direct else "scheduled", reason="direct-matrix-does-not-consume-fanout" if direct else "canonical-release-fanout"),
+                               fixed_point=dict(state="not-applicable" if direct else "scheduled", reason="direct-matrix-does-not-run-self-host" if direct else "canonical-release-fanout"),
+                               unity_analysis=dict(state="scheduled", reason="canonical-clang-release"),
+                               table_audit=dict(state="scheduled", reason="direct-matrix-default-audit" if direct else "canonical-superbuild-tree"))
+        capabilities = [dict(id=row["id"], compiler=row["compiler"], path=row["compiler"], path_hash="e" * 64,
+                             identity=row["compiler"], version="1", target="fixture", state="excluded" if row["exclusion"] else "available",
+                             reason=row["exclusion"]) for row in expected]
+        coverage = dict(identity=identity.copy(), kind="desktop-matrix-coverage", mode="ci", phase="complete", partition_version=2,
+                        expected=expected, detected=capabilities, policy=policy, obligations=obligations,
+                        executed=[dict(lane_id=identity["lane_id"], status="success", evidence="driver-complete", rows=sorted(selected))])
+        rows = [row for row in expected if row["id"] in selected]
+        plan = dict(schema=phases.SCHEMA, epoch_us=1, identity=identity, scheduler="direct" if direct else "pooled", test_admission="overlap",
+                    outer_jobs=1 if direct else min(len(rows), 4), logical_cpus=4, cpu_budget=4,
+                    cpu_time="unknown", peak_rss="unknown", trees=[], tasks=[])
+
+        def task(tree, phase, config, start, end, dependency="ready", pool=""):
+            name = phases.task_id(tree, phase, config)
+            plan["tasks"].append(dict(id=name, tree=tree, phase=phase, configuration=config, dependency=dependency,
+                                      pool_edge=pool, inner_jobs=1, argv=[]))
+            argv = ["fixture", name]
+            if phase in ("build", "validation", "post_test", "clean"):
+                argv = ["fixture-cmake", "--build", f"build/{tree}", "--parallel", "1"]
+            elif phase == "self_host":
+                argv = ["fixture-driver", "self_host_from_existing", "--build-directory", f"build/{tree}"]
+            elif phase == "test":
+                argv = [f"build/{tree}/{config}/ide" + ("" if direct else ".exe"), "test"]
+            common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=argv)
+            if phase == "evidence":
+                common["authority"] = "driver_callback"
+            phase_tests.write(directory, f"{name}.{common['pid']}.start.json", dict(common, state="running"))
+            phase_tests.write(directory, f"{name}.{common['pid']}.end.json", dict(common, state="success", child_start_us=start,
+                              end_us=end, publication_start_us=end, result=0, platform_status=0, spawned=1, timed_out=0,
+                              termination_requested=0, forcibly_terminated=0, cpu_time="unknown", peak_rss="unknown",
+                              test_jobs="1", ctest_jobs="not-applicable"))
+            if dependency == "ready":
+                phase_tests.write(directory, name + ".ready.json", dict(epoch_us=1, ready_us=start))
+
+        for i, row in enumerate(rows):
+            compiler, config, tree = row["compiler"], row["configuration"], f"tree{i}"
+            plan["trees"].append(dict(id=tree, rows=[row["id"]], build_directory=f"build/{tree}", compiler=compiler,
+                                      compiler_path=compiler, compiler_sha256="e" * 64, compiler_identity=compiler, compiler_version="1",
+                                      target="fixture", configurations=config, sanitize=int(row["sanitize"]), fuzz=int(row["fuzz"]),
+                                      lto=False, generator="Ninja Multi-Config", linker="DEFAULT"))
+            task(tree, "configure", "", 2 + i * 2, 3 + i * 2)
+        if not direct:
+            task("matrix", "scheduler", "", 20, 900)
+            for i in range(len(rows)):
+                task(f"tree{i}", "build", "", 30 + i * 20, 40 + i * 20, "scheduler", f"build-tree{i}")
+        current = 150
+        for i, row in enumerate(rows):
+            tree, config = f"tree{i}", row["configuration"]
+            if row["compiler"] == "clang":
+                if direct and row["unity"]:
+                    task(tree, "build", config, current, current + 10)
+                    current += 15
+                task(tree, "validation", config, current, current + 30,
+                     "ready" if direct else phases.task_id(tree, "build"), "" if direct else f"validation-{tree}")
+                task(tree, "test", config, current + 5, current + 25, "nested")
+                current += 35
+            elif direct:
+                task(tree, "build", config, current, current + 10)
+                current += 15
+        if release:
+            task("tree0", "post_test", "Release", current, current + 10,
+                 "ready" if direct else phases.task_id("tree0", "validation", "Release"), "" if direct else "validation-tree0")
+            current += 15
+            if not direct:
+                task("tree0", "self_host", "Release", current, current + 10, phases.task_id("tree0", "build"), "self-host")
+                current += 15
+                for phase, config in (("clean", "Release"), ("evidence", "capture"), ("evidence", "clean")):
+                    task("tree0", phase, config, current, current + 5)
+                    current += 10
+        task("matrix", "evidence", "coverage", 910, 915)
         phase_tests.write(directory, "plan.json", plan)
-        coverage["policy"] = dict(version=1, row_count=5, required_count=5, excluded_count=0,
-                                  fingerprint=qualification.coverage_tools._coverage_policy_fingerprint(coverage["identity"], coverage["expected"]))
-        selected = qualification.coverage_tools._coverage_selected_ids({r["id"]: r for r in coverage["expected"]}, "release" if release else "checks")
-        coverage["executed"] = [dict(lane_id="fixture", status="success", evidence="driver-complete", rows=sorted(selected))]
+        phase_tests.write(directory, "terminal.json", dict(epoch_us=1, terminal_us=920, result=0))
         condition = dict(image_os="fixture", image_version="1", runner="synthetic", caches={"BUSTER_CI_ZIG_CACHE_HIT": "false"})
-        meta = dict(GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", ImageOS="fixture", ImageVersion="1", BUSTER_CI_RUNNER="synthetic", BUSTER_CI_ZIG_CACHE_HIT="false")
+        meta = dict(GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", BUSTER_MATRIX_SHARD=shard,
+                    ImageOS="fixture", ImageVersion="1", BUSTER_CI_RUNNER="synthetic", BUSTER_CI_ZIG_CACHE_HIT="false")
         summary = phases.analyze(directory, coverage, meta)
         tests = []
         pairs = [(row, cap) for row, cap in zip(coverage["expected"], coverage["detected"]) if row["id"] in selected and row["execution"] == "runtime"]
@@ -265,7 +360,7 @@ class QualificationTests(unittest.TestCase):
             tests.append(dict(row_id=row["id"], manifest=reference(self.root, f"unit{i}.json", unit),
                               observation=reference(self.root, str((sidecar / "observation.json").relative_to(self.root)), receipt), log_sha256=receipt["log_sha256"]))
         result = dict(success=True, metadata=meta, matrix_phases=summary)
-        item = dict(job=("macOS x86-64" if direct else "Windows x86-64") + (" release" if release else " checks"), phase_directory=directory.name, tests=tests,
+        item = dict(job=("macOS x86-64" if direct else "Windows x86-64") + " " + shard, phase_directory=directory.name, tests=tests,
                     coverage=reference(self.root, "coverage.json", coverage), result=reference(self.root, "result.json", result), phases=reference(self.root, "phases.json", summary))
         return item, coverage, condition
 
@@ -293,6 +388,127 @@ class QualificationTests(unittest.TestCase):
         item["tests"].pop()
         with self.assertRaisesRegex(ValueError, "runtime assertion census"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def reject_coverage(self, item, coverage, condition, change, message):
+        changed = copy.deepcopy(coverage)
+        change(changed)
+        invalid = dict(item, coverage=reference(self.root, "invalid-coverage.json", changed))
+        with self.assertRaisesRegex(ValueError, message):
+            qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+
+    def test_recomputed_shrunken_policy_is_rejected_by_independent_anchor(self):
+        item, coverage, condition = self.complete_desktop()
+        def shrink(value):
+            row = next(r for r in value["expected"] if r["state"] == "excluded")
+            value["expected"].remove(row)
+            value["detected"] = [cap for cap in value["detected"] if cap["id"] != row["id"]]
+            value["policy"].update(row_count=27, excluded_count=21,
+                                   fingerprint=qualification.coverage_tools._coverage_policy_fingerprint(value["identity"], value["expected"]))
+        self.reject_coverage(item, coverage, condition, shrink, "independent lane anchor")
+
+    def test_row_complete_smaller_native_journal_still_cannot_qualify(self):
+        item, coverage, condition = self.complete_desktop()
+        omitted = next(row for row in coverage["expected"] if row["state"] == "required" and row["compiler"] == "cl")
+        coverage["expected"].remove(omitted)
+        coverage["detected"] = [cap for cap in coverage["detected"] if cap["id"] != omitted["id"]]
+        coverage["executed"][0]["rows"].remove(omitted["id"])
+        coverage["policy"].update(row_count=27, required_count=5,
+                                  fingerprint=qualification.coverage_tools._coverage_policy_fingerprint(coverage["identity"], coverage["expected"]))
+        directory = self.root / item["phase_directory"]
+        plan = phases.read(directory / "plan.json")
+        tree = next(tree for tree in plan["trees"] if omitted["id"] in tree["rows"])
+        plan["trees"].remove(tree)
+        removed = {task["id"] for task in plan["tasks"] if task["tree"] == tree["id"]}
+        plan["tasks"] = [task for task in plan["tasks"] if task["id"] not in removed]
+        for path in directory.iterdir():
+            if path.name.split(".", 1)[0] in removed:
+                path.unlink()
+        phase_tests.write(directory, "plan.json", plan)
+        result = qualification.record(self.root, item["result"])
+        summary = phases.analyze(directory, coverage, result["metadata"])
+        self.assertTrue(summary["complete"])
+        result["matrix_phases"] = summary
+        item.update(coverage=reference(self.root, "coverage.json", coverage), result=reference(self.root, "result.json", result),
+                    phases=reference(self.root, "phases.json", summary))
+        with self.assertRaisesRegex(ValueError, "independent lane anchor"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_policy_version_counts_and_fingerprint_match_independent_anchor(self):
+        item, coverage, condition = self.complete_desktop()
+        changes = [("version", value) for value in (None, True, False, 2)] + [
+            ("row_count", 27), ("required_count", 5), ("excluded_count", 21), ("fingerprint", "0" * 16)]
+        for key, value in changes:
+            with self.subTest(key=key, value=value):
+                self.reject_coverage(item, coverage, condition, lambda p: p["policy"].update({key: value}), "policy version|independent lane anchor")
+        self.reject_coverage(item, coverage, condition, lambda p: p["policy"].pop("version"), "policy version")
+
+    def test_partition_version_two_is_independent_from_policy_version_one(self):
+        item, coverage, condition = self.complete_desktop()
+        self.assertEqual(coverage["policy"]["version"], 1)
+        self.assertEqual(coverage["partition_version"], 2)
+        for value in (1, 3, None, True, False):
+            with self.subTest(value=value):
+                self.reject_coverage(item, coverage, condition, lambda p: p.update(partition_version=value), "partition version")
+        self.reject_coverage(item, coverage, condition, lambda p: p.pop("partition_version"), "partition version")
+
+    def test_full_source_bound_row_semantics_are_checked_before_digest(self):
+        item, coverage, condition = self.complete_desktop()
+        clang = next(i for i, row in enumerate(coverage["expected"]) if row["state"] == "required" and row["compiler"] == "clang" and row["configuration"] == "Debug")
+        portability = next(i for i, row in enumerate(coverage["expected"]) if row["state"] == "required" and row["compiler"] == "cl")
+        excluded = next(i for i, row in enumerate(coverage["expected"]) if row["state"] == "excluded")
+        mutations = [(clang, "execution", "compile-link", "execution kind"),
+                     (clang, "execution", "package-only", "execution kind"),
+                     (portability, "execution", "package-only", "execution kind"),
+                     (excluded, "execution", "runtime", "execution kind"),
+                     (clang, "optimize", True, "optimization/unity"),
+                     (clang, "unity", True, "optimization/unity")]
+        mutations += [(clang, key, value, "row booleans") for key, value in (("optimize", 0), ("sanitize", 1), ("fuzz", "false"), ("unity", None))]
+        for index, key, value, message in mutations:
+            with self.subTest(index=index, key=key, value=value):
+                self.reject_coverage(item, coverage, condition, lambda p: p["expected"][index].update({key: value}), message)
+
+    def test_obligations_cannot_be_omitted_expanded_or_reassigned(self):
+        item, coverage, condition = self.complete_desktop(release=True)
+        self.assertEqual(set(coverage["obligations"]), {"self_host", "fixed_point", "unity_analysis", "table_audit"})
+        self.assertTrue(all(value["state"] == "scheduled" for value in coverage["obligations"].values()))
+        changes = [lambda p: p.pop("obligations"), lambda p: p.update(obligations={}),
+                   lambda p: p["obligations"].update(extra=dict(state="scheduled", reason="invented"))]
+        for name in coverage["obligations"]:
+            changes.extend((lambda p, n=name: p["obligations"].pop(n),
+                            lambda p, n=name: p["obligations"][n].update(state="not-applicable"),
+                            lambda p, n=name: p["obligations"][n].update(reason="owned-by-release-shard")))
+        for i, change in enumerate(changes):
+            with self.subTest(change=i):
+                self.reject_coverage(item, coverage, condition, change, "obligations.*independent lane policy")
+
+    def test_grouped_and_split_jobs_preserve_full_policy_and_release_obligations(self):
+        original = self.root
+        reports = {}
+        try:
+            for shard in ("checks", "sanitized-debug", "sanitized-release", "portability", "release"):
+                with self.subTest(shard=shard):
+                    self.root = original / shard
+                    self.root.mkdir()
+                    item, coverage, condition = self.complete_desktop(shard=shard)
+                    variant = "split-overlap" if shard in github.SPLIT_CHECK_SHARDS else "combined-overlap"
+                    reports[shard] = qualification.desktop(self.root, item, self.run_fixture(variant), condition, variant)
+                    self.assertEqual(len(reports[shard]["rows"]), 28)
+                    self.assertEqual(coverage["policy"]["required_count"], 6)
+                    if shard != "release":
+                        self.assertTrue(all(v == dict(state="not-applicable", reason="owned-by-release-shard") for v in coverage["obligations"].values()))
+                    else:
+                        self.assertTrue(all(v["state"] == "scheduled" for v in coverage["obligations"].values()))
+            split_rows = [row for shard in github.SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
+            self.assertEqual(Counter(split_rows), Counter(reports["checks"]["selected"]))
+            self.assertEqual(len(split_rows), 5)
+            self.assertEqual(len(reports["release"]["selected"]), 1)
+            self.assertEqual(set(split_rows) | reports["release"]["selected"],
+                             {row["id"] for row in reports["checks"]["rows"] if row["state"] == "required"})
+            for shard in github.SPLIT_CHECK_SHARDS:
+                self.assertEqual(reports[shard]["policy"], reports["checks"]["policy"])
+                self.assertEqual(reports[shard]["rows"], reports["checks"]["rows"])
+        finally:
+            self.root = original
 
     def test_native_receipt_identity_completion_binary_and_task_path_are_required(self):
         item, _, condition = self.complete_desktop()
@@ -385,10 +601,24 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "table audit policy"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
 
+    def test_direct_canonical_release_keeps_analysis_and_its_default_audits(self):
+        item, coverage, condition = self.complete_desktop(release=True, direct=True)
+        result = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        self.assertEqual(coverage["obligations"]["self_host"], dict(state="not-applicable", reason="direct-matrix-does-not-consume-fanout"))
+        self.assertEqual(coverage["obligations"]["fixed_point"], dict(state="not-applicable", reason="direct-matrix-does-not-run-self-host"))
+        self.assertEqual(coverage["obligations"]["unity_analysis"], dict(state="scheduled", reason="canonical-clang-release"))
+        self.assertEqual(coverage["obligations"]["table_audit"], dict(state="scheduled", reason="direct-matrix-default-audit"))
+        self.assertEqual(len(result["selected"]), 1)
+        census = next(iter(result["census"].values()))
+        self.assertFalse(census["skipped_table_audits"])
+        self.assertIn("table_audit_fixture", census["modules"])
+        self.reject_coverage(item, coverage, condition, lambda p: p["obligations"]["unity_analysis"].update(state="not-applicable"), "obligations.*independent lane policy")
+
     def test_direct_runtime_keeps_default_audits_even_without_unity(self):
         item, _, condition = self.complete_desktop(direct=True)
         result = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
-        self.assertTrue(all(not row["unity"] for row in result["rows"]))
+        self.assertEqual(len(result["rows"]), 23)
+        self.assertTrue(all(not row["unity"] for row in result["rows"] if row["id"] in result["selected"]))
         self.assertTrue(all(not census["skipped_table_audits"] and "table_audit_fixture" in census["modules"] for census in result["census"].values()))
         test = item["tests"][0]
         unit = qualification.record(self.root, test["manifest"])

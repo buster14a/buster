@@ -180,6 +180,44 @@ def conditions(root, reference, run):
     return entries, normalized
 
 
+def policy_rows(coverage, environment):
+    """Bind the archived census to the independent production lane contract."""
+    identity = coverage["identity"]
+    expected = coverage.get("expected", [])
+    rows = {row["id"]: row for row in expected}
+    require(rows and len(rows) == len(expected), "empty/duplicate policy row census")
+    for row in expected:
+        require(row.get("compiler") in ("cl", "clang", "gcc", "zig") and row.get("configuration") in ("Debug", "Release"),
+                "unsupported policy compiler/configuration")
+        require(all(type(row.get(k)) is bool for k in ("optimize", "sanitize", "fuzz", "unity")), "malformed policy row booleans")
+        require(row["optimize"] == (row["configuration"] == "Release") and
+                row["unity"] == (row["compiler"] == "clang" and not row["sanitize"] and row["optimize"]),
+                "policy optimization/unity differs from configuration")
+        require(row.get("state") in ("required", "excluded") and isinstance(row.get("exclusion"), str) and
+                ((row["state"] == "excluded") == bool(row["exclusion"])), "invalid exclusion census")
+        execution = "none" if row["state"] == "excluded" else "runtime" if row["compiler"] == "clang" else "compile-link"
+        require(row.get("execution") == execution, "policy execution kind differs from compiler/state")
+        require(row["id"] == coverage_tools._coverage_row_id(identity, row) and row.get("owner_shard") == coverage_tools._coverage_row_owner(row), "invalid policy row identity/owner")
+    policy = coverage.get("policy", {})
+    require(type(policy.get("version")) is int and policy["version"] == coverage_tools.COVERAGE_POLICY_VERSION,
+            "coverage policy version differs from independent lane anchor")
+    require(type(coverage.get("partition_version")) is int and coverage["partition_version"] == coverage_tools.COVERAGE_PARTITION_VERSION,
+            "coverage partition version differs from independent lane contract")
+    anchor = coverage_tools._COVERAGE_POLICY_ANCHORS.get((identity["platform"], identity["architecture"]))
+    require(anchor is not None, "coverage platform has no independent lane anchor")
+    fields = ("row_count", "required_count", "excluded_count", "fingerprint")
+    require(all(type(policy.get(k)) is int for k in fields[:3]) and tuple(policy.get(k) for k in fields) == anchor,
+            "coverage policy census/fingerprint differs from independent lane anchor")
+    require(policy["row_count"] == len(rows) and policy["required_count"] == sum(r["state"] == "required" for r in expected) and
+            policy["excluded_count"] == sum(r["state"] == "excluded" for r in expected) and policy["fingerprint"] == coverage_tools._coverage_policy_fingerprint(identity, expected), "policy census/fingerprint mismatch")
+    selected = coverage_tools._coverage_selected_ids(rows, identity["shard"])
+    has_unity = any(rows[row_id].get("unity") for row_id in selected)
+    obligations = coverage_tools._coverage_expected_obligations(identity, "ci", environment, has_unity)
+    require(coverage.get("obligations") == {name: {"state": state, "reason": reason} for name, (state, reason) in obligations.items()},
+            "coverage obligations differ from independent lane policy")
+    return rows, selected
+
+
 def observation(root, item, test, unit, manifest_path, event, identity):
     path = retained(root, test["observation"])
     expected = (root / item["phase_directory"]).parent / "unit-observations" / event["id"] / "observation.json"
@@ -216,6 +254,7 @@ def desktop(root, item, run, condition, variant):
     require(str(identity.get("run_id")) == str(run["id"]) and identity.get("run_attempt") == "1" and identity.get("source_revision") == run["head_sha"], "desktop coverage belongs to a different run/source")
     require(meta.get("GITHUB_SHA") == run["head_sha"] and str(meta.get("GITHUB_RUN_ID")) == str(run["id"]) and meta.get("GITHUB_RUN_ATTEMPT") == "1", "desktop result run identity mismatch")
     environment = dict(summary.get("runner", {}), **meta)
+    rows, selected = policy_rows(coverage, environment)
     report = phases.analyze(root / item["phase_directory"], coverage, environment)
     require(report == summary and result.get("matrix_phases") == summary, "retained phase summary differs from native journal replay/result")
     require(COMMIT.fullmatch(report["identity"]["source_tree"]) and all(HASH.fullmatch(str(identity.get(k, ""))) for k in ("source_hash", "driver_hash")), "missing exact source/tree/driver identity")
@@ -231,16 +270,7 @@ def desktop(root, item, run, condition, variant):
     for field, key in (("ImageOS", "image_os"), ("ImageVersion", "image_version"), ("BUSTER_CI_RUNNER", "runner")):
         require(known(runner.get(field)) and runner[field] == condition[key], "phase/conditions runner image mismatch")
     require(known(runner.get("BUSTER_CI_ZIG_CACHE_HIT")) and condition["caches"].get("BUSTER_CI_ZIG_CACHE_HIT") == runner["BUSTER_CI_ZIG_CACHE_HIT"], "missing/mismatched actual Zig cache condition")
-    expected = coverage.get("expected", [])
-    rows = {row["id"]: row for row in expected}
-    require(rows and len(rows) == len(expected), "empty/duplicate policy row census")
-    for row in expected:
-        require(row["id"] == coverage_tools._coverage_row_id(identity, row) and row.get("owner_shard") == coverage_tools._coverage_row_owner(row), "invalid policy row identity/owner")
-        require(row.get("state") in ("required", "excluded") and ((row.get("state") == "excluded") == bool(row.get("exclusion"))), "invalid exclusion census")
-    policy = coverage.get("policy", {})
-    require(policy.get("row_count") == len(rows) and policy.get("required_count") == sum(r["state"] == "required" for r in expected) and
-            policy.get("excluded_count") == sum(r["state"] == "excluded" for r in expected) and policy.get("fingerprint") == coverage_tools._coverage_policy_fingerprint(identity, expected), "policy census/fingerprint mismatch")
-    selected = coverage_tools._coverage_selected_ids(rows, shard)
+    expected, policy = coverage["expected"], coverage["policy"]
     executed = coverage.get("executed", [])
     require(len(executed) == 1 and executed[0].get("status") == "success" and executed[0].get("evidence") == "driver-complete" and
             executed[0].get("lane_id") == identity["lane_id"] and Counter(executed[0].get("rows", [])) == Counter(selected), "incomplete/duplicate selected-row completion")

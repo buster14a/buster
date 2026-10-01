@@ -216,3 +216,131 @@ merged Visual Studio fixture suite. Exact evidence was posted to the owner
 [#1582](https://github.com/buster14a/buster/issues/1582#issuecomment-5916784757).
 The aggregate correctly remained failed; the reason those PowerShell fixtures
 ran slowly is unproved. This does not waive ordinary correctness admission.
+
+## 2026-10-01 module census and hosted screening
+
+The source census below is bound to `src/buster/tests/test.c` blob
+`8de0c6a3593aeb9014b2ea4f57194e0055374497`, present at source
+`8f173cd9831e94357b340ba0d9d9b25d439b0e0d`. The x86-64 registry contains 56
+modules: 53 serial descriptors and three existing parallel descriptors.
+AArch64 contains 54: 51 serial and the same three parallel descriptors.
+The parallel descriptors remain `aarch64_direct_simd_tests`,
+`aarch64_complex_simd_tests` and `aarch64_memory_semantics_tests`.
+
+The following census records every x86-64 serial descriptor in registration
+order. Except for `compiler_driver_tests`, each stays in the original serial
+rest sequence: individual thread independence has not been established.
+`os_tests` additionally checks thread liveness and context ownership.
+`x86_64_completion_census_tests` is a whole-table audit, excluded from the
+ordinary audits-off invocation; it and `x86_64_tests` are absent on AArch64.
+
+```text
+byte_writer_tests
+arena_tests
+integer_tests
+sanitizer_tests
+hash_tests
+simd_tests
+string_tests
+os_tests
+file_tests
+target_tests
+truetype_tests
+image_tests
+c_frontend_tests
+c_once_tests
+c_type_layout_tests
+c_macro_conditional_tests
+record_layout_tests
+metamorphic_tests
+aarch64_encoding_tests
+aarch64_exact_bridge_tests
+aarch64_control_semantics_tests
+aarch64_system_registers_tests
+aarch64_semantics_tests
+aarch64_system_semantics_tests
+aarch64_syntax_tests
+aarch64_semantic_vm_tests
+aarch64_alias_projection_tests
+assembly_tests
+x86_64_forwarding_tests
+x86_64_metadata_tests
+x86_64_tls_tests
+executable_padding_tests
+x86_64_got_tests
+x86_64_completion_census_tests
+ir_tests
+vector_contract_tests
+llvm_bitcode_tests
+machine_selection_tests
+machine_tests
+codegen_tests
+aarch64_stride_tests
+debug_model_tests
+dwarf_tests
+codeview_tests
+pdb_tests
+object_tests
+jit_tests
+link_tests
+gpu_pipeline_tests
+compiler_diagnostic_tests
+compiler_driver_tests
+compiler_driver_object_path_tests
+x86_64_tests
+```
+
+The driver/rest process cut isolates compiler globals and lazy caches,
+watchdog slots, thread contexts, arena pools and temporary-root state. Each
+child retains initialization and prewarm; rest retains the original gang
+boundary and deterministic replay. Temporary roots include PID, invocation
+serial and monotonic timestamp, require exclusive creation, and are removed
+only by their owner. The bounded driver audit found writable artifacts,
+response-batch default objects and frame-vector caches under that owned root;
+CWD changes are process-local and restored. The intentional `/dev/full` probe
+and driver-only opt-in `BUSTER_ELF_DATA_OUTPUT` have no rest consumer or current
+workflow setting. This supports the isolated cut, not additional in-process
+parallelism for the remaining modules.
+
+Partition admission requires at least four parent workers. Two child quotas
+sum to at most that parent quota and each retains at least two workers;
+smaller quotas use the original streaming invocation. Captures drain
+concurrently and replay driver then rest. The 64 MiB capture limit and
+5,400-second owned-process deadline reject incomplete, failed or unclean
+execution; the serial fallback retains its original unlimited parent wait.
+Existing individual synchronous fixture waits can remain unbounded within
+the partition's overall deadline. Memory, CPU and repeated-run reliability
+still require hosted qualification.
+
+[Hosted screening run 36840375184, attempt 1](https://github.com/buster14a/buster/actions/runs/36840375184)
+completed one baseline/candidate pair per platform on actual PR-merge source
+`f3835072e6cd46af3573e47b803b10d86163e8fb`. Independently replayed native
+intervals and inventory/assertion proofs give:
+
+| Platform | Baseline outer wall | Partitioned outer wall | Reduction | Assertions in each arm |
+| --- | ---: | ---: | ---: | ---: |
+| Windows x86-64 | 1551.277493 s | 913.774750 s | 41.0953% | 4,964,144 |
+| Linux x86-64 | 1109.190984 s | 678.297523 s | 38.8475% | 4,967,013 |
+
+Both arms execute the same 55 modules, with zero external tests and the
+whole-table audit explicitly skipped. Baseline uses two workers; candidate
+uses two isolated children of two workers each under a four-worker host
+budget. This is not a four-worker baseline comparison. Native exit,
+deadline, capture and cleanup proofs pass. CPU time and peak RSS are unknown.
+Summed child wall changes by +0.5609% on Windows and +13.4305% on Linux;
+these sums do not measure aggregate CI runner seconds or CPU time.
+
+Retained ZIP bytes match the published artifact SHA-256:
+
+| Platform | Artifact ID | ZIP SHA-256 |
+| --- | ---: | --- |
+| Windows | 11154335209 | `754680f0c2b2f051d63e30f1d838e12d029453720a35a0e13d9febbd4aed6326` |
+| Linux | 11153620583 | `488383d9c7320ec4b2eb14a9ae9795324dd683bf545b09b478b134b457a3c70c` |
+
+The independent screening verdict is `screening_valid=true`,
+`measurement_review_ready=false`, `ci_complete=false` and
+`performance_accepted=false`. This separate one-pair cohort does not qualify
+the newer integrated source, the Windows all-build barrier or split checks.
+Those proposals retain their default policies until three matched complete
+first attempts per variant and resource/reliability review satisfy #2119 and
+#2120. The earlier cohorts above remain separate.
