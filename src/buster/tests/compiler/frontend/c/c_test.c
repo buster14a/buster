@@ -8805,6 +8805,258 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     return result;
 }
 
+// GNU comma elision distinguishes an omitted variadic argument from a supplied
+// empty one. Nested forwarding must derive that distinction from the resulting
+// invocation, while ordinary token-paste placemarkers keep their standard rule.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_comma_omission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 definitions = S8("#define V(x, ...) x , ## __VA_ARGS__\n"
+                             "#define W(x, y, ...) x y , ## __VA_ARGS__\n"
+                             "#define NAMED(x, rest...) x , ## rest\n"
+                             "#define ONLY(...) before , ## __VA_ARGS__ after\n"
+                             "#define NAMED_ONLY(rest...) before , ## rest after\n"
+                             "#define ALIAS V\n#define WRAP(...) V(__VA_ARGS__)\n"
+                             "#define FORWARD(x, ...) V(x, __VA_ARGS__)\n#define OMIT(x) V(x)\n"
+                             "#define EMPTY\n#define ID(x) x\n"
+                             "#define CAT(a, b) a ## b\n#define CHAIN(a, b, c) a ## b ## c\n"
+                             "#define ORDINARY(x) before , ## x after\n"
+                             "#define FIXED(x, ...) before , ## x after\n");
+    struct
+    {
+        String8 input;
+        String8 expected;
+    } cases[] = {
+        {S8("V(1)"), S8("1")},
+        {S8("V(1,)"), S8("1 ,")},
+        {S8("V(1,/*empty*/)"), S8("1 ,")},
+        {S8("V(1,EMPTY)"), S8("1 ,")},
+        {S8("V(1,2)"), S8("1 , 2")},
+        {S8("V(1,2,3)"), S8("1 , 2 , 3")},
+        {S8("V((1,2),)"), S8("(1 , 2) ,")},
+        {S8("V(,)"), S8(",")},
+        {S8("W(1,2)"), S8("1 2")},
+        {S8("W(1,2,)"), S8("1 2 ,")},
+        {S8("W(1,2,3,4)"), S8("1 2 , 3 , 4")},
+        {S8("W(,)"), S8("")},
+        {S8("W(,,)"), S8(",")},
+        {S8("NAMED(1)"), S8("1")},
+        {S8("NAMED(1,)"), S8("1 ,")},
+        {S8("NAMED(1,2)"), S8("1 , 2")},
+        {S8("ALIAS(1)"), S8("1")},
+        {S8("ALIAS(1,)"), S8("1 ,")},
+        {S8("WRAP(1)"), S8("1")},
+        {S8("WRAP(1,)"), S8("1 ,")},
+        {S8("WRAP(1,EMPTY)"), S8("1 ,")},
+        // FORWARD supplies the separator even when its own varargs are omitted.
+        {S8("FORWARD(1)"), S8("1 ,")},
+        {S8("FORWARD(1,)"), S8("1 ,")},
+        {S8("FORWARD(1,2)"), S8("1 , 2")},
+        {S8("OMIT(1)"), S8("1")},
+        {S8("ID(V(1))"), S8("1")},
+        {S8("ID(V(1,))"), S8("1 ,")},
+        {S8("W(1,2,V(3,))"), S8("1 2 , 3 ,")},
+        {S8("ONLY(,)"), S8("before , , after")},
+        {S8("ONLY(EMPTY)"), S8("before , after")},
+        {S8("ONLY(2)"), S8("before , 2 after")},
+        {S8("CAT(,) end"), S8("end")},
+        {S8("CAT(,name)"), S8("name")},
+        {S8("CAT(name,)"), S8("name")},
+        {S8("CHAIN(,,name)"), S8("name")},
+        {S8("CHAIN(name,,)"), S8("name")},
+        {S8("CHAIN(,,) end"), S8("end")},
+        {S8("ORDINARY()"), S8("before , after")},
+        {S8("FIXED()"), S8("before , after")},
+        {S8("FIXED(,1)"), S8("before , after")},
+    };
+    struct
+    {
+        CPreprocessDialect dialect;
+        bool gnu;
+    } modes[] = {
+        {C_PREPROCESS_DIALECT_GNU89, true},
+        {C_PREPROCESS_DIALECT_GNU99, true},
+        {C_PREPROCESS_DIALECT_GNU11, true},
+        {C_PREPROCESS_DIALECT_GNU17, true},
+        {C_PREPROCESS_DIALECT_GNU23, true},
+        {C_PREPROCESS_DIALECT_C99, false},
+        {C_PREPROCESS_DIALECT_C11, false},
+        {C_PREPROCESS_DIALECT_C17, false},
+        {C_PREPROCESS_DIALECT_C23, false},
+    };
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8("{S8}{S8}\n"), definitions, cases[case_index].input);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = modes[mode].dialect});
+            CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+            BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, preprocess.token_count == expected.token_count, source);
+            for (u64 index = 0; index + 1 < expected.token_count; index += 1)
+            {
+                c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                          c_token_spelling(expected.spelling_base, expected.tokens[index]));
+            }
+            scratch_end(temporary);
+        }
+        // With no fixed parameter, an empty invocation is ambiguous. GNU modes
+        // elide the comma; standard modes retain it, matching both oracles.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("{S8}ONLY() NAMED_ONLY()\n"), definitions);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = modes[mode].dialect});
+        CLexResult expected = c_lex(temporary.arena, modes[mode].gnu ? S8("before after before after") : S8("before , after before , after"));
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == expected.token_count);
+        for (u64 index = 0; index + 1 < expected.token_count; index += 1)
+        {
+            c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                      c_token_spelling(expected.spelling_base, expected.tokens[index]));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_header_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 root = buster_test_temporary_path(arguments->arena, S8("header-operands"), S8(".dir"));
+    String8 paths[] = {string_format_z(arguments->arena, S8("{S8}/first"), root),
+                       string_format_z(arguments->arena, S8("{S8}/second"), root)};
+    bool files_ready = root.pointer && os_make_directory_attempt(root) && os_make_directory_attempt(paths[0]) && os_make_directory_attempt(paths[1]);
+    struct
+    {
+        u32 directory;
+        String8 name;
+        String8 source;
+    } files[] = {
+        {0, S8("operand spaced.h"), S8("#define HEADER_SELECTED 1\n")},
+        {0, S8("operandspaced.h"), S8("#define HEADER_SELECTED 2\n")},
+        {0, S8("operand  repeated.h"), S8("#define HEADER_SELECTED 3\n")},
+        {0, S8("next probe.h"), S8("#define next absent\n"
+                                  "#if !__has_include_next(<next probe.h>) || !__has_include_next(\"next probe.h\")\n"
+                                  "#error literal_include_next_query\n#endif\n#include_next <next probe.h>\n")},
+        {1, S8("next probe.h"), S8("#define HEADER_NEXT_SELECTED 7\n")},
+        {1, S8("nextprobe.h"), S8("#define HEADER_NEXT_SELECTED 8\n")},
+    };
+    for (u32 index = 0; files_ready && index < BUSTER_ARRAY_LENGTH(files); index += 1)
+    {
+        String8 path = string_format_z(arguments->arena, S8("{S8}/{S8}"), paths[files[index].directory], files[index].name);
+        files_ready = file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(files[index].source));
+    }
+    String8 cases[] = {
+        S8("#include <operand spaced.h>\n_Static_assert(HEADER_SELECTED == 1, \"literal spaced\");\n"),
+        S8("#include \"operand spaced.h\"\n_Static_assert(HEADER_SELECTED == 1, \"quoted spaced\");\n"),
+        S8("#include <operandspaced.h>\n_Static_assert(HEADER_SELECTED == 2, \"unspaced\");\n"),
+        S8("#include <operand  repeated.h>\n_Static_assert(HEADER_SELECTED == 3, \"repeated spaces\");\n"),
+        S8("#include <operand \\\nspaced.h>\n_Static_assert(HEADER_SELECTED == 1, \"spliced header\");\n"),
+        S8("#import <operand spaced.h>\n_Static_assert(HEADER_SELECTED == 1, \"import spaced\");\n"),
+        S8("#define operand absent\n"
+           "#if !__has_include(<operand spaced.h>) || !__has_include(\"operand spaced.h\")\n"
+           "#error literal_header_query\n#endif\n"
+           "#include <operand spaced.h>\n_Static_assert(HEADER_SELECTED == 1, \"collision\");\n"),
+        S8("#define operand absent\n#define HI __has_include\n#define HII HI\n"
+           "#if !HII(<operand spaced.h>)\n#error aliased_header_query\n#endif\n"
+           "#include <operand spaced.h>\n_Static_assert(HEADER_SELECTED == 1, \"alias\");\n"),
+        S8("#define operand absent\n#define HAS(h) __has_include(h)\n"
+           "#if HAS(<operand spaced.h>)\n#error wrapper_header_prescan\n#endif\n"
+           "#if !HAS(\"operand spaced.h\")\n#error wrapper_quoted_header\n#endif\n"),
+        S8("#define HAS(h) __has_include(h)\n"
+           "#if !HAS(<operand spaced.h>)\n#error wrapper_token_combination\n#endif\n"),
+        S8("#define EMPTY\n#define HAS(h) __has_include(h)\n"
+           "#if !HAS(<operandspaced.h EMPTY>)\n#error wrapper_empty_prescan\n#endif\n"),
+        S8("#define STEM operandspaced\n#define H <STEM.h>\n"
+           "#if !__has_include(H)\n#error expanded_header_query\n#endif\n"
+           "#include H\n_Static_assert(HEADER_SELECTED == 2, \"expanded angle\");\n"),
+        S8("#define H \"operand spaced.h\"\n"
+           "#if !__has_include(H) || __has_include(<missing_header.h>)\n#error quoted_header_query\n#endif\n"
+           "#include H\n_Static_assert(HEADER_SELECTED == 1, \"expanded quoted\");\n"),
+        S8("#include <next probe.h>\n_Static_assert(HEADER_NEXT_SELECTED == 7, \"include next\");\n"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23};
+    if (BUSTER_REQUIRE(arguments, files_ready))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[index], (CPreprocessOptions){
+                    .include_paths = paths,
+                    .include_path_count = BUSTER_ARRAY_LENGTH(paths),
+                    .source_path = S8("tests/header-operands.c"),
+                    .target = target_native,
+                    .dialect = dialects[dialect],
+                });
+                BUSTER_TEST(arguments, preprocess.error_count == 0);
+                if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0))
+                {
+                    CParseResult parsed = c_parse(temporary.arena, preprocess);
+                    BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    if (root.pointer)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_pragma_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#define DO_PRAGMA(p) _Pragma(p)\n"
+        "#define WIDE_PACK L\"pack(push, 1)\"\n"
+        "_Pragma(\"pack(push, 1)\")\n"
+        "struct Narrow { char byte; int value; };\n"
+        "_Pragma(\"pack(pop)\")\n"
+        "DO_PRAGMA(WIDE_PACK) struct Wide { char byte; int value; }; _Pragma(L\"pack(pop)\")\n"
+        "_Pragma(L\"pack(push, 2)\") struct Two { char byte; int value; }; _Pragma(\"pack(pop)\")\n"
+        "struct Natural { char byte; int value; };\n"
+        "_Static_assert(sizeof(struct Narrow) == 5, \"narrow pack\");\n"
+        "_Static_assert(sizeof(struct Wide) == 5, \"wide macro pack\");\n"
+        "_Static_assert(sizeof(struct Two) == 6, \"wide direct pack\");\n"
+        "_Static_assert(sizeof(struct Natural) == 8, \"restored pack\");\n"
+        "#define SAVED_VALUE 1\n"
+        "_Pragma(L\"push_macro(\\\"SAVED_VALUE\\\")\")\n"
+        "#undef SAVED_VALUE\n#define SAVED_VALUE 2\n"
+        "_Pragma(L\"pop_macro(\\\"SAVED_VALUE\\\")\")\n"
+        "_Static_assert(SAVED_VALUE == 1, \"wide restored macro\");\n");
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, source, (CPreprocessOptions){
+        .source_path = S8("wide-pragma.c"), .target = target_native, .dialect = C_PREPROCESS_DIALECT_C17,
+    });
+    BUSTER_TEST(arguments, preprocess.error_count == 0);
+    if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0))
+    {
+        CParseResult parsed = c_parse(arguments->arena, preprocess);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        String8 names[] = {S8("Narrow"), S8("Wide"), S8("Two"), S8("Natural")};
+        u16 alignments[] = {1, 1, 2, 0};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            bool seen = false;
+            for (u32 token_index = 0; !seen && token_index < preprocess.token_count; token_index += 1)
+            {
+                if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), names[index]))
+                {
+                    seen = true;
+                    BUSTER_TEST(arguments, c_preprocess_pack_alignment(&preprocess, token_index) == alignments[index]);
+                }
+            }
+            BUSTER_TEST(arguments, seen);
+        }
+    }
+    return result;
+}
+
 // Paste-free, stringify-free replacements are produced straight into their
 // task batch (c_macro_produce_plain_tasks); builtins, `#`, `##` and pragma
 // operands keep the staged path. Every case here compares the complete
@@ -29284,6 +29536,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
+    BUSTER_TEST_FIXTURE(arguments, c_test_header_operands);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
+    BUSTER_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_name_literals);
