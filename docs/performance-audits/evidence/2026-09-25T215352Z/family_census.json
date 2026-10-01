@@ -1,0 +1,202 @@
+[
+ {
+  "workload": "F1_hello_c",
+  "base": 138952189,
+  "proto": 101903548,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "F1_hello_link",
+  "base": 142638425,
+  "proto": 108284066,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "F1_tiny_aarch64",
+  "base": 1814255,
+  "proto": 1814081,
+  "shapes": 0,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "F2_ops",
+  "base": 154896629,
+  "proto": 121388743,
+  "shapes": 36,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "F3_string",
+  "base": 282591655,
+  "proto": 251205806,
+  "shapes": 37,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_aarch64",
+  "base": 237634106,
+  "proto": 201411858,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_arena",
+  "base": 203037965,
+  "proto": 166854680,
+  "shapes": 30,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_byte_writer",
+  "base": 167124732,
+  "proto": 130883336,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_entry_point",
+  "base": 254559586,
+  "proto": 218335098,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_file",
+  "base": 258133282,
+  "proto": 221908320,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_float",
+  "base": 164752672,
+  "proto": 128511550,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_font_provider",
+  "base": 271742974,
+  "proto": 235521412,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_hash",
+  "base": 174339863,
+  "proto": 138097883,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_integer",
+  "base": 172254482,
+  "proto": 136014158,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_os",
+  "base": 459671802,
+  "proto": 425828903,
+  "shapes": 35,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_rendering",
+  "base": 284390789,
+  "proto": 248139420,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_sanitizer_coe_win",
+  "base": 2097504,
+  "proto": 2097747,
+  "shapes": 0,
+  "compiled": false,
+  "identical": false
+ },
+ {
+  "workload": "H1_simd",
+  "base": 168839997,
+  "proto": 131799770,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_target",
+  "base": 319361679,
+  "proto": 283103800,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_time",
+  "base": 226379712,
+  "proto": 190156948,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_truetype",
+  "base": 240076189,
+  "proto": 210206412,
+  "shapes": 38,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_ui_builder",
+  "base": 225814729,
+  "proto": 189571394,
+  "shapes": 29,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_ui_core",
+  "base": 497610478,
+  "proto": 468031802,
+  "shapes": 45,
+  "compiled": true,
+  "identical": true
+ },
+ {
+  "workload": "H1_window",
+  "base": 62612166,
+  "proto": 62627484,
+  "shapes": 0,
+  "compiled": false,
+  "identical": false
+ },
+ {
+  "workload": "H1_x86_64",
+  "base": 219950981,
+  "proto": 183824760,
+  "shapes": 32,
+  "compiled": true,
+  "identical": true
+ }
+]

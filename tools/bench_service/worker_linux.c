@@ -1,4 +1,5 @@
 #include "worker_linux.h"
+#include "zen5_stage.h"
 
 #ifdef __linux__
 #include <dirent.h>
@@ -15,6 +16,11 @@
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
 #define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
 #define BQ_SYSTEMD_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
+#define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
+#define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
+#define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+#define BQ_WORKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
+#define BQ_WORKER_CGROUP_PREFIX BQ_WORKER_CGROUP_SLICE "/"
 #define BQ_SYSTEMCTL "/usr/bin/systemctl"
 #define BQ_WORKER_COMMAND_MILLISECONDS 5000u
 #define BQ_WORKER_STOP_MILLISECONDS 10000u
@@ -221,6 +227,15 @@ BUSTER_GLOBAL_LOCAL int bq_worker_open_lease_parent(char const* path, char leaf[
     return parent;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_permissions(char const* path, struct stat const* info)
+{
+    bool broker_lease = path && !strcmp(path, BQ_BROKER_LEASE);
+    bool ok = info && info->st_uid == geteuid() && (broker_lease ?
+              ((info->st_mode & 07777) == 0640 && info->st_gid == getegid()) :
+              ((info->st_mode & 077) == 0));
+    return ok;
+}
+
 /* Same stable-inode/open-description contract consumed by throughput's
  * --lease-fd.  Kept local so bench_service does not compile unrelated
  * throughput qualification/reporting functions into the service. */
@@ -243,7 +258,7 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_acquire(char const* path, BqWorkerLease*
     struct stat info;
     if (!error && fstat(fd, &info) != 0) error = errno;
     if (!error && (!S_ISREG(info.st_mode) || info.st_nlink != 1)) error = EINVAL;
-    if (!error && (info.st_uid != geteuid() || (info.st_mode & 077) != 0)) error = EACCES;
+    if (!error && !bq_worker_lease_permissions(path, &info)) error = EACCES;
     if (!error && flock(fd, LOCK_EX | LOCK_NB) != 0) error = errno;
     if (!error) lease->descriptor = fd;
     else if (fd >= 0) close(fd);
@@ -260,7 +275,7 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt(char const* path, int fd, BqWorker
     struct stat inherited, selected;
     if (!error && fstat(fd, &inherited) != 0) error = errno;
     if (!error && (!S_ISREG(inherited.st_mode) || inherited.st_nlink != 1)) error = EINVAL;
-    if (!error && (inherited.st_uid != geteuid() || (inherited.st_mode & 077) != 0)) error = EACCES;
+    if (!error && !bq_worker_lease_permissions(path, &inherited)) error = EACCES;
     char leaf[BQ_PATH_CAP + 1];
     int parent = !error ? bq_worker_open_lease_parent(path, leaf) : -1;
     if (!error && parent < 0) error = errno ? errno : EINVAL;
@@ -283,7 +298,7 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt(char const* path, int fd, BqWorker
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt_transferred(int fd, u64 device, u64 inode,
+BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt_transferred(char const* path, int fd, u64 device, u64 inode,
                                                            BqWorkerLease* lease)
 {
     lease->descriptor = -1;
@@ -291,7 +306,8 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt_transferred(int fd, u64 device, u6
     struct stat info = {0};
     int error = fd < 3 ? EINVAL : flags < 0 ? errno : fstat(fd, &info) != 0 ? errno : 0;
     if (!error && (!S_ISREG(info.st_mode) || info.st_nlink != 1 || info.st_uid != geteuid() ||
-                   (info.st_mode & 077) != 0 || (u64)info.st_dev != device || (u64)info.st_ino != inode))
+                   !bq_worker_lease_permissions(path, &info) ||
+                   (u64)info.st_dev != device || (u64)info.st_ino != inode))
         error = EACCES;
     if (!error && flock(fd, LOCK_EX | LOCK_NB) != 0) error = errno;
     if (!error && fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) error = errno;
@@ -545,8 +561,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
                               bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST, lease_path,
                                                                job_id, attempt_token, 0, 0) &&
                               fstat(lease_fd, &lease_info) == 0 && S_ISREG(lease_info.st_mode) &&
-                              lease_info.st_nlink == 1 && lease_info.st_uid == geteuid() &&
-                              (lease_info.st_mode & 077) == 0;
+                              lease_info.st_nlink == 1 && bq_worker_lease_permissions(lease_path, &lease_info);
             if (request_ok)
             {
                 BqWorkerLeaseMessage response;
@@ -676,7 +691,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
         bool adopted_ok = false;
         if (response_ok && received_fd >= 3)
         {
-            adopted_ok = bq_worker_lease_adopt_transferred(received_fd, response.device, response.inode, &adopted) == 0;
+            adopted_ok = bq_worker_lease_adopt_transferred(lease_path, received_fd, response.device,
+                                                            response.inode, &adopted) == 0;
             received_fd = -1;
         }
         response_ok = adopted_ok;
@@ -840,7 +856,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_record_write(BqQueue* queue, BqJob const* 
         memcpy(bytes + 96, boot, strlen(boot));
         memcpy(bytes + 136, unit, strlen(unit));
     }
-    BqError error = ok ? bq_record_write(queue, name, bytes, sizeof(bytes), false) : BQ_WORKER_MISMATCH;
+    mode_t mode = queue && !strcmp(queue->directory_path, BQ_BROKER_QUEUE) ? 0440 : 0400;
+    BqError error = ok ? bq_record_write_mode(queue, name, bytes, sizeof(bytes), false, mode) : BQ_WORKER_MISMATCH;
     return error;
 }
 
@@ -908,7 +925,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_instance_write(BqQueue* queue, BqJob const
         bq_put64(bytes + 496, observed->cgroup_slice_device);
         bq_put64(bytes + 504, observed->cgroup_slice_inode);
     }
-    return ok ? bq_record_write(queue, name, bytes, sizeof(bytes), true) : BQ_WORKER_MISMATCH;
+    mode_t mode = queue && !strcmp(queue->directory_path, BQ_BROKER_QUEUE) ? 0440 : 0400;
+    BqError error = ok ? bq_record_write_mode(queue, name, bytes, sizeof(bytes), true, mode) : BQ_WORKER_MISMATCH;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_instance_read(BqQueue* queue, BqJob const* job,
@@ -1073,7 +1092,8 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_verify_cgroup(BqWorkerConfig const* config, B
     char root[BQ_PATH_CAP + 1];
     bool ok = bq_worker_text(config->cgroup_root, root, sizeof(root)) &&
               bq_worker_cgroup_path_valid(observed->cgroup) &&
-              strncmp(observed->cgroup, "/buster-bench.slice/", 20) == 0;
+              strncmp(observed->cgroup, BQ_WORKER_CGROUP_PREFIX,
+                      sizeof(BQ_WORKER_CGROUP_PREFIX) - 1) == 0;
     int directory = ok ? bq_worker_open_trusted_directory(config->cgroup_root, false, false) : -1;
     ok = directory >= 0;
     struct stat root_identity;
@@ -1156,7 +1176,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
     char expected_inaccessible[BQ_PATH_CAP * 2 + 2];
     char expected_read_only[BQ_PATH_CAP + 1], expected_read_write[BQ_PATH_CAP + 1];
     snprintf(cpu, sizeof(cpu), "%u", config->limits.cpu);
-    snprintf(expected_cgroup, sizeof(expected_cgroup), "/buster-bench.slice/%s", unit);
+    snprintf(expected_cgroup, sizeof(expected_cgroup), BQ_WORKER_CGROUP_PREFIX "%s", unit);
     String8 inaccessible_root = config->production_path ? config->queue_root : config->workspace_root;
     char inaccessible_root_text[BQ_PATH_CAP + 1], lease_text[BQ_PATH_CAP + 1];
     bool paths = bq_worker_text(inaccessible_root, inaccessible_root_text, sizeof(inaccessible_root_text)) &&
@@ -1173,6 +1193,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
               observed->paths_valid && inaccessible_length > 0 && !strcmp(observed->inaccessible_paths, expected_inaccessible) &&
               !strcmp(observed->read_only_paths, expected_read_only) && !strcmp(observed->read_write_paths, expected_read_write) &&
               !strcmp(observed->user, "buster-bench") && !strcmp(observed->group, "buster-bench") &&
+              !strcmp(observed->collect_mode, "inactive") &&
               observed->no_new_privileges && observed->private_tmp && observed->private_devices &&
               observed->private_network && observed->protect_home && observed->protect_system &&
               observed->protect_proc && observed->restrict_suidsgid && observed->protect_control_groups &&
@@ -1184,7 +1205,10 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
               observed->syscall_error_number_eperm;
     if (ok && resources)
     {
-        ok = !strcmp(observed->allowed_cpus, cpu) && observed->memory_max == config->limits.memory_max &&
+        /* A fresh launch must satisfy the current sandbox. Identity checks
+         * without resources still authorize cleanup of older exact units. */
+        ok = observed->capability_sets_empty &&
+             !strcmp(observed->allowed_cpus, cpu) && observed->memory_max == config->limits.memory_max &&
              observed->memory_swap_max == config->limits.memory_swap_max &&
              observed->tasks_max == config->limits.tasks_max &&
              observed->runtime_max_usec == config->limits.runtime_max_usec &&
@@ -1413,6 +1437,66 @@ BUSTER_GLOBAL_LOCAL char* bq_worker_property(char* text, char const* name)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_systemd_capabilities_empty(char* output)
+{
+    char* bounding = bq_worker_property(output, "CapabilityBoundingSet");
+    char* ambient = bq_worker_property(output, "AmbientCapabilities");
+    /* systemctl show renders an empty set as an empty property value. */
+    bool ok = bounding && ambient && (bounding[0] == '\n' || bounding[0] == 0) &&
+              (ambient[0] == '\n' || ambient[0] == 0);
+    return ok;
+}
+
+/* systemd exposes the expanded syscall set, not the @system-service token.
+ * Compare it with the installed trusted service, which carries the same fixed
+ * filter on the same manager and architecture. Cache only a successful read. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_systemd_filter_matches(char const* actual, u64 deadline)
+{
+    static char expected[BQ_WORKER_OUTPUT_CAP];
+    static bool ready;
+    bool ok = actual && actual[0];
+    if (ok && !ready)
+    {
+        char output[BQ_WORKER_OUTPUT_CAP];
+        char const* arguments[] = {BQ_SYSTEMCTL, "show", "--no-pager", "--property=SystemCallFilter",
+                                   "buster-bench.service", NULL};
+        int status = 0;
+        ok = bq_worker_exec_capture(arguments, output, sizeof(output), &status,
+                                    bq_worker_remaining(deadline)) == BQ_OK &&
+             WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        char* value = ok ? bq_worker_property(output, "SystemCallFilter") : NULL;
+        char* end = value ? strchr(value, '\n') : NULL;
+        ok = ok && value && end && end > value && (size_t)(end - value) < sizeof(expected);
+        if (ok)
+        {
+            memcpy(expected, value, (size_t)(end - value));
+            expected[end - value] = 0;
+            ready = true;
+        }
+    }
+    return ok && ready && !strcmp(actual, expected);
+}
+
+BUSTER_GLOBAL_LOCAL BqWorkerResult bq_worker_systemd_result(char const* value, bool active)
+{
+    BqWorkerResult result = !strcmp(value, "oom-kill") ? BQ_WORKER_OOM :
+                            !strcmp(value, "timeout") ? BQ_WORKER_TIMED_OUT :
+                            !strcmp(value, "canceled") ? BQ_WORKER_CANCELLED_RESULT :
+                            !strcmp(value, "success") && active ? BQ_WORKER_RUNNING :
+                            !strcmp(value, "success") ? BQ_WORKER_SUCCEEDED :
+                            BQ_WORKER_EXECUTION_FAILED;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_systemd_collected(char* output)
+{
+    char* load_state = bq_worker_property(output, "LoadState");
+    char* end = load_state ? strchr(load_state, '\n') : NULL;
+    bool collected = end && (size_t)(end - load_state) == sizeof("not-found") - 1 &&
+                     !memcmp(load_state, "not-found", sizeof("not-found") - 1);
+    return collected;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, char const* unit,
                                                      BqWorkerObserved* observed, u64 deadline)
 {
@@ -1423,6 +1507,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
         "--property=MemoryMax", "--property=MemorySwapMax", "--property=TasksMax", "--property=RuntimeMaxUSec",
         "--property=TimeoutStopUSec", "--property=KillMode", "--property=SendSIGKILL", "--property=InvocationID",
         "--property=Result", "--property=NoNewPrivileges", "--property=PrivateTmp", "--property=PrivateDevices",
+        "--property=CapabilityBoundingSet", "--property=AmbientCapabilities",
         "--property=PrivateNetwork", "--property=ProtectHome", "--property=ProtectSystem", "--property=ProtectProc",
         "--property=RestrictSUIDSGID", "--property=ProtectControlGroups", "--property=ProtectKernelTunables",
         "--property=ProtectKernelModules", "--property=ProtectKernelLogs", "--property=ProtectClock",
@@ -1437,6 +1522,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
     BqError error = remaining ? bq_worker_exec_capture(arguments, output, sizeof(output), &status, remaining) : BQ_IO;
     *observed = (BqWorkerObserved){0};
     bool missing = error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0);
+    if (error == BQ_OK && !missing && bq_worker_systemd_collected(output)) missing = true;
+    if (error == BQ_OK && !missing) observed->capability_sets_empty = bq_worker_systemd_capabilities_empty(output);
     enum { BQ_SYSTEMD_FIELD_COUNT = 48 };
     char* fields[BQ_SYSTEMD_FIELD_COUNT] = {0};
     char const* names[] = {"Id", "LoadState", "ActiveState", "SubState", "ControlGroup", "AllowedCPUs",
@@ -1501,8 +1588,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
         observed->restrict_realtime = !strcmp(fields[34], "yes");
         observed->address_families_unix = !strcmp(fields[35], "AF_UNIX");
         observed->syscall_architectures_native = !strcmp(fields[36], "native");
-        observed->syscall_filter_system_service = !strcmp(fields[37], "@system-service");
-        observed->syscall_error_number_eperm = !strcmp(fields[38], "EPERM");
+        observed->syscall_filter_system_service = bq_worker_systemd_filter_matches(fields[37], deadline);
+        observed->syscall_error_number_eperm = !strcmp(fields[38], "1") || !strcmp(fields[38], "EPERM");
         int inaccessible_length = bq_worker_copy_field(observed->inaccessible_paths, sizeof(observed->inaccessible_paths), fields[39]);
         int read_only_length = bq_worker_copy_field(observed->read_only_paths, sizeof(observed->read_only_paths), fields[40]);
         int read_write_length = bq_worker_copy_field(observed->read_write_paths, sizeof(observed->read_write_paths), fields[41]);
@@ -1524,11 +1611,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
                                                 (u32)collect_mode_length < sizeof(observed->collect_mode) &&
                                                 user_length > 0 && (u32)user_length < sizeof(observed->user) &&
                                                 group_length > 0 && (u32)group_length < sizeof(observed->group);
-        observed->result = !strcmp(fields[14], "oom-kill") ? BQ_WORKER_OOM :
-                           !strcmp(fields[14], "timeout") ? BQ_WORKER_TIMED_OUT :
-                           !strcmp(fields[14], "success") ? BQ_WORKER_SUCCEEDED :
-                           !strcmp(fields[14], "canceled") ? BQ_WORKER_CANCELLED_RESULT :
-                           observed->active ? BQ_WORKER_RUNNING : BQ_WORKER_EXECUTION_FAILED;
+        observed->result = bq_worker_systemd_result(fields[14], observed->active);
         char boot[BQ_WORKER_BOOT_CAP];
         if (!bq_worker_read_regular("/proc/sys/kernel/random/boot_id", boot, sizeof(boot))) error = BQ_IO;
         else if (bq_worker_copy_field(observed->boot_id, sizeof(observed->boot_id), boot) < 0) error = BQ_IO;
@@ -1573,20 +1656,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_signal(BqWorkerBackend* backend, char con
     char const* arguments[] = {BQ_SYSTEMD_BROKER, "signal", unit, signal_name, NULL};
     int status = 0;
     u32 remaining = bq_worker_remaining(deadline);
-    BqError error = strcmp(signal_name, "TERM") && strcmp(signal_name, "KILL") ? BQ_BAD_REQUEST : !remaining ? BQ_IO :
+    BqError error = strcmp(signal_name, "TERM") && strcmp(signal_name, "KILL") &&
+                    strcmp(signal_name, "CONT") ? BQ_BAD_REQUEST : !remaining ? BQ_IO :
                     bq_worker_exec_capture(arguments, output, sizeof(output), &status, remaining);
     if (error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) error = BQ_IO;
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline)
+BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline, bool cancellable)
 {
     BqSystemdContext* context = backend->context;
     BqError error = BQ_OK;
     if (context->pid > 0)
     {
         bool finished = false;
-        while (error == BQ_OK && !finished && !bq_worker_cancel_signal)
+        while (error == BQ_OK && !finished && !(cancellable && bq_worker_cancel_signal))
         {
             pid_t waited = waitpid(context->pid, status, WNOHANG);
             if (waited == context->pid)
@@ -1603,7 +1687,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* statu
                                                    bq_worker_deadline(now, 100) : deadline);
             }
         }
-        if (bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
+        if (cancellable && bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
     }
     else
     {
@@ -1687,6 +1771,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_open(BqWorkerConfig const* config, 
                     bq_worker_result_path(config->workspace_root, job->id, job->token, result_root) &&
                     bq_workspace_name(name, job->id, job->token) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int workspace = error == BQ_OK ? bq_worker_open_trusted_directory(config->workspace_root, false, false) : -1;
+    bool broker_results = config && string_equal(config->workspace_root, S8(BQ_BROKER_WORKSPACES));
     int results = workspace >= 0 ? openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     bool made_results = false;
     bool made_result = false;
@@ -1695,8 +1780,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_open(BqWorkerConfig const* config, 
         made_results = mkdirat(workspace, "results", 0700) == 0;
         if (made_results)
             results = openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (made_results && broker_results &&
+            (results < 0 || fchown(results, (uid_t)-1, getegid()) != 0 || fchmod(results, 0710) != 0))
+            error = BQ_CONFIGURATION_MISMATCH;
     }
-    if (error == BQ_OK && (workspace < 0 || results < 0 || !bq_worker_directory_owner(results, true, false)))
+    struct stat results_info = {0};
+    bool results_ok = results >= 0 &&
+                      bq_worker_directory_owner(results, !broker_results, false) &&
+                      (!broker_results || (fstat(results, &results_info) == 0 &&
+                       results_info.st_uid == geteuid() && results_info.st_gid == getegid() &&
+                       (results_info.st_mode & 07777) == 0710));
+    if (error == BQ_OK && (workspace < 0 || !results_ok))
         error = BQ_CONFIGURATION_MISMATCH;
     int result = error == BQ_OK ? openat(results, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (result < 0 && create && error == BQ_OK && errno == ENOENT)
@@ -2329,16 +2423,37 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate(int result_directory,
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
+/* A long-lived result descriptor can predate the entries a walk must reach.
+ * btrfs (Linux 6.5+) fixes a directory's last readdir index when its open file
+ * is created, and a consumed offset hides entries everywhere, so walks read a
+ * fresh open file that must still be the pinned inode. */
+BUSTER_GLOBAL_LOCAL int bq_worker_reopen_directory(int directory)
+{
+    int result = directory >= 0 ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat pinned = {0}, fresh = {0};
+    bool same = result >= 0 && fstat(directory, &pinned) == 0 && fstat(result, &fresh) == 0 &&
+                pinned.st_dev == fresh.st_dev && pinned.st_ino == fresh.st_ino;
+    if (!same && result >= 0)
+    {
+        close(result);
+        result = -1;
+    }
+    return result;
+}
+
+/* Fsyncs the whole result tree. A foreign entry type or an entry replaced
+ * between listing and open is a configuration mismatch; a failed read or
+ * fsync leaves durability unknown. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_sync_tree(int result_directory)
 {
     BqWorkerBundleFrame* frames = mmap(NULL, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP,
                                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    int root = result_directory >= 0 ? fcntl(result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int root = bq_worker_reopen_directory(result_directory);
     DIR* stream = root >= 0 ? fdopendir(root) : NULL;
     if (stream) root = -1;
-    bool ok = frames != MAP_FAILED && stream != NULL;
-    u32 depth = ok ? 1 : 0;
-    if (ok)
+    BqError error = frames != MAP_FAILED && stream != NULL ? BQ_OK : BQ_IO;
+    u32 depth = error == BQ_OK ? 1 : 0;
+    if (error == BQ_OK)
     {
         memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
         frames[0].stream = stream;
@@ -2349,18 +2464,18 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         else if (root >= 0) close(root);
         root = -1;
     }
-    while (ok && depth)
+    while (error == BQ_OK && depth)
     {
         BqWorkerBundleFrame* frame = frames + depth - 1;
         errno = 0;
         struct dirent* item = readdir(frame->stream);
         if (!item)
         {
-            if (errno) ok = false;
+            if (errno) error = BQ_IO;
             else
             {
                 int directory = dirfd(frame->stream);
-                ok = fsync(directory) == 0;
+                if (fsync(directory) != 0) error = BQ_IO;
                 closedir(frame->stream);
                 frame->stream = NULL;
                 depth -= 1;
@@ -2373,39 +2488,50 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         {
             int parent = dirfd(frame->stream);
             struct stat info = {0};
-            ok = parent >= 0 && fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
+            if (parent < 0 || fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0) error = BQ_IO;
+            else if (S_ISDIR(info.st_mode))
             {
                 int child = depth < BQ_WORKER_BUNDLE_DEPTH_CAP ?
                             openat(parent, item->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
                 DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
                 if (!child_stream && child >= 0) close(child);
                 struct stat opened = {0};
-                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino;
-                if (ok)
+                if (!child_stream || fstat(child, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino) error = BQ_CONFIGURATION_MISMATCH;
+                if (error == BQ_OK)
                 {
                     frames[depth].stream = child_stream;
                     depth += 1;
                 }
+                else if (child_stream)
+                {
+                    closedir(child_stream);
+                }
             }
-            else if (ok && S_ISREG(info.st_mode))
+            else if (S_ISREG(info.st_mode))
             {
                 int descriptor = openat(parent, item->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
                 struct stat opened = {0};
-                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino && opened.st_size == info.st_size && fsync(descriptor) == 0;
-                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+                if (descriptor < 0 || fstat(descriptor, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino || opened.st_size != info.st_size)
+                    error = BQ_CONFIGURATION_MISMATCH;
+                else if (fsync(descriptor) != 0) error = BQ_IO;
+                if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
             }
-            else if (ok)
+            else
             {
-                ok = false;
+                error = BQ_CONFIGURATION_MISMATCH;
             }
         }
     }
-    if (root >= 0 && close(root) != 0) ok = false;
+    while (depth)
+    {
+        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+        depth -= 1;
+    }
+    if (root >= 0 && close(root) != 0 && error == BQ_OK) error = BQ_IO;
     if (frames != MAP_FAILED) munmap(frames, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
-    return ok;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
@@ -2525,7 +2651,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
                     bq_worker_finalization_recipe(job, finalization) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
     int base_binary_length = 0, candidate_binary_length = 0;
-    if (error == BQ_OK && !bq_worker_result_sync_tree(finalization->result_directory)) error = BQ_IO;
+    if (error == BQ_OK) error = bq_worker_result_sync_tree(finalization->result_directory);
     if (error == BQ_OK)
     {
         String8 base = bq_field(&job->request, 3), candidate = bq_field(&job->request, 4);
@@ -2589,25 +2715,47 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
     if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
     if (error == BQ_OK)
     {
+        /* Both served recipes bind the job, attempt, roots, revisions and
+         * bundle. validate-buster-v1 finishes at its throughput stage with
+         * both binaries; zen5-calibration-v1 finishes complete with its plan,
+         * three complete capture records and an unauthorized A/B decision. */
         bytes[used] = 0;
+        bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+        char const* text = (char const*)bytes;
         char prefix[BQ_RECIPE_NAME_CAP + 96];
         int prefix_length = snprintf(prefix, sizeof(prefix),
-                                     "schema=1\nrecipe=%s\nstatus=succeeded\nstage=throughput\nprocess-result=success\n",
-                                     finalization->recipe.name);
+                                     "schema=1\nrecipe=%s\nstatus=succeeded\nstage=%s\nprocess-result=success\n",
+                                     finalization->recipe.name, zen5 ? "complete" : "throughput");
         bool lines = prefix_length > 0 && (u32)prefix_length < sizeof(prefix) && used >= (u32)prefix_length &&
                      !memcmp(bytes, prefix, (u32)prefix_length) &&
-                     bq_worker_result_line((char const*)bytes, job_line) && bq_worker_result_line((char const*)bytes, token_line) &&
-                     bq_worker_result_line((char const*)bytes, workspace_line) && bq_worker_result_line((char const*)bytes, result_line) &&
-                     bq_worker_result_line((char const*)bytes, base_line) && bq_worker_result_line((char const*)bytes, candidate_line) &&
-                     bq_worker_result_line((char const*)bytes, base_binary_line) &&
-                     bq_worker_result_line((char const*)bytes, candidate_binary_line) &&
-                     bq_worker_result_line((char const*)bytes, "driver=/usr/local/libexec/buster-bench-build") &&
-                     bq_worker_result_line((char const*)bytes, "throughput=/usr/local/libexec/buster-bench-throughput") &&
-                     bq_worker_result_line((char const*)bytes, "trusted-source-scope=operator-installed-read-only") &&
-                     bq_worker_result_line((char const*)bytes, "namespace-policy=private-workspace-post-run-identity") &&
-                     bq_worker_result_digest_line((char const*)bytes, "base-binary-sha256=", base_digest) &&
-                     bq_worker_result_digest_line((char const*)bytes, "candidate-binary-sha256=", candidate_digest) &&
-                     bq_worker_result_digest_line((char const*)bytes, "bundle-sha256=", bundle_digest);
+                     bq_worker_result_line(text, job_line) && bq_worker_result_line(text, token_line) &&
+                     bq_worker_result_line(text, workspace_line) && bq_worker_result_line(text, result_line) &&
+                     bq_worker_result_line(text, base_line) && bq_worker_result_line(text, candidate_line) &&
+                     bq_worker_result_digest_line(text, "bundle-sha256=", bundle_digest);
+        if (lines && zen5)
+        {
+            char plan_digest[SHA256_HEX_CAPACITY], capture_digest[SHA256_HEX_CAPACITY];
+            lines = bq_worker_result_digest_line(text, "plan-sha256=", plan_digest) &&
+                    bq_worker_result_digest_line(text, "immutable-capture-sha256=", capture_digest) &&
+                    bq_worker_result_digest_line(text, "same-root-rebuild-capture-sha256=", capture_digest) &&
+                    bq_worker_result_digest_line(text, "cross-root-capture-sha256=", capture_digest) &&
+                    bq_worker_result_line(text, "immutable-capture-status=complete") &&
+                    bq_worker_result_line(text, "same-root-rebuild-capture-status=complete") &&
+                    bq_worker_result_line(text, "cross-root-capture-status=complete") &&
+                    bq_worker_result_line(text, "ab-authorized=false") &&
+                    bq_worker_result_line(text, "aa-decision=not-evaluated") &&
+                    !strstr(text, "\nab-authorized=true");
+        }
+        else if (lines)
+        {
+            lines = bq_worker_result_line(text, base_binary_line) && bq_worker_result_line(text, candidate_binary_line) &&
+                    bq_worker_result_line(text, "driver=/usr/local/libexec/buster-bench-build") &&
+                    bq_worker_result_line(text, "throughput=/usr/local/libexec/buster-bench-throughput") &&
+                    bq_worker_result_line(text, "trusted-source-scope=operator-installed-read-only") &&
+                    bq_worker_result_line(text, "namespace-policy=private-workspace-post-run-identity") &&
+                    bq_worker_result_digest_line(text, "base-binary-sha256=", base_digest) &&
+                    bq_worker_result_digest_line(text, "candidate-binary-sha256=", candidate_digest);
+        }
         error = lines ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
     if (error == BQ_OK && memchr(bytes, 0, used) != NULL) error = BQ_CONFIGURATION_MISMATCH;
@@ -2997,20 +3145,70 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
-                                                       BqWorkerFinalization* finalization)
+BUSTER_GLOBAL_LOCAL int bq_worker_result_evidence_body(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization, char* body, u32 capacity)
 {
-    char body[BQ_WORKER_EVIDENCE_CAP];
     bool recipe = bq_worker_finalization_recipe(job, finalization);
-    int body_length = recipe ? snprintf(body, sizeof(body),
+    int body_length = recipe ? snprintf(body, capacity,
                                      "schema=1\nrecipe=%s\nstatus=%s\nerror=%s\n"
                                      "job-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\n",
                                      finalization->recipe.name, bq_worker_outcome_name(outcome), bq_error_name(reason),
                                      (uint64_t)job->id, (uint64_t)job->token) : -1;
-    bool ok = recipe && body_length > 0 && (u32)body_length < sizeof(body) &&
+    return body_length > 0 && (u32)body_length < capacity ? body_length : -1;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization)
+{
+    char body[BQ_WORKER_EVIDENCE_CAP];
+    int body_length = bq_worker_result_evidence_body(job, outcome, reason, finalization, body, sizeof(body));
+    bool ok = body_length > 0 &&
               bq_worker_result_control_publish(finalization, finalization->recipe.outcome, body,
                                                 (u64)body_length, 0400) == BQ_OK;
     return ok ? BQ_OK : BQ_IO;
+}
+
+/* A failure path that could not finish may already have published the
+ * immutable outcome record. Recovery adopts exactly those bytes, limited to
+ * `required` when the outcome is already durable, and otherwise to the
+ * outcomes the queue accepts for this job (a durable cancellation only
+ * finishes cancelled). Reasons are limited to those a terminal record can
+ * carry; failed and interrupted reasons must stay readable as failure records.
+ * A missing record keeps the caller's default; any other existing record
+ * fails closed and is never replaced. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_recover_outcome(BqJob const* job, BqWorkerFinalization* finalization,
+                                                      BqOutcome required, BqOutcome* outcome, BqError* reason)
+{
+    bool recipe = job && finalization && finalization->result_directory >= 0 &&
+                  bq_worker_finalization_recipe(job, finalization);
+    struct stat entry = {0};
+    errno = 0;
+    int lookup = recipe ? fstatat(finalization->result_directory, finalization->recipe.outcome, &entry,
+                                  AT_SYMLINK_NOFOLLOW) : -1;
+    BqError error = !recipe ? BQ_CONFIGURATION_MISMATCH :
+                    lookup != 0 && errno == ENOENT ? BQ_OK :
+                    lookup != 0 ? BQ_IO : BQ_CORRUPT;
+    BqOutcome outcomes[] = {BQ_FAILED, BQ_CANCELLED, BQ_INTERRUPTED};
+    for (u32 index = 0; error == BQ_CORRUPT && index < BUSTER_ARRAY_LENGTH(outcomes); index += 1)
+    {
+        if (required != BQ_NO_OUTCOME ? outcomes[index] != required :
+            (outcomes[index] == BQ_CANCELLED) != job->cancel_requested) continue;
+        u32 last = outcomes[index] == BQ_CANCELLED ? (u32)BQ_WORKER_CANCEL_SIGNAL : (u32)BQ_BOOT_INTERRUPTED;
+        for (u32 candidate = BQ_RECIPE_MISMATCH; error == BQ_CORRUPT && candidate <= last; candidate += 1)
+        {
+            char body[BQ_WORKER_EVIDENCE_CAP];
+            int length = bq_worker_result_evidence_body(job, outcomes[index], (BqError)candidate, finalization,
+                                                        body, sizeof(body));
+            if (length > 0 && bq_worker_evidence_matches(finalization->result_directory,
+                                                         finalization->recipe.outcome, body, (u64)length))
+            {
+                *outcome = outcomes[index];
+                *reason = (BqError)candidate;
+                error = BQ_OK;
+            }
+        }
+    }
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
@@ -3066,13 +3264,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
                 ok = finalization->config &&
                      bq_worker_result_validate(finalization->config, job, finalization) == BQ_OK;
             }
+            /* A failure names a stage of its own recipe (zen5: its phases). */
+            bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+            char const* validate_stages[] = {"stage=base-generate", "stage=base-build", "stage=candidate-generate",
+                                             "stage=candidate-build", "stage=throughput"};
+            char const* zen5_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=oracle",
+                                         "stage=pmu", "stage=plan", "stage=captures"};
             bool stage = bq_worker_result_line(manifest_body, "stage=prepare") ||
-                         bq_worker_result_line(manifest_body, "stage=base-generate") ||
-                         bq_worker_result_line(manifest_body, "stage=base-build") ||
-                         bq_worker_result_line(manifest_body, "stage=candidate-generate") ||
-                         bq_worker_result_line(manifest_body, "stage=candidate-build") ||
-                         bq_worker_result_line(manifest_body, "stage=throughput") ||
                          bq_worker_result_line(manifest_body, "stage=worker");
+            for (u32 index = 0; !zen5 && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
+                stage = stage || bq_worker_result_line(manifest_body, validate_stages[index]);
+            for (u32 index = 0; zen5 && index < BUSTER_ARRAY_LENGTH(zen5_stages); index += 1)
+                stage = stage || bq_worker_result_line(manifest_body, zen5_stages[index]);
             bool status = bq_worker_result_line(manifest_body, "status=failed") ||
                           bq_worker_result_line(manifest_body, "status=cancelled") ||
                           bq_worker_result_line(manifest_body, "status=interrupted");
@@ -3226,10 +3429,12 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_cgroup_absent(BqWorkerConfig const* config,
                                                   BqWorkerObserved const* identity)
 {
     int root = identity ? bq_worker_open_trusted_directory(config->cgroup_root, false, false) : -1;
-    int slice = root >= 0 ? openat(root, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int parent = root >= 0 ? openat(root, "buster.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int slice = parent >= 0 ? openat(parent, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat root_info, slice_info, info;
     struct statfs filesystem;
-    bool filesystem_ok = root >= 0 && slice >= 0 &&
+    bool filesystem_ok = root >= 0 && parent >= 0 && slice >= 0 &&
+                         bq_worker_directory_owner(parent, false, false) &&
                          bq_worker_directory_owner(slice, false, false) &&
                          fstat(root, &root_info) == 0 && fstat(slice, &slice_info) == 0 &&
                          identity->cgroup_root_device == (u64)root_info.st_dev &&
@@ -3245,23 +3450,53 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_cgroup_absent(BqWorkerConfig const* config,
     bool absent = filesystem_ok && fstatat(slice, identity->unit, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
                   errno == ENOENT;
     if (slice >= 0) close(slice);
+    if (parent >= 0) close(parent);
     if (root >= 0) close(root);
     return absent;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_wait_cgroup_absent(BqWorkerConfig const* config,
+                                                          BqWorkerBackend* backend,
+                                                          BqWorkerObserved const* identity, u64 deadline)
+{
+    BqError error = BQ_OK;
+    bool absent = bq_worker_cgroup_absent(config, identity);
+    u32 attempts = 0;
+    while (error == BQ_OK && !absent && backend->clock(backend) < deadline &&
+           attempts < BQ_WORKER_STOP_MILLISECONDS / BQ_WORKER_POLL_MILLISECONDS)
+    {
+        attempts += 1;
+        u64 now = backend->clock(backend);
+        u64 available = deadline - now;
+        u32 delay = available < BQ_WORKER_POLL_MILLISECONDS ? (u32)available : BQ_WORKER_POLL_MILLISECONDS;
+        error = delay ? backend->delay(backend, delay) : BQ_OK;
+        if (error == BQ_OK) absent = bq_worker_cgroup_absent(config, identity);
+    }
+    if (error == BQ_OK && !absent) error = BQ_CLEANUP_FAILED;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_instance_matches(BqWorkerConfig const* config,
                                                      BqWorkerObserved const* identity,
                                                      BqWorkerObserved* observed)
 {
-    bool ok = bq_worker_observed(config, identity->boot_id, identity->unit, observed, false);
-    return ok && !strcmp(identity->invocation_id, observed->invocation_id) &&
-           !strcmp(identity->cgroup, observed->cgroup) &&
-           identity->cgroup_device == observed->cgroup_device &&
-           identity->cgroup_inode == observed->cgroup_inode &&
-           identity->cgroup_root_device == observed->cgroup_root_device &&
-           identity->cgroup_root_inode == observed->cgroup_root_inode &&
-           identity->cgroup_slice_device == observed->cgroup_slice_device &&
-           identity->cgroup_slice_inode == observed->cgroup_slice_inode;
+    bool live = bq_worker_observed(config, identity->boot_id, identity->unit, observed, false) &&
+                !strcmp(identity->cgroup, observed->cgroup) &&
+                identity->cgroup_device == observed->cgroup_device &&
+                identity->cgroup_inode == observed->cgroup_inode &&
+                identity->cgroup_root_device == observed->cgroup_root_device &&
+                identity->cgroup_root_inode == observed->cgroup_root_inode &&
+                identity->cgroup_slice_device == observed->cgroup_slice_device &&
+                identity->cgroup_slice_inode == observed->cgroup_slice_inode;
+    /* systemd clears ControlGroup after exit. The recorded invocation and
+     * original slice identity still have to prove that its leaf is gone. */
+    bool drained = observed->unit_found && !strcmp(identity->boot_id, observed->boot_id) &&
+                   !strcmp(identity->unit, observed->unit) && !observed->active && !observed->populated &&
+                   observed->result != BQ_WORKER_RUNNING &&
+                   !strcmp(observed->collect_mode, "inactive") &&
+                   (!observed->cgroup[0] || !strcmp(identity->cgroup, observed->cgroup)) &&
+                   bq_worker_cgroup_absent(config, identity);
+    return (live || drained) && !strcmp(identity->invocation_id, observed->invocation_id);
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_poll_empty(BqWorkerConfig const* config, BqWorkerBackend* backend,
@@ -3282,8 +3517,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_poll_empty(BqWorkerConfig const* config, B
         if (error == BQ_OK) error = backend->observe(backend, identity->unit, observed, deadline);
         if (error == BQ_OK && observed->unit_found && !bq_worker_instance_matches(config, identity, observed))
             error = BQ_WORKER_MISMATCH;
-        if (error == BQ_OK && !observed->unit_found && !bq_worker_cgroup_absent(config, identity))
-            error = BQ_CLEANUP_FAILED;
+        if (error == BQ_OK && !observed->unit_found)
+            error = bq_worker_wait_cgroup_absent(config, backend, identity, deadline);
     }
     return error;
 }
@@ -3329,7 +3564,7 @@ BUSTER_GLOBAL_LOCAL void bq_worker_child_expected(BqWorkerObserved* child,
     *child = (BqWorkerObserved){0};
     snprintf(child->boot_id, sizeof(child->boot_id), "%s", parent->boot_id);
     snprintf(child->unit, sizeof(child->unit), "%s", unit);
-    snprintf(child->cgroup, sizeof(child->cgroup), "/buster-bench.slice/%s", unit);
+    snprintf(child->cgroup, sizeof(child->cgroup), BQ_WORKER_CGROUP_PREFIX "%s", unit);
     child->cgroup_root_device = parent->cgroup_root_device;
     child->cgroup_root_inode = parent->cgroup_root_inode;
     child->cgroup_slice_device = parent->cgroup_slice_device;
@@ -3391,7 +3626,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_child_poll_absent(BqWorkerConfig const* co
     {
         BqWorkerObserved expected;
         bq_worker_child_expected(&expected, parent, identity->unit);
-        if (!bq_worker_cgroup_absent(config, &expected)) error = BQ_CLEANUP_FAILED;
+        error = bq_worker_wait_cgroup_absent(config, backend, &expected, deadline);
     }
     return error;
 }
@@ -3400,8 +3635,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
                                                      BqWorkerBackend* backend,
                                                      BqWorkerObserved const* parent)
 {
+    /* Every typed stage unit the broker can start under this outer unit:
+     * the validation recipe's five and zen5_stage.h's thirteen. */
     char const* stages[] = {"base-generate", "base-build", "candidate-generate",
-                            "candidate-build", "throughput"};
+                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES};
     BqError error = BQ_OK;
     for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(stages); index += 1)
     {
@@ -3418,9 +3655,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
             if (!bq_worker_child_matches(config, parent, &expected, &observed)) error = BQ_WORKER_MISMATCH;
             else identity = observed;
         }
-        else if (error == BQ_OK && !bq_worker_cgroup_absent(config, &expected))
+        else if (error == BQ_OK)
         {
-            error = BQ_CLEANUP_FAILED;
+            error = bq_worker_wait_cgroup_absent(config, backend, &expected,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         }
         if (error == BQ_OK && observed.unit_found && (observed.active || observed.populated))
         {
@@ -3431,7 +3669,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
             if (error == BQ_OK)
                 error = bq_worker_child_poll_absent(config, backend, parent, &identity, &observed, deadline);
         }
-        if (error == BQ_OK && observed.unit_found)
+        if (error == BQ_OK && observed.unit_found && !observed.active && !observed.populated)
+        {
+            u64 deadline = bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS);
+            error = bq_worker_child_poll_absent(config, backend, parent, &identity, &observed, deadline);
+        }
+        if (error == BQ_OK && observed.unit_found && (observed.active || observed.populated))
         {
             error = backend->signal(backend, unit, "KILL",
                                     bq_worker_deadline(backend->clock(backend),
@@ -3452,6 +3695,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     BqError error = !identity || !backend->delay ? BQ_BAD_REQUEST : BQ_OK;
     if (error == BQ_OK && observed->unit_found && !bq_worker_instance_matches(config, identity, observed))
         error = BQ_WORKER_MISMATCH;
+    if (error == BQ_OK && !observed->unit_found)
+        error = bq_worker_wait_cgroup_absent(config, backend, identity,
+            bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
     if (error == BQ_OK && (observed->active || observed->populated))
     {
         error = backend->signal(backend, identity->unit, "TERM",
@@ -3474,9 +3720,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     if (error == BQ_OK && empty && lease->descriptor < 0 && bq_worker_lease_acquire(lease_path, lease) != 0)
         error = BQ_BUSY;
     if (error == BQ_OK && empty) error = bq_worker_stop_children(config, backend, identity);
+    /* The outer unit is proven empty, so the launcher exits once the broker
+     * reports its outcome. A cancellation that is still pending (this stop may
+     * be serving it) must not abandon that bounded reap as cleanup failure. */
     if (error == BQ_OK && empty)
         error = backend->join(backend, &status,
-                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
+                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS), false);
     if (error == BQ_OK && empty)
     {
         BqWorkerObserved final = {0};
@@ -3488,9 +3737,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
             if (!bq_worker_instance_matches(config, identity, &final)) error = BQ_WORKER_MISMATCH;
             else if (final.active || final.populated) error = BQ_CLEANUP_FAILED;
         }
-        else if (error == BQ_OK && !bq_worker_cgroup_absent(config, identity))
+        else if (error == BQ_OK)
         {
-            error = BQ_CLEANUP_FAILED;
+            error = bq_worker_wait_cgroup_absent(config, backend, identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         }
     }
     BqError result = error == BQ_WORKER_MISMATCH ? error :
@@ -3523,8 +3773,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
             bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
         if (error == BQ_OK && observed.unit_found && !bq_worker_instance_matches(config, &identity, &observed))
             error = BQ_WORKER_MISMATCH;
-        if (error == BQ_OK && !observed.unit_found && !bq_worker_cgroup_absent(config, &identity))
-            error = BQ_WORKER_MISMATCH;
+        if (error == BQ_OK && !observed.unit_found)
+            error = bq_worker_wait_cgroup_absent(config, backend, &identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         if (error == BQ_OK) error = bq_worker_stop(config, backend, &identity, &observed, lease_path, lease);
     }
     if (error == BQ_OK && config && config->production_path)
@@ -3533,14 +3784,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
                                       job->phase < BQ_FINALIZING && !job->result_bound);
         if (error == BQ_OK) error = bq_worker_lease_handoff_purge_stale(finalization->result_directory);
     }
+    BqOutcome outcome = BQ_INTERRUPTED;
+    BqError reason = BQ_WORKER_INTERRUPTED;
     if (error == BQ_OK)
     {
-        error = bq_worker_finish(queue, config, job,
-                                 durable_outcome ? job->outcome : BQ_INTERRUPTED,
-                                 durable_outcome ? BQ_NOT_FOUND :
-                                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED,
-                                 finalization);
+        /* The queue accepts only a cancelled terminal outcome for a job with a
+         * durable cancellation request; interrupted is for the rest. */
+        outcome = durable_outcome ? job->outcome : job->cancel_requested ? BQ_CANCELLED : BQ_INTERRUPTED;
+        reason = durable_outcome ? BQ_NOT_FOUND :
+                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED;
     }
+    /* A durable non-success outcome whose result is still unbound may also
+     * have its record published; only that exact outcome may be adopted. */
+    bool adoptable = !durable_outcome || (job->outcome != BQ_SUCCEEDED && !job->result_bound);
+    if (error == BQ_OK && adoptable && config && config->production_path)
+        error = bq_worker_recover_outcome(job, finalization, durable_outcome ? job->outcome : BQ_NO_OUTCOME,
+                                          &outcome, &reason);
+    if (error == BQ_OK) error = bq_worker_finish(queue, config, job, outcome, reason, finalization);
     return error;
 }
 
@@ -3659,7 +3919,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                           !strcmp(lease_path, "/var/lib/buster-bench/lease/host.lock"));
         if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
             token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
-            strcmp(finalization.recipe.name, "validate-buster-v1") ||
+            (strcmp(finalization.recipe.name, "validate-buster-v1") &&
+             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE)) ||
             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
@@ -3671,7 +3932,10 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                              &handoff) ? BQ_OK : BQ_IO;
     if (error == BQ_OK && !recovering)
     {
-        char const* arguments[] = {BQ_SYSTEMD_BROKER, "start-outer", job_id, attempt_token,
+        /* The broker's recipe selector picks the outer unit's recipe. */
+        char const* verb = strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? "start-outer" :
+                           BQ_ZEN5_STAGE_OUTER_VERB;
+        char const* arguments[] = {BQ_SYSTEMD_BROKER, verb, job_id, attempt_token,
                                    base_revision_text, candidate_revision_text, NULL};
         error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
         launched = error == BQ_OK;
@@ -3679,7 +3943,6 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering && handoff.listener >= 0)
     {
         error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token);
-        if (error == BQ_OK) bq_worker_lease_release(&lease);
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
     BqWorkerObserved observed = {0};
@@ -3712,7 +3975,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         u64 wait = config->limits.runtime_max_usec / 1000;
         wait = wait <= UINT64_MAX - BQ_WORKER_STOP_MILLISECONDS ? wait + BQ_WORKER_STOP_MILLISECONDS : UINT64_MAX;
-        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait));
+        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait), true);
     }
     bool interrupted_join = error == BQ_WORKER_CANCEL_SIGNAL;
     bool signal_cancelled = interrupted_join || (production && bq_worker_cancel_signal);
@@ -3731,7 +3994,22 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     }
     if (error == BQ_OK && !recovering && !signal_cancelled) error = backend->observe(backend, unit, &observed,
         bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
-    if (error == BQ_OK && !recovering && !signal_cancelled && !bq_worker_instance_matches(config, &identity, &observed)) error = BQ_WORKER_MISMATCH;
+    if (error == BQ_OK && !recovering && !signal_cancelled)
+    {
+        if (observed.unit_found && !bq_worker_instance_matches(config, &identity, &observed))
+            error = BQ_WORKER_MISMATCH;
+        if (error == BQ_OK && !observed.unit_found)
+        {
+            error = bq_worker_wait_cgroup_absent(config, backend, &identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
+            /* CollectMode=inactive permits successful outer units to disappear,
+             * but retains failures and their exact Result. A missing failed
+             * invocation cannot be classified from the launcher status. */
+            if (error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0))
+                error = BQ_WORKER_MISMATCH;
+            if (error == BQ_OK) observed.result = BQ_WORKER_SUCCEEDED;
+        }
+    }
     if (error == BQ_OK && !recovering && !signal_cancelled)
         error = bq_worker_stop(config, backend, &identity, &observed, lease_path, &lease);
     if (error == BQ_OK && !recovering && !signal_cancelled && bq_worker_cancel_signal)
@@ -3808,8 +4086,11 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             }
             else if (production && finalization.result_directory >= 0)
             {
-                BqOutcome retained_outcome = signal_cancelled ? BQ_CANCELLED : BQ_FAILED;
-                BqError retained_reason = signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL : evidence_reason;
+                /* Follow the journal, not the signal: a CANCEL that did not
+                 * become durable must not be published as cancelled. */
+                BqOutcome retained_outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
+                BqError retained_reason = job->cancel_requested && signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL :
+                                          evidence_reason;
                 BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, &finalization);
                 if (retained == BQ_OK && !job->result_bound)
                     retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, &finalization);

@@ -4,7 +4,8 @@
 Feature validation and publication use the same reviewed rebinder from the
 current default-branch revision. Candidate code is never imported or executed
 by this module. Publication is one lease-guarded ref update after a separate
-read-only job validates the exact final tree.
+read-only job validates the exact final tree. See docs/native-retirement-automation.md
+for the opt-in standing grant; manual authorization remains the default.
 """
 
 from __future__ import annotations
@@ -38,12 +39,16 @@ TRUST_IMPLEMENTATION_PATHS = frozenset((
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
+    ".github/workflows/native-retirement-automation.yml",
+    ".github/workflows/native-retirement-catch-up.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".gitattributes",
     "tools/native_retirement_contract.py",
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_automation.py",
+    "tools/native_retirement_controller.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
@@ -51,6 +56,7 @@ TRUST_IMPLEMENTATION_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 POLICY_SCHEMA_PATHS = frozenset((
+    ".github/native-retirement-automation.json",
     "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",
     "docs/native-retirement-dependencies-v1.json",
@@ -58,12 +64,14 @@ POLICY_SCHEMA_PATHS = frozenset((
     "tools/native_retirement_census.c",
 ))
 TRANSITION_KINDS = ("ordinary", "bootstrap", "policy")
-AUTHORIZATION_MODES = ("independent-review", "solo-maintainer")
+AUTHORIZATION_MODES = ("independent-review", "solo-maintainer", "automation")
 TRUSTED_FILE_PATHS = (
     "tools/native_retirement_contract.py",
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_automation.py",
+    "tools/native_retirement_controller.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
@@ -226,6 +234,55 @@ def classify_candidate(repo: Path, base: str, head: str) -> Classification:
     base_commit = _commit(repo, base)
     head_commit = _commit(repo, head)
     return classify_paths(changed_paths(repo, base_commit, head_commit))
+
+
+def bound_sources(repo: Path, base: str) -> frozenset[str]:
+    result = _git(repo, "show", base + ":docs/native-retirement-repository-sources-v1.json")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise IntegrationError("trusted base has malformed repository-source snapshot") from error
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise IntegrationError("trusted base repository-source snapshot has no records")
+    sources: set[str] = set()
+    for record in records:
+        source = record.get("source") if isinstance(record, dict) else None
+        if not isinstance(source, str):
+            raise IntegrationError("trusted base repository-source snapshot has a malformed record")
+        sources.add(_canonical_path(source))
+    if not sources:
+        raise IntegrationError("trusted base repository-source snapshot is unexpectedly empty")
+    return frozenset(sources)
+
+
+def classification_is_bound(classification: Classification, changed: tuple[str, ...],
+                            sources: frozenset[str]) -> bool:
+    """True when the candidate changes admitted sources or trusted state."""
+    source_change = any(path in sources for path in changed)
+    return source_change or classification.kind in ("bootstrap", "policy")
+
+
+def require_trusted_integration(repo: Path, base: str, head: str) -> Classification:
+    """Refuse candidates whose integration head merge admission would reject.
+
+    The gate admits a writer head only for a bound candidate or a catch-up
+    (an empty candidate, #1893). Publishing any other head changes no
+    generated state and turns the required admission check red (#1828).
+    """
+    base_commit = _commit(repo, base)
+    head_commit = _commit(repo, head)
+    changed = changed_paths(repo, base_commit, head_commit)
+    classification = classify_paths(changed)
+    enforce_classification(classification, None, True)
+    if changed and not classification_is_bound(classification, changed,
+                                               bound_sources(repo, base_commit)):
+        raise IntegrationError(
+            "candidate does not require trusted integration: it changes no "
+            "native-retirement-bound source, trusted implementation, or policy/schema "
+            "path; merge it through the ordinary path without dispatching the writer"
+        )
+    return classification
 
 
 def stage(repo: Path, worktree: Path, base: str, head: str, requested_kind: str,
@@ -643,18 +700,43 @@ def authorize_solo_maintainer(api: GitHub, actor: str, actor_permission: str,
 
 def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kind: str,
               actor: str, *, authorization_mode: str = "independent-review",
-              solo_context: dict | None = None) -> dict:
+              solo_context: dict | None = None,
+              automation_context: dict | None = None,
+              repo_root: Path | None = None) -> dict:
     _require_hex(expected_head, HEX40, "expected PR head")
     if transition_kind not in TRANSITION_KINDS or authorization_mode not in AUTHORIZATION_MODES:
         raise IntegrationError("unknown integration transition or authorization mode")
     pr = api.request("pulls/" + str(pull_request))
+    if pr["head"]["sha"] != expected_head:
+        raise StaleHead("PR head SHA changed before authorization")
     if (pr["state"] != "open" or pr["draft"] or pr["base"]["ref"] != "main" or
             pr["base"]["repo"]["full_name"] != api.repository or
-            pr["head"]["repo"]["full_name"] != api.repository or
-            pr["head"]["sha"] != expected_head):
+            (pr["head"].get("repo") or {}).get("full_name") != api.repository):
         raise IntegrationError(
             "PR is closed, draft, external, not based on main, or head SHA changed"
         )
+    if authorization_mode == "automation":
+        # Import only from this trusted checkout. Candidate authority is never
+        # imported by the prepare/publish jobs, including on a bootstrap.
+        import native_retirement_automation as automation
+        context = automation_context or {}
+        if repo_root is None:
+            raise IntegrationError("automation authorization requires a trusted repository checkout")
+        base = context.get("expected_base", "")
+        source = context.get("source_head", "")
+        _require_hex(base, HEX40, "automation base")
+        _require_hex(source, HEX40, "automation source")
+        if _commit(repo_root, "HEAD") != base:
+            raise IntegrationError("automation checkout differs from the trusted base")
+        classification = classify_candidate(repo_root, base, source)
+        enforce_classification(classification, transition_kind, True)
+        try:
+            return automation.authorize_request(
+                api, pr, actor, context, classification.as_dict())
+        except automation.AutomationMoved as error:
+            if error.exit_code == STALE_MAIN_EXIT:
+                raise StaleMain(str(error)) from error
+            raise StaleHead(str(error)) from error
     actor_permission = api.permission(actor)
     allowed = (("write", "maintain", "admin") if transition_kind == "ordinary"
                else ("maintain", "admin"))
@@ -796,6 +878,9 @@ def _parser() -> argparse.ArgumentParser:
     authorize_parser.add_argument("--authorization-mode", choices=AUTHORIZATION_MODES,
                                   default="independent-review")
     authorize_parser.add_argument("--expected-base", default="")
+    authorize_parser.add_argument("--repo-root", type=Path)
+    authorize_parser.add_argument("--source-head", default="")
+    authorize_parser.add_argument("--automation-publication", action="store_true")
     return parser
 
 
@@ -803,9 +888,9 @@ def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         if arguments.command == "resolve-dispatch":
-            classification = classify_candidate(arguments.repo_root, arguments.base,
-                                                arguments.source_head or arguments.head)
-            enforce_classification(classification, classification.kind, True)
+            classification = require_trusted_integration(
+                arguments.repo_root, arguments.base, arguments.source_head or arguments.head
+            )
             report = resolve_dispatch(
                 arguments.base, arguments.head, classification.kind,
                 expected_base=arguments.expected_base, expected_head=arguments.expected_head,
@@ -853,6 +938,21 @@ def main(argv=None) -> int:
             report = authorize(api, arguments.pull_request, arguments.expected_head,
                                arguments.transition_kind, os.environ["GITHUB_ACTOR"],
                                authorization_mode=arguments.authorization_mode,
+                               repo_root=arguments.repo_root,
+                               automation_context={
+                                   "expected_base": arguments.expected_base,
+                                   "source_head": arguments.source_head,
+                                   "request_json": os.environ.get("AUTOMATION_REQUEST", ""),
+                                   "request_key": os.environ.get("AUTOMATION_KEY", ""),
+                                   "actor_id": os.environ.get("GITHUB_ACTOR_ID", ""),
+                                   "event_name": os.environ.get("GITHUB_EVENT_NAME", ""),
+                                   "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF", ""),
+                                   "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA", ""),
+                                   "triggering_actor": os.environ.get("GITHUB_TRIGGERING_ACTOR", ""),
+                                   "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                                   "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+                                   "publication": arguments.automation_publication,
+                               },
                                solo_context={
                                    "configured_login": os.environ.get("NATIVE_RETIREMENT_SOLO_MAINTAINER", ""),
                                    "expected_base": arguments.expected_base,

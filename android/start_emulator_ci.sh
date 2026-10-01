@@ -10,6 +10,8 @@ set -euo pipefail
 #
 # The default keeps this script useful as a standalone blocking helper. CI uses
 # `start` followed by a later `wait` so CMake/Ninja can build while Android boots.
+# Ownership: read_emulator_pid loads the PID plus its launch identity;
+# emulator_pid_is_running checks that identity before adb or signal cleanup.
 lifecycle=${1:-start-and-wait}
 if [[ $# -gt 1 ]]; then
     echo "usage: $0 [start|wait|stop]" >&2
@@ -152,6 +154,8 @@ optional_timed_command() {
 log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 emulator_log=${BUSTER_ANDROID_EMULATOR_LOG:-${log_dir%/}/buster-android-emulator.log}
 started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${log_dir%/}/buster-android-emulator.started}
+identity_marker=${started_marker}.identity
+process_platform=$(uname -s)
 mkdir -p "$(dirname "$started_marker")" "$(dirname "$emulator_log")"
 mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME"
 
@@ -183,120 +187,185 @@ print_diagnostics() {
 }
 
 read_emulator_pid() {
+    local status=1 recorded_pid
     emulator_pid=
-    if [[ ! -f $started_marker ]]; then
-        return 1
+    emulator_identity=
+    if [[ -f $started_marker ]]; then
+        status=2
+        if IFS= read -r emulator_pid <"$started_marker" &&
+           [[ $emulator_pid =~ ^[1-9][0-9]*$ ]] &&
+           [[ -f $identity_marker ]] && read -r recorded_pid emulator_identity <"$identity_marker" &&
+           [[ $recorded_pid == "$emulator_pid" ]] &&
+           [[ $emulator_identity =~ ^linux:[[:xdigit:]-]+:[0-9]+$ || $emulator_identity =~ ^ps:.{24}$ ]]; then
+            status=0
+        else
+            echo "error: Android emulator ownership record '$started_marker' is incomplete or invalid" >&2
+        fi
     fi
-    if ! IFS= read -r emulator_pid <"$started_marker"; then
-        echo "error: could not read Android emulator PID marker '$started_marker'" >&2
-        return 1
+    return "$status"
+}
+
+# 0: identity/state snapshot, 1: absent, 2: present but unverifiable.
+# Linux starttime is kernel clock ticks, and boot_id excludes previous boots.
+# ps lstart is the portable fallback used by the macOS fake lifecycle suite.
+probe_emulator_process() {
+    local pid=$1 snapshot boot_id
+    local status=2
+    local -a fields
+    process_identity=
+    process_state=
+    if [[ $process_platform == Linux ]]; then
+        if IFS= read -r snapshot 2>/dev/null <"/proc/$pid/stat" &&
+           IFS= read -r boot_id </proc/sys/kernel/random/boot_id; then
+            # comm can contain spaces and parentheses; fields follow its last ).
+            read -r -a fields <<<"${snapshot##*) }"
+            if [[ ${fields[19]:-} =~ ^[0-9]+$ && -n ${fields[0]:-} ]]; then
+                process_identity="linux:$boot_id:${fields[19]}"
+                process_state=${fields[0]}
+                status=0
+            fi
+        fi
+    elif snapshot=$(LC_ALL=C ps -o lstart= -o stat= -p "$pid" 2>/dev/null) &&
+         [[ $snapshot =~ ^[[:space:]]*(.{24})[[:space:]]+([^[:space:]]+)[[:space:]]*$ ]]; then
+        process_identity="ps:${BASH_REMATCH[1]}"
+        process_state=${BASH_REMATCH[2]}
+        status=0
     fi
-    if [[ ! $emulator_pid =~ ^[1-9][0-9]*$ ]]; then
-        echo "error: Android emulator PID marker '$started_marker' is invalid" >&2
-        return 1
+    if [[ $status -ne 0 ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
+        status=1
     fi
-    return 0
+    return "$status"
 }
 
 emulator_pid_is_running() {
     local pid=$1
-    local process_state
-    local running=1
-    if kill -0 "$pid" >/dev/null 2>&1; then
-        # kill -0 also succeeds for a terminated child awaiting reaping. Such
-        # a PID cannot handle adb or signals and must not fail cleanup. If ps
-        # loses the process after kill -0 observed it, reconcile with one more
-        # liveness probe: disappearance is stopped, persistent ambiguity stays
-        # fail-closed as running.
-        if process_state=$(ps -o stat= -p "$pid" 2>/dev/null); then
-            process_state=${process_state//[[:space:]]/}
-            if [[ $process_state != Z* && $process_state != X* ]]; then
-                running=0
-            fi
-        elif kill -0 "$pid" >/dev/null 2>&1; then
-            running=0
+    local status
+    if probe_emulator_process "$pid"; then
+        if [[ $process_identity != "$emulator_identity" || $process_state == Z* || $process_state == X* ]]; then
+            status=1
+        else
+            status=0
         fi
+    else
+        status=$?
     fi
-    return "$running"
+    return "$status"
 }
 
 wait_for_owned_emulator_stop() {
     local pid=$1
     local timeout_seconds=$2
     local deadline=$((SECONDS + timeout_seconds))
-    local running=1
+    local running=0 probe_status
 
     # A stopped observation is terminal for this ownership check. Do not
     # immediately re-probe the numeric PID: the owned process can be reaped
     # between adjacent probes, and a later ambiguous query must not turn a
     # proven terminal state back into "running".
-    while [[ $running -ne 0 ]] && (( SECONDS < deadline )); do
+    while true; do
         if emulator_pid_is_running "$pid"; then
-            sleep 1
+            probe_status=0
         else
-            running=0
+            probe_status=$?
         fi
-    done
-    if [[ $running -ne 0 ]]; then
-        if emulator_pid_is_running "$pid"; then
+        if [[ $probe_status -eq 1 ]]; then
+            running=0
+            break
+        elif [[ $probe_status -eq 2 ]]; then
+            running=2
+            break
+        elif (( SECONDS >= deadline )); then
             running=1
-        else
-            running=0
+            break
         fi
-    fi
+        sleep 1
+    done
     return "$running"
 }
 
 stop_owned_emulator() {
-    local status=0
+    local status=0 record_status probe_status stopped=0 signal_name
+    local wait_seconds=$cleanup_timeout_seconds
     local pid=
     local fallback_pid=${emulator_pid:-}
+    local fallback_identity=${emulator_identity:-}
 
     if read_emulator_pid; then
         pid=$emulator_pid
-    elif [[ $fallback_pid =~ ^[1-9][0-9]*$ ]]; then
-        # Cover the small window between launching the process and publishing
-        # the marker when an interrupt arrives.
-        pid=$fallback_pid
+    else
+        record_status=$?
+        if [[ $record_status -eq 1 && $fallback_pid =~ ^[1-9][0-9]*$ && -n $fallback_identity ]]; then
+            # Interrupt between capturing launch identity and publishing marker.
+            pid=$fallback_pid
+            emulator_identity=$fallback_identity
+        elif [[ $record_status -eq 2 ]]; then
+            status=1
+        fi
     fi
 
     # Ask the emulator through adb first so it can release its device state.
     # The PID fallback handles adb outages and fake/test emulators.
-    if [[ -n $pid ]] && emulator_pid_is_running "$pid"; then
-        if timed_command "$cleanup_timeout_seconds" "adb emulator shutdown" adb emu kill; then
-            :
-        else
-            echo "warning: adb emulator shutdown failed; terminating owned PID $pid" >&2
-            status=1
-        fi
-
-        if wait_for_owned_emulator_stop "$pid" "$cleanup_timeout_seconds"; then
-            :
-        else
-            echo "warning: Android emulator PID $pid did not exit; sending SIGTERM" >&2
-            kill "$pid" >/dev/null 2>&1 || true
-            if wait_for_owned_emulator_stop "$pid" 1; then
+    if [[ -n $pid ]]; then
+        if emulator_pid_is_running "$pid"; then
+            if timed_command "$cleanup_timeout_seconds" "adb emulator shutdown" adb emu kill; then
                 :
             else
-                echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
-                kill -KILL "$pid" >/dev/null 2>&1 || true
-                if wait_for_owned_emulator_stop "$pid" 1; then
-                    :
+                echo "warning: adb emulator shutdown failed; terminating owned PID $pid" >&2
+                status=1
+            fi
+
+            for signal_name in TERM KILL; do
+                if wait_for_owned_emulator_stop "$pid" "$wait_seconds"; then
+                    stopped=1
+                    break
                 else
-                    echo "warning: Android emulator PID $pid survived SIGKILL" >&2
-                    status=1
+                    probe_status=$?
+                    if [[ $probe_status -eq 2 ]]; then
+                        break
+                    fi
                 fi
+                # Recheck identity immediately before each signal. A reused PID
+                # belongs to another process; do not signal an identity mismatch.
+                if emulator_pid_is_running "$pid"; then
+                    if [[ $signal_name == TERM ]]; then
+                        echo "warning: Android emulator PID $pid did not exit; sending SIGTERM" >&2
+                    else
+                        echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
+                    fi
+                    kill -"$signal_name" "$pid" >/dev/null 2>&1 || true
+                else
+                    probe_status=$?
+                    if [[ $probe_status -eq 1 ]]; then stopped=1; fi
+                    break
+                fi
+                # Forced signals retain the existing one-second verification budget.
+                wait_seconds=1
+            done
+            if [[ $stopped -eq 0 ]] && wait_for_owned_emulator_stop "$pid" 1; then
+                stopped=1
+            fi
+            if [[ $stopped -eq 0 ]]; then
+                echo "warning: Android emulator PID $pid remains live or its ownership cannot be verified" >&2
+                status=1
+            fi
+        else
+            probe_status=$?
+            if [[ $probe_status -eq 1 ]]; then
+                echo "Android emulator PID $pid is no longer running"
+                stopped=1
+            else
+                echo "warning: Android emulator PID $pid ownership cannot be verified" >&2
+                status=1
             fi
         fi
-    elif [[ -n $pid ]]; then
-        echo "Android emulator PID $pid is no longer running"
     fi
 
-    rm -f "$started_marker"
+    if [[ $stopped -eq 1 ]]; then rm -f "$started_marker" "$identity_marker"; fi
     return "$status"
 }
 
 emulator_pid=
+emulator_identity=
 emulator_started=0
 cleanup_after_start_failure() {
     local status=$?
@@ -340,7 +409,7 @@ wait_for_ready() {
                 return 1
             fi
         fi
-        if read_emulator_pid && ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
+        if [[ $emulator_started -eq 1 ]] && ! emulator_pid_is_running "$emulator_pid"; then
             echo "error: emulator exited before connecting to adb" >&2
             print_diagnostics
             return 1
@@ -366,7 +435,7 @@ wait_for_ready() {
         if [[ $boot_completed == 1 ]]; then
             break
         fi
-        if read_emulator_pid && ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
+        if [[ $emulator_started -eq 1 ]] && ! emulator_pid_is_running "$emulator_pid"; then
             echo "error: emulator exited before Android finished booting" >&2
             print_diagnostics
             return 1
@@ -406,6 +475,13 @@ if [[ $lifecycle == wait ]]; then
     # caller retains ownership through install/run and can stop it afterward.
     if read_emulator_pid; then
         emulator_started=1
+        if ! emulator_pid_is_running "$emulator_pid"; then
+            echo "error: owned emulator exited or its identity cannot be verified before wait" >&2
+            exit 1
+        fi
+    else
+        record_status=$?
+        if [[ $record_status -eq 2 ]]; then exit 1; fi
     fi
     if ! timed_command "$adb_timeout_seconds" "adb start-server" adb start-server; then
         exit 1
@@ -425,24 +501,35 @@ if ! timed_command "$adb_timeout_seconds" "adb start-server" adb start-server; t
     exit 1
 fi
 
-if read_emulator_pid && kill -0 "$emulator_pid" >/dev/null 2>&1; then
-    echo "Reusing owned Android emulator PID $emulator_pid"
-    if [[ $lifecycle == start ]]; then
-        trap - EXIT INT TERM
-        exit 0
-    fi
-    emulator_started=1
-    wait_started=$SECONDS
-    if wait_for_ready; then
-        echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
-        emulator_started=0
-        trap - EXIT INT TERM
-        exit 0
+if read_emulator_pid; then
+    if emulator_pid_is_running "$emulator_pid"; then
+        echo "Reusing owned Android emulator PID $emulator_pid"
+        if [[ $lifecycle == start ]]; then
+            trap - EXIT INT TERM
+            exit 0
+        fi
+        emulator_started=1
+        wait_started=$SECONDS
+        if wait_for_ready; then
+            echo "TIMING_ANDROID boot_wait_seconds=$((SECONDS - wait_started))"
+            emulator_started=0
+            trap - EXIT INT TERM
+            exit 0
+        else
+            exit 1
+        fi
     else
-        exit 1
+        probe_status=$?
+        if [[ $probe_status -eq 2 ]]; then
+            echo "error: existing Android emulator ownership cannot be verified" >&2
+            exit 1
+        fi
     fi
+else
+    record_status=$?
+    if [[ $record_status -eq 2 ]]; then exit 1; fi
 fi
-rm -f "$started_marker"
+rm -f "$started_marker" "$identity_marker"
 
 if adb_has_device; then
     echo "Android device is already available; not starting an emulator."
@@ -552,11 +639,26 @@ if [[ ! $emulator_pid =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 emulator_started=1
+if probe_emulator_process "$emulator_pid" && [[ $process_state != Z* && $process_state != X* ]]; then
+    emulator_identity=$process_identity
+else
+    echo "error: could not capture Android emulator launch identity" >&2
+    # Retain an explicitly unverifiable record if the launched child is live.
+    # Cleanup must report failure instead of guessing ownership from its PID.
+    if kill -0 "$emulator_pid" >/dev/null 2>&1; then
+        printf '%s unverified\n' "$emulator_pid" >"$identity_marker"
+        printf '%s\n' "$emulator_pid" >"$started_marker"
+    fi
+    exit 1
+fi
 marker_tmp="${started_marker}.tmp.$$"
-if ! printf '%s\n' "$emulator_pid" >"$marker_tmp" || ! mv -f "$marker_tmp" "$started_marker"; then
-    rm -f "$marker_tmp"
+identity_tmp="${identity_marker}.tmp.$$"
+# Publish identity first; the numeric marker remains the ready/ownership flag.
+if ! printf '%s %s\n' "$emulator_pid" "$emulator_identity" >"$identity_tmp" ||
+   ! mv -f "$identity_tmp" "$identity_marker" ||
+   ! printf '%s\n' "$emulator_pid" >"$marker_tmp" || ! mv -f "$marker_tmp" "$started_marker"; then
+    rm -f "$marker_tmp" "$identity_tmp"
     echo "error: could not publish Android emulator PID marker '$started_marker'" >&2
-    kill "$emulator_pid" >/dev/null 2>&1 || true
     exit 1
 fi
 echo "Android emulator started asynchronously (pid=$emulator_pid, log=$emulator_log)"

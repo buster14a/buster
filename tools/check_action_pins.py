@@ -22,6 +22,8 @@ APPROVED = {
 # GitHub binds this literal reusable workflow to the caller's own commit.
 # Local composite actions are allowed only by exact path and are scanned below.
 APPROVED_LOCAL_WORKFLOWS = {"./.github/workflows/throughput-real-source.yml"}
+# Keep the pinned apt qualification's frozen local-workflow contract intact.
+APPROVED_COMPILER_THROUGHPUT_WORKFLOW = "./.github/workflows/compiler-throughput.yml"
 APPROVED_LOCAL_ACTIONS = {"./.github/actions/native-artifact-upload"}
 ACTION = re.compile(r"\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 BLOCK = re.compile(r"\s*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*:\s*[|>][-+]?\s*$")
@@ -88,7 +90,7 @@ def check_text(text, path):
             value = action.group(1)
             if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
                 value = value[1:-1]
-            if value not in APPROVED_LOCAL_WORKFLOWS | APPROVED_LOCAL_ACTIONS:
+            if value not in APPROVED_LOCAL_WORKFLOWS | {APPROVED_COMPILER_THROUGHPUT_WORKFLOW} | APPROVED_LOCAL_ACTIONS:
                 match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})", value)
                 if not match:
                     problem = "uses must contain a GitHub owner/repository action path and full lowercase commit SHA"

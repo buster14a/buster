@@ -37,6 +37,8 @@ jobs:
       - name: Prove exclusive fixed-gateway dispatch
         run: |
           python3 -B tools/bench_service/workflow_policy_test.py
+          python3 -B tools/bench_service/dispatch_recipe_test.py
+          python3 -B tools/bench_service/zen5_profile_test.py
           python3 -B tools/bench_service/deploy/verify_github_actor_policy_test.py
           python3 -B tools/bench_service/deploy/verify_github_admission_test.py
           python3 -B tools/bench_service/deploy/verify_github_queue_test.py
@@ -45,6 +47,7 @@ jobs:
           python3 -B tools/zen5_host_qualification.py --self-test
           python3 -B tools/zen5_aa_noise.py --self-test
           python3 -B tools/zen5_build_control.py --self-test
+          python3 -B tools/zen5_aa_evaluator.py --self-test
       - name: Exercise atomic exclusive admission
         shell: bash
         run: |
@@ -55,3 +58,40 @@ jobs:
             tools/bench_service/exclusive_admission_test.c \
             -o "$RUNNER_TEMP/exclusive-admission-test"
           "$RUNNER_TEMP/exclusive-admission-test"
+      - name: Reject contaminated broker account groups before state inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            tools/bench_service/systemd_broker_group_test.c \
+            -o "$RUNNER_TEMP/systemd-broker-group-test"
+          "$RUNNER_TEMP/systemd-broker-group-test"
+      - name: Build and exercise the static effective-credential gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            -static -Wl,-z,noexecstack \
+            tools/bench_service/credential_gate.c \
+            -o "$RUNNER_TEMP/buster-bench-credential-gate"
+          readelf -W -l "$RUNNER_TEMP/buster-bench-credential-gate" > "$RUNNER_TEMP/credential-gate-elf.txt"
+          cat "$RUNNER_TEMP/credential-gate-elf.txt"
+          if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$RUNNER_TEMP/credential-gate-elf.txt"; then
+            echo '::error::Credential gate must be static with a nonexecutable stack.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/buster-bench-credential-gate" --self-test
+      - name: Exercise credential and numeric account receipt rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=(-std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
+          for test in credential_gate_test credential_gate_elf_test systemd_broker_account_test; do
+            clang "${flags[@]}" "tools/bench_service/$test.c" -o "$RUNNER_TEMP/$test"
+          done
+          clang "${flags[@]}" tools/bench_service/credential_gate.c -o "$RUNNER_TEMP/gate-dynamic-negative"
+          "$RUNNER_TEMP/credential_gate_test"
+          "$RUNNER_TEMP/credential_gate_elf_test" "$RUNNER_TEMP/buster-bench-credential-gate" "$RUNNER_TEMP/gate-dynamic-negative"
+          "$RUNNER_TEMP/systemd_broker_account_test"

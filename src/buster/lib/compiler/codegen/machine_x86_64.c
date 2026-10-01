@@ -528,8 +528,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_class_scalar_bit_width(MachineX64Selector co
     return result;
 }
 
-// The only sixteen-byte scalar float carried here is resolved SysV f80.
-// AArch64 binary128 and Win64 long double remain their own target shapes.
+// Resolved SysV f80 and Android binary128 are both sixteen-byte frame values,
+// but they use distinct x87 and XMM call shapes.
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selector, IrTypeId type_id)
 {
     MachineTypeClass type_class = machine_x64_type_class(selector, type_id);
@@ -539,6 +539,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selec
         result = codegen_canonical_x64_type_is_f80(ir_type_from_id(&selector->program->types, type_id));
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f128(IrProgram* program, Target target, IrTypeId type_id)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    return target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+           machine_x64_abi_convention(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type &&
+           type->layout.resolved && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 &&
+           type->layout.size == 16 && type->layout.alignment == 16;
 }
 
 // Darwin caps bare vector ABI alignment at the CPU's available width.
@@ -823,6 +832,26 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_is_float = {1},
             .part_count = 1,
             .byte_size = 8,
+        };
+        return true;
+    }
+    if (machine_x64_type_is_f128(program, target, type_id))
+    {
+        IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+        if (abi.indirect || abi.memory || abi.part_count != 1 ||
+            abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || abi.parts[0].size != 16)
+        {
+            return false;
+        }
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {16},
+            .part_count = 1,
+            .byte_size = 16,
+            .exact_byte_size = 16,
+            .aggregate = true,
+            .xmm128 = true,
+            .stack_alignment = 16,
         };
         return true;
     }
@@ -2501,8 +2530,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
         machine_x64_define(selector, result_register, row);
         selected = true;
     }
-    else if (machine_x64_type_is_f80(selector, instruction->canonical_type) && instruction->immediate_count == 2 &&
-             !(instruction->immediates[1] & ~UINT64_C(0xffff)))
+    else if (instruction->immediate_count == 2 &&
+             ((machine_x64_type_is_f80(selector, instruction->canonical_type) &&
+               !(instruction->immediates[1] & ~UINT64_C(0xffff))) ||
+              machine_x64_type_is_f128(selector->program, selector->target, instruction->canonical_type)))
     {
         u32 slot = selector->value_stack_slots[instruction->result.value];
         selected = slot != UINT32_MAX;
@@ -7882,6 +7913,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, parameter->canonical_type), target);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
                         machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
+                        machine_x64_type_is_f128(program, target, parameter->canonical_type) ||
                         (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
                          parameter_class.size_log2 <= 4);
             bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
@@ -8420,8 +8452,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             // Address producers hold an 8-byte address in their vreg no
             // matter what their declared canonical type is, exactly like
             // the canonical path stores an address in the value's slot.
-            bool float_scalar = (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
-                                (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
+            bool float_scalar =
+                !machine_x64_type_is_f128(program, selector.target, value->canonical_type) &&
+                (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
+                    (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
             bool windows_va_list_register = windows_va_list &&
                                             (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
                                              instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
@@ -8435,7 +8469,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                                          });
                 selector.value_virtual_registers[instruction->result.value] = register_index;
             }
-            else if (machine_x64_type_is_f80(&selector, value->canonical_type))
+            else if (machine_x64_type_is_f80(&selector, value->canonical_type) ||
+                     machine_x64_type_is_f128(program, selector.target, value->canonical_type))
             {
                 selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
             }
@@ -9661,29 +9696,70 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZE
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
 // Expansion/prologue instructions use a small, closed set of physical
-// shapes.  Resolve each shape through the metadata selector once during the
-// serial prewarm lane and publish only the resulting opaque machine token to
+// shapes.  Each shape resolves through the metadata selector once, on a
+// serial thread, and only the resulting opaque machine token is published to
 // workers.  The signature deliberately describes physical shape/value
 // classes, not register numbers or byte templates; dynamic registers,
 // displacements, and immediates are still validated by the metadata transform
 // on every emission.
+//
+// The serial prewarm registers the closed set rather than resolving it.  Its
+// 336 queries each run a generic selector search -- about 45 M instructions
+// in total, more than a one-function compile spends on everything else --
+// while an ordinary compile reaches a few dozen of the 267 distinct shapes.
+// Registration hashes each query and keeps its parameters; the first serial
+// lookup of a registered shape resolves the same query the eager walk would
+// have resolved first, and a shape outside the closed set still misses and
+// fails closed.  machine_x86_64_exact_prewarm_all_shapes resolves every
+// registration, including the duplicate-signature agreement checks, and must
+// run before a gang may emit.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
+#define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
+#define MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY 4u
+#define MACHINE_X64_METADATA_SHAPE_PENDING 0u
+#define MACHINE_X64_METADATA_SHAPE_VALID 1u
+#define MACHINE_X64_METADATA_SHAPE_INVALID 2u
 typedef struct MachineX64MetadataShapeCacheEntry MachineX64MetadataShapeCacheEntry;
 struct MachineX64MetadataShapeCacheEntry
 {
     u64 signature;
     u64 guard;
     BusterX86MetadataMachineExactToken token;
+    // First registration of this signature: the query eager resolution
+    // would have selected with.
+    u16 registration;
+    u8 state;
+    u8 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineX64MetadataShapeCacheEntry) == 24);
+// One registered closed-set query.  Mnemonics are string literals and every
+// feature list names a static machine_x64_*_features array, so a query stays
+// valid until it is resolved.
+typedef struct MachineX64MetadataShapeRegistration MachineX64MetadataShapeRegistration;
+struct MachineX64MetadataShapeRegistration
+{
+    String8 mnemonic;
+    BusterX86MetadataFeatureInput features;
+    BusterX86MetadataPhysicalAttributes attributes;
+    BusterX86MetadataPhysicalOperand operands[MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY];
+    u32 operand_count;
+    u32 entry;
 };
 BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeCacheEntry machine_x64_metadata_shape_cache[MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u16 machine_x64_metadata_shape_cache_slots[MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeRegistration machine_x64_metadata_shape_registrations[MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_registration_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_count;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_resolved_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_invalid_count;
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_ready;
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_complete;
 BUSTER_CT_CHECK((MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u)) == 0);
+BUSTER_CT_CHECK(MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY <= UINT16_MAX);
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void);
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void);
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void);
 
 enum
@@ -11813,6 +11889,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
                         ? MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
                         : 0u);
     machine_x64_gpr_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLES_BUILT, 1);
     return (u8)machine_x64_gpr_encoding_table_count;
 }
 
@@ -11937,6 +12014,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
     table->gpr_operand_slot = variant->operand_slots[gpr_operand_index];
     table->memory_operand_slot = variant->operand_slots[memory_operand_index];
     machine_x64_variable_memory_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLES_BUILT, 1);
     return (u8)machine_x64_variable_memory_encoding_table_count;
 }
 
@@ -12127,7 +12205,18 @@ void machine_x86_64_exact_prewarm(void)
 
     // Every row was staged serially above.  The ready bit is written last;
     // codegen_prewarm() completes before any worker lane can observe globals.
+    // Closed-set shapes the templates did not reach stay registered but
+    // unresolved: a serial compile resolves the few it emits on first use.
     machine_x64_exact_opcode_map_ready = true;
+}
+
+// The gang form of the prewarm: also resolves every registered shape, so a
+// worker lane's bridge lookup is a plain read.  Call it serially before any
+// lane_run that may emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
+void machine_x86_64_exact_prewarm_all_shapes(void)
+{
+    machine_x86_64_exact_prewarm();
+    machine_x64_metadata_shape_cache_resolve_all();
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -12613,17 +12702,17 @@ BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeHashes machine_x64_metadata_shape_has
     return hashes;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
-                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                               BusterX86MetadataFeatureInput features,
-                                                               BusterX86MetadataPhysicalAttributes attributes)
+// Resolves one registered query exactly as the eager walk resolved it: the
+// generic selector, then the serial plan preparation and its machine token.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
+                                                            BusterX86MetadataMachineExactToken* token)
 {
     BusterX86MetadataPhysicalQuery query = {
-        .mnemonic = mnemonic,
-        .operands = operands,
-        .operand_count = operand_count,
-        .features = features,
-        .attributes = attributes,
+        .mnemonic = registration->mnemonic,
+        .operands = registration->operand_count ? registration->operands : 0,
+        .operand_count = registration->operand_count,
+        .features = registration->features,
+        .attributes = registration->attributes,
         .address_size = 64,
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = false,
@@ -12632,66 +12721,155 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         .source_semantics = false,
     };
     BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(query);
-    if (!machine_x64_metadata_shape_mnemonic_id(mnemonic) || selected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS ||
-        selected.form_id == UINT32_MAX || !selected.stable_hash)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
     BusterX86MetadataFormKey key = {.form_id = selected.form_id, .stable_hash = selected.stable_hash};
     BusterX86MetadataExactPlan plan = {0};
-    BusterX86MetadataMachineExactToken token = {0};
-    if (!buster_x86_metadata_exact_plan_prepare(key, &plan) ||
-        !buster_x86_metadata_machine_exact_token_for_plan(plan, features, &token))
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
-    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
-    {
-        MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + entry_index;
-        if (entry->signature != hashes.signature) continue;
-        if (entry->guard != hashes.guard || entry->token.slot_plus_one != token.slot_plus_one ||
-            entry->token.policy_flags != token.policy_flags ||
-            entry->token.integrity != token.integrity)
-        {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-            return false;
-        }
-        return true;
-    }
-    if (machine_x64_metadata_shape_cache_count >= MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count++] = (MachineX64MetadataShapeCacheEntry){
-        .signature = hashes.signature,
-        .guard = hashes.guard,
-        .token = token,
-    };
-    return true;
+    *token = (BusterX86MetadataMachineExactToken){0};
+    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected.form_id != UINT32_MAX && selected.stable_hash &&
+                  buster_x86_metadata_exact_plan_prepare(key, &plan) &&
+                  buster_x86_metadata_machine_exact_token_for_plan(plan, registration->features, token);
+
+    return result;
 }
 
+// Registers one closed-set query.  Nothing is selected here: a new signature
+// gets a pending entry that remembers this first query, and a repeated
+// signature only has its guard checked; its token agreement is checked by
+// machine_x64_metadata_shape_cache_resolve_all.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
+                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                               BusterX86MetadataFeatureInput features,
+                                                               BusterX86MetadataPhysicalAttributes attributes)
+{
+    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
+    u32 entry_index = 0;
+    while (entry_index < machine_x64_metadata_shape_cache_count && machine_x64_metadata_shape_cache[entry_index].signature != hashes.signature)
+    {
+        entry_index += 1;
+    }
+    bool existing = entry_index < machine_x64_metadata_shape_cache_count;
+    bool result = machine_x64_metadata_shape_mnemonic_id(mnemonic) != 0 &&
+                  operand_count <= MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY &&
+                  machine_x64_metadata_shape_registration_count < MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY &&
+                  (existing ? machine_x64_metadata_shape_cache[entry_index].guard == hashes.guard
+                            : machine_x64_metadata_shape_cache_count < MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY);
+    if (result)
+    {
+        u32 registration_index = machine_x64_metadata_shape_registration_count;
+        MachineX64MetadataShapeRegistration* registration = machine_x64_metadata_shape_registrations + registration_index;
+        *registration = (MachineX64MetadataShapeRegistration){
+            .mnemonic = mnemonic,
+            .features = features,
+            .attributes = attributes,
+            .operand_count = operand_count,
+            .entry = entry_index,
+        };
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            registration->operands[operand_index] = operands[operand_index];
+        }
+        machine_x64_metadata_shape_registration_count += 1;
+        if (!existing)
+        {
+            machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count] = (MachineX64MetadataShapeCacheEntry){
+                .signature = hashes.signature,
+                .guard = hashes.guard,
+                .registration = (u16)registration_index,
+                .state = MACHINE_X64_METADATA_SHAPE_PENDING,
+            };
+            machine_x64_metadata_shape_cache_count += 1;
+        }
+    }
+    else
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+    }
+
+    return result;
+}
+
+// A failed resolution refuses every later bridge emission, as a failed eager
+// walk refused all of them.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX64MetadataShapeCacheEntry* entry)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    bool valid = machine_x64_metadata_shape_resolve(machine_x64_metadata_shape_registrations + entry->registration, &entry->token);
+    entry->state = valid ? MACHINE_X64_METADATA_SHAPE_VALID : MACHINE_X64_METADATA_SHAPE_INVALID;
+    machine_x64_metadata_shape_cache_resolved_count += 1;
+    if (!valid)
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        machine_x64_metadata_shape_cache_ready = false;
+    }
+}
+
+// Resolves every registration in registration order -- the order of the
+// eager walk -- and repeats its check that queries sharing a signature select
+// the same token, so no gang can reach a pending entry.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
+{
+    if (!machine_x64_metadata_shape_cache_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        for (u32 registration_index = 0; registration_index < machine_x64_metadata_shape_registration_count; registration_index += 1)
+        {
+            MachineX64MetadataShapeRegistration const* registration = machine_x64_metadata_shape_registrations + registration_index;
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + registration->entry;
+            if (entry->registration == registration_index)
+            {
+                if (entry->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+                {
+                    machine_x64_metadata_shape_cache_resolve_entry(entry);
+                }
+            }
+            else
+            {
+                BusterX86MetadataMachineExactToken token;
+                bool agrees = machine_x64_metadata_shape_resolve(registration, &token) &&
+                              entry->state == MACHINE_X64_METADATA_SHAPE_VALID && entry->token.slot_plus_one == token.slot_plus_one &&
+                              entry->token.policy_flags == token.policy_flags && entry->token.integrity == token.integrity;
+                if (!agrees)
+                {
+                    machine_x64_metadata_shape_cache_invalid_count += 1;
+                    machine_x64_metadata_shape_cache_ready = false;
+                }
+            }
+        }
+        machine_x64_metadata_shape_cache_complete = true;
+    }
+}
+
+// A registered shape still pending is resolved here, on its first lookup;
+// only a serial thread may do that, which BUSTER_CHECK_SERIAL_INITIALIZATION
+// enforces.  Shapes outside the closed set still miss.
 BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metadata_shape_cache_find(
     String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
     BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
 {
     MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
     u32 slot = (u32)hashes.signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
-    for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
+    MachineX64MetadataShapeCacheEntry* found = 0;
+    bool searching = true;
+    for (u32 probe = 0; searching && probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
     {
         u16 entry_plus_one = machine_x64_metadata_shape_cache_slots[slot];
-        if (!entry_plus_one) return 0;
-        MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
-        if (entry->signature == hashes.signature)
+        if (!entry_plus_one)
         {
-            return entry->guard == hashes.guard ? &entry->token : 0;
+            searching = false;
+        }
+        else if (machine_x64_metadata_shape_cache[entry_plus_one - 1u].signature == hashes.signature)
+        {
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
+            found = entry->guard == hashes.guard ? entry : 0;
+            searching = false;
         }
         slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     }
-    return 0;
+    if (found && found->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+    {
+        machine_x64_metadata_shape_cache_resolve_entry(found);
+    }
+
+    return found && found->state == MACHINE_X64_METADATA_SHAPE_VALID ? &found->token : 0;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_publish_slots(void)
@@ -13145,30 +13323,44 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
     (void)machine_x64_metadata_shape_cache_add(S8("CMPXCHG16B"), &cmpxchg16_operand, 1, cx16, attributes);
 }
 
+// Registers the closed set and publishes its slots; resolution waits for
+// the first lookup of each shape or for machine_x86_64_exact_prewarm_all_shapes.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
 {
-    if (machine_x64_metadata_shape_cache_ready) return;
-    machine_x64_metadata_shape_cache_count = 0;
-    machine_x64_metadata_shape_cache_invalid_count = 0;
-    machine_x64_metadata_shape_cache_prepare_zero();
-    machine_x64_metadata_shape_cache_prepare_predicates();
-    machine_x64_metadata_shape_cache_prepare_unary();
-    machine_x64_metadata_shape_cache_prepare_registers();
-    machine_x64_metadata_shape_cache_prepare_immediates();
-    machine_x64_metadata_shape_cache_prepare_memory();
-    machine_x64_metadata_shape_cache_prepare_relative();
-    machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
-    machine_x64_metadata_shape_cache_prepare_x87();
-    machine_x64_metadata_shape_cache_publish_slots();
-    machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    if (!machine_x64_metadata_shape_registration_count)
+    {
+        machine_x64_metadata_shape_cache_count = 0;
+        machine_x64_metadata_shape_cache_resolved_count = 0;
+        machine_x64_metadata_shape_cache_invalid_count = 0;
+        machine_x64_metadata_shape_cache_complete = false;
+        machine_x64_metadata_shape_cache_prepare_zero();
+        machine_x64_metadata_shape_cache_prepare_predicates();
+        machine_x64_metadata_shape_cache_prepare_unary();
+        machine_x64_metadata_shape_cache_prepare_registers();
+        machine_x64_metadata_shape_cache_prepare_immediates();
+        machine_x64_metadata_shape_cache_prepare_memory();
+        machine_x64_metadata_shape_cache_prepare_relative();
+        machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
+        machine_x64_metadata_shape_cache_prepare_x87();
+        machine_x64_metadata_shape_cache_publish_slots();
+        machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    }
 }
 
 #if BUSTER_INCLUDE_TESTS
 MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
 {
-    machine_x86_64_exact_prewarm();
+    machine_x86_64_exact_prewarm_all_shapes();
+    u32 pending_rows = 0;
+    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
+    {
+        pending_rows += machine_x64_metadata_shape_cache[entry_index].state == MACHINE_X64_METADATA_SHAPE_PENDING;
+    }
     return (MachineX64MetadataShapeCacheAudit){
         .prepared_rows = machine_x64_metadata_shape_cache_count,
+        .registered_queries = machine_x64_metadata_shape_registration_count,
+        .resolved_rows = machine_x64_metadata_shape_cache_resolved_count,
+        .pending_rows = pending_rows,
         .invalid_rows = machine_x64_metadata_shape_cache_invalid_count,
         .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
                  machine_x64_metadata_shape_cache_invalid_count == 0,
@@ -13274,10 +13466,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features);
         }
     }
-    // Workers never re-enter the generic selector.  The serial prewarm lane
-    // populated one immutable token per finite physical shape; a stale or
-    // unclassified shape fails closed instead of falling back to handwritten
-    // bytes or a checked query lookup.
+    // Workers never re-enter the generic selector: a gang starts only after
+    // machine_x86_64_exact_prewarm_all_shapes has resolved one immutable token
+    // per finite physical shape, and a serial compile resolves a registered
+    // shape on its first lookup.  A stale or unclassified shape fails closed
+    // instead of falling back to handwritten bytes or a checked query lookup.
     if (!machine_x64_metadata_shape_cache_ready)
     {
         return machine_x64_exact_reject(encoder, counters);
@@ -13961,6 +14154,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
 
+// Recomputes a frame-address value into `reg`: `lea reg, [rbp - offset]` for
+// the slot and member displacement of the value's defining LEA_FRAME row,
+// the same address that row produced.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_address(MachineX64Encoder* encoder, MachineFunction const* function,
+                                                             MachineStackPlacement const* placement, u32 virtual_register, u32 reg)
+{
+    MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
+    MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
+    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_X64_LEA_FRAME);
+    u32 offset = placement->stack_slot_offsets[machine_ref_payload(definition->operands[1])] - definition->payload;
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(reg, 64),
+        machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, 64, true),
+    };
+    bool result = entry && entry->descriptor && entry->plan_valid &&
+                  machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, 2, true, false, 0, false, 0);
+    encoder->overflow |= !result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                            MachineX64ExactEmitCounters* counters)
 {
@@ -14158,6 +14372,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
         else
         {
             MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + table_index;
+            WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
             MachineX64GprEncoding const* encoding = table->encodings + reg;
             if (table->operand_count != 1 || table->operand_slots[0] != 0 ||
                 table->flags != MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE ||
@@ -14246,6 +14461,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     u32 displacement_class = force_disp32 ? 2 : displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
     MachineX64VariableMemoryEncodingTable const* table =
         machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, 1);
     MachineX64GprEncoding const* encoding =
         table->encodings[displacement_class] + reg + (base << 4);
     u32 byte_count = encoding->byte_count;
@@ -14414,6 +14630,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
+        WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
         u8 low_register = table->operand_count ? operand_registers[table->operand_slots[0]] : 0;
         u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
@@ -15046,6 +15263,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, function->immediates[edit->subject]);
             else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, function->immediates[edit->subject], 0);
         }
+        else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+        {
+            (void)machine_x64_emit_exact_frame_address(encoder, function, placement, edit->subject, edit->location);
+        }
         else
         {
             bool temporary = edit->kind == MACHINE_EDIT_TEMP_SPILL || edit->kind == MACHINE_EDIT_TEMP_RELOAD;
@@ -15215,6 +15436,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
 
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_x86_64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                               u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     if (!placement->valid)
     {
@@ -15272,7 +15499,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         return result;
     }
     MachineX64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineX64ExactEmitCounters exact_counters = {0};

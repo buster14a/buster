@@ -63,4 +63,15 @@ BUSTER_F_DECL bool c_test_include_file_table_grow(CIncludeFileTable* table);
 BUSTER_F_DECL void c_test_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count);
 // Test the private append-only finalization boundary, not arbitrary map edits.
 BUSTER_F_DECL void c_test_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, IrSourceRegion* regions, u32 count, u32 capacity);
+// Ownership check for the preprocessing phase boundary: the number of
+// pointers anywhere in the result graph (symbol table internals included)
+// that lie in [start, end). Written field by field, independently of the
+// seal, so a released phase range must report zero.
+BUSTER_F_DECL u64 c_test_preprocess_references_range(CPreprocessResult const* result, void const* start, void const* end);
+// The identifier table's production entry points: `intern` inserts, `find`
+// answers the id a spelling already has and never inserts, `count` is the
+// number of ids the table has handed out.
+BUSTER_F_DECL u32 c_test_symbol_intern(CSymbolTable* table, String8 name);
+BUSTER_F_DECL u32 c_test_symbol_find(CSymbolTable const* table, String8 name);
+BUSTER_F_DECL u32 c_test_symbol_count(CSymbolTable const* table);
 #endif

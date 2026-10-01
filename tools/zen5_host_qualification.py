@@ -42,6 +42,36 @@ from zen5_qualification_common import (
 )
 from zen5_qualification_replay import compare_results, validate_result
 
+COMMIT_TEXT = frozenset("0123456789abcdef")
+
+
+def load_repository_identity(path: Path, root: Path) -> tuple[dict[str, Any], list[str]]:
+    """Read a service-snapshot identity instead of asking Git.
+
+    A benchmark-service attempt materializes a manifest-verified snapshot with
+    no `.git` directory. Its trusted recipe supplies the revision, the tree
+    from the operator installation receipt, and an empty status for a snapshot
+    whose every listed file matched its manifest. Malformed facts are
+    retained as invalidity reasons, exactly like a failing Git query.
+    """
+    value = load_json(path)
+    problems: list[str] = []
+    if not isinstance(value, dict) or set(value) != {"revision", "tree", "status"}:
+        raise QualificationError("repository identity must contain exactly revision, tree and status")
+    for key in ("revision", "tree"):
+        text = value[key]
+        if not isinstance(text, str) or len(text) != 40 or not set(text) <= COMMIT_TEXT:
+            problems.append(f"repository {key} is not a full object id")
+    if not isinstance(value["status"], str):
+        raise QualificationError("repository identity status must be a string")
+    if value["status"]:
+        problems.append("repository checkout is not clean")
+    identity = {"root": str(root.resolve(strict=True)), "revision": value["revision"], "tree": value["tree"],
+                "status": value["status"], "identity_source": "service-snapshot",
+                "identity_sha256": sha256_file(path)}
+    return identity, problems
+
+
 def capture_group(
     group: dict[str, Any],
     repeats: int,
@@ -125,7 +155,11 @@ def capture(arguments: argparse.Namespace) -> int:
     if not executable.is_absolute():
         executable = cwd / executable
     executable_record = hash_path_record(executable)
-    repository, repository_problems = collect_git_identity(arguments.repository_root)
+    if arguments.repository_identity:
+        repository, repository_problems = load_repository_identity(arguments.repository_identity,
+                                                                   arguments.repository_root)
+    else:
+        repository, repository_problems = collect_git_identity(arguments.repository_root)
     host, host_problems = collect_host(arguments.cpu)
     host_problems.extend(validate_host(manifest, host))
     external = [hash_path_record(path) for path in arguments.environment_input]
@@ -228,6 +262,8 @@ def parse_arguments() -> argparse.Namespace:
     capture_parser.add_argument("--output", type=Path, required=True)
     capture_parser.add_argument("--cpu", type=int, default=2)
     capture_parser.add_argument("--repository-root", type=Path, default=Path.cwd())
+    capture_parser.add_argument("--repository-identity", type=Path,
+                                help="service-snapshot revision/tree/status JSON used instead of Git")
     capture_parser.add_argument("--working-directory", type=Path, default=Path.cwd())
     capture_parser.add_argument("--input", type=Path, action="append", default=[])
     capture_parser.add_argument("--output-artifact", type=Path, action="append", default=[])

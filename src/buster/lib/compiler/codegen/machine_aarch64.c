@@ -8160,6 +8160,40 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(u32 frame_area, u32 placement_o
     return frame_area - placement_offset;
 }
 
+// A LEA_FRAME row's address into `destination`. The payload is a byte offset
+// into the slot; the whole member address is one add when it fits an imm12,
+// or a materialized constant plus a register add when it does not —
+// mirroring the canonical base-address helper with the destination as its own
+// scratch. Rematerializing a frame-address value replays its defining row here.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_address(MachineA64Encoder* encoder, MachineStackPlacement const* placement, u32 frame_area,
+                                                       MachineInstruction const* definition, u32 destination)
+{
+    u32 frame_offset =
+        machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(definition->operands[1])] - definition->payload);
+    if (frame_offset <= A64_IMM12_MAX)
+    {
+        u32 fields[] = {destination, MACHINE_A64_X28, frame_offset};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+    else
+    {
+        machine_a64_emit_immediate(encoder, destination, frame_offset);
+        u32 fields[] = {destination, MACHINE_A64_X28, 0, destination};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+}
+
+// The reload of a value whose single definition is a LEA_FRAME row.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_address_rematerialization(MachineA64Encoder* encoder, MachineFunction const* function,
+                                                                         MachineStackPlacement const* placement, u32 frame_area,
+                                                                         u32 virtual_register, u32 destination)
+{
+    MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
+    MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
+    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_A64_LEA_FRAME);
+    machine_a64_emit_frame_address(encoder, placement, frame_area, definition, destination);
+}
+
 // X12 names a saved ABI slot or an overflow slot; X9 is the row's data
 // scratch. Never read the padding past an indirectly supplied object.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_va_value(MachineA64Encoder* encoder, MachineVaArg* metadata,
@@ -8740,6 +8774,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
 
 MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_aarch64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                                u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     u32 push_count = 0;
     for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
@@ -8897,7 +8937,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         return result;
     }
     MachineA64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineBuilderStream fixups;
@@ -9044,6 +9084,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 {
                     machine_a64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
                 }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+                {
+                    machine_a64_emit_frame_address_rematerialization(&encoder, function, placement, frame_area, edit->subject, edit->location);
+                }
                 else
                 {
                     u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_RELOAD ? placement->edge_copy_temporary_offset + edit->subject
@@ -9173,27 +9217,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[1], operand_registers[0], 0, 8, true);
                 break;
             case MACHINE_A64_LEA_FRAME:
-            {
-                // The payload is a byte offset into the slot; the whole
-                // member address is one add when it fits an imm12, or a
-                // materialized constant plus a register add when it does
-                // not — mirroring the canonical base-address helper with
-                // the destination as its own scratch.
-                u32 frame_offset = machine_a64_frame_offset(
-                    frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
-                if (frame_offset <= A64_IMM12_MAX)
-                {
-                    u32 fields[] = {operand_registers[0], MACHINE_A64_X28, frame_offset};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
-                else
-                {
-                    machine_a64_emit_immediate(&encoder, operand_registers[0], frame_offset);
-                    u32 fields[] = {operand_registers[0], MACHINE_A64_X28, 0, operand_registers[0]};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
-            }
-            break;
+                machine_a64_emit_frame_address(&encoder, placement, frame_area, instruction, operand_registers[0]);
+                break;
             case MACHINE_A64_LEA_OFFSET:
             {
                 u32 displacement = instruction->payload;
@@ -10311,6 +10336,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
                 {
                     machine_a64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
+                }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+                {
+                    machine_a64_emit_frame_address_rematerialization(&encoder, function, placement, frame_area, edit->subject, edit->location);
                 }
                 else
                 {

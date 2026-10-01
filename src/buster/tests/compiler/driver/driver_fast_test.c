@@ -193,8 +193,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     return result;
 }
 
-// Static assertions containing local-object sizeof operands must agree in the
-// semantic-only and object actions, including both frontend SSA forms.
+// Static assertions containing local-object sizeof or _Generic operands must
+// agree in the semantic-only and object actions, including both frontend SSA
+// forms.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -242,6 +243,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
+            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+        // #1697: _Generic selects on a block-scope object's type.
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, long: 1, default: 0), \"generic local\");\n"
+            "}\n"), true, {0}},
+        {S8("void f(void) {\n"
+            "    long y = 0;\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"generic local\");\n"
             "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -307,11 +317,203 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
     return result;
 }
 
+// The work ledger observes an ordinary compile without changing it: every
+// family that the source exercises counts, the counters keep their documented
+// relationships, each pipeline phase is entered once per native compile, and
+// the phase rows partition the arena traffic exactly. A syntax-only compile is
+// the negative control -- it reaches no lowering, machine or output counter.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-work-ledger"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-work-ledger"), S8(".o"));
+    String8 source = S8("static const unsigned char table[] = {1, 2, 3, 'x', 0x10};\n"
+                        "struct Inner { int a; };\n"
+                        "struct Outer { struct { int b; }; struct Inner inner; };\n"
+                        "int f(struct Outer* o, int x) { return o->b + o->inner.a + table[x & 3] + (int)sizeof(struct Outer); }\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 object_command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+    String8 syntax_command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), input};
+    CompilerDriverInvocation object_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command));
+    CompilerDriverInvocation syntax_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+    BUSTER_TEST(arguments, object_invocation.error == COMPILER_DRIVER_ERROR_NONE && syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters before = work_ledger_counters();
+    ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
+#endif
+    CompilerDriverResult object = compiler_driver_execute_invocation(arena, object_invocation);
+    BUSTER_TEST(arguments, object.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters after = work_ledger_counters();
+    ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    u64 delta[WORK_LEDGER_COUNT];
+    for (u32 counter = 0; counter < WORK_LEDGER_COUNT; counter += 1)
+    {
+        BUSTER_TEST(arguments, after.values[counter] >= before.values[counter]);
+        delta[counter] = after.values[counter] - before.values[counter];
+    }
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_CACHE_HITS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED] +
+                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_LITERAL_ANSWERS] == delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_QUERY_CHECKPOINTS] == delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] != 0 &&
+                               delta[WORK_LEDGER_SNAPSHOT_FRAME_BYTES] % delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] == 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
+                               delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
+                               delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_MACHINE_FUNCTIONS_SELECTED] == 1 && delta[WORK_LEDGER_MACHINE_ROWS] != 0 &&
+                               delta[WORK_LEDGER_MACHINE_ENCODED_BYTES] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_OUTPUT_OBJECT_BYTES] != 0 && delta[WORK_LEDGER_OUTPUT_LINK_IMAGE_BYTES] == 0);
+    WorkLedgerPhase entered[] = {WORK_LEDGER_PHASE_PREPROCESS, WORK_LEDGER_PHASE_PARSE, WORK_LEDGER_PHASE_SEMANTIC, WORK_LEDGER_PHASE_LOWER,
+                                 WORK_LEDGER_PHASE_PREPARE, WORK_LEDGER_PHASE_TARGET_PREWARM, WORK_LEDGER_PHASE_OBJECT, WORK_LEDGER_PHASE_OUTPUT};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entered); index += 1)
+    {
+        BUSTER_TEST(arguments, after.phases[entered[index]].marks == before.phases[entered[index]].marks + 1);
+    }
+    // Codegen is entered by the driver and again after the target prewarm.
+    BUSTER_TEST(arguments, after.phases[WORK_LEDGER_PHASE_CODEGEN].marks == before.phases[WORK_LEDGER_PHASE_CODEGEN].marks + 2);
+    u64 phase_calls = 0;
+    u64 phase_bytes = 0;
+    for (u32 phase = 0; phase < WORK_LEDGER_PHASE_COUNT; phase += 1)
+    {
+        phase_calls += after.phases[phase].arena_calls - before.phases[phase].arena_calls;
+        phase_bytes += after.phases[phase].arena_bytes - before.phases[phase].arena_bytes;
+    }
+    BUSTER_TEST(arguments, phase_calls == arena_after.calls - arena_before.calls);
+    BUSTER_TEST(arguments, phase_bytes == arena_after.requested_bytes - arena_before.requested_bytes);
+    WorkLedgerCounters syntax_before = work_ledger_counters();
+#endif
+    CompilerDriverResult syntax = compiler_driver_execute_invocation(arena, syntax_invocation);
+    BUSTER_TEST(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters syntax_after = work_ledger_counters();
+    WorkLedgerCounter untouched[] = {WORK_LEDGER_REDERIVE_LOWER_QUERY_ROOTS, WORK_LEDGER_MACHINE_FUNCTIONS_SELECTED, WORK_LEDGER_MACHINE_ROWS,
+                                     WORK_LEDGER_MACHINE_ENCODED_BYTES, WORK_LEDGER_OUTPUT_OBJECT_BYTES};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(untouched); index += 1)
+    {
+        BUSTER_TEST(arguments, syntax_after.values[untouched[index]] == syntax_before.values[untouched[index]]);
+    }
+    BUSTER_TEST(arguments, syntax_after.values[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] > syntax_before.values[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+    BUSTER_TEST(arguments, syntax_after.phases[WORK_LEDGER_PHASE_LOWER].marks == syntax_before.phases[WORK_LEDGER_PHASE_LOWER].marks);
+    BUSTER_TEST(arguments, syntax_after.phases[WORK_LEDGER_PHASE_SEMANTIC].marks == syntax_before.phases[WORK_LEDGER_PHASE_SEMANTIC].marks + 1);
+#endif
+    scratch_end(temporary);
+    return result;
+}
+
+// #1601: a function whose declarator returns a function pointer, declared and
+// then defined, gave its RETURN rows and its direct calls a return type the
+// function's own signature does not name. -fverify-codegen rejected the unit,
+// and the default producer-certified path silently declined FAST for all of it
+// (#1602). Plain, static, qualified-return and two-level shapes, in both
+// frontend forms: the strict validator accepts the unit, FAST reaches every
+// function codegen receives, and every allocator's executable agrees.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_pointer_return_redeclarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-function-pointer-return"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static int twice(int x) { return 2 * x; }\n"
+        "static int thrice(int x) { return 3 * x; }\n"
+        "static int (*pick(int))(int);\n"
+        "int early(int v) { return pick(0)(v); }\n"
+        "static int (*pick(int which))(int) { return which ? twice : thrice; }\n"
+        "int (*pick_extern(int))(int);\n"
+        "int (*pick_extern(int which))(int) { return which ? thrice : twice; }\n"
+        "static int (*const pick_const(int))(int);\n"
+        "static int (*const pick_const(int which))(int) { return which ? twice : 0; }\n"
+        "static int (*volatile pick_volatile(int))(int);\n"
+        "static int (*volatile pick_volatile(int which))(int) { return which ? thrice : 0; }\n"
+        "static int (*level1(int which))(int) { return which ? twice : thrice; }\n"
+        "static int (*(*level2(int))(int))(int);\n"
+        "static int (*(*level2(int which))(int))(int) { return which ? level1 : 0; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int (*(*outer)(int))(int) = level2(1);\n"
+        "    return early(5) != 15 || pick(1)(5) != 10 || pick_extern(1)(4) != 12 || pick_const(1)(6) != 12 ||\n"
+        "           pick_volatile(1)(2) != 6 || outer(0)(7) != 21;\n"
+        "}\n"))));
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        // The default path trusts the producer and is where the decline was
+        // silent; -fverify-codegen validates the input before anything runs.
+        for (u32 verify = 0; verify < 2; verify += 1)
+        {
+            String8 object = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-function-pointer-return-{u32}-{u32}"), form, verify), S8(".o"));
+            String8 command[7];
+            u32 count = 0;
+            command[count++] = S8("-nostdinc");
+            command[count++] = forms[form];
+            if (verify) command[count++] = S8("-fverify-codegen");
+            command[count++] = S8("-c");
+            command[count++] = S8("-o");
+            command[count++] = object;
+            command[count++] = input;
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == IR_FAST_ALL);
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("function-pointer return form={u32} verify={u32}: {S8}\n"), form, verify, compiled.diagnostic);
+            }
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
+            BUSTER_TEST(arguments, compiled.fast.validation_skips == 0 && compiled.fast.functions != 0 &&
+                                   compiled.fast.functions == compiled.codegen_statistics.function_count);
+        }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+        // Mobile tests run in an application process that cannot launch the
+        // generated executables; the object checks above still run there.
+        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 executable = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-function-pointer-return-{u32}-{S8}"), form, modes[mode]), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), forms[form], string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                                 S8("-o"), executable, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, invocation);
+            if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("function-pointer return form={u32} mode={S8}: {S8}\n"), form, modes[mode], linked.diagnostic);
+            }
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE && !linked.codegen_statistics.fallback_function_count);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {executable};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+#endif
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_work_ledger);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_pointer_return_redeclarations);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command));
