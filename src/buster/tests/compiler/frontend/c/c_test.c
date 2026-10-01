@@ -17544,7 +17544,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult tokens = c_preprocess(temporary.arena,
-                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
                                                "static double object;\n"
                                                "typedef __typeof__(*(double *)0) from_cast;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (double *)0)) same_arms;\n"
@@ -17560,7 +17560,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                                "typedef __typeof__(((struct Bits *)0)->one + 0) binary_add_bit;\n"
                                                "typedef __typeof__(((struct Bits *)0)->one << 1) left_shift_bit;\n"
                                                "typedef __typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional_bit;\n"
-                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"),
+                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->a) narrow_ull_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->b + 0) full_ull_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->e << 1) narrow_long_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->sn ? ((struct Bits *)0)->sn : ((struct Bits *)0)->sn) signed_narrow_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->sf) signed_full_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->wide) unpromoted_wide_bit;\n"
+                                               "typedef __typeof__(+(unsigned long long)((struct Bits *)0)->a) cast_wide_bit;\n"),
                                             (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
     CParseResult parse = c_parse(temporary.arena, tokens);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
@@ -17598,6 +17605,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
         {S8("left_shift_bit"), C_TYPE_INT, C_TYPE_VOID},
         {S8("conditional_bit"), C_TYPE_INT, C_TYPE_VOID},
         {S8("unary_plus_short_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("narrow_ull_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("full_ull_bit"), C_TYPE_UNSIGNED_INT, C_TYPE_VOID},
+        {S8("narrow_long_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("signed_narrow_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("signed_full_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unpromoted_wide_bit"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_VOID},
+        {S8("cast_wide_bit"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_VOID},
     };
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
     {
@@ -17638,17 +17652,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     // The semantic type attached to typeof must agree with the type carried
     // by the raw function signature on both supported desktop ABIs and both
     // lowering frontends.
-    String8 promotion_source = S8("struct Bits { unsigned int one:1; };\n"
+    String8 promotion_source = S8("struct Bits { unsigned int one:1; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
                                   "__typeof__(+((struct Bits *)0)->one) unary_plus(struct Bits *p) { return +p->one; }\n"
                                   "__typeof__(((struct Bits *)0)->one + 0) binary_add(struct Bits *p) { return p->one + 0; }\n"
                                   "__typeof__(((struct Bits *)0)->one << 1) left_shift(struct Bits *p) { return p->one << 1; }\n"
-                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n");
+                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n"
+                                  "__typeof__(+((struct Bits *)0)->a) narrow_ull(struct Bits *p) { return +p->a; }\n"
+                                  "__typeof__(((struct Bits *)0)->b + 0) full_ull(struct Bits *p) { return p->b + 0; }\n"
+                                  "__typeof__(((struct Bits *)0)->e << 1) narrow_long(struct Bits *p) { return p->e << 1; }\n"
+                                  "__typeof__(((struct Bits *)0)->sn ? ((struct Bits *)0)->sn : ((struct Bits *)0)->sn) signed_narrow(struct Bits *p) { return p->sn ? p->sn : p->sn; }\n"
+                                  "__typeof__(+((struct Bits *)0)->sf) signed_full(struct Bits *p) { return +p->sf; }\n"
+                                  "__typeof__(+((struct Bits *)0)->wide) unpromoted_wide(struct Bits *p) { return +p->wide; }\n");
     Target promotion_targets[] = {target_native, target_native};
     promotion_targets[0].cpu_arch = CPU_ARCH_X86_64;
     promotion_targets[0].os = OPERATING_SYSTEM_LINUX;
     promotion_targets[1].cpu_arch = CPU_ARCH_AARCH64;
     promotion_targets[1].os = OPERATING_SYSTEM_LINUX;
-    String8 promotion_names[] = {S8("unary_plus"), S8("binary_add"), S8("left_shift"), S8("conditional")};
+    struct
+    {
+        String8 name;
+        u32 bit_width;
+        bool is_signed;
+    } promotion_expected[] = {
+        {S8("unary_plus"), 32, true}, {S8("binary_add"), 32, true}, {S8("left_shift"), 32, true}, {S8("conditional"), 32, true},
+        {S8("narrow_ull"), 32, true}, {S8("full_ull"), 32, false}, {S8("narrow_long"), 32, true}, {S8("signed_narrow"), 32, true},
+        {S8("signed_full"), 32, true}, {S8("unpromoted_wide"), 64, false},
+    };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(promotion_targets); target_index += 1)
     {
         for (u32 frontend = 0; frontend < 2; frontend += 1)
@@ -17672,14 +17701,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                     IrProgram* program = lowered.program;
                     IrModule* module = program->modules;
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
-                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_names); name_index += 1)
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_expected); name_index += 1)
                     {
-                        IrFunction* function = c_test_find_ir_function(module, promotion_names[name_index]);
+                        IrFunction* function = c_test_find_ir_function(module, promotion_expected[name_index].name);
                         BUSTER_TEST(arguments, function != 0);
                         IrType* signature = function ? ir_type_from_id(&program->types, function->canonical_type) : 0;
                         IrType* return_type = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
                         BUSTER_TEST(arguments, return_type && return_type->kind == IR_TYPE_INTEGER &&
-                                                    return_type->bit_width == 32 && return_type->is_signed);
+                                                    return_type->bit_width == promotion_expected[name_index].bit_width &&
+                                                    return_type->is_signed == promotion_expected[name_index].is_signed);
                     }
                 }
             }
@@ -17693,9 +17723,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     String8 runtime_source = buster_test_temporary_path(arguments->arena, S8("typeof-integer-promotions"), S8(".c"));
     String8 runtime_text = S8("#define IS_INT_TYPE(expression) _Generic((__typeof__(expression))0, int: 1, default: 0)\n"
                               "#define IS_UINT_TYPE(expression) _Generic((__typeof__(expression))0, unsigned int: 1, default: 0)\n"
-                              "struct Bits { unsigned int one:1; unsigned short us:3; };\n"
-                              "int main(void) { struct Bits bits = {1, 5}; struct Bits *p = &bits;\n"
-                              " unsigned char uc = 7; short s = 7; _Bool b = 1; int result = 0;\n"
+                              "#define IS_ULL_TYPE(expression) _Generic((__typeof__(expression))0, unsigned long long: 1, default: 0)\n"
+                              "static int promoted_arguments(int marker, ...) { __builtin_va_list ap; __builtin_va_start(ap, marker);\n"
+                              " int a = __builtin_va_arg(ap, int); unsigned int b = __builtin_va_arg(ap, unsigned int); int sn = __builtin_va_arg(ap, int);\n"
+                              " __builtin_va_end(ap); return a == 0 && b == 0 && sn == -3; }\n"
+                              "struct Bits { unsigned int one:1; unsigned short us:3; unsigned long long a:31; unsigned long long b:32; unsigned long e:20; signed long long sn:20; signed long long sf:32; unsigned long long wide:33; };\n"
+                              "int main(void) { struct Bits bits = {1, 5, 0, 0, 0, -3, -3, 0}; struct Bits *p = &bits;\n"
+                              " unsigned char uc = 7; short s = 7; _Bool b = 1; volatile int one = 1; int result = 0;\n"
                               " result |= !IS_UINT_TYPE(p->one);\n"
                               " result |= !IS_INT_TYPE(+p->one);\n"
                               " result |= !IS_INT_TYPE(-p->one);\n"
@@ -17708,6 +17742,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                               " result |= !IS_INT_TYPE(+s);\n"
                               " result |= !IS_INT_TYPE(+b);\n"
                               " result |= !IS_INT_TYPE(uc ? uc : uc);\n"
+                              " result |= !IS_ULL_TYPE(p->a) || !IS_ULL_TYPE(+(unsigned long long)p->a);\n"
+                              " result |= !IS_INT_TYPE(+p->a) || !IS_UINT_TYPE(+p->b) || !IS_INT_TYPE(+p->e);\n"
+                              " result |= !IS_INT_TYPE(+p->sn) || !IS_INT_TYPE(+p->sf) || !IS_ULL_TYPE(+p->wide);\n"
+                              " result |= !IS_INT_TYPE(p->a + 0) || !IS_INT_TYPE(p->e << 1) || !IS_INT_TYPE(p->sn ? p->sn : p->sn);\n"
+                              " result |= (p->a - one < 0) != 1 || (long long)(p->a - one) != -1;\n"
+                              " result |= (p->b - one < 0) != 0 || (long long)(p->b - one) != 4294967295LL;\n"
+                              " result |= (p->e - one < 0) != 1 || (long long)(p->e - one) != -1;\n"
+                              " result |= (p->a - 7) / 2 != -3 || (p->e - 7) / 2 != -3;\n"
+                              " result |= sizeof(p->a + 0) != sizeof(int) || sizeof(p->e + 0) != sizeof(int) || sizeof(+p->a) != sizeof(int);\n"
+                              " result |= sizeof(+p->sn) != sizeof(int) || sizeof(+p->sf) != sizeof(int) || sizeof(+p->wide) != sizeof(long long);\n"
+                              " result |= !promoted_arguments(0, p->a, p->b, p->sn);\n"
+                              " result |= ((p->a = 0) - one < 0) != 1;\n"
+                              " result |= (long long)((p->b = 0) - one) != 4294967295LL;\n"
+                              " result |= ((p->sn = -3) - one) != -4;\n"
                               " return result; }\n");
     BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
     String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
