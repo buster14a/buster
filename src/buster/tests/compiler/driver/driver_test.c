@@ -8,6 +8,7 @@
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
+// compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -15194,6 +15195,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTest
     return result;
 }
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && !BUSTER_SANITIZE && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pragma_pack_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("buster-pragma-pack-alignment"), S8(".c"));
+    // Independent definitions in both directions expose member offsets and
+    // array stride; a Buster-only image could agree with its own wrong layout.
+    String8 source = S8(
+        "#pragma pack(push, 1)\n"
+        "struct one { char tag; _Alignas(8) int value; };\n#pragma pack(pop)\n"
+        "#pragma pack(push, 2)\n"
+        "struct two { char tag; int value __attribute__((aligned(8))); };\n#pragma pack(pop)\n"
+        "#pragma pack(push, 4)\n"
+        "struct four { char tag; _Alignas(16) int value; };\n#pragma pack(pop)\n"
+        "_Static_assert(sizeof(struct one) == 5, \"pack1\");\n"
+        "_Static_assert(sizeof(struct two) == 6, \"pack2\");\n"
+        "_Static_assert(sizeof(struct four) == 8, \"pack4\");\n"
+        "#ifdef PACK_DEFINITIONS\n"
+        "struct one shared_one[2] = {{7, 0x11223344}, {9, 0x22334455}};\n"
+        "struct two shared_two[2] = {{7, 0x11223344}, {9, 0x22334455}};\n"
+        "struct four shared_four[2] = {{7, 0x11223344}, {9, 0x22334455}};\n"
+        "#else\n"
+        "extern struct one shared_one[2]; extern struct two shared_two[2]; extern struct four shared_four[2];\n"
+        "#define VERIFY(A) ((A)[0].tag == 7 && (A)[0].value == 0x11223344 && (A)[1].tag == 9 && (A)[1].value == 0x22334455)\n"
+        "int main(void) { int ok = VERIFY(shared_one) && VERIFY(shared_two) && VERIFY(shared_four);\n"
+        "  shared_one[1].value = 31; shared_two[1].value = 32; shared_four[1].value = 34;\n"
+        "  return ok && shared_one[1].value == 31 && shared_two[1].value == 32 && shared_four[1].value == 34 ? 0 : 1; }\n"
+        "#endif\n");
+    bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 host_object = buster_test_temporary_path(arena, S8("buster-pragma-pack-host"), S8(".o"));
+    String8 host_command[12];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+    {
+        host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    }
+    host_command[host_count++] = S8("-std=c11");
+    host_command[host_count++] = S8("-O2");
+    host_command[host_count++] = S8("-fno-pic");
+    host_command[host_count++] = S8("-g0");
+    host_command[host_count++] = S8("-DPACK_DEFINITIONS=1");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = source_path;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    bool host_compiled = false;
+    if (written)
+    {
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count}, (SliceString8){0}, (SliceString8){0},
+                                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        host_compiled = spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    }
+    BUSTER_TEST(arguments, host_compiled);
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 mode = 0; host_compiled && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        TemporalArena row = scratch_begin(&arena, 1);
+        Arena* row_arena = row.arena;
+        String8 buster_image = buster_test_temporary_path(row_arena, S8("buster-pragma-pack-consumer"), S8(""));
+        String8 buster_command[] = {modes[mode], S8("-fverify-codegen"), source_path, host_object, S8("-o"), buster_image};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            row_arena, compiler_driver_parse_arguments(row_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_command)));
+        if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, compiler_driver_test_process_success(row_arena, buster_image));
+        }
+        String8 buster_object = buster_test_temporary_path(row_arena, S8("buster-pragma-pack-definition"), S8(".o"));
+        String8 definitions[] = {modes[mode], S8("-DPACK_DEFINITIONS=1"), S8("-c"), source_path, S8("-o"), buster_object};
+        CompilerDriverResult defined = compiler_driver_execute_invocation(
+            row_arena, compiler_driver_parse_arguments(row_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(definitions)));
+        if (BUSTER_REQUIRE(arguments, defined.error == COMPILER_DRIVER_ERROR_NONE && defined.has_object))
+        {
+            String8 host_image = buster_test_temporary_path(row_arena, S8("buster-pragma-pack-host-consumer"), S8(""));
+            String8 link_command[12];
+            u32 link_count = 0;
+            link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+            {
+                link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            }
+            link_command[link_count++] = S8("-std=c11");
+            link_command[link_count++] = S8("-O2");
+            link_command[link_count++] = S8("-fno-pic");
+            link_command[link_count++] = S8("-no-pie");
+            link_command[link_count++] = source_path;
+            link_command[link_count++] = buster_object;
+            link_command[link_count++] = S8("-o");
+            link_command[link_count++] = host_image;
+            ProcessSpawnResult link = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count}, (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool linked = link.handle && os_process_wait_deadline(row_arena, link, 30000000).result == PROCESS_RESULT_SUCCESS;
+            if (BUSTER_REQUIRE(arguments, linked))
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(row_arena, host_image));
+            }
+        }
+        scratch_end(row);
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15241,6 +15350,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bootstrap_trace);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_alignment);
+#endif
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && !BUSTER_SANITIZE && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pragma_pack_alignment);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_runtime_types);

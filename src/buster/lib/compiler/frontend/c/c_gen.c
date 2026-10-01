@@ -51283,14 +51283,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 // two agreeing is not evidence the rule is the target's, which
                 // is what record_layout_tests checks (#1439).
                 //
-                // `__attribute__((packed))` on the definition and `#pragma
-                // pack(N)` around it ask the same question: the ceiling a
-                // member's alignment is clamped to. Packed is that ceiling at
-                // one byte.
+                // GNU packed lowers natural member alignment to one byte,
+                // but explicit alignment can raise it again. Keep pragma
+                // pack's separate ceiling to cap the merged request below.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
-                u32 pack_alignment = c_type->definition_start < preprocess.token_count
-                                         ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
-                                         : 0;
+                u32 pragma_pack_alignment = c_type->definition_start < preprocess.token_count
+                                                ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
+                                                : 0;
+                u32 pack_alignment = pragma_pack_alignment;
                 if (aggregate_attributes.is_packed)
                 {
                     pack_alignment = 1;
@@ -51427,6 +51427,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     {
                         fields_resolved = false;
                         break;
+                    }
+                    // Match the parse fold's pragma ceiling after merging
+                    // explicit requests; over-ceiling bit-field starts are
+                    // suppressed rather than rounded to the pragma ceiling.
+                    // Microsoft and zero-width bit-fields retain their rules.
+                    if (pragma_pack_alignment && record.policy != C_RECORD_LAYOUT_MICROSOFT && (!member->is_bit_field || member_bit_width))
+                    {
+                        if (member->is_bit_field)
+                        {
+                            field_alignment = BUSTER_MAX(natural_alignment, field_alignment_request);
+                            if (field_alignment_request > pragma_pack_alignment)
+                            {
+                                field_alignment_request = 0;
+                            }
+                        }
+                        field_alignment = BUSTER_MIN(field_alignment, pragma_pack_alignment);
                     }
                     CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
                                                                                           .size = field_type->layout.size,

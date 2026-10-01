@@ -74,9 +74,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit on `CMember`; an object declarator's `aligned` joins the specifier-level
   alignment specifiers in the one contiguous run `alignment_start`/
   `alignment_count` names, which is why the trailing scan runs immediately
-  after the specifier one. `#pragma pack(N)` asks the same question -- the
-  ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
-  one byte, so both feed one knob. **Two layout engines read it**:
+  after the specifier one. GNU `packed` lowers natural member alignment to one
+  byte, and an explicit member `aligned` or `_Alignas` can raise it again.
+  `#pragma pack(N)` instead caps that merged member alignment on Itanium and
+  AAPCS64 targets (#1244, duplicate #1248). A nonzero bit-field contributes its
+  unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
+  explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
+  explicit alignment; Microsoft's required explicit member alignment overrides
+  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
+  parse-time constants, and canonical member offsets. The registered
+  `compiler_driver_test_pragma_pack_alignment` also cross-links independent
+  host/Buster definitions and consumers in both directions for every allocator
+  on desktop Linux. **Two layout engines read it**:
   `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
   parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
   about `#pragma pack` before this: the fold packed and the IR did not, so a
