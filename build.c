@@ -29,7 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
-//   bench_service_zen5_*                        held zen5-calibration-v1 recipe (tools/bench_service/zen5_recipe.c)
+//   bench_service_zen5_*                        served zen5-calibration-v1 recipe (tools/bench_service/zen5_recipe.c)
 //   bench_service_broker_add                    Linux broker, static entry/payload gates and regression probes
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance

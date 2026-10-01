@@ -16,8 +16,9 @@ pass.
 ## Linux installed worker boundary
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
-single-job supervisor. A request may name only an admitted service recipe;
-`validate-buster-v1` is currently the sole admitted entry. It cannot supply a
+single-job supervisor. A request may name only an admitted service recipe:
+`validate-buster-v1` or `zen5-calibration-v1` (one revision named twice). It
+cannot supply a
 program, argument, unit name, resource property, cgroup path or timeout. The
 service sends a typed job/attempt request to the root-owned
 `buster-bench-systemd-broker` socket. The broker constructs the fixed
@@ -629,14 +630,29 @@ Any append/sync uncertainty poisons that handle: close/reopen and reconcile or
 retry, never roll it back in memory and continue appending.
 
 Limits are fixed across journal schemas 1 and 2: eight unfinished jobs
-(including active and cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
+(including active and cleaning), 512 lifetime submissions, 8,192 journal events, 320-byte request
 payloads, 564-byte maximum journal frames and 536-byte control requests/ordinary replies.
 The authenticated export operation has a separate fixed reply cap; see [EXPORT.md](EXPORT.md). Normal
 job transitions use fewer than 16 events each. There is no compaction, rotation,
-expiry or tombstone eviction. Once all 64 lifetime slots are used, new keys fail
+expiry or tombstone eviction. Once all 512 lifetime slots are used, new keys fail
 closed even if every job has finished; existing identical retries still work.
 A migration/retention scheme is a subsequent slice, not silent deletion of
 accepted identities.
+
+The lifetime cap was 64 submissions and 1,024 events until #2114 raised it so
+that a #426 window 2 of at least 64 confirmatory `zen5-calibration-v1`
+attempts fits in the same queue state after window 1 and any earlier jobs. No
+durable format records the cap: frames carry no slot index or count, job ids
+remain journal sequences, and replay only rejects a journal longer than
+`BQ_EVENT_CAP` maximum frames. A journal written by the 64-job build therefore
+replays unchanged, keeps its ids, and admits new submissions up to the new cap;
+the status reply's `job_count` and the capabilities text report the raised
+value. The new cap applies only after the installed service is rebuilt and
+reinstalled from a revision that contains it. `BqState` is about 664 KiB, is
+stack-resident in `BqQueue` and copied once per tentative append; a compile-time
+check keeps it at or under 1 MiB. Replay remains a bounded linear scan with a
+quadratic key comparison over at most 512 jobs. The cap is not a disk quota:
+retained results and exports still follow their own per-job bounds.
 
 ## Journal wire format and recovery
 
@@ -772,13 +788,12 @@ reviewed binaries; see
 [unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020)
 and [unit-side projection and oracle](RETIREMENT_PREPARATION.md#unit-side-projection-and-oracle-1020).
 
-`zen5-calibration-v1` (#426) is registered with a real executable profile,
-`profiles/zen5-calibration-v1.recipe`, and the fixed build-driver command
-`bench_service_zen5_recipe`, but it is **held**: it is neither admitted nor
-served, so request validation, `client`, `gateway submit-recipe`, the
-materializer, `worker-unit` and export binding all refuse it, and the
-capabilities text does not list it. It stays held until the systemd broker
-carries its stage contract; see [the held calibration recipe](#held-zen5-calibration-v1-recipe).
+`zen5-calibration-v1` (#426) is a served recipe with a real executable
+profile, `profiles/zen5-calibration-v1.recipe`, and the fixed build-driver
+command `bench_service_zen5_recipe`. Request validation admits it only with one
+40-hex revision named as both base and candidate; the capabilities text lists
+it in `service-recipes`. The systemd broker's version-2 recipe selector starts
+its outer unit and stages; see [the calibration recipe](#zen5-calibration-v1-recipe).
 
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
@@ -897,61 +912,109 @@ deterministic attempt entry. A recorded configuration failure also permits an
 unopenable root because workspace creation occurs only after the attempt record.
 All other missing-attempt combinations retain active admission.
 
-## Held zen5-calibration-v1 recipe
+## zen5-calibration-v1 recipe
 
 `tools/bench_service/zen5_recipe.c` (included by `build.c`) is the fixed #426
 Zen 5 calibration attempt. One attempt names one immutable source twice
-(base and candidate revision must be equal), reads the tree identity from a
-manifest-listed `.bq-source-tree` file supplied by the operator's installation
-receipt, and verifies the four pinned PMU tool/manifest digests of its
-installed profile before it runs anything. It then runs, strictly in order:
+(base and candidate revision must be equal). It reads the tree identity from a
+`.bq-source-tree` file that the operator's installation lists, with its digest,
+in the installed source manifest (exact format in
+`deploy/VALIDATE_BUSTER_V1.md`; no tool in this repository writes installed
+sources); an unlisted or mismatched file stops the attempt. It verifies the four pinned PMU tool/manifest digests of its
+installed profile and copies them read-only into the driver-owned
+`zen5/pmu-tool` before it runs anything. It then runs, strictly in order:
 
 1. five serial trusted Release builds (immutable, same-root A then B in one
    configured root, cross-root A and B in two roots), each frozen read-only
-   before the next starts, with its build/link commands, `compile_commands.json`
-   digest, build log digest, binary identity and ELF `.text` placement;
+   before the next starts, with its build/link commands (the trusted driver
+   itself runs `ninja -t commands`), `compile_commands.json` digest, build log
+   digest, binary identity and ELF `.text` placement;
 2. an untimed oracle run of every frozen binary on the fixed workload
    (`tests/c_abi_cfuncs.c`, `ide cc -g0 -O0 -c`), whose immutable output digest
    becomes the predeclared oracle;
-3. the PMU phase outside every timed interval: `tools/zen5_host_qualification.py
-   capture` with `tools/zen5_pmu_events_v1.json` (four groups, three repeats),
-   using `--repository-identity` for the snapshot. A kernel/perf refusal is
-   retained as an `invalid` qualification record, never zero counts;
+3. the PMU phase outside every timed interval: the pinned
+   `zen5_host_qualification.py capture` from `zen5/pmu-tool` with
+   `python3 -B -E -s`, so no snapshot file or environment variable can shadow
+   a module, using `--repository-identity` for the snapshot. The pinned copies
+   are re-hashed first, and the `python3`, `perf` and `taskset` identities are
+   recorded in `zen5/pmu/runtime.identity`. A kernel/perf refusal is retained
+   as an `invalid` qualification record, never zero counts;
 4. the pre-sample family plan (`tools/zen5_calibration_handoff.py freeze`
    form, canonical bytes) is written read-only into the attempt tree and
    published with a durable `zen5-calibration-v1.plan.manifest` before any
    timed child. The capture runner re-hashes it and refuses before its first
    child if it changed;
-5. three fixed 120-slot captures (360 pairs, 720 timed children):
-   immutable-binary A/A (`buster-zen5-aa-capture-v1`), same-root rebuild and
-   cross-root (`buster-zen5-build-control-capture-v1`). Every slot, order,
-   label/path assignment, monotonic bound, exit status, wall time, peak RSS,
-   output digest and (for controls) executed binary digest is retained;
-   invalid slots stay in place and there is no rerun.
+5. one captures stage running three fixed 120-slot captures (360 pairs, 720
+   timed children): immutable-binary A/A (`buster-zen5-aa-capture-v1`),
+   same-root rebuild and cross-root (`buster-zen5-build-control-capture-v1`).
+   Every slot, order, label/path assignment, monotonic bound, exit status,
+   wall time, peak RSS, output digest and (for controls) executed binary
+   digest is retained; invalid slots stay in place and there is no rerun.
+
+All six frozen paths (five builds and the second immutable path) are re-hashed
+before the oracle, PMU and plan phases and after the captures stage, and each
+capture spec carries the expected digests the runner checks before its first
+child. The driver checks each capture natively before publishing it: the
+trusted header is its prefix, it says `ab_authorized` false exactly once, and
+its observations are sequences 0 to 119 in order. `zen5_aa_noise.py` and
+`zen5_build_control.py` also reject `ab_authorized` other than false. An
+invalid capture stays published but fails the attempt.
 
 Every record lands in the service-private result root under `zen5/` with the
-stage logs, a `BQ-BUNDLE-V1` index and a final manifest that always says
-`ab-authorized=false` and `aa-decision=not-evaluated`. The recipe enforces its
-profile's `budget-seconds=2700` as a hard deadline on every stage (stage units
-are bound to the outer unit, which is bounded by the broker's 3600-second
-`RuntimeMaxSec`) and refuses to start timing unless `timing-reserve-seconds`
-remain. The dispatch workflow's result wait uses the same 2700 seconds.
+stage logs, a `BQ-BUNDLE-V1` index and a final manifest with per-capture
+`*-capture-status` lines that always says `ab-authorized=false` and
+`aa-decision=not-evaluated`. The worker binds a successful manifest only with
+`stage=complete`, the plan and three capture digests, three `complete`
+statuses and those two lines, so `gateway export` replays it. The recipe
+enforces its profile's `budget-seconds=2700` as a hard deadline on every stage
+and starts no stage past it (stage units are bound to the outer unit, which is
+bounded by the broker's 3600-second `RuntimeMaxSec`), and refuses to start
+timing unless `timing-reserve-seconds` remain. That budget starts inside the
+outer unit, after materialization, so the dispatch workflow waits for the
+broker's 3600 seconds plus its finalization allowance instead.
+
+Host readback (OPUS-LOCAL, 2026-10-01, not a run of this recipe): kernel
+6.18.50-2-lts, perf 7.2.4, microcode 0xb404038, Python 3.14.7, and
+`perf_event_paranoid=2`, under which
+`sudo -u buster-bench-candidate perf stat -e instructions:u,cycles:u -- true`
+counts, so the no-capability PMU design needs no host change. The zen5 tool
+self-tests pass under Python 3.14.0rc2 and 3.13 with DeprecationWarning as an
+error.
 
 Runtime estimate (unverified on the 9700X): a single-core Release `ide` build
-took 261 s on a 2.8 GHz Xeon core, so five builds are at most about 22 min; the
-720 timed children of about 50-60 ms, 21 two-second block gaps and binary
-staging add about 2-3 min, and the PMU phase and oracle well under a minute.
+took 261 s on a 2.8 GHz Xeon core, and a real-build smoke on one Xeon core
+finished in 1319 s, so five builds are at most about 22 min; the 720 timed
+children of about 50-60 ms, 21 two-second block gaps and binary staging add
+about 2-3 min, and the PMU phase and oracle well under a minute.
 
-`./build.sh bench_service_zen5_recipe_self_test` runs every phase with a fake
-build driver, the real capture runner and the real PMU tool (with perf and
-taskset stand-ins), then replays the result with the landed readers and the
-handoff consumer, and covers plan tampering, a pinned-tool mismatch, a missing
-tree identity, two different sources and an exhausted timing reserve. The
-service self-test validates the kept result tree with the worker's exhaustive
-bundle validator. Before the recipe can be served, the broker must implement
-the stage contract in the header of `zen5_recipe.c` (including
-`perf_event_open` for the PMU stage), the worker must enumerate and clean its
-stage units and bind its manifest, and the operator must install the profile.
+**Trust.** A zen5 revision must be as trusted as a smoke base. Every stage
+unit is denied the service and broker control sockets, but the build stages
+still run the revision's CMake as the service account with write access to
+their roots, so the candidate account of the oracle, PMU and captures does not
+protect trusted outputs from the revision itself.
+
+The broker stage contract is `zen5_stage.h`: thirteen typed stages
+(`deploy/SYSTEMD_BROKER.md`). The builds run as the service account with only
+their configured root writable; the oracle, PMU and captures run as the
+candidate account with one staging directory writable; the PMU stage alone
+may call `perf_event_open`, with no capability and no host setting change.
+
+`./build.sh bench_service_zen5_recipe_self_test` runs every phase with the
+same stage argv as plain children, a fake build driver, the real capture
+runner and the real PMU tool (with perf and taskset stand-ins and snapshot
+modules that would shadow its standard library), then replays the result with
+the landed readers and the handoff consumer. It also covers plan tampering, a
+pinned-tool mismatch, a missing and an unlisted tree identity, two different
+sources, an exhausted timing reserve, a frozen binary changed before the
+oracle, before the captures stage and after it, and a stage that overruns the
+deadline. It honors `TMPDIR`. Host eligibility is exact: a Linux x86-64
+build, an x86 `/proc/cpuinfo` and python3 at `/usr/bin` or `/usr/local/bin`. An
+eligible host must run and pass every case (zero cases fail); any other host
+prints `result=skipped-ineligible-host reason=...` and exits 4, which the
+service self-test's bridge accepts only when it also finds the host
+ineligible. The service self-test binds the kept result tree through the
+worker's finalization, exports it with the server's snapshot and replays it
+with the client unpack. Nothing here has run on the physical 9700X.
 
 ## Local authenticated service
 
@@ -974,8 +1037,8 @@ suppress global sequence, occupancy and reconciliation fields.
 
 The service retries a queued admitted service request on each bounded idle
 tick and runs the existing supervisor with that fixed configuration. At
-present, the only such request is `validate-buster-v1`; the blocked retirement
-identity and the held `zen5-calibration-v1` recipe cannot enter the queue. A queued real request therefore follows the
+present, the served requests are `validate-buster-v1` and
+`zen5-calibration-v1`; the blocked retirement identity cannot enter the queue. A queued real request therefore follows the
 same lease-before-materialization and
 cleanup/recovery path as the local worker command, including progress after a
 temporary `BQ_BUSY` lease result without another client frame. The synchronous
@@ -1154,7 +1217,7 @@ status/result response at the top-level error field.
 | --- | --- |
 | Durable bounded single-writer journal | `bq_open`, `bq_append`, `bq_replay`; competing handles, real short writes, sync/ack faults |
 | Bounded framing, sequence, checksums | Canonical encoding; every partial final-frame prefix; header/payload corruption; duplicate sequence; oversized lengths; checksum-valid illegal transitions |
-| Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion |
+| Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion, including a 64-job old-cap journal reopened and extended by a full window |
 | Explicit active ownership | Persisted fake reservation token; stale-token rejection; one-active through cancellation/cleaning; restart at every phase |
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
 | Bounded CLI/control operations | Same dispatcher for CLI, pipe and authenticated socket frames; truncation/version/length/numeric validation; bounded journal-event pagination |

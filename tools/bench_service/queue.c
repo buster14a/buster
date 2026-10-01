@@ -47,10 +47,8 @@ BUSTER_CT_CHECK(sizeof(bq_validate_buster_profile) - 1 <= BQ_RECIPE_PROFILE_CAP)
  * installed service (main.c), which has no override. */
 BUSTER_GLOBAL_LOCAL String8 bq_retirement_profile_test_override;
 #endif
-/* Held (#426): a real executable profile whose stages the systemd broker
- * cannot start yet. It is neither admitted nor served, so every submission,
- * gateway, materialization, worker-unit and export path refuses it; the
- * capabilities text is unchanged (it has no room for another name). */
+/* Served (#426): the systemd broker's version-2 recipe selector starts its
+ * outer unit and the thirteen typed stages of zen5_stage.h. */
 BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
 BUSTER_CT_CHECK(sizeof(bq_zen5_calibration_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
 
@@ -270,22 +268,21 @@ bool bq_recipe_retirement_admitted(void)
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
                   (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_recipe_retirement_admitted());
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
                   (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_recipe_retirement_admitted());
     return result;
 }
 
 bool bq_recipe_blocked(BqRecipe recipe)
 {
-    bool result = (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && !bq_recipe_retirement_admitted()) ||
-                  recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && !bq_recipe_retirement_admitted();
     return result;
 }
 
@@ -330,6 +327,9 @@ bool bq_request_valid_admitting(BqRequest const* request, bool retirement_admitt
     bool admitted = selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? retirement_admitted : bq_recipe_admitted(selected);
     bool ok = bq_name(principal, 32) && bq_name(key, 64) && admitted &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
+              /* zen5-calibration-v1 measures one immutable source named twice. */
+              (selected != BQ_RECIPE_ZEN5_CALIBRATION ||
+               (base.length == 40 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
 }

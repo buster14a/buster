@@ -60,8 +60,9 @@ registered it; the readback can then come too early.
 
 The typed request (version 2) carries a recipe selector and a runtime limit
 in microseconds; `systemd_runtime.h` holds the shared bounds and parser. Smoke
-requests (`start-outer` and the five smoke stages) and every signal carry
-neither, and their units keep `RuntimeMaxSec=3600000000us` byte for byte. The
+requests (`start-outer` and the five smoke stages), zen5 requests (see
+below) and every signal carry neither, and their units keep
+`RuntimeMaxSec=3600000000us` byte for byte. The
 retirement outer unit is started with
 
 ```text
@@ -91,15 +92,16 @@ self-test covers command construction and readback parsing only.
 
 **Upgrade together.** Version 2 changes the request frame for every
 operation, smoke included (176 to 184 bytes), and the broker accepts only
-exactly its own version. Install the service and the broker from the same
-reviewed revision in one step, with dispatch disabled and no live outer or
+exactly its own version. Install the service, the broker and the credential
+gate from the same reviewed revision in one step, with dispatch disabled and no live outer or
 stage unit. A mixed pair refuses every start and signal, including cleanup
 signals for units the older pair started, so drain first; do not upgrade
 around a quarantined job.
 
-Every stage unit, smoke and retirement alike, also lists
+Every stage unit, smoke, retirement and zen5 alike, also lists
 `/var/lib/buster-bench/workspaces/results/.lease-return` in
-`InaccessiblePaths`. That directory holds each outer unit's lease-keeper socket
+`InaccessiblePaths`, followed by the two control socket directories (see the
+zen5 section). That directory holds each outer unit's lease-keeper socket
 (see the service README), which the keeper creates before the recipe can start
 any stage; a stage running as `buster-bench` therefore cannot reach it and
 obtain the lease description.
@@ -155,7 +157,8 @@ sandbox includes `NoNewPrivileges=yes`, `ProtectSystem=strict`,
 `MemoryDenyWriteExecute=yes`, `RestrictSUIDSGID=yes`, empty capability sets,
 `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX` and the
 `@system-service` system-call filter. `InaccessiblePaths` covers the queue,
-the lease, the attempt's result directory and the lease-keeper directory. Baseline stages have
+the lease, the attempt's result directory, the lease-keeper directory and
+both control socket directories. Baseline stages have
 `ReadOnlyPaths=<attempt>/base/source <attempt>/candidate/source`. Candidate
 stages have `ReadOnlyPaths=<attempt>/base/source <attempt>/base/build
 <attempt>/candidate/source`. The only differences from the smoke stages are
@@ -199,6 +202,59 @@ credentials, the build driver and the verb. Its runtime limit may be the smoke
 hour or a bounded retirement value. No pre-gate legacy form exists
 for these units, so a direct `ExecStart` of the driver is refused. Any other
 retirement-like name is not a unit name the broker recognizes.
+
+### Recipe selector and zen5-calibration-v1 stages (#426)
+
+The typed request is version 2, in the #923 layout: the former `reserved`
+word is a recipe selector (`0` smoke, `1` retirement, `2` zen5) and a
+`runtime_max_usec` word follows the attempt (176 to 184 bytes). A zen5 request
+requires a zero runtime word (its units keep the fixed
+`RuntimeMaxSec=3600000000us`), signals carry selector and runtime `0`, and
+each start's selector must own its stage: stages 1..5 only smoke, 6..9 only
+retirement, 16..28 only zen5; 10..15 are unassigned and refused. The zen5
+outer unit is started with
+
+```text
+start-zen5-outer <job> <attempt> <revision> <revision>
+```
+
+which requires the two revisions to be equal and runs `worker-unit` with the
+`zen5-calibration-v1` recipe name. Its stages use the existing
+`start-stage <job> <attempt> <stage> <revision> <revision>` verb with one of
+the thirteen names of `zen5_stage.h` (broker and gate stage numbers 16 to 28):
+`zen5-<id>-generate` and `zen5-<id>-build` for `immutable`, `same-root-A`,
+`same-root-B`, `cross-root-A` and `cross-root-B`, then `zen5-oracle`,
+`zen5-pmu` and `zen5-captures`. The broker builds each argv, working directory
+and path grant from that header, which the recipe and the credential gate
+share:
+
+- the ten build stages run as `buster-bench` with the fixed build driver's
+  Release `generate` or `build`; only their configured root under
+  `ATTEMPT/zen5/builds/` is writable, and the trusted driver creates it first;
+- `zen5-oracle` and `zen5-captures` run the build driver's
+  `bench_service_zen5_capture` as `buster-bench-candidate`, writing only
+  `ATTEMPT/zen5/staging/oracle` or `ATTEMPT/zen5/staging/captures`;
+- `zen5-pmu` runs `/usr/bin/python3 -B -E -s` on the driver-owned pinned copy
+  in `ATTEMPT/zen5/pmu-tool` as the candidate account, writing only
+  `ATTEMPT/zen5/staging/pmu`. Its seccomp allow-list alone adds
+  `perf_event_open`. No capability is granted and no host setting changes:
+  the host's `perf_event_paranoid` decides, and a refused counter is recorded
+  as `invalid`, never zero.
+
+Every zen5 stage reads `ATTEMPT/base/source` and `ATTEMPT/zen5` read-only and
+cannot reach the queue, lease, result root or lease-keeper directory. Every
+stage unit, smoke, retirement and zen5 alike, also lists `/run/buster-bench`
+and `/run/buster-bench-systemd-broker` in `InaccessiblePaths`: both control sockets authenticate only by peer
+uid/gid, and a stage runs revision-controlled code. The broker does not yet
+tie a stage request's selector to the live outer unit's recipe; with the
+sockets out of reach, only the trusted outer unit can make such a request.
+A zen5 revision must still be as trusted as a smoke base, because the build
+stages run its CMake as `buster-bench` with write access to their roots. The credential gate admits
+exactly each stage's program and first argument. `systemd-run --wait` returns
+only after the stage unit is inactive, so no stage process remains when the
+driver reads staging. The worker's cleanup enumerates all twenty-two stage
+names (five smoke, four retirement, thirteen zen5). The upgrade rule of the
+runtime section above applies.
 
 The template retains root UID with empty capability sets. Its primary group
 is `buster-bench` and its supplementary group is `buster-bench-candidate`.

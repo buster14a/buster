@@ -55,6 +55,8 @@
  */
 #include "worker_linux.h"
 #include "phase_channel.h"
+#include "retirement_stage.h"
+#include "zen5_stage.h"
 
 #ifdef __linux__
 #include <dirent.h>
@@ -214,23 +216,26 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_runtime(String8 profile, String
 }
 
 /* The typed broker argv for the outer unit. Smoke keeps start-outer and its
- * six values; retirement adds its derived limit in decimal microseconds,
- * which the broker bounds again (systemd_broker.c, bq_broker_cli). */
+ * six values; zen5 selects the broker's zen5 recipe with the same six under
+ * BQ_ZEN5_STAGE_OUTER_VERB; retirement adds its derived limit in decimal
+ * microseconds, which the broker bounds again (systemd_broker.c,
+ * bq_broker_cli). */
 BUSTER_GLOBAL_LOCAL bool bq_worker_outer_arguments(BqRecipe recipe, u64 runtime_usec, char const* job_id,
                                                    char const* attempt_token, char const* base,
                                                    char const* candidate, char runtime_text[32],
                                                    char const* arguments[8], u32* count)
 {
     bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    bool zen5 = recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     int length = retirement ? snprintf(runtime_text, 32, "%" PRIu64, (uint64_t)runtime_usec) : 0;
     bool ok = job_id && attempt_token && base && candidate && count &&
-              (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+              (recipe == BQ_RECIPE_VALIDATE_BUSTER || zen5 ||
                (retirement && bq_systemd_retirement_runtime_valid(runtime_usec) && length > 0 && length < 32));
     for (u32 index = 0; index < 8; index += 1) arguments[index] = NULL;
     if (ok)
     {
         arguments[0] = BQ_SYSTEMD_BROKER;
-        arguments[1] = retirement ? BQ_SYSTEMD_RETIREMENT_OUTER_VERB : "start-outer";
+        arguments[1] = retirement ? BQ_SYSTEMD_RETIREMENT_OUTER_VERB : zen5 ? BQ_ZEN5_STAGE_OUTER_VERB : "start-outer";
         arguments[2] = job_id;
         arguments[3] = attempt_token;
         arguments[4] = base;
@@ -2135,10 +2140,12 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_recipe(BqJob const* job, BqWorke
 }
 
 /* bq_worker_run's launch gate on the recipe the finalization bound: the
- * smoke recipe, or the retirement recipe under the same completeness gate. */
+ * smoke or zen5 recipe, or the retirement recipe under the same completeness
+ * gate. */
 BUSTER_GLOBAL_LOCAL bool bq_worker_recipe_launchable(BqWorkerFinalization const* finalization)
 {
     bool launchable = finalization && (!strcmp(finalization->recipe.name, "validate-buster-v1") ||
+                      !strcmp(finalization->recipe.name, BQ_ZEN5_STAGE_RECIPE) ||
                       (!strcmp(finalization->recipe.name, "native-retirement-performance-v1") &&
                        bq_worker_recipe_service(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, finalization)));
     return launchable;
@@ -3157,25 +3164,47 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate_smoke(BqWorkerConfig const
     if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
     if (error == BQ_OK)
     {
+        /* Both served recipes bind the job, attempt, roots, revisions and
+         * bundle. validate-buster-v1 finishes at its throughput stage with
+         * both binaries; zen5-calibration-v1 finishes complete with its plan,
+         * three complete capture records and an unauthorized A/B decision. */
         bytes[used] = 0;
+        bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+        char const* text = (char const*)bytes;
         char prefix[BQ_RECIPE_NAME_CAP + 96];
         int prefix_length = snprintf(prefix, sizeof(prefix),
-                                     "schema=1\nrecipe=%s\nstatus=succeeded\nstage=throughput\nprocess-result=success\n",
-                                     finalization->recipe.name);
+                                     "schema=1\nrecipe=%s\nstatus=succeeded\nstage=%s\nprocess-result=success\n",
+                                     finalization->recipe.name, zen5 ? "complete" : "throughput");
         bool lines = prefix_length > 0 && (u32)prefix_length < sizeof(prefix) && used >= (u32)prefix_length &&
                      !memcmp(bytes, prefix, (u32)prefix_length) &&
-                     bq_worker_result_line((char const*)bytes, job_line) && bq_worker_result_line((char const*)bytes, token_line) &&
-                     bq_worker_result_line((char const*)bytes, workspace_line) && bq_worker_result_line((char const*)bytes, result_line) &&
-                     bq_worker_result_line((char const*)bytes, base_line) && bq_worker_result_line((char const*)bytes, candidate_line) &&
-                     bq_worker_result_line((char const*)bytes, base_binary_line) &&
-                     bq_worker_result_line((char const*)bytes, candidate_binary_line) &&
-                     bq_worker_result_line((char const*)bytes, "driver=/usr/local/libexec/buster-bench-build") &&
-                     bq_worker_result_line((char const*)bytes, "throughput=/usr/local/libexec/buster-bench-throughput") &&
-                     bq_worker_result_line((char const*)bytes, "trusted-source-scope=operator-installed-read-only") &&
-                     bq_worker_result_line((char const*)bytes, "namespace-policy=private-workspace-post-run-identity") &&
-                     bq_worker_result_digest_line((char const*)bytes, "base-binary-sha256=", base_digest) &&
-                     bq_worker_result_digest_line((char const*)bytes, "candidate-binary-sha256=", candidate_digest) &&
-                     bq_worker_result_digest_line((char const*)bytes, "bundle-sha256=", bundle_digest);
+                     bq_worker_result_line(text, job_line) && bq_worker_result_line(text, token_line) &&
+                     bq_worker_result_line(text, workspace_line) && bq_worker_result_line(text, result_line) &&
+                     bq_worker_result_line(text, base_line) && bq_worker_result_line(text, candidate_line) &&
+                     bq_worker_result_digest_line(text, "bundle-sha256=", bundle_digest);
+        if (lines && zen5)
+        {
+            char plan_digest[SHA256_HEX_CAPACITY], capture_digest[SHA256_HEX_CAPACITY];
+            lines = bq_worker_result_digest_line(text, "plan-sha256=", plan_digest) &&
+                    bq_worker_result_digest_line(text, "immutable-capture-sha256=", capture_digest) &&
+                    bq_worker_result_digest_line(text, "same-root-rebuild-capture-sha256=", capture_digest) &&
+                    bq_worker_result_digest_line(text, "cross-root-capture-sha256=", capture_digest) &&
+                    bq_worker_result_line(text, "immutable-capture-status=complete") &&
+                    bq_worker_result_line(text, "same-root-rebuild-capture-status=complete") &&
+                    bq_worker_result_line(text, "cross-root-capture-status=complete") &&
+                    bq_worker_result_line(text, "ab-authorized=false") &&
+                    bq_worker_result_line(text, "aa-decision=not-evaluated") &&
+                    !strstr(text, "\nab-authorized=true");
+        }
+        else if (lines)
+        {
+            lines = bq_worker_result_line(text, base_binary_line) && bq_worker_result_line(text, candidate_binary_line) &&
+                    bq_worker_result_line(text, "driver=/usr/local/libexec/buster-bench-build") &&
+                    bq_worker_result_line(text, "throughput=/usr/local/libexec/buster-bench-throughput") &&
+                    bq_worker_result_line(text, "trusted-source-scope=operator-installed-read-only") &&
+                    bq_worker_result_line(text, "namespace-policy=private-workspace-post-run-identity") &&
+                    bq_worker_result_digest_line(text, "base-binary-sha256=", base_digest) &&
+                    bq_worker_result_digest_line(text, "candidate-binary-sha256=", candidate_digest);
+        }
         error = lines ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
     if (error == BQ_OK && memchr(bytes, 0, used) != NULL) error = BQ_CONFIGURATION_MISMATCH;
@@ -3970,13 +3999,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
                 ok = finalization->config &&
                      bq_worker_result_validate(finalization->config, job, finalization) == BQ_OK;
             }
+            /* A failure names a stage of its own recipe (zen5: its phases). */
+            bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+            char const* validate_stages[] = {"stage=base-generate", "stage=base-build", "stage=candidate-generate",
+                                             "stage=candidate-build", "stage=throughput"};
+            char const* zen5_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=oracle",
+                                         "stage=pmu", "stage=plan", "stage=captures"};
             bool stage = bq_worker_result_line(manifest_body, "stage=prepare") ||
-                         bq_worker_result_line(manifest_body, "stage=base-generate") ||
-                         bq_worker_result_line(manifest_body, "stage=base-build") ||
-                         bq_worker_result_line(manifest_body, "stage=candidate-generate") ||
-                         bq_worker_result_line(manifest_body, "stage=candidate-build") ||
-                         bq_worker_result_line(manifest_body, "stage=throughput") ||
                          bq_worker_result_line(manifest_body, "stage=worker");
+            for (u32 index = 0; !zen5 && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
+                stage = stage || bq_worker_result_line(manifest_body, validate_stages[index]);
+            for (u32 index = 0; zen5 && index < BUSTER_ARRAY_LENGTH(zen5_stages); index += 1)
+                stage = stage || bq_worker_result_line(manifest_body, zen5_stages[index]);
             bool status = bq_worker_result_line(manifest_body, "status=failed") ||
                           bq_worker_result_line(manifest_body, "status=cancelled") ||
                           bq_worker_result_line(manifest_body, "status=interrupted");
@@ -4996,8 +5030,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
                                                      BqWorkerBackend* backend,
                                                      BqWorkerObserved const* parent)
 {
+    /* Every typed stage unit the broker can start under this outer unit:
+     * the validation recipe's five, retirement_stage.h's four and
+     * zen5_stage.h's thirteen. */
     char const* stages[] = {"base-generate", "base-build", "candidate-generate",
-                            "candidate-build", "throughput"};
+                            "candidate-build", "throughput", BQ_RETIREMENT_STAGE_NAMES, BQ_ZEN5_STAGE_NAMES};
     BqError error = BQ_OK;
     for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(stages); index += 1)
     {

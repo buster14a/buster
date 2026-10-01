@@ -257,12 +257,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_identity(void)
     /* Capabilities v2 stays byte for byte what the dispatch workflow greps. */
 #ifdef __linux__
     static char const expected[] =
-        "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
-        "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
+        "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
+        "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1 "
         "blocked-recipes=native-retirement-performance-v1\n"
-        "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
+        "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
         "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
-        "retirement=blocked export=1 transport=unix-seqpacket authentication=peer-uid-gid\n"
+        "export=1 transport=unix-seqpacket authentication=peer-uid-gid\n"
         "storage=private-local-posix-directory\n";
     BQ_CHECK(sizeof(expected) == sizeof(bq_capabilities_v2) && !memcmp(expected, bq_capabilities_v2, sizeof(expected)));
     BQ_CHECK(bq_transport_public_operation(BQ_OP_RECIPE_IDENTITY) == BQ_OK);

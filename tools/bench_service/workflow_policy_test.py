@@ -31,15 +31,13 @@ BROKER_RUNTIME = SERVICE / "systemd_runtime.h"
 RECIPE_TEST = SERVICE / "dispatch_recipe_test.py"
 
 # The reviewed dispatch allowlist (#2071): recipe -> service runtime budget in
-# seconds. validate-buster-v1 has no budget of its own, so it waits for the
-# broker's fixed RuntimeMaxSec. zen5-calibration-v1 enforces the budget-seconds
-# pinned in its installed profile (zen5_recipe.c stops every stage at that
-# deadline and the stage units are bound to the outer unit), so its wait is
-# that budget, which must not exceed RuntimeMaxSec. A shorter wait than a
-# recipe's enforced budget would give up on a job the service still runs. The
-# installed service still refuses any recipe its compiled registry does not
-# serve (zen5-calibration-v1 is held there until the broker carries its stages).
-REVIEWED_RECIPES = (("validate-buster-v1", 3600), ("zen5-calibration-v1", 2700))
+# seconds. Both recipes wait for the broker's fixed RuntimeMaxSec, which bounds
+# the outer unit from its start. zen5-calibration-v1 also enforces the
+# budget-seconds pinned in its installed profile (zen5_recipe.c stops every
+# stage at that deadline), but that clock starts after materialization inside
+# the unit, so the profile budget must fit within RuntimeMaxSec and the wait
+# must not be the shorter profile budget (#2090 review S1).
+REVIEWED_RECIPES = (("validate-buster-v1", 3600), ("zen5-calibration-v1", 3600))
 ZEN5_PROFILE = SERVICE / "profiles" / "zen5-calibration-v1.recipe"
 FINALIZATION_ALLOWANCE = 600
 JOB_MARGIN = 300
@@ -483,11 +481,10 @@ def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) 
         profile = ZEN5_PROFILE.read_text(encoding="utf-8") if ZEN5_PROFILE.is_file() else ""
         enforced = re.findall(r"(?m)^budget-seconds=([1-9][0-9]*)$", profile)
         for name, budget in REVIEWED_RECIPES:
-            if name == "zen5-calibration-v1":
-                if len(enforced) != 1 or budget != int(enforced[0]) or budget > broker_seconds:
-                    errors.append(f"{name} budget must equal its profile budget-seconds and fit RuntimeMaxSec")
-            elif budget != broker_seconds:
+            if budget != broker_seconds:
                 errors.append(f"{name} budget must equal the broker RuntimeMaxSec")
+            if name == "zen5-calibration-v1" and (len(enforced) != 1 or int(enforced[0]) >= broker_seconds):
+                errors.append(f"{name} profile budget-seconds must fit inside RuntimeMaxSec")
 
     refusal = (
             '            echo \'BENCH_DISPATCH_RECIPE_NOT_INSTALLED the installed service does not serve this recipe\' >&2',

@@ -429,6 +429,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
     BQ_CHECK(bq_worker_outer_arguments(BQ_RECIPE_VALIDATE_BUSTER, BQ_SYSTEMD_SMOKE_RUNTIME_USEC, "1", "2", base,
                                        candidate, runtime_text, arguments, &count) && count == 6 &&
              !strcmp(arguments[1], "start-outer") && arguments[6] == NULL);
+    BQ_CHECK(bq_worker_outer_arguments(BQ_RECIPE_ZEN5_CALIBRATION, BQ_SYSTEMD_SMOKE_RUNTIME_USEC, "1", "2", base,
+                                       base, runtime_text, arguments, &count) && count == 6 &&
+             !strcmp(arguments[1], BQ_ZEN5_STAGE_OUTER_VERB) && !strcmp(arguments[1], "start-zen5-outer") &&
+             !strcmp(arguments[4], base) && !strcmp(arguments[5], base) && arguments[6] == NULL);
     u64 const refused_limits[] = {0, UINT64_C(59000000), UINT64_C(8640000001),
                                   BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC + BQ_SYSTEMD_USEC_PER_SECOND, UINT64_MAX};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_limits); index += 1)
