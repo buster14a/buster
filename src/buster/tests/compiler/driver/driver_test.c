@@ -2558,6 +2558,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_void_function_pointer_ro
             }
         }
     }
+#else
+    (void)arguments;
 #endif
     return result;
 }
