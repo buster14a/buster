@@ -141,6 +141,18 @@ results belong on #2179 and its component/application PRs. Physical desktop
 interaction and other platform/backend graphical gates remain unexecuted unless
 separately recorded.
 
+The first complete hosted slice passed all four native configurations in
+[run 36936514171](https://github.com/buster14a/buster/actions/runs/36936514171),
+head `0dc876f37ff25a037bfa63eff247ce7f23c9680f`, actual merge source
+`47cac4b4120b1812fc3d5aab6ec97b688f78ba25`: Clang Debug/split, Clang
+Release/unity, sanitized Clang Debug/split and GCC Release/split. Each passed
+70/70 real-worker ownership assertions, state tests with zero failures,
+the native browser input/readback/joined-shutdown gate, and the separate raster
+CPU/native/unavailable-display gates (99/99, 180/180 and 1/1). Release/unity
+also compiled the tests-OFF production target and checked its CLI. This is
+software XCB evidence under Xvfb; subsequent exact-head and merge-group
+validation is recorded on [the application PR](https://github.com/buster14a/buster/pull/2213).
+
 ## Provenance and licenses
 
 All new implementation and pattern assets are project-authored. The encoded
