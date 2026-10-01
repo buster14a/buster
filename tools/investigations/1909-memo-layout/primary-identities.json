@@ -1,0 +1,19 @@
+{
+  "source_commit": "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+  "source_tree": "8810c6603e47e5eecf26e1d73633619a347c70d8",
+  "original_sources": {
+    "src/buster/lib/compiler/frontend/c/c_parse.c": "9f65229d902318ceb3ee5d32900232365285e95154a2e5835c4f5c98ce8161b0",
+    "src/buster/lib/compiler/frontend/c/c_internal.h": "5368d5beb3de00bf310bb389095577479927fedcbee48f088818e6a394c39271"
+  },
+  "baseline_binary": "1b91a8e088380d07222053787b0055fbd2b31c577b23c4cf240c6944eae65cbb",
+  "observer_sources": {
+    "src/buster/lib/compiler/frontend/c/c_parse.c": "f7a19835cbac82a3bd96762754b9debc8ceac03106ec961055ddb16a1ead2d82",
+    "src/buster/lib/compiler/frontend/c/c_internal.h": "5368d5beb3de00bf310bb389095577479927fedcbee48f088818e6a394c39271"
+  },
+  "observer_binary": "c83eb974eb2c24f8bb4e0e8cccc71d024e27b61c792f711aa693c5fedb4859b6",
+  "candidate_sources": {
+    "src/buster/lib/compiler/frontend/c/c_parse.c": "6ebef5e20578e4b11ab37af311286157c3c1540ee8c3df072dab82301ff0e5fc",
+    "src/buster/lib/compiler/frontend/c/c_internal.h": "f07cfb1fcbd0b3c5e8ca1cf209da11a057f4ad4b0e3f3e927b5ea61ba427b8d5"
+  },
+  "candidate_binary": "745827dd29861f00cbc81158d64826545e79da666b7b23d395d92f85b5ce71c3"
+}

@@ -57,10 +57,14 @@ WORKFLOW_TOOLS_STEP = "Workflow tool regression tests"
 WORKFLOW_TOOLS_BUDGET_SECONDS = {
     "Linux x86-64 release": 2 * 60,
     "Linux AArch64 release": 2 * 60,
-    "macOS x86-64 release": 5 * 60,
     "macOS AArch64 release": 5 * 60,
     "Windows x86-64 release": 5 * 60,
     "Windows AArch64 release": 5 * 60,
+}
+# Old workflow revisions can still finish after the Apple CI policy changes.
+# Preserve their deadline and the #1866 incident replay outside the live matrix.
+HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS = {
+    "macOS x86-64 release": 5 * 60,
 }
 STEP_DEADLINE_GRACE_SECONDS = 10 * 60
 # Passes keep no state, so normal cancellation gets this long, inside the pass
@@ -332,7 +336,8 @@ def step_deadline_candidates(run, jobs, now):
         # A finished run's stale step metadata is never cancellation authority.
         jobs = []
     for job in jobs:
-        budget = WORKFLOW_TOOLS_BUDGET_SECONDS.get(job.get("name"))
+        budget = WORKFLOW_TOOLS_BUDGET_SECONDS.get(
+            job.get("name"), HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS.get(job.get("name")))
         steps = job.get("steps")
         if budget is None or job.get("status") != "in_progress" or not isinstance(steps, list):
             continue
@@ -492,7 +497,9 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
         if status == "completed":
             if conclusion is None:
                 raise ValueError("Completed CI job has no conclusion.")
-            if conclusion != "success":
+            # A job whose `if:` excludes merge groups (Main CI reuse decision,
+            # #1808) completes as skipped; CI complete still requires every shard.
+            if conclusion not in ("success", "skipped"):
                 failed.append(job.get("name", "unnamed"))
         elif conclusion is not None:
             raise ValueError("Incomplete CI job already has a conclusion.")

@@ -2,6 +2,16 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
+
+Canonical fallback identity casts of structs and unions copy the complete
+resolved layout between value frame homes on x86-64 and AArch64. The frontend
+keeps these casts on aggregate comma results to preserve their non-lvalue
+semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
+returns, partial eightbytes and tail fields with canonical FAST disabled,
+both frontend forms and all four allocators; desktop lanes execute the native
+fixture as well as compiling both architectures.
+
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
@@ -182,6 +192,13 @@
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- FAST/QUALITY never store a recreatable value. A single-definition constant
+  reloads as `MACHINE_EDIT_REMATERIALIZE` of its immediate, and a non-mutable
+  value whose only definition is the target's `frame_address_opcode` row reloads
+  as `MACHINE_EDIT_REMATERIALIZE_FRAME`, naming the value; both encoders replay
+  the defining row's slot address (`machine_x64_emit_exact_frame_address`,
+  `machine_a64_emit_frame_address`). This is sound because a slot whose address
+  a row takes keeps its own storage for the whole function.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
@@ -289,12 +306,16 @@
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
-  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
-  independent parts; an orphan SSEUP becomes SSE. Canonical classification
-  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
-  with explicit XMM definition/use operands for whole-register argument
-  transfers and the existing XMM0 result bridges. Variadic prologues save
-  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  sixteen-byte VECTOR ABI part. Android IEEE binary128 scalar values and
+  one-member wrappers use the same XMM contract. Union merging can split that
+  pair into two independent parts; an orphan SSEUP becomes SSE. Canonical
+  classification publishes no FLOAT_UP parts. MIR keeps these values in frame
+  slots, with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. `machine_x64_type_is_f128`
+  admits only Android's exact sixteen-byte scalar layout; constants write both
+  limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
+  copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
+  each VECTOR read consumes one FP cursor slot.
   The shared direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
@@ -530,7 +551,8 @@
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
-  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
+  Binary128 arithmetic and rounding conversions are frontend runtime calls;
+  see the wide-float frontend guide.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
@@ -777,7 +799,8 @@
   links here. An instruction shape the relaxation does not recognize fails the
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
+  sequence too (`link_elf_relax_local_dynamic`).
 
 ## Wide integer conversion rounding
 

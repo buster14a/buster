@@ -112,14 +112,38 @@ archive`, reject symlinks, and compile the reference wholly inside that frozen
 tree. A complete byte-identical driver closure records `selection=skip` and
 `reason=unchanged-driver-closure`; a changed closure selects comparison, and any
 incomplete or unprovable provenance selects comparison conservatively with
-`reason=provenance-uncertain`. Merge groups, distinct unclassified events, and
-same-revision events outside the narrow skip policy also compare. A manual
+`reason=provenance-uncertain`. A merge group at the exact same revision may record `selection=skip` and
+`reason=same-driver-merge-group` only with complete dependency/policy provenance
+and byte-identical manifests binding one shared candidate executable. The V2
+manifest binds that executable's SHA-256, Clang's resolved path, binary and
+version hashes, the actual bootstrap command, the absolute build/output paths,
+and a hash of compiler/driver environment inputs. `bootstrap` executes the
+recorded compile profile itself and checks Clang identity before and after the
+compile; `manifest --driver` independently reconstructs it before analysis.
+Environment values are not retained: compiler/search/locale keys and `BUSTER_*`
+inputs are hashed, excluding unrelated runner metadata and credentials.
+
+This is an explicit A/A policy: both selected roles use the exact same retained
+executable in the candidate checkout, on the same authoritative database and
+analyzer command projection. It does not infer equivalence of two separately
+compiled executables, their build roots, or two complete provenance manifests.
+The reference is not compiled or run; its manifest is an explicit alias of the
+candidate manifest. Full candidate execution and independent aggregation are
+still mandatory, and no reference success or `ANALYZE_BASELINE` is fabricated.
+Unknown context, incomplete provenance, mismatched commands/toolchains/paths,
+distinct merge-group revisions, distinct unclassified events, and same-revision
+events outside this narrow policy keep comparison. A manual
 workflow dispatch with `analyzer_comparison=true` always selects comparison and
-records `reason=requested`.
+records `reason=requested`. Both workflow steps ask
+`tools/analyzer_reference.py materialization` whether the reference must be
+materialized; both the same-revision and proven same-driver rules are shared
+with `select`. The campaign first reconstructs its candidate manifest, then
+recomputes materialization from that fresh proof; bootstrap exports cannot steer
+the verifier.
 
 Immediately before analysis, the campaign re-resolves both revisions, regenerates
 both manifests from the retained dependency files and materialized trees, and
-requires their bytes, the versioned V2 selection record, and all exported fields
+requires their bytes, the versioned V3 selection record, and all exported fields
 to agree exactly. Missing, extra, malformed, tampered, stale, NUL-containing or
 symlinked evidence fails before an analyzer launches. The historical source tree
 is removed after this revalidation so it is not retained as a large artifact.
@@ -157,6 +181,63 @@ speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
 The initial complete comparison and its measurement limits are recorded in
 [the CI performance audit](performance-audits/2026-09-12T192036Z.md).
+
+`python3 tools/analyzer_selection_test.py -v` exercises both extracted workflow
+steps, proof mismatches, unknown/incomplete proof, wrong events/revisions, forced
+comparison and stale/tampered source, executable, Clang, environment and evidence.
+Rollback is focused: disable `same_driver_skip` in `tools/analyzer_reference.py`;
+both call sites then materialize and compare merge groups again. Revert the PR to
+restore the previous evidence schemas as well. No cache or analysis-scope change
+is involved. Hosted timings must distinguish analyzer execution, total runner
+work and whole-CI completion; removing one measured reference pass does not
+establish an end-to-end speedup while another lane controls completion.
+
+## Opt-in worker-budget qualification
+
+The routine default remains two workers. `--qualify-workers` runs four complete
+candidate-only inventories sequentially in fixed `2,4,4,2` order through the
+ordinary native scheduler. It requires at least four reported host logical CPUs
+and four shards, and refuses `--jobs`, independent worker/prepare/aggregate modes,
+self-tests and a baseline driver. Host logical CPU count is only a preflight;
+affinity, quota, physical topology and memory still need independent inspection.
+
+```sh
+./build.sh clang_analyze build/analyzer-tree --config Release --shards 8 --timeout 600 --quiet --qualify-workers --results build/analyzer-budget
+python3 tools/analyzer_worker_budget.py host build/host-context.json
+```
+
+The result directory contains one fresh manifest, shard reports, diagnostic logs
+and `run.txt` per arm, plus `qualification.txt`. All arms run even after an
+earlier failure; any failed arm or changed database/command inventory fails the
+campaign. The only intended manifest difference is the arm's output directory.
+`children_cpu_us` is the POSIX waited-descendant user+system CPU-time delta,
+including workers and their reaped analyzers; zero means unavailable. It is
+separate from shard wall times and hosted VM occupancy. Neither CPU time nor
+sampled summed RSS proves physical-core availability or physical-memory use.
+
+The manually dispatched `Analyzer worker budget qualification` workflow runs
+two independent `ubuntu-26.04` trials, with one frozen driver and authoritative
+split database per VM. It retains source/tree and binary hashes, Clang identity,
+CPU affinity/topology, cgroup ancestor limits/counters, host memory/pressure,
+all failures and full per-TU evidence. `tools/analyzer_worker_budget.py verify`
+independently checks the selected union, exact commands/deadlines, all shard
+fingerprints and diagnostic checksums across arms. It supports downloaded,
+relocated artifacts and never changes a default or admits a performance result.
+Run `python3 tools/analyzer_worker_budget_test.py -v` after building the native
+driver at `build/analyzer-driver`; `BUSTER_ANALYZER_TEST_DRIVER` overrides that
+path. Native self-tests also exercise complete and failed qualification arms
+on hosts reporting four or more logical CPUs.
+
+#2033's predeclared decision requires at least 10% wall improvement in each
+order-balanced pair on both trials, no more than 5% additional child CPU work,
+identical successful coverage/diagnostics, four CPUs of affinity/quota and
+sampled summed RSS below 25% of the smallest known host/cgroup memory budget,
+with no new OOM/swap pressure. Missing budgets or inconsistent evidence are
+inconclusive. A benefit in analyzer VM occupancy is not a whole-CI speedup;
+compare the other required jobs and report bounded timestamp replays separately.
+Rollback of the experiment removes the opt-in workflow, reader/tests and
+qualification option; the ordinary one-worker reproduction and indivisible
+unity TU keep their existing path.
 
 ## Split-analysis contracts
 
