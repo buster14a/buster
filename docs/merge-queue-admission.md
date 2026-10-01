@@ -139,7 +139,8 @@ predecessor and the six gates. It does almost no verification. The
   Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
   trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
   therefore converge to the same result. One global concurrency group
-  serializes passes; each job has a 10-minute limit and never sleeps.
+  serializes passes; each job has a 10-minute limit and never waits on prerequisites.
+  Only transient GET recovery uses bounded backoff, as described below.
 - **Trust.** The job checks out live `main` and runs only that code. It fetches
   group commits as data and never checks out or executes them. The job has read
   scopes plus `checks: write`, and `CheckWriter` can only create or update a
@@ -207,6 +208,46 @@ workflow keeps #1907's in-job predecessor wait; its runner-held wait remains
 tracked in #1811.
 
 ## Exact identities and fail-closed evidence
+
+### API read recovery and retired groups (#1983)
+
+Both admission clients use `github_read_json` from the already trusted
+`native_retirement_integration.py`. A GET has at most four attempts within a
+30-second elapsed recovery budget, with 1/2/4-second backoff. The helper retries
+500/502/503/504, 429, connection failures and timeouts. A 403 retries only with
+rate-limit evidence. `Retry-After` (seconds or HTTP date) and rate-limit reset
+timing are respected; a delay outside the remaining budget leaves the read
+unresolved instead of retrying early. Other 4xx and malformed JSON fail closed.
+POST/PATCH publication remains single-attempt. Diagnostics name the operation,
+repository-relative API path, status and attempt count without response bodies
+or credentials.
+
+A queue-ref GET additionally retries a 404 within that budget. Persistent 404
+does not itself prove retirement: a successful `git/matching-refs` read must
+prove that the exact ref is absent or names a different head. A failed,
+malformed or ambiguous confirmation remains unresolved. A successful exact-ref
+read showing replacement also retires only the old head. GitHub owns rebuilding;
+no result is carried into a replacement group.
+
+The reconciler records confirmed retirement as `retired`, publishes no admission
+check for that observation, and continues the sweep. Retired groups alone do
+not fail the maintenance run. An evidence/checks GET returning 404 is likewise
+classified as retired only after a fresh exact-ref confirmation; otherwise it
+remains `retry`. Exhausted native-gate API recovery remains `retry`, rather than
+being converted into a terminal policy rejection by the subprocess caller.
+Actual policy or required-check failures retain their terminal denial.
+
+Legacy `check-group` and `wait-base` terminate a retired group's wait with a
+structured `status=retry`, `reason=group-retired` and exit 75. Exhausted API
+reads use the same non-success exit with `reason=api-read`. An obsolete required
+job is never turned green, and downstream native validation cannot proceed
+from that wait. These old jobs can therefore still appear failed for a group
+GitHub has already removed; the distinction is explicit in the report. The
+reconciler maintenance pass is the route that can finish successfully without
+authorizing the obsolete group.
+
+This is a source-only backwards-compatible authority bootstrap: it changes no
+generated state, support manifest, ruleset, required checks or writer grant.
 
 For a group, both admission workflows check out live `main` as independently
 trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
