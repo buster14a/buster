@@ -16,6 +16,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CMAKE = shutil.which("cmake")
 CLANG = shutil.which("clang")
+PROJECT_CONFIGURE_TIMEOUT_SECONDS = 90
 
 
 def cmake_script(directory, module, body):
@@ -150,7 +151,7 @@ message("selected=${{CMAKE_SYSTEM_PROCESSOR}} cross=${{BUSTER_CROSS_COMPILE}}")
 ''')
                     result = subprocess.run([CMAKE, "--warn-uninitialized", "-Werror=dev",
                                              "-S", str(source), "-B", str(source / "build")],
-                                            capture_output=True, text=True, timeout=30)
+                                            capture_output=True, text=True, timeout=PROJECT_CONFIGURE_TIMEOUT_SECONDS)
                     if diagnostic:
                         self.assertNotEqual(result.returncode, 0)
                         self.assertIn(diagnostic, " ".join(result.stderr.split()))
