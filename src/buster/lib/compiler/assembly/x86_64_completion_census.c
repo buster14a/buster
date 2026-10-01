@@ -1029,16 +1029,24 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool unsized_memory = false;
     bool block_source_topology = buster_x86_metadata_block_memory_source_topology(form, query) ||
                                  buster_x86_metadata_aggregate_memory_source_topology(form, query);
-    bool legacy_memory_source = buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("X87_ALU"));
+    bool legacy_memory_prefix = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
+                                form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
+    bool ordinary_evex_source = form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX &&
+                                !form.apx_flags && !form.amx_flags && !query.attributes.has_mask_register &&
+                                !query.attributes.zeroing && !query.attributes.decorator_flags && !query.attributes.sae &&
+                                query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
+    bool fixed_vector_memory_prefix = form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX || ordinary_evex_source;
+    bool schema_memory_source = legacy_memory_prefix &&
+                                buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("X87_ALU"));
     for (u32 index = 0; index < query.operand_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = query.operands[index];
-        legacy_memory_source |= physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                                (physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX ||
-                                 physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM);
+        schema_memory_source |= physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                ((legacy_memory_prefix && physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX) ||
+                                 ((legacy_memory_prefix || fixed_vector_memory_prefix) &&
+                                  physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM) ||
+                                 (fixed_vector_memory_prefix && physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM));
     }
-    legacy_memory_source &= form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
-                            form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
     if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);
@@ -1150,13 +1158,13 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             operand.memory.source_width = 512;
         }
         else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-                 (legacy_memory_source ||
+                 (schema_memory_source ||
                   (buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) &&
                    (form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY ||
                     form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX ||
                     form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP))) &&
                  metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
-                 (legacy_memory_source ||
+                 (schema_memory_source ||
                   ((metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
                    !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE))))
         {

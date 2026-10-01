@@ -208,10 +208,15 @@ EVEX-only move, compare and round-scale families also retain their selected
 metadata form for layout and emission. Physical memory queries carry encoded
 element width separately from the source tuple qualifier.
 
-The EVEX source migration adds eight five-byte exact census witnesses in each
-dialect (stable form IDs 3092–3099); all other 11,005 records retain their full
-classification, reason, byte count and relocation count. The APX descendant
-retains these results without an additional census outcome change.
+The EVEX migration and VEX schema source-width correction pin 33 additional
+complete census outcomes relative to the repaired legacy parent: Intel exact
+witnesses increase by 23 and AT&T by 17. All previously exact complete tuples
+are preserved. The 11,013 metadata form IDs and stable form hashes stay fixed;
+synthesized source spellings are corrected separately. Four VCMP memory witnesses
+use their published 128/256-bit source widths, and four register witnesses stay
+unchanged. Sixteen independent byte/rejected-source controls cover 64/32-bit
+addresses, including AVX512-enabled targets. Remaining VEX/EVEX encoding variants
+stay strict byte mismatches. The APX descendant retains these census outcomes.
 
 ### Throughput and publication
 
