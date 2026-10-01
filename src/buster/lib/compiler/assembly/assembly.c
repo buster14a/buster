@@ -9256,10 +9256,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_s
     return suffix_selection;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_select_symbolic_push_imm32(BusterX86MetadataPhysicalQuery query,
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_select_symbolic_imm32(BusterX86MetadataPhysicalQuery query,
                                                                             BusterX86MetadataSelectResult* selection)
 {
-    if (selection && selection->status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selection->selected_byte_count < 5)
+    if (selection && selection->status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
         bool has_symbol = false;
         for (u32 index = 0; index < query.operand_count; index += 1)
@@ -9269,6 +9269,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_select_symbolic_push_imm32(Buster
         }
         if (has_symbol)
         {
+            BusterX86MetadataForm selected_form = {0};
+            if (!buster_x86_metadata_form(selection->form_id, &selected_form) || selected_form.immediate_width >= 4)
+                return false;
             BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(query.mnemonic);
             for (u32 position = 0; position < candidates.count; position += 1)
             {
@@ -9290,7 +9293,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_select_symbolic_push_imm32(Buster
                         .relocations = relocations,
                         .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
                     });
-                if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == 5)
+                if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 1 &&
+                    relocations[0].width == 4)
                 {
                     selection->form_id = form_id;
                     selection->stable_hash = emitted.stable_hash;
@@ -10381,8 +10385,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
     }
     AssemblyInstructionInfo mnemonic_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
-    bool is_push_mnemonic = assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info) &&
-                            mnemonic_info.opcode == ASSEMBLY_OPCODE_X86_PUSH;
+    assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info);
     AssemblyOpcode source_opcode = mnemonic_info.opcode != ASSEMBLY_OPCODE_COUNT ? mnemonic_info.opcode : mnemonic_suffix_info.opcode;
     bool duplicate_pop2_destination = source_opcode == ASSEMBLY_OPCODE_X86_APX_POP2 && operand_count == 2 &&
                                      physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
@@ -10416,17 +10419,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
     }
-    // An unresolved PUSH immediate cannot be proven to fit the short form.
-    // Reserve the architectural sign-extended imm32 relocation so linking a
-    // normal symbol address does not depend on it happening to fit in 8 bits.
-    if (is_push_mnemonic)
+    // An unresolved immediate cannot be proven to fit a short form. Reserve
+    // an imm32 field so linking an ordinary symbol does not depend on it
+    // happening to fit in 8 bits; form semantics still decide 32 versus 32S.
+    for (u32 index = 0; index < operand_count; index += 1)
     {
-        for (u32 index = 0; index < operand_count; index += 1)
+        if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol &&
+            physical[index].width < 32)
         {
-            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
-            {
-                physical[index].width = 32;
-            }
+            physical[index].width = 32;
         }
     }
     for (u32 immediate_index = 0; immediate_index < operand_count; immediate_index += 1)
@@ -10747,11 +10748,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
         return selection.status;
     }
-    if (is_push_mnemonic)
-    {
-        query.operands = physical;
-        assembly_x86_metadata_select_symbolic_push_imm32(query, &selection);
-    }
+    query.operands = physical;
+    assembly_x86_metadata_select_symbolic_imm32(query, &selection);
     if (builder->instruction_count >= builder->instruction_capacity)
     {
         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
