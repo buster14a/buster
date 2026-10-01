@@ -80,17 +80,10 @@ if (DEFINED CMAKE_BUILD_TYPE)
     set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
-set(BUSTER_CROSS_COMPILE ${CMAKE_CROSSCOMPILING})
-
-# CMake leaves CMAKE_SYSTEM_PROCESSOR empty for the iOS platform; derive it from
-# the requested architecture so the per-arch codegen module selection still works.
-if (NOT CMAKE_SYSTEM_PROCESSOR)
-    if (CMAKE_OSX_ARCHITECTURES)
-        list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
-    else()
-        set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-    endif()
-endif()
+include(cmake/TargetArchitecture.cmake)
+buster_target_architecture(CMAKE_SYSTEM_PROCESSOR BUSTER_CROSS_COMPILE
+    "${CMAKE_SYSTEM_NAME}" "${CMAKE_SYSTEM_PROCESSOR}" "${CMAKE_HOST_SYSTEM_PROCESSOR}"
+    "${CMAKE_OSX_ARCHITECTURES}" "${CMAKE_CROSSCOMPILING}")
 
 set(C_COMPILER_GNU OFF)
 set(C_COMPILER_APPLE_CLANG OFF)
@@ -2182,25 +2175,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         endif()
     endif()
 
-    # Pick the newest installed build-tools unless told otherwise.
-    if (NOT BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        file(GLOB BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES "${BUSTER_ANDROID_SDK}/build-tools/*")
-        if (BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(SORT BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(GET BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES -1 BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        endif()
-    endif()
-
-    # android.jar matching the configured platform (fallback to newest available).
-    string(REGEX MATCH "[0-9]+" BUSTER_ANDROID_API_LEVEL "${ANDROID_PLATFORM}")
-    set(BUSTER_ANDROID_JAR "${BUSTER_ANDROID_SDK}/platforms/android-${BUSTER_ANDROID_API_LEVEL}/android.jar")
-    if (NOT EXISTS "${BUSTER_ANDROID_JAR}")
-        file(GLOB BUSTER_ANDROID_PLATFORM_JARS "${BUSTER_ANDROID_SDK}/platforms/*/android.jar")
-        if (BUSTER_ANDROID_PLATFORM_JARS)
-            list(SORT BUSTER_ANDROID_PLATFORM_JARS)
-            list(GET BUSTER_ANDROID_PLATFORM_JARS -1 BUSTER_ANDROID_JAR)
-        endif()
-    endif()
+    include(cmake/AndroidSdkSelection.cmake)
+    buster_android_build_tools(BUSTER_ANDROID_BUILD_TOOLS_DIR
+        "${BUSTER_ANDROID_SDK}" "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    buster_android_platform_jar(BUSTER_ANDROID_JAR
+        "${BUSTER_ANDROID_SDK}" "${ANDROID_PLATFORM}" "${BUSTER_ANDROID_JAR}")
 
     find_program(BUSTER_AAPT2 aapt2 HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
     find_program(BUSTER_ZIPALIGN zipalign HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
