@@ -1,7 +1,13 @@
 name: External C capability portfolio
 on:
   push:
-    branches: [codex/capability-portfolio]
+    branches:
+      - codex/capability-portfolio
+    # Compiler changes rerun the cloud corpus; docs-only receipts use PR checks.
+    paths:
+      - 'src/buster/lib/compiler/frontend/c/**'
+      - 'src/buster/tests/compiler/frontend/c/**'
+      - 'src/buster/tests/compiler/driver/**'
   workflow_dispatch:
 permissions:
   contents: read
