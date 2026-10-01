@@ -44,6 +44,7 @@ struct CIncludeFileEntry
     u32 guard_symbol;
     bool physical;
     bool once;
+    bool included;
 };
 
 typedef struct CIncludeFileTable CIncludeFileTable;

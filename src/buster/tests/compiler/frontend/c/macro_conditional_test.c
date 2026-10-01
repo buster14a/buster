@@ -1,6 +1,6 @@
-// GCC/Clang-compatible source conditional directives inside function-like
-// macro arguments. These tests exercise the real preprocessor and pin active
-// token selection, expansion interactions, and diagnostic source attribution.
+// GCC/Clang-compatible macro source boundaries: ordinary newline lookahead,
+// source conditionals inside arguments, and push/pop effects at the rescan
+// cursor. Pin tokens, expansion ownership, and diagnostic source attribution.
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
@@ -10,7 +10,7 @@
 #include <buster/lib/string.h>
 
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
-BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected, String8 diagnostic)
 {
     UnitTestResult result = {0};
     u64 actual_count = 0;
@@ -23,7 +23,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
     {
         expected_count += expected.tokens[index].kind != C_TOKEN_NEWLINE;
     }
-    BUSTER_TEST(arguments, actual_count == expected_count);
+    BUSTER_TEST_RAW(arguments, actual_count == expected_count, diagnostic);
     u64 actual_index = 0;
     u64 expected_index = 0;
     while (actual_index < actual.token_count && expected_index < expected.token_count)
@@ -38,9 +38,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
         }
         if (actual_index < actual.token_count && expected_index < expected.token_count)
         {
-            BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
-            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
-                               c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+            BUSTER_TEST_RAW(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind, diagnostic);
+            BUSTER_TEST_RAW(arguments, string_equal(c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                                                   c_token_spelling(expected.spelling_base, expected.tokens[expected_index])), diagnostic);
             actual_index += 1;
             expected_index += 1;
         }
@@ -167,9 +167,161 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArgumen
     return result;
 }
 
+// Ordinary whitespace lookahead and macro-state effects share the same rescan
+// cursor. Pin exact tokens independently of parsing, then use both external
+// preprocessors on hosted Linux and the assertion-bearing runtime fixture below.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 expected;
+        String8 gcc_expected;
+        bool skip_gcc;
+    } cases[] = {
+        {.source = S8("#define F(x) x\nF\n(11)\n"), .expected = S8("11")},
+        {.source = S8("#define F(x) x\nF\n(__LINE__)\n"), .expected = S8("3")},
+        {.source = S8("#define F(x) x\n#define A F\nA\n(__LINE__)\n"), .expected = S8("4"), .gcc_expected = S8("3")},
+        {.source = S8("#define F(x) x\n#define ID(x) x\nID(F\n(__LINE__))\n"), .expected = S8("4")},
+        {.source = S8("#define F(x) x\n#line 70 \"rescan-lines.c\"\nF\n(__LINE__)\n"), .expected = S8("71")},
+        {.source = S8("#define F(x) x\n#define A F\n#define B A\nB\n\n(12)\n"), .expected = S8("12")},
+        {.source = S8("#define F(x) x\nF /* comment\ncontinued */\n/* between */ (13)\n"), .expected = S8("13")},
+        {.source = S8("#define F(x) x\r\nF\r\n\r\n(14)\r\n"), .expected = S8("14")},
+        {.source = S8("#define F(x) x\n#define ID(x) x\n#define A F\nID(A)\n(ID(F\n(15)))\n"), .expected = S8("15")},
+        {.source = S8("#define F(x) x\n#define TAIL(x) x F\nTAIL(16)\n(17)\n"), .expected = S8("16 17")},
+        {.source = S8("#define F(x) x\n#define A F\nF\nname A\n+ 18\n"), .expected = S8("F name F + 18")},
+        {.source = S8("#define F(x) x\n#define A F\nA\n#undef A\n#define A 19\nA\n"), .expected = S8("F 19")},
+        {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
+            "_Pragma(\"pop_macro(\\\"X\\\")\") X\n"), .expected = S8("1")},
+        {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
+            "_Pragma(\"pop_macro(\\\"X\\\")\")\nX\n"), .expected = S8("1")},
+        {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
+            "#define RESTORE _Pragma(\"pop_macro(\\\"X\\\")\")\n#define ID(x) x\n"
+            "ID(RESTORE X) X\n"), .expected = S8("2 1")},
+        {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n#pragma push_macro(\"X\")\n"
+            "#undef X\n#define X 3\n#define DUP(x) x x\n"
+            "DUP(_Pragma(\"pop_macro(\\\"X\\\")\") X) X\n"), .expected = S8("3 3 1")},
+        {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
+            "_Pragma(\"push_macro(\\\"X\\\")\") _Pragma(\"pop_macro(\\\"X\\\")\") X "
+            "_Pragma(\"pop_macro(\\\"X\\\")\") X\n"), .expected = S8("2 1")},
+        {.source = S8("#pragma push_macro(\"MISSING\")\n#define MISSING 9\n"
+            "_Pragma(\"pop_macro(\\\"MISSING\\\")\") MISSING\n"), .expected = S8("MISSING")},
+        // The two-argument replacement is materialized before its substituted
+        // pragma restores the one-argument definition for later invocations.
+        {.source = S8("#define F(x) x\n#pragma push_macro(\"F\")\n#undef F\n#define F(x,y) x + y\n"
+            "F(_Pragma(\"pop_macro(\\\"F\\\")\") 1,2) F(3)\n"), .expected = S8("1 + 2 3")},
+        {.source = S8("#define F(x) x\n#pragma push_macro(\"F\")\n#undef F\n#define F(x,y) x #y\n"
+            "F(_Pragma(\"pop_macro(\\\"F\\\")\") 4,5) F(6)\n"), .expected = S8("4 \"5\" 6")},
+        {.source = S8("#pragma push_macro(\"X\")\n#define X _Pragma(\"pop_macro(\\\"X\\\")\")\n"
+            "X\n#define X 1\nX\n"), .expected = S8("1")},
+        // Omission belongs to the suspended variadic definition even when
+        // pop_macro restores an object-like name with no parameters. An
+        // explicitly empty final argument must retain the separating comma.
+        {.source = S8("#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n"
+            "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11) M\n"), .expected = S8("11 7")},
+        {.source = S8("#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n"
+            "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11,) M\n"), .expected = S8("11 , 7")},
+        // The dynamic builtin kind is part of the saved definition, including
+        // restoring it while an ordinary replacement remains on the task stack.
+        {.source = S8("#line 100 \"builtin-restored.c\"\n#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n"
+            "#define __LINE__ 7\n#pragma pop_macro(\"__LINE__\")\n__LINE__\n"), .expected = S8("104")},
+        {.source = S8("#line 100 \"builtin-restored.c\"\n#pragma push_macro(\"__FILE__\")\n#undef __FILE__\n"
+            "#define __FILE__ \"replacement.c\"\n#pragma pop_macro(\"__FILE__\")\n__FILE__\n"), .expected = S8("\"builtin-restored.c\"")},
+        {.source = S8("#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n#define __LINE__(x,y) x + y\n"
+            "__LINE__(_Pragma(\"pop_macro(\\\"__LINE__\\\")\") 1,2) __LINE__\n"), .expected = S8("1 + 2 4")},
+        {.source = S8("#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n"
+            "#define __LINE__ _Pragma(\"pop_macro(\\\"__LINE__\\\")\") __LINE__\n__LINE__\n"), .expected = S8("4")},
+        // GCC 15 loops emitting newlines for SAME; the isolated hosted oracle
+        // recorded nontermination. Keep Buster and Clang checks for that case.
+        // Alias __LINE__ above has a separate observed GCC expectation (3).
+        // Evidence: actions/runs/36893167831/job/110473524861.
+        // Restoring the same active generation keeps its replacement disabled.
+        {.source = S8("#define SAME _Pragma(\"push_macro(\\\"SAME\\\")\") "
+            "_Pragma(\"pop_macro(\\\"SAME\\\")\") SAME\nSAME\n"), .expected = S8("SAME"), .skip_gcc = true},
+        // A restored different generation is enabled inside the old replacement.
+        {.source = S8("#define SELF 7\n#pragma push_macro(\"SELF\")\n#undef SELF\n"
+            "#define SELF _Pragma(\"pop_macro(\\\"SELF\\\")\") SELF\nSELF SELF\n"), .expected = S8("7 7")},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, cases[case_index].source,
+                                                      (CPreprocessOptions){.source_path = S8("macro-rescan-boundary.c"),
+                                                                           .dialect = dialects[dialect_index]});
+            CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+            BUSTER_TEST_RAW(arguments, actual.error_count == 0, cases[case_index].source);
+            BUSTER_TEST(arguments, actual.token_count == expected.token_count);
+            for (u64 index = 0; index < actual.token_count && index < expected.token_count; index += 1)
+            {
+                BUSTER_TEST(arguments, actual.tokens[index].kind == expected.tokens[index].kind);
+                BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[index]),
+                                   c_token_spelling(expected.spelling_base, expected.tokens[index]));
+            }
+            scratch_end(temporary);
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 reference_names[] = {S8("clang"), S8("gcc")};
+        for (u32 reference_index = 0; reference_index < BUSTER_ARRAY_LENGTH(reference_names); reference_index += 1)
+        {
+            if (reference_index == 1 && cases[case_index].skip_gcc)
+            {
+                continue;
+            }
+            String8 reference_expected = reference_index == 1 && cases[case_index].gcc_expected.length
+                                             ? cases[case_index].gcc_expected : cases[case_index].expected;
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, reference_names[reference_index]);
+            String8 source_path = buster_test_temporary_path(temporary.arena, S8("macro-rescan-reference"), S8(".c"));
+            bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source));
+            BUSTER_TEST(arguments, compiler.length != 0);
+            BUSTER_TEST(arguments, written);
+            if (BUSTER_REQUIRE(arguments, compiler.length && written))
+            {
+                String8 command[] = {compiler, S8("-E"), S8("-P"), S8("-std=c17"), source_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){
+                                                                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                .use_process_environment = true, .search_path = true,
+                                                            });
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                    String8 output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+                    String8 error = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]);
+                    String8 diagnostic_parts[] = {
+                        compiler, S8("\nsource:\n"), cases[case_index].source,
+                        S8("\nexpected:\n"), reference_expected,
+                        S8("\nstdout (up to 4096 bytes):\n"), string_slice(output, 0, BUSTER_MIN(output.length, 4096)),
+                        S8("\nstderr (up to 4096 bytes):\n"), string_slice(error, 0, BUSTER_MIN(error.length, 4096)),
+                    };
+                    String8 diagnostic = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(diagnostic_parts), false);
+                    BUSTER_TEST_RAW(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS, diagnostic);
+                    if (BUSTER_REQUIRE(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS))
+                    {
+                        CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+                        CLexResult expected = c_lex(temporary.arena, reference_expected);
+                        UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, diagnostic);
+                        result.test_count += reference_result.test_count;
+                        result.succeeded_test_count += reference_result.succeeded_test_count;
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+#endif
+    }
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
@@ -309,7 +461,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
                 CLexResult expected = c_lex(temporary.arena, expected_source);
                 BUSTER_TEST(arguments, reference.diagnostic_count == 0);
-                UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected);
+                UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, source);
                 result.test_count += reference_result.test_count;
                 result.succeeded_test_count += reference_result.succeeded_test_count;
             }
@@ -372,7 +524,18 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         scratch_end(temporary);
     }
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    String8 runtime_source = S8("#define ENABLED 1\n"
+    String8 runtime_source = S8("#define F(x) x\n#define ALIAS F\n#define ID(x) x\n"
+                                "_Static_assert(F\n(11) == 11, \"direct newline invocation\");\n"
+                                "_Static_assert(ALIAS /* split\ncomment */\r\n(12) == 12, \"alias CRLF invocation\");\n"
+                                "_Static_assert(ID(ALIAS)\n(ID(F\n(13))) == 13, \"nested newline rescan\");\n"
+                                "#define RESTORED 1\n#pragma push_macro(\"RESTORED\")\n#undef RESTORED\n#define RESTORED 2\n"
+                                "#define RESTORE _Pragma(\"pop_macro(\\\"RESTORED\\\")\")\n"
+                                "RESTORE _Static_assert(RESTORED == 1, \"same-line restoration\");\n"
+                                "_Pragma(\"pack(push, 1)\") struct PackedRescan { char byte; int value; }; "
+                                "_Pragma(\"pack(pop)\") struct NaturalRescan { char byte; int value; };\n"
+                                "_Static_assert(sizeof(struct PackedRescan) == 5, \"pack marker position\");\n"
+                                "_Static_assert(sizeof(struct NaturalRescan) == 8, \"pack pop marker position\");\n"
+                                "#define ENABLED 1\n"
                                 "#define SELECT(x) x\n"
                                 "#define VALUES(...) __VA_ARGS__\n"
                                 "#if !(u'\\0' - 1 > 0)\n"
