@@ -1,0 +1,52 @@
+name: LLVM runtime archive probe
+on:
+  push:
+    branches: [codex/2122-llvm-runtime-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            target: x86_64-linux
+          - runner: ubuntu-26.04-arm
+            target: aarch64-linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Inspect verified LLVM 23.1.2 archive and loader dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys, tarfile
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          import ci_llvm
+          token = os.environ['GH_TOKEN']
+          version, asset = ci_llvm.select_release(ci_llvm.fetch_releases(token), os.environ['LLVM_TARGET'], ('tar.zst',), (23, 1, 2))
+          print(asset, flush=True)
+          work = Path(os.environ['RUNNER_TEMP']) / 'llvm-probe'
+          work.mkdir()
+          archive = work / asset['name']
+          ci_llvm.download(asset, archive, token)
+          with subprocess.Popen(['zstd', '-dc', '--long=31', str(archive)], stdout=subprocess.PIPE) as process:
+              with tarfile.open(fileobj=process.stdout, mode='r|') as stream:
+                  libraries = [m.name for m in stream if '.so' in m.name and '/lib/' in m.name]
+              print('ARCHIVE_SHARED_LIBRARIES', libraries, flush=True)
+          ci_llvm.unpack(archive, work / 'install')
+          for name in ('clang', 'ld.lld', 'lld-link', 'llvm-ar'):
+              binary = work / 'install/bin' / name
+              subprocess.run(['readelf', '-d', str(binary)], check=True)
+              subprocess.run(['ldd', str(binary)])
+              result = subprocess.run([str(binary), '--version'], capture_output=True, text=True)
+              print(name, 'status', result.returncode, result.stdout, result.stderr, flush=True)
+          PY
