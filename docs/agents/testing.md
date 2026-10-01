@@ -552,6 +552,19 @@ stderr message. This harness regression changes neither assertion totals nor
 
 ## Node-backed Wasm oracle deadlines
 
+`compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
+additive `tools/wasm_unsigned_div_rem_execution.js` companion on the same freshly
+emitted artifact. It compares the file with the compiler's returned bytes before
+and after execution; the companion also records the consumed SHA-256. Four
+parameterized unsigned div/rem calls use UINT32_MAX/UINT64_MAX divided by two,
+with independent literal expectations. A hand-emitted unsigned baseline and four
+single-opcode signedness controls require the corresponding equality mismatch;
+validation failures, missing exports and traps do not count as semantic rejection.
+These controls establish the checker boundary, not production mutation coverage.
+The companion lives beside the startup shim in `tools/`, outside the frozen
+`tests/` input inventory. Both frozen oracle scripts and the reviewed support
+inventory remain unchanged.
+
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.

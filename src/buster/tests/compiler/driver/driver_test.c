@@ -8872,6 +8872,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
         .attempts = 1,
         .readiness_files_ok = true,
         .require_node_ready = string_equal(oracle, S8("integer")) || string_equal(oracle, S8("integer-policy")) ||
+                              string_equal(oracle, S8("unsigned-div-rem")) ||
                               string_equal(oracle, S8("bit-field-aggregate")),
     };
     SliceString8 keys = {0};
@@ -9331,18 +9332,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     CompilerDriverResult compiled = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
     BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64);
-    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64)
     {
         String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
         if (node.length)
         {
-            String8 node_arguments[] = {node, S8("tools/wasm_integer_execution_startup.js"), output};
-            u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
-            CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
-                arguments, arguments->arena, S8("integer"), S8("default"), S8("retry"),
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
-                S8("1504 frontend-to-Wasm integer checks passed"), deadline, deadline);
-            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+            ByteSlice artifact = file_read(arguments->arena, output, (FileReadOptions){0});
+            bool artifact_matches = compiled.wasm64.bytes.pointer != 0 && artifact.pointer != 0 &&
+                                    compiled.wasm64.bytes.length != 0 && artifact.length == compiled.wasm64.bytes.length &&
+                                    memcmp(artifact.pointer, compiled.wasm64.bytes.pointer, artifact.length) == 0;
+            if (BUSTER_REQUIRE(arguments, artifact_matches))
+            {
+                String8 node_arguments[] = {node, S8("tools/wasm_integer_execution_startup.js"), output};
+                u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
+                    arguments, arguments->arena, S8("integer"), S8("default"), S8("retry"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                    S8("1504 frontend-to-Wasm integer checks passed"), deadline, deadline);
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+                String8 unsigned_arguments[] = {node, S8("tools/wasm_unsigned_div_rem_execution.js"), output};
+                CompilerDriverWasmNodeRun unsigned_run = compiler_driver_test_wasm_node_run_with_retry(
+                    arguments, arguments->arena, S8("unsigned-div-rem"), S8("default"), S8("retry"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(unsigned_arguments),
+                    S8("4/4 unsigned high-bit div/rem checks and 4/4 signedness controls passed"), deadline, deadline);
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(unsigned_run));
+                // Both independent oracles must consume the original emitted bytes.
+                ByteSlice final_artifact = file_read(arguments->arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, final_artifact.pointer != 0 && final_artifact.length == compiled.wasm64.bytes.length &&
+                                       memcmp(final_artifact.pointer, compiled.wasm64.bytes.pointer, final_artifact.length) == 0);
+            }
         }
         else
         {
