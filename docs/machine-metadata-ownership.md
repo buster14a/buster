@@ -357,6 +357,7 @@ have the same size.
 | `vector_allocatable_mask`, `vector_register_mask` | Class validation, active register-file bounds, liveness and placement |
 | `predicate_allocatable_mask` | Separate predicate placement admits only k1-k7 on supported x86 targets; zero disables the bank. The mask never expands the shared 48-register GPR/ZMM tile; k0 remains reserved |
 | `copy_opcode`, `vector_copy_opcode`, `constant_opcode` | Copy coalescing, literal rematerialization and emission |
+| `frame_address_opcode` | Address-taken slots keep their own storage during frame coloring; frame-address rematerialization |
 | `indirect_call_opcode`, `indirect_call_register` | Call barriers and callee-pointer staging |
 | `unconditional_branch_opcode`, `switch_opcode` | Edge normalization and cold-entry/edge-contract construction |
 | `float_bridge_opcode`, `float_bridge_register` | Placement constraints around implicit vector bridges |
@@ -395,7 +396,7 @@ not additional authoritative IRs.
 
 | Record / fields | Producer and consumer | Invalidation |
 | --- | --- | --- |
-| `MachineFastPrepass.rematerialize_immediates`, `definition_blocks`, `last_use`, `escapes`, `next_call` | Existing FAST prepass; FAST and QUALITY allocation | Exact source function rows, references, classes and CFG; build again after mutation |
+| `MachineFastPrepass.rematerialize_immediates` (immediate IDs, or `MACHINE_FAST_REMATERIALIZE_FRAME` for a frame-address value), `definition_blocks`, `last_use`, `escapes`, `next_call` | Existing FAST prepass; FAST and QUALITY allocation | Exact source function rows, references, classes and CFG; build again after mutation |
 | `operand_masks` | Same row walk; FAST and QUALITY operand classification | Same opcode/operand stream, no separate source of operand truth |
 | `predecessor_offsets`, `predecessor_list`, `predecessor_edges`, `terminator_edges`, `cold_blocks` | Existing CFG prepass; edge conformance and pin plans | Same CFG, block layout and terminator slots |
 | `interval_starts`, `interval_ends`, `disqualified`, `loop_spans`, `loop_span_count` | Built only when QUALITY requests facts; QUALITY candidate ranking | Same source function and constraints. Null/zero in FAST-only requests |

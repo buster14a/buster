@@ -117,6 +117,14 @@ itself, so do not label it all as removable setup. Intervals are wall times
 under matrix contention, never CPU usage. Compare identical configurations and
 correlate with the retained Windows process events before choosing a repair.
 
+`native_frame_vectors` compiles its cells on a gang of `BUSTER_TEST_JOBS`
+lanes (`compiler_driver_test_frame_vector_lane`) and then checks, links and
+runs them serially in matrix order. Its `buster_compile` and `positive_compile`
+rows therefore sum per-cell lane wall and can exceed `body`; the
+`compile_gang` row is the gang's own wall interval, with `calls` equal to the
+lane count. The gang is the fixture's only worker pool: the driver declines to
+start a nested one inside a caller's gang (`compiler_driver_unit_worker_limit`).
+
 For a subsequent optimization, retain at least three successful comparable full
 uninstrumented runs per arm, matched runner/image and configuration identities,
 coverage/assertion summaries and sanitizer evidence. Also retain unsuccessful
