@@ -85,6 +85,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_runtime_object_target(Target target
     return target.os == OPERATING_SYSTEM_LINUX && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
 }
 
+// A shared object registers its exit handlers under a `__dso_handle` of its
+// own and finalizes them when unloaded; an executable passes the null handle
+// libc_nonshared.a's stubs pass (issue #1709).
+BUSTER_GLOBAL_LOCAL ObjectFile compiler_driver_elf_libc_runtime_object(Arena* arena, CompilerDriverInvocation invocation)
+{
+    return invocation.image_kind == NATIVE_IMAGE_SHARED ? link_elf_libc_shared_runtime_object(arena, invocation.target)
+                                                        : link_elf_libc_runtime_object(arena, invocation.target);
+}
+
 // How many synthetic runtime objects a hosted link for this target can add:
 // Windows takes the unconditional `_fltused` marker plus the UCRT exit-handler
 // stubs, ELF only the glibc ones.  Both stub objects are selected the way an
@@ -3496,7 +3505,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     }
     if (compiler_driver_elf_runtime_object_target(invocation.target))
     {
-        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
+        ObjectFile runtime = compiler_driver_elf_libc_runtime_object(arena, invocation);
         if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, link_inputs, link_input_count))
         {
             link_inputs[link_input_count++] = runtime;
@@ -5147,7 +5156,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         // Selected the way an archive member is: only a program that
         // references one of its stubs and defines none of them pulls it in.
-        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
+        ObjectFile runtime = compiler_driver_elf_libc_runtime_object(arena, invocation);
         if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, objects, object_count))
         {
             objects[object_count++] = runtime;

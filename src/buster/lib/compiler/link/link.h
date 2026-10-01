@@ -190,6 +190,11 @@ BUSTER_F_DECL ObjectFile link_windows_runtime_object(Arena* arena, Target target
 // from.  Selected the way an archive member is, so a program that references
 // none of them never sees it.
 BUSTER_F_DECL ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target);
+// Its replacement in an x86-64 Linux shared object: the same stubs passing a
+// hidden `__dso_handle` of the library's own, and a `.fini_array` entry that
+// calls `__cxa_finalize` on it, so handlers the library registers run when it
+// is unloaded rather than after its code is gone.  Selected the same way.
+BUSTER_F_DECL ObjectFile link_elf_libc_shared_runtime_object(Arena* arena, Target target);
 // The UCRT counterpart for hosted Windows executable links: `atexit` and
 // `at_quick_exit` live in the import library rather than in ucrtbase.dll, so
 // this supplies them as weak stubs over the `_crt_` forms it does export.

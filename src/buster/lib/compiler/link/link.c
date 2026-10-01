@@ -41,6 +41,8 @@
 // Hosted ELF startup also preserves and registers the loader-supplied
 // finalizer before any executable destructor registration, so `exit` reaches
 // the startup-loaded shared libraries as well as this image's handlers.
+// A shared image's link_elf_libc_shared_runtime_object instead registers
+// handlers under its own hidden __dso_handle and finalizes it at unload.
 //
 // `__attribute__((constructor))` follows the same split. A writer with an
 // entry stub calls the registered functions from it and takes the two array
@@ -2899,6 +2901,182 @@ ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
         {
             result.symbols[index].hidden = result.symbols[index].section != OBJECT_SECTION_UNDEFINED;
         }
+    }
+
+    return result;
+}
+
+// Symbol and relocation numbering of link_elf_libc_shared_runtime_object.
+// The three code sequences are laid out in LINK_ELF_DSO_STUB order.
+typedef enum LinkElfDsoStub
+{
+    LINK_ELF_DSO_STUB_ATEXIT,
+    LINK_ELF_DSO_STUB_AT_QUICK_EXIT,
+    LINK_ELF_DSO_STUB_FINALIZE,
+    LINK_ELF_DSO_STUB_COUNT,
+} LinkElfDsoStub;
+enum
+{
+    LINK_ELF_DSO_SYMBOL_HANDLE = LINK_ELF_DSO_STUB_COUNT,
+    LINK_ELF_DSO_SYMBOL_TARGETS,
+    LINK_ELF_DSO_SYMBOL_COUNT = LINK_ELF_DSO_SYMBOL_TARGETS + LINK_ELF_DSO_STUB_COUNT,
+    // Per stub: its handle address and its branch; then the handle's own
+    // value and the `.fini_array` slot.
+    LINK_ELF_DSO_RELOCATION_COUNT = LINK_ELF_DSO_STUB_COUNT * 2 + 2,
+    LINK_ELF_DSO_STUB_CAPACITY = 32,
+};
+
+// The shared-object form of link_elf_libc_runtime_object, for x86-64 Linux
+// `-shared`: what libc_nonshared.a's stubs and crtbeginS.o do together.  A
+// handler a library registers belongs to that library, so glibc can run it
+// when the library is unloaded instead of calling into unmapped code at
+// `exit`.  The object carries
+//
+//   __dso_handle   hidden, 8 bytes holding its own address, as crtbeginS's;
+//                  its address is the identity glibc files handlers under
+//   atexit         xor esi, esi; lea rdx, [rip + __dso_handle]; jmp __cxa_atexit
+//   at_quick_exit  lea rsi, [rip + __dso_handle]; jmp __cxa_at_quick_exit
+//   finalizer      lea rdi, [rip + __dso_handle]; jmp __cxa_finalize
+//
+// and one `.fini_array` entry naming the finalizer.  __cxa_finalize runs and
+// forgets every handler filed under the handle, so a dlclose runs them there
+// and a later `exit` finds nothing left of the library's.  The entry takes
+// priority 0, which link_initializer_arrays_order sorts ahead of every entry
+// a program can name; the loader walks the array backwards, so the finalizer
+// runs after all of the library's own destructors, where crtbeginS's
+// __do_global_dtors_aux runs.  `__cxa_finalize` is a weak reference, as in
+// crtbeginS; libc.so.6 defines it wherever a shared object can be loaded.
+// The stubs are hidden like glibc's, so another module never registers
+// through them under this library's handle.
+ObjectFile link_elf_libc_shared_runtime_object(Arena* arena, Target target)
+{
+    ObjectFile result = {
+        .target = target,
+    };
+    static String8 const stub_names[LINK_ELF_DSO_STUB_COUNT] = {S8_INITIALIZER("atexit"), S8_INITIALIZER("at_quick_exit"),
+                                                                S8_INITIALIZER("__buster_dso_finalize")};
+    static String8 const target_names[LINK_ELF_DSO_STUB_COUNT] = {S8_INITIALIZER("__cxa_atexit"), S8_INITIALIZER("__cxa_at_quick_exit"),
+                                                                  S8_INITIALIZER("__cxa_finalize")};
+    u8 code[LINK_ELF_DSO_STUB_CAPACITY * LINK_ELF_DSO_STUB_COUNT];
+    u32 starts[LINK_ELF_DSO_STUB_COUNT] = {0};
+    u32 handle_fields[LINK_ELF_DSO_STUB_COUNT] = {0};
+    BusterX86MetadataRelocation branches[LINK_ELF_DSO_STUB_COUNT] = {0};
+    LinkX86InstructionBuilder builder = {.bytes = code, .capacity = sizeof(code)};
+    bool valid = arena != 0;
+    if (!arena)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    else if (target.os != OPERATING_SYSTEM_LINUX || target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        valid = false;
+    }
+    for (u32 stub = 0; valid && stub < LINK_ELF_DSO_STUB_COUNT; stub += 1)
+    {
+        bool finalize = stub == LINK_ELF_DSO_STUB_FINALIZE;
+        BusterX86MetadataPhysicalOperand operands[2] = {link_x86_register(6, 32), link_x86_register(6, 32)};
+        starts[stub] = builder.count;
+        valid = stub != LINK_ELF_DSO_STUB_ATEXIT || link_x86_emit(&builder, S8("XOR"), operands, 2);
+        // __cxa_atexit takes (handler, argument, handle), while
+        // __cxa_at_quick_exit takes (handler, handle) and __cxa_finalize
+        // takes only the handle. The LEA's last four bytes hold its rel32.
+        operands[0] = link_x86_register(finalize ? 7 : stub == LINK_ELF_DSO_STUB_ATEXIT ? 2 : 6, 64);
+        operands[1] = link_x86_memory_rip(64, 0);
+        valid = valid && link_x86_emit(&builder, S8("LEA"), operands, 2) && builder.count >= 4;
+        handle_fields[stub] = builder.count - 4;
+        valid = valid && builder.capacity - builder.count >= BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE &&
+                buster_x86_metadata_emit_forwarding(code + builder.count, builder.capacity - builder.count, BUSTER_X86_METADATA_FORWARDING_JUMP,
+                                                    &branches[stub]);
+        branches[stub].offset += builder.count;
+        builder.count += BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE;
+    }
+    if (arena && result.error == OBJECT_ERROR_NONE && !valid)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    if (result.error == OBJECT_ERROR_NONE)
+    {
+        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+        result.section_count = OBJECT_SECTION_COUNT;
+        for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+        {
+            ObjectSectionKind kind = (ObjectSectionKind)section_index;
+            result.sections[section_index] = (ObjectSection){
+                .name = object_section_name_for_kind(kind),
+                .kind = kind,
+                .alignment = object_section_default_alignment(kind),
+            };
+        }
+        u8* text = arena_allocate(arena, u8, builder.count);
+        memcpy(text, code, builder.count);
+        result.sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = text, .length = builder.count};
+        result.sections[OBJECT_SECTION_TEXT].virtual_size = builder.count;
+        result.sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, sizeof(u64)), .length = sizeof(u64)};
+        result.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(u64);
+        result.sections[OBJECT_SECTION_DATA].alignment = BUSTER_MAX(result.sections[OBJECT_SECTION_DATA].alignment, (u32)sizeof(u64));
+        result.sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, OBJECT_INITIALIZER_ENTRY_SIZE),
+                                                                     .length = OBJECT_INITIALIZER_ENTRY_SIZE};
+        result.sections[OBJECT_SECTION_FINI_ARRAY].virtual_size = OBJECT_INITIALIZER_ENTRY_SIZE;
+        result.initializer_priorities[1] = arena_allocate_zeroed(arena, u32, 1);
+
+        result.symbols = arena_allocate(arena, ObjectSymbol, LINK_ELF_DSO_SYMBOL_COUNT);
+        result.relocations = arena_allocate(arena, ObjectRelocation, LINK_ELF_DSO_RELOCATION_COUNT);
+        for (u32 stub = 0; stub < LINK_ELF_DSO_STUB_COUNT; stub += 1)
+        {
+            bool finalize = stub == LINK_ELF_DSO_STUB_FINALIZE;
+            u32 end = stub + 1 < LINK_ELF_DSO_STUB_COUNT ? starts[stub + 1] : builder.count;
+            result.symbols[stub] = (ObjectSymbol){
+                .name = stub_names[stub],
+                .value = starts[stub],
+                .size = end - starts[stub],
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = !finalize,
+                .weak = !finalize,
+                .hidden = !finalize,
+            };
+            result.symbols[LINK_ELF_DSO_SYMBOL_TARGETS + stub] = (ObjectSymbol){
+                .name = target_names[stub],
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+                .weak = finalize,
+            };
+            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                .addend = -(s64)sizeof(u32),
+                .offset = handle_fields[stub],
+                .section = OBJECT_SECTION_TEXT,
+                .symbol = LINK_ELF_DSO_SYMBOL_HANDLE,
+                .kind = OBJECT_RELOCATION_X86_64_PC32,
+            };
+            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                .addend = branches[stub].addend,
+                .offset = branches[stub].offset,
+                .section = OBJECT_SECTION_TEXT,
+                .symbol = LINK_ELF_DSO_SYMBOL_TARGETS + stub,
+                .kind = OBJECT_RELOCATION_X86_64_PC32,
+            };
+        }
+        result.symbols[LINK_ELF_DSO_SYMBOL_HANDLE] = (ObjectSymbol){
+            .name = S8("__dso_handle"),
+            .size = sizeof(u64),
+            .section = OBJECT_SECTION_DATA,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+            .hidden = true,
+        };
+        result.relocations[result.relocation_count++] = (ObjectRelocation){
+            .section = OBJECT_SECTION_DATA,
+            .symbol = LINK_ELF_DSO_SYMBOL_HANDLE,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        result.relocations[result.relocation_count++] = (ObjectRelocation){
+            .section = OBJECT_SECTION_FINI_ARRAY,
+            .symbol = LINK_ELF_DSO_STUB_FINALIZE,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        result.symbol_count = LINK_ELF_DSO_SYMBOL_COUNT;
     }
 
     return result;
