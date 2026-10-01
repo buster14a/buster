@@ -17875,7 +17875,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             callee_type = ir_type_from_id(&program->types, callee_type->element_type);
                         }
-                        if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic)
+                        bool system_v_variadic_call = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && callee_type &&
+                                                      callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
+                        if (system_v_variadic_call)
                         {
                             BusterX86MetadataPhysicalOperand variadic_register_count_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
@@ -17890,8 +17892,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (indirect_call)
                         {
-                            c_x64_load(&emitter, 0x85, instruction->operands[0]);
-                            BusterX86MetadataPhysicalOperand call_register = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                            // Reload from the callee's frame home after argument staging.
+                            // R10 is caller-saved and carries no System V argument; RAX
+                            // must retain the variadic vector-register count in AL.
+                            X64Register target_register = system_v_variadic_call ? X64_REGISTER_R10 : X64_REGISTER_RAX;
+                            if (system_v_variadic_call)
+                            {
+                                codegen_canonical_x64_asm_load(&buffer, target_register, X64_REGISTER_RBP,
+                                                              (u32)c_x64_value_displacement(&emitter, instruction->operands[0]), 8);
+                            }
+                            else
+                            {
+                                c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                            }
+                            BusterX86MetadataPhysicalOperand call_register = codegen_canonical_x64_metadata_gpr(target_register, 64);
                             if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("CALL"), &call_register, 1))
                             {
                                 result.error = buffer.error;
