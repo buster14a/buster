@@ -915,7 +915,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
-                .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
+                .stack_alignment = use == IR_ABI_USE_RESULT ? codegen_canonical_x64_stack_argument_alignment(type)
+                                                          : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
             };
             return true;
         }
@@ -6298,15 +6299,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
                 // An unused indirect result still needs backing storage.
                 plan->indirect_result_slot = machine_x64_append_slot(selector, plan->return_shape.byte_size, 8);
             }
-            if (planned && plan->return_shape.stack_alignment > 16)
+            if (planned && plan->return_shape.stack_alignment > 8)
             {
                 u64 backing_size = (u64)plan->return_shape.byte_size + plan->return_shape.stack_alignment - 1;
                 planned = backing_size <= UINT32_MAX;
                 if (planned)
                 {
                     // Internal aggregate slots are only eight-aligned. Give
-                    // an external callee enough slack for its naturally
-                    // aligned vector store, then copy back after the call.
+                    // a callee enough slack for the result type's natural
+                    // alignment, including sixteen, then copy back after the call.
                     plan->indirect_result_backing_slot = machine_x64_append_slot(selector, (u32)backing_size, 8);
                 }
             }

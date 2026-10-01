@@ -4032,14 +4032,20 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 classes[1] = IR_ABI_CLASS_FLOAT;
             }
             bool whole_vector = classes[0] == IR_ABI_CLASS_FLOAT && classes[1] == IR_ABI_CLASS_FLOAT_UP;
-            value.part_count = whole_vector ? 1u : (u32)((size + 7) / 8);
-            for (u32 part = 0; part < value.part_count; part += 1)
+            u32 eightbyte_count = whole_vector ? 1u : (u32)((size + 7) / 8);
+            for (u32 part = 0; part < eightbyte_count; part += 1)
             {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = whole_vector ? IR_ABI_CLASS_VECTOR : classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
-                    .value_offset = part * 8,
-                    .size = whole_vector ? 16u : (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                };
+                // NO_CLASS padding occupies storage, never an argument or
+                // result register. Compact live pieces without changing their
+                // offsets in the aggregate's complete object representation.
+                if (whole_vector || classes[part] != IR_ABI_CLASS_NONE)
+                {
+                    value.parts[value.part_count++] = (IrAbiPart){
+                        .abi_class = whole_vector ? IR_ABI_CLASS_VECTOR : classes[part],
+                        .value_offset = part * 8,
+                        .size = whole_vector ? 16u : (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
             }
         }
     }

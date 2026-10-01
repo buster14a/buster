@@ -50276,10 +50276,11 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CAr
 //
 // `requested_out`, when asked for, receives the largest alignment any of the
 // records *asks* for, before it is merged with the declared type's natural
-// alignment. Only the bit-field placement rule needs that raw number: GNU
-// `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
-// is below the declared type's own alignment, while every other reader of a
-// request only ever raises with it. Zero means no record resolved.
+// alignment. Packed members merge that raw number with their placement floor
+// after validating standard constraints against the declared type. GNU
+// `aligned(N)` also starts a bit-field at the next multiple of N bytes even
+// when N is below the declared type's own alignment. Zero means no record
+// resolved.
 BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
                                                              u32* alignment_out, u32* requested_out, String8* rejection_out)
 {
@@ -51313,14 +51314,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 // two agreeing is not evidence the rule is the target's, which
                 // is what record_layout_tests checks (#1439).
                 //
-                // `__attribute__((packed))` on the definition and `#pragma
-                // pack(N)` around it ask the same question: the ceiling a
-                // member's alignment is clamped to. Packed is that ceiling at
-                // one byte.
+                // GNU packed lowers natural member alignment to one byte,
+                // but explicit alignment can raise it again. Keep pragma
+                // pack's separate ceiling to cap the merged request below.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
-                u32 pack_alignment = c_type->definition_start < preprocess.token_count
-                                         ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
-                                         : 0;
+                u32 pragma_pack_alignment = c_type->definition_start < preprocess.token_count
+                                                ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
+                                                : 0;
+                u32 pack_alignment = pragma_pack_alignment;
                 if (aggregate_attributes.is_packed)
                 {
                     pack_alignment = 1;
@@ -51391,15 +51392,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
                     // rather than about a type that never got a layout.
-                    // Almost no member carries a specifier at all, and the
-                    // evaluation answers the alignment it was handed for the
-                    // ones that do not; asking first keeps the call itself off
-                    // the path every other member takes.
+                    // Standard requests are constrained by the declared
+                    // type's natural alignment before packing. GNU aligned
+                    // still merges with the packed floor, so a packed int
+                    // requesting GNU alignment two is placed at two bytes.
                     u32 field_alignment_request = 0;
-                    CIrAlignmentStatus member_status =
-                        member->alignment_count ? c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment,
-                                                                          &field_alignment, &field_alignment_request, &member_rejection)
-                                                : C_IR_ALIGNMENT_RESOLVED;
+                    CIrAlignmentStatus member_status = C_IR_ALIGNMENT_RESOLVED;
+                    if (member->alignment_count)
+                    {
+                        u32 field_alignment_floor = field_alignment;
+                        member_status = c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, natural_alignment,
+                                                                &field_alignment, &field_alignment_request, &member_rejection);
+                        if (member_status != C_IR_ALIGNMENT_PENDING)
+                        {
+                            field_alignment = BUSTER_MAX(field_alignment_floor, field_alignment_request);
+                        }
+                    }
                     if (member_status == C_IR_ALIGNMENT_PENDING)
                     {
                         fields_resolved = false;
@@ -51457,6 +51465,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     {
                         fields_resolved = false;
                         break;
+                    }
+                    // Match the parse fold's pragma ceiling after merging
+                    // explicit requests; over-ceiling bit-field starts are
+                    // suppressed rather than rounded to the pragma ceiling.
+                    // Microsoft and zero-width bit-fields retain their rules.
+                    if (pragma_pack_alignment && record.policy != C_RECORD_LAYOUT_MICROSOFT && (!member->is_bit_field || member_bit_width))
+                    {
+                        if (member->is_bit_field)
+                        {
+                            field_alignment = BUSTER_MAX(natural_alignment, field_alignment_request);
+                            if (field_alignment_request > pragma_pack_alignment)
+                            {
+                                field_alignment_request = 0;
+                            }
+                        }
+                        field_alignment = BUSTER_MIN(field_alignment, pragma_pack_alignment);
                     }
                     CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
                                                                                           .size = field_type->layout.size,

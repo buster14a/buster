@@ -316,8 +316,33 @@ class NativeObservationTest(unittest.TestCase):
         slow_compiler = self.root / "slow-clang"
         slow_compiler.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
         slow_compiler.chmod(0o755)
-        with mock.patch.object(observation, "IDENTITY_PROBE_TIMEOUT_SECONDS", 0.2):
+        command_identity = observation.command_identity
+
+        def fixture_identity(command):
+            if command[0] == str(slow_compiler):
+                # Keep a real timeout witness, scoped to its intentional probe.
+                with mock.patch.object(observation, "IDENTITY_PROBE_TIMEOUT_SECONDS", 0.2):
+                    identity = command_identity(command)
+            else:
+                self.assertEqual([sys.executable, "--version"], command)
+                identity = {
+                    "argv": list(command),
+                    "path": sys.executable,
+                    "first_line": "fixture-tool 1",
+                    "sha256": observation.sha256_bytes(b"fixture-tool 1"),
+                }
+            return identity
+
+        with mock.patch.object(observation, "command_identity", side_effect=fixture_identity) as probes:
             self.initialize(compiler=str(slow_compiler))
+        self.assertEqual(
+            [
+                mock.call([str(slow_compiler), "--version"]),
+                mock.call([sys.executable, "--version"]),
+                mock.call([sys.executable, "--version"]),
+            ],
+            probes.call_args_list,
+        )
         self.assertFalse((self.evidence / "toolchain.json").exists())
         degraded = json.loads((self.evidence / "toolchain-degraded.json").read_text(encoding="utf-8"))
         self.assertEqual(observation.TOOLCHAIN_DEGRADED_SCHEMA, degraded["schema"])
