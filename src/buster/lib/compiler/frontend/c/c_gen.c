@@ -8050,15 +8050,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             return c_ir_emit_representation_alias_conversion(builder, value, target_type, source);
         }
     }
-    // Two types that differ only in a `volatile` qualifier are one type as far
-    // as a value is concerned: the qualifier constrains how the object behind a
-    // place is accessed, and the access itself carries `volatile_access`. The
-    // ladder below spans the scalar kinds only, so an aggregate that crossed
-    // the qualifier -- `volatile sigset_t oldset = set2` in libc-test's
-    // functional/setjmp -- had no conversion to reach for and was refused
-    // (#735). Nothing is emitted: the value already has the representation the
-    // target asks for, and the load/store validation admits the difference.
-    if (ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
+    // Scalar conversions must retain the requested canonical result type:
+    // return validation requires the exact function signature, including a
+    // volatile-qualified scalar return. Aggregates have no scalar conversion
+    // ladder, and their load/store validation admits the qualifier difference.
+    if (source_value->kind != IR_TYPE_BOOLEAN && source_value->kind != IR_TYPE_INTEGER && source_value->kind != IR_TYPE_ENUM &&
+        source_value->kind != IR_TYPE_FLOAT && source_value->kind != IR_TYPE_POINTER &&
+        ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
     {
         return value;
     }
