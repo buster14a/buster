@@ -4218,6 +4218,9 @@ struct CMacroExpansionTaskStack
     u64 capacity;
 };
 
+// Expose the row-storage bound to GCC before narrowing into the count bitfield.
+#define C_MACRO_ARGUMENT_COUNT_MASK (UINT64_MAX >> 1)
+
 typedef struct CMacroArgument CMacroArgument;
 struct CMacroArgument
 {
@@ -5197,7 +5200,7 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
         else
         {
             argument->expanded_tokens = argument->tokens;
-            argument->expanded_token_count = argument->token_count;
+            argument->expanded_token_count = argument->token_count & C_MACRO_ARGUMENT_COUNT_MASK;
             continuation->argument_index += 1;
         }
     }
@@ -5342,7 +5345,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             {
                 CMacroArgument* argument = continuation->arguments + continuation->argument_index;
                 argument->expanded_tokens = arena_allocate(arena, CPpToken, context->output_count);
-                argument->expanded_token_count = context->output_count;
+                argument->expanded_token_count = context->output_count & C_MACRO_ARGUMENT_COUNT_MASK;
                 u64 expanded_index = 0;
                 for (CPreprocessTokenNode* node = context->first_output; node; node = node->next)
                 {
