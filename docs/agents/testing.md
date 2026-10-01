@@ -30,9 +30,11 @@
   `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
   covering deadlines, launch/startup failures, cancellation, descendant cleanup,
   failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
-  The whole original suite's obsolete workflow assertions remain tracked by
-  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
-  CI contract.
+  `python3 tests/bootstrap_wrapper_test.py -v` runs the full local behavior,
+  child-process and immutable-driver build-graph harness. The authoritative
+  workflow guard, budgets, logs and required-summary failure checks live in
+  `tools/ci_zig_cache_test.py`, which the policy step executes on each Release
+  lane. The wrapper module has no duplicate workflow contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
