@@ -151,6 +151,21 @@
   resolves safe `.` and `..` segments inside the rooted APK asset namespace so
   nested quoted includes consume the same fixture bytes as desktop tests;
   traversal above the asset root is rejected.
+- The iOS payload runs `test --verbose=1 --ci=1`. Failed launches report
+  `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
+  module/index and the last module observed in timing or arena records;
+  `unavailable` means no such record arrived. The last observed module is
+  evidence of progress, not a claim that it is still running. Simulator
+  process-table, unified-log and crash-report probes retain separate bounded
+  lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
+  native exit, timeout/helper status and capture completion distinguished.
+  Probe failure does not establish an app crash. The additive
+  `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
+  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
+  payload with real CoreSimulator boot, probes and shutdown on hosted macOS
+  ARM64. The mobile lifecycle workflow retains actual probe availability and
+  failure reasons there; real app compilation/execution remains in mobile CI.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and
@@ -540,7 +555,38 @@ requires the live started row, forbids the completed row, and checks the fatal
 stderr message. This harness regression changes neither assertion totals nor
 `TEST_MODULE_TIMING` rows.
 
+## AArch64 ELF direct memory references
+
+`compiler_driver_test_aarch64_elf_ldst` runs on desktop Linux AArch64 with
+the configured host compiler. Its host-only input is
+`src/buster/tests/compiler/driver/fixtures/aarch64_elf_ldst.c`, outside the
+frozen `tests/*.c` native-retirement census. The default fixture is the
+volatile-int store/load from GitHub #2077; `AARCH64_LDST_SCALE_FAMILY=1`
+checks byte, halfword, word, doubleword and 128-bit SIMD stores/loads with
+nonzero addends past one page. Each input is compiled at `-O2 -fno-pie`,
+with GNU's section anchors disabled to keep independent symbol references,
+linked and executed independently with the host toolchain, then imported,
+linked and executed through Buster. The test requires the expected scaled
+relocation kinds, loads and stores, and reports `AARCH64_ELF_LDST_NATIVE_V1`
+only after both executions succeed. Compiler/linker children and executions
+have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
+classes, scale mismatches and malformed sites; `link_tests` derives patched
+addresses from static/dynamic section tables and imported-data copy slots.
+
 ## Node-backed Wasm oracle deadlines
+
+`compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
+additive `tools/wasm_unsigned_div_rem_execution.js` companion on the same freshly
+emitted artifact. It compares the file with the compiler's returned bytes before
+and after execution; the companion also records the consumed SHA-256. Four
+parameterized unsigned div/rem calls use UINT32_MAX/UINT64_MAX divided by two,
+with independent literal expectations. A hand-emitted unsigned baseline and four
+single-opcode signedness controls require the corresponding equality mismatch;
+validation failures, missing exports and traps do not count as semantic rejection.
+These controls establish the checker boundary, not production mutation coverage.
+The companion lives beside the startup shim in `tools/`, outside the frozen
+`tests/` input inventory. Both frozen oracle scripts and the reviewed support
+inventory remain unchanged.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 

@@ -26,7 +26,21 @@ hosted runner image happens to ship. `tools/ci_llvm.py` runs as the
   neither Visual Studio's bundled clang nor the image's
   `C:\Program Files\LLVM` wins; the existing default-target assertion still
   guards the AArch64 runner. The installer fails unless `clang --version`
-  reports the selected release.
+  reports the selected release and the native LLD frontend and archiver launch.
+  Other installed LLD frontends are also probed, each with a 30-second budget;
+  a missing executable, loader error or timeout fails before PATH publication.
+- **Linux linker runtime.** LLVM 23.1.2's verified Linux archives contain no
+  ICU runtime, while LLD directly requires `libicui18n.so.70`, `libicuuc.so.70`
+  and `libicudata.so.70` on both architectures. The installer downloads Ubuntu
+  Jammy's `libicu70` 70.1-2 package with pinned size and SHA-256 from the signed
+  package indexes ([provenance run](https://github.com/buster14a/buster/actions/runs/36838076717)).
+  `dpkg-deb` extracts it without installing system packages; its libraries and
+  real SONAME symlinks are copied to the private LLVM `lib` directory, which
+  the upstream executable's `$ORIGIN/../lib` RUNPATH already searches.
+  The package copyright notices are retained under `share/licenses/icu70`.
+  No host ICU symlink, global loader configuration or `LD_LIBRARY_PATH` is needed.
+  Clang and LLD still come from the selected newest-stable upstream archive.
+  A future release with a different unmet dependency fails readiness explicitly.
 - **macOS.** The macOS lanes keep Xcode's AppleClang, which is the platform
   compiler the project supports there; upstream LLVM also publishes no
   x86-64 macOS archive.
@@ -36,3 +50,10 @@ hosted runner image happens to ship. `tools/ci_llvm.py` runs as the
 Special-purpose consumers keep their own pins: the GPU profiles use the
 apt-locked LLVM 18 described in [ci-apt-inputs.md](ci-apt-inputs.md), and the
 analyzer, UEFI, and other workflows still use the image compiler.
+
+`python3 tools/ci_llvm_test.py -v` covers archive/runtime integrity, private
+runtime staging, SONAME preservation and fail-closed tool readiness offline.
+The ephemeral CI runtime is ICU 70.1 (Unicode-DFS-2016, plus the component
+notices in its [license](https://github.com/unicode-org/icu/blob/release-70-1/icu4c/LICENSE));
+LLVM is Apache-2.0 WITH LLVM-exception. Buster's first-party license remains
+unspecified; see [license provenance](../LICENSES/README.md).

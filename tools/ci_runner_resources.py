@@ -15,13 +15,13 @@ import re
 import shutil
 import signal
 import subprocess
-import threading
 import time
 
 
 INTERVAL_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 2
-STOP = threading.Event()
+STOP_POLL_SECONDS = 1
+STOP = False
 
 
 def command_output(argv):
@@ -118,7 +118,18 @@ def sample(parent_pid, phase, temp_directory, elapsed_seconds):
 
 
 def stop(_signum, _frame):
-    STOP.set()
+    global STOP
+    # A signal can interrupt Event.wait while its non-reentrant lock is held.
+    # Only record the request here; the main thread performs bounded waits.
+    STOP = True
+
+
+def wait_interval(seconds):
+    deadline = time.monotonic() + seconds
+    remaining = seconds
+    while not STOP and remaining > 0:
+        time.sleep(min(STOP_POLL_SECONDS, remaining))
+        remaining = deadline - time.monotonic()
 
 
 def main():
@@ -137,7 +148,7 @@ def main():
     start = time.monotonic()
     count = 0
     with args.log.open("a", encoding="utf-8", buffering=1) as output:
-        while not STOP.is_set():
+        while not STOP:
             record = sample(args.parent_pid, args.phase, os.environ.get("RUNNER_TEMP", "."),
                             time.monotonic() - start)
             line = "CI_RESOURCE_SAMPLE " + json.dumps(record, sort_keys=True, separators=(",", ":"))
@@ -146,7 +157,7 @@ def main():
             count += 1
             if args.once:
                 break
-            STOP.wait(args.interval)
+            wait_interval(args.interval)
         line = f"CI_RESOURCE_END phase={args.phase} samples={count} elapsed_seconds={time.monotonic() - start:.1f}"
         print(line, flush=True)
         output.write(line + "\n")
