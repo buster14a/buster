@@ -16856,7 +16856,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                             }
                         }
-                        if (split_system_v_aggregate && split_float_count)
+                        if (split_system_v_aggregate && (aggregate || split_float_count))
                         {
                             u32 overflow_branch_offsets[2] = {0};
                             u32 overflow_branch_sizes[2] = {0};
