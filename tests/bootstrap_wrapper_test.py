@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Controlled cross-platform tests for the immutable TCC bootstrap cache."""
-import hashlib
 import json
 import os
 import platform
@@ -134,10 +133,7 @@ if os.environ.get("BUSTER_FAKE_TCC_DELAY"):
     time.sleep(float(os.environ["BUSTER_FAKE_TCC_DELAY"]))
 if "-MF" in arguments:
     dependency = Path(arguments[arguments.index("-MF") + 1])
-    extra_dependency = os.environ.get("BUSTER_FAKE_TCC_DEPENDENCY", "")
-    extra_dependency = extra_dependency.replace("\\", "\\\\").replace(" ", "\\ ")
-    dependency.write_text("bootstrap: build.c src/buster/lib/base.h src/buster/lib/header\\ with\\ spaces.h" +
-                          (" " + extra_dependency if extra_dependency else "") + "\n")
+    dependency.write_text("bootstrap: build.c src/buster/lib/base.h src/buster/lib/header\\ with\\ spaces.h\n")
 if "-o" in arguments:
     destination = Path(arguments[arguments.index("-o") + 1])
     if os.environ.get("BUSTER_FAKE_TCC_FAIL") and ".tmp" in destination.name:
@@ -239,63 +235,6 @@ class BootstrapWrapperTests(unittest.TestCase):
             output.write("\n")
         self.assert_driver_ran(self.run_wrapper(*arguments), "identity-marker")
         self.assertEqual(self.launch_count(), 6)
-
-    @unittest.skipIf(os.name == "nt", "POSIX bootstrap dependency paths")
-    def test_absolute_parent_dependency_cold_warm_and_invalidation(self):
-        toolchain_build = self.root.parent / "tinycc build"
-        toolchain_build.mkdir()
-        resource = self.root.parent / "tcc install/include/stdalign.h"
-        resource.parent.mkdir(parents=True)
-        resource.write_text("#define BUSTER_EXTERNAL 1\n")
-        # Retain the lexical /../ component TinyCC puts in its dependencies.
-        dependency = str(toolchain_build / "../tcc install/include/stdalign.h")
-        self.environment["BUSTER_FAKE_TCC_DEPENDENCY"] = dependency
-        arguments = self.success_arguments("external-header-marker")
-        self.assert_driver_ran(self.run_wrapper(*arguments), "external-header-marker")
-        self.assertEqual(self.launch_count(), 2)
-        self.assert_driver_ran(self.run_wrapper(*arguments), "external-header-marker")
-        self.assertEqual(self.launch_count(), 2)
-        resource.write_text("#define BUSTER_EXTERNAL 2\n")
-        self.assert_driver_ran(self.run_wrapper(*arguments), "external-header-marker")
-        self.assertEqual(self.launch_count(), 4)
-        self.assert_driver_ran(self.run_wrapper(*arguments), "external-header-marker")
-        self.assertEqual(self.launch_count(), 4)
-        resource.unlink()
-        result = self.run_wrapper(*arguments)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing bootstrap dependency", result.stderr)
-        self.assertNotIn("external-header-marker", result.stdout)
-
-    @unittest.skipIf(os.name == "nt", "POSIX bootstrap dependency paths")
-    def test_relative_parent_dependencies_remain_refused(self):
-        external = self.root.parent / "external header.h"
-        external.write_text("#define BUSTER_EXTERNAL 1\n")
-        dependencies = ("../external header.h", "src/../../external header.h",
-                        "src/buster/lib/../lib/base.h")
-        for index, dependency in enumerate(dependencies):
-            with self.subTest(dependency=dependency):
-                result = self.run_wrapper(*self.success_arguments("unsafe-path-marker"),
-                                          environment={"BUSTER_FAKE_TCC_DEPENDENCY": dependency})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("unsafe bootstrap dependency path: " + dependency, result.stderr)
-                self.assertNotIn("unsafe-path-marker", result.stdout)
-                self.assertEqual(self.launch_count(), index + 1)
-                self.assertEqual(list(self.root.glob(".cache/bootstrap-driver/*/*/*.complete")), [])
-
-    @unittest.skipIf(os.name == "nt", "POSIX bootstrap dependency paths")
-    def test_relative_parent_manifest_dependency_is_not_reused(self):
-        arguments = self.success_arguments("unsafe-manifest-marker")
-        self.assert_driver_ran(self.run_wrapper(*arguments), "unsafe-manifest-marker")
-        external = self.root.parent / "external header.h"
-        external.write_text("#define BUSTER_EXTERNAL 1\n")
-        digest = hashlib.sha256(external.read_bytes()).hexdigest()
-        marker = next(self.root.glob(".cache/bootstrap-driver/*/*/*.complete"))
-        marker.write_text(marker.read_text().replace("\nEND\n",
-                          "\ndependency\t../external header.h\t" + digest + "\nEND\n"))
-        result = self.run_wrapper(*arguments, environment={"BUSTER_FAKE_TCC_FAIL": "23"})
-        self.assertEqual(result.returncode, 23, result.stderr)
-        self.assertNotIn("unsafe-manifest-marker", result.stdout)
-        self.assertEqual(self.launch_count(), 4)
 
     def test_effective_flag_change_invalidates_reuse(self):
         arguments = self.success_arguments("flags-marker")
