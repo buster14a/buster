@@ -16,6 +16,15 @@ BUSTER_GLOBAL_LOCAL f64 image_browser_clamp_scale(f64 scale)
     return result;
 }
 
+// Drag and anchored zoom share the same finite translation policy. At this
+// boundary zoom may move the anchor rather than grow pan outside the policy.
+BUSTER_GLOBAL_LOCAL f64 image_browser_clamp_pan(f64 pan)
+{
+    f64 limit = (f64)IMAGE_BROWSER_MAX_SCALE * 8192.0 + 65536.0;
+    f64 result = BUSTER_CLAMP(-limit, pan, limit);
+    return result;
+}
+
 void image_browser_state_initialize(ImageBrowserState* state, u32 width, u32 height)
 {
     *state = (ImageBrowserState){.view = {.width = width, .height = height, .scale = 1.0}};
@@ -232,8 +241,8 @@ void image_browser_zoom(ImageBrowserState* state, f64 factor, f64 anchor_x, f64 
         f64 relative_x = anchor_x - (f64)state->view.width * 0.5;
         f64 relative_y = anchor_y - (f64)state->view.height * 0.5;
         f64 ratio = next / previous;
-        state->view.pan_x = relative_x - (relative_x - state->view.pan_x) * ratio;
-        state->view.pan_y = relative_y - (relative_y - state->view.pan_y) * ratio;
+        state->view.pan_x = image_browser_clamp_pan(relative_x - (relative_x - state->view.pan_x) * ratio);
+        state->view.pan_y = image_browser_clamp_pan(relative_y - (relative_y - state->view.pan_y) * ratio);
         state->view.scale = next;
     }
 }
@@ -241,10 +250,9 @@ void image_browser_zoom(ImageBrowserState* state, f64 factor, f64 anchor_x, f64 
 void image_browser_pan(ImageBrowserState* state, f64 delta_x, f64 delta_y)
 {
     // Keep repeated input bounded before the renderer converts coordinates.
-    f64 limit = (f64)IMAGE_BROWSER_MAX_SCALE * 8192.0 + 65536.0;
     if (delta_x >= -65536.0 && delta_x <= 65536.0 && delta_y >= -65536.0 && delta_y <= 65536.0)
     {
-        state->view.pan_x = BUSTER_CLAMP(-limit, state->view.pan_x + delta_x, limit);
-        state->view.pan_y = BUSTER_CLAMP(-limit, state->view.pan_y + delta_y, limit);
+        state->view.pan_x = image_browser_clamp_pan(state->view.pan_x + delta_x);
+        state->view.pan_y = image_browser_clamp_pan(state->view.pan_y + delta_y);
     }
 }

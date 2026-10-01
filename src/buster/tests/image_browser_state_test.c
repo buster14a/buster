@@ -359,12 +359,58 @@ BUSTER_GLOBAL_LOCAL s32 image_browser_test_view(void)
     return failures;
 }
 
+BUSTER_GLOBAL_LOCAL s32 image_browser_test_pan_zoom_bounds(void)
+{
+    s32 failures = 0;
+    ImageBrowserState state;
+    image_browser_state_initialize(&state, 128, 96);
+    // The translation policy admits 64 * 8192 + 65536 = 589824 pixels.
+    f64 bound = 589824.0;
+    for (u32 iteration = 0; iteration < 16; iteration += 1)
+    {
+        image_browser_pan(&state, 65536, -65536);
+    }
+    IMAGE_BROWSER_TEST(state.view.pan_x == bound && state.view.pan_y == -bound);
+    // A center-anchored zoom used to multiply already admitted pan by 64,
+    // producing +/-37748736; the next drag then jumped back to the bound.
+    image_browser_zoom(&state, 64, 64, 48);
+    IMAGE_BROWSER_TEST(state.view.scale == 64.0);
+    IMAGE_BROWSER_TEST(state.view.pan_x == bound && state.view.pan_y == -bound);
+    image_browser_pan(&state, -7, 5);
+    IMAGE_BROWSER_TEST(state.view.pan_x == bound - 7.0 && state.view.pan_y == -bound + 5.0);
+    image_browser_zoom(&state, 1.0 / 64.0, 64, 48);
+    IMAGE_BROWSER_TEST(image_browser_test_near(state.view.pan_x, (bound - 7.0) / 64.0));
+    IMAGE_BROWSER_TEST(image_browser_test_near(state.view.pan_y, (-bound + 5.0) / 64.0));
+
+    // Zooming back out at a different corner changes translation even though
+    // each cycle restores scale. Check both intermediate and final views: the
+    // unclamped implementation crosses the bound during the 75th cycle.
+    image_browser_actual_size(&state);
+    bool bounded = true;
+    for (u32 iteration = 0; iteration < 128; iteration += 1)
+    {
+        image_browser_zoom(&state, 64, 0, 96);
+        bounded = bounded && state.view.pan_x >= -bound && state.view.pan_x <= bound &&
+                  state.view.pan_y >= -bound && state.view.pan_y <= bound;
+        image_browser_zoom(&state, 1.0 / 64.0, 128, 0);
+        bounded = bounded && state.view.pan_x >= -bound && state.view.pan_x <= bound &&
+                  state.view.pan_y >= -bound && state.view.pan_y <= bound;
+    }
+    IMAGE_BROWSER_TEST(bounded && state.view.scale == 1.0);
+    IMAGE_BROWSER_TEST(state.view.pan_x > 0 && state.view.pan_y < 0);
+    image_browser_actual_size(&state);
+    IMAGE_BROWSER_TEST(state.view.pan_x == 0 && state.view.pan_y == 0);
+    IMAGE_BROWSER_TEST(image_browser_state_destroy(&state));
+    return failures;
+}
+
 s32 image_browser_run_state_tests(void)
 {
     s32 failures = image_browser_test_transitions();
     failures += image_browser_test_shutdown();
     failures += image_browser_test_decode_policy();
     failures += image_browser_test_view();
+    failures += image_browser_test_pan_zoom_bounds();
     fprintf(stderr, "image browser state/ownership: %d failures\n", failures);
     return failures ? 1 : 0;
 }
