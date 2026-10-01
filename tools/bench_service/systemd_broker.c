@@ -54,6 +54,10 @@
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
 #define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+/* Every stage unit loses the service and broker control sockets: a stage
+ * runs revision-controlled code (CMake as buster-bench, the frozen binaries
+ * as the candidate), and both sockets authenticate only by peer uid/gid. */
+#define BQ_BROKER_CONTROL_DIRECTORIES "/run/buster-bench /run/buster-bench-systemd-broker"
 /* The one fixed unit runtime bound; the dispatch wait equals it. */
 #define BQ_BROKER_RUNTIME_MAX "--property=RuntimeMaxSec=3600000000us"
 #define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
@@ -101,6 +105,7 @@ typedef struct BqBrokerRequest
     char base[65];
     char candidate[65];
 } BqBrokerRequest;
+_Static_assert(sizeof(BqBrokerRequest) == 184, "broker request version 2 is 184 bytes (#923 layout)");
 
 typedef struct BqBrokerCommand
 {
@@ -463,8 +468,8 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
                 bq_broker_add_format(command, "--property=ReadWritePaths=%s", paths.throughput_output);
                 bq_broker_add_format(command, "--working-directory=%s", paths.candidate_source);
             }
-            bq_broker_add_format(command, "--property=InaccessiblePaths=%s %s %s", BQ_BROKER_QUEUE,
-                                 BQ_BROKER_LEASE, paths.result);
+            bq_broker_add_format(command, "--property=InaccessiblePaths=%s %s %s %s", BQ_BROKER_QUEUE,
+                                 BQ_BROKER_LEASE, paths.result, BQ_BROKER_CONTROL_DIRECTORIES);
         }
         bq_broker_add(command, "--property=PrivateNetwork=yes");
         bq_broker_add_gate(command, request, groups);
@@ -813,6 +818,23 @@ static bool bq_broker_installed_binary(char const* path, bool static_gate)
     return ok;
 }
 
+/* The writable directory a stage start requires to exist already, service
+ * owned: the candidate staging of candidate-generate and, because the trusted
+ * driver creates each one first, every zen5 stage's writable path. Returns 1
+ * with `output` filled, 0 when none is required, -1 on an invalid request. */
+static int bq_broker_start_writable(BqBrokerRequest const* request, BqBrokerPaths const* paths, char* output,
+                                    size_t capacity)
+{
+    BqZen5StageCommand zen5;
+    int result = 0;
+    if (request->stage == BQ_BROKER_CANDIDATE_GENERATE)
+        result = bq_broker_format(output, capacity, "%s", paths->candidate_staging) ? 1 : -1;
+    else if (bq_broker_zen5_stage(request->stage))
+        result = bq_zen5_stage_command(request->stage - BQ_BROKER_ZEN5_FIRST_STAGE, paths->attempt, &zen5) &&
+                 bq_broker_format(output, capacity, "%s", zen5.writable) ? 1 : -1;
+    return result;
+}
+
 static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
                             gid_t service_gid, gid_t candidate_gid)
 {
@@ -834,13 +856,10 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
              bq_broker_installed_binary(BQ_BROKER_BUILD, false) &&
              bq_broker_installed_binary(BQ_BROKER_THROUGHPUT, false) &&
              bq_broker_installed_binary(BQ_BROKER_GATE, true);
-        if (ok && request->stage == BQ_BROKER_CANDIDATE_GENERATE)
-            ok = bq_broker_directory(paths.candidate_staging, service_uid, true);
-        /* The trusted driver creates each zen5 stage's writable path first. */
-        BqZen5StageCommand zen5;
-        if (ok && bq_broker_zen5_stage(request->stage))
-            ok = bq_zen5_stage_command(request->stage - BQ_BROKER_ZEN5_FIRST_STAGE, paths.attempt, &zen5) &&
-                 bq_broker_directory(zen5.writable, service_uid, true);
+        char writable[BQ_ZEN5_STAGE_TEXT] = {0};
+        int required = ok ? bq_broker_start_writable(request, &paths, writable, sizeof(writable)) : 0;
+        if (ok && required < 0) ok = false;
+        else if (ok && required > 0) ok = bq_broker_directory(writable, service_uid, true);
     }
     return ok;
 }
@@ -997,7 +1016,9 @@ static bool bq_broker_exec_identity(char const* text, BqBrokerRequest const* req
                                     BqBrokerStartGroups const* groups)
 {
     bool ok = bq_broker_gate_exec_identity(text, request, groups);
-    if (!ok && request->signal_number != BQ_BROKER_CONT)
+    /* Only the smoke stages predate the credential gate; a zen5 unit always
+     * runs gated, so an ungated ExecStart never identifies one. */
+    if (!ok && request->signal_number != BQ_BROKER_CONT && request->stage <= BQ_BROKER_THROUGHPUT_STAGE)
     {
         ok = bq_broker_exec_path(text, bq_broker_stage_program(request->stage, false));
     }
@@ -1963,7 +1984,7 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
     {
         uint32_t index = stage - BQ_BROKER_ZEN5_FIRST_STAGE;
         BqZen5StageCommand expected;
-        char number[16], writable[600], directory[600], unit[256];
+        char number[16], writable[600], directory[600], unit[256], hidden[900];
         request->stage = stage;
         bool built = bq_broker_command(request, groups, &command) && bq_broker_paths(request, &paths) &&
                      bq_zen5_stage_command(index, paths.attempt, &expected) &&
@@ -1971,13 +1992,17 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
                      bq_broker_format(writable, sizeof(writable), "--property=ReadWritePaths=%s", expected.writable) &&
                      bq_broker_format(directory, sizeof(directory), "--working-directory=%s", expected.directory) &&
                      bq_broker_format(unit, sizeof(unit), "--unit=buster-bench-1-2-%s.service",
-                                      bq_broker_zen5_stages[index]);
+                                      bq_broker_zen5_stages[index]) &&
+                     bq_broker_format(hidden, sizeof(hidden), "--property=InaccessiblePaths=%s %s %s %s",
+                                      BQ_BROKER_QUEUE, BQ_BROKER_LEASE, paths.result, BQ_BROKER_CONTROL_DIRECTORIES);
         unsigned gate = 0;
         while (built && gate < command.count && strcmp(command.argv[gate], BQ_BROKER_GATE)) gate += 1;
         BQ_ZEN5_CHECK(built && command.count < BQ_BROKER_MAX_ARGS && gate + 6 + expected.count == command.count &&
                       !strcmp(command.argv[gate + 1], number) &&
                       !strcmp(command.argv[gate + 4], expected.service ? "65000,65001" : "65001") &&
                       bq_broker_has_argument(&command, unit) && bq_broker_has_argument(&command, writable) &&
+                      bq_broker_has_argument(&command, hidden) &&
+                      bq_broker_property_count(&command, "--property=InaccessiblePaths=") == 1 &&
                       bq_broker_argument_count(&command, writable) == 1 &&
                       bq_broker_property_count(&command, "--property=ReadWritePaths=") == 1 &&
                       bq_broker_has_argument(&command, directory) && bq_broker_has_argument(&command, "--pipe") &&
@@ -1988,6 +2013,9 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
                       (index == BQ_ZEN5_STAGE_PMU));
         for (unsigned argument = 0; built && argument < expected.count; argument += 1)
             BQ_ZEN5_CHECK(!strcmp(command.argv[gate + 6 + argument], expected.argv[argument]));
+        char required[BQ_ZEN5_STAGE_TEXT] = {0};
+        BQ_ZEN5_CHECK(built && bq_broker_start_writable(request, &paths, required, sizeof(required)) == 1 &&
+                      !strcmp(required, expected.writable));
         BQ_ZEN5_CHECK(!strcmp(bq_broker_stage_program(stage, false), expected.argv[0]) &&
                       !strcmp(bq_broker_stage_program(stage, true), expected.argv[1]) &&
                       bq_broker_service_stage(stage) == expected.service);
@@ -1997,6 +2025,16 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
     }
     request->stage = BQ_BROKER_BASE_GENERATE;
     BQ_ZEN5_CHECK(!bq_broker_command(request, groups, &command));
+    char required[BQ_ZEN5_STAGE_TEXT] = {0};
+    BQ_ZEN5_CHECK(bq_broker_paths(request, &paths) &&
+                  bq_broker_start_writable(request, &paths, required, sizeof(required)) == 0);
+    request->stage = BQ_BROKER_CANDIDATE_GENERATE;
+    BQ_ZEN5_CHECK(bq_broker_paths(request, &paths) &&
+                  bq_broker_start_writable(request, &paths, required, sizeof(required)) == 1 &&
+                  !strcmp(required, paths.candidate_staging));
+    request->stage = BQ_BROKER_OUTER;
+    BQ_ZEN5_CHECK(bq_broker_paths(request, &paths) &&
+                  bq_broker_start_writable(request, &paths, required, sizeof(required)) == 0);
     request->stage = BQ_BROKER_OUTER;
     request->recipe = BQ_BROKER_RECIPE_RETIREMENT;
     BQ_ZEN5_CHECK(!bq_broker_command(request, groups, &command));
@@ -2017,6 +2055,9 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
     parsed.recipe = BQ_BROKER_RECIPE_ZEN5;
     BQ_ZEN5_CHECK(!bq_broker_command(&parsed, groups, &command));
     parsed.recipe = BQ_BROKER_RECIPE_SMOKE;
+    parsed.runtime_max_usec = 1;
+    BQ_ZEN5_CHECK(!bq_broker_command(&parsed, groups, &command));
+    parsed.runtime_max_usec = 0;
     char const* pmu_show = "ExecStart={ path=" BQ_BROKER_GATE " ; argv[]=" BQ_BROKER_GATE
                            " 27 65001 65001 65001 -- " BQ_ZEN5_STAGE_PYTHON " -B fixed ; }\n";
     char const* build_show = "ExecStart={ path=" BQ_BROKER_GATE " ; argv[]=" BQ_BROKER_GATE
@@ -2026,6 +2067,15 @@ static bool bq_broker_zen5_self_test(BqBrokerRequest* request, BqBrokerStartGrou
     parsed.stage = BQ_BROKER_ZEN5_FIRST_STAGE;
     BQ_ZEN5_CHECK(bq_broker_exec_identity(build_show, &parsed, groups) &&
                   !bq_broker_exec_identity(pmu_show, &parsed, groups));
+    /* An ungated ExecStart identifies only a smoke stage (the legacy path). */
+    char const* ungated_build = "ExecStart={ path=" BQ_ZEN5_STAGE_DRIVER " ; argv[]=" BQ_ZEN5_STAGE_DRIVER
+                                " generate fixed ; }\n";
+    parsed.signal_number = BQ_BROKER_KILL;
+    BQ_ZEN5_CHECK(!bq_broker_exec_identity(ungated_build, &parsed, groups));
+    parsed.stage = BQ_BROKER_BASE_GENERATE;
+    BQ_ZEN5_CHECK(bq_broker_exec_identity(ungated_build, &parsed, groups));
+    parsed.stage = BQ_BROKER_ZEN5_FIRST_STAGE;
+    parsed.signal_number = BQ_BROKER_TERM;
     char* outer_cli[] = {"broker", BQ_ZEN5_STAGE_OUTER_VERB, "1", "2", revision, revision};
     BQ_ZEN5_CHECK(bq_broker_cli(6, outer_cli, &parsed) && parsed.recipe == BQ_BROKER_RECIPE_ZEN5 &&
                   parsed.stage == BQ_BROKER_OUTER);
@@ -2213,8 +2263,8 @@ static int bq_broker_self_test(void)
         BQ_BROKER_CHECK(bq_broker_format(unit_option, sizeof(unit_option), "--unit=%s", paths.unit) &&
                         bq_broker_format(parent_option, sizeof(parent_option), "--property=PartOf=%s", paths.parent) &&
                         bq_broker_format(result_option, sizeof(result_option),
-                                         "--property=InaccessiblePaths=%s %s %s", BQ_BROKER_QUEUE,
-                                         BQ_BROKER_LEASE, paths.result));
+                                         "--property=InaccessiblePaths=%s %s %s %s", BQ_BROKER_QUEUE,
+                                         BQ_BROKER_LEASE, paths.result, BQ_BROKER_CONTROL_DIRECTORIES));
         BQ_BROKER_CHECK(command.count < BQ_BROKER_MAX_ARGS && command.argv[0] &&
                         !strcmp(command.argv[0], BQ_BROKER_RUN) && command.argv[command.count] == NULL);
         unsigned gate_index = 0;

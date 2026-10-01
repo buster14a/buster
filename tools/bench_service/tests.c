@@ -3495,16 +3495,18 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_term_grace(void)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
+/* A live stage unit `stage` (a smoke or zen5_stage.h name) that survives the
+ * outer unit's KILL is found by name, stopped and collected before cleanup. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_child_stage_survives(char const* stage, u32 number)
 {
     BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, true))
     {
-        BqRequest request = bq_test_real_request(141);
+        BqRequest request = bq_test_real_request(number);
         u64 id = 0;
         fixture.fake.child = fixture.fake.observed;
         snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
-                 "buster-bench-1-2-throughput.service");
+                 "buster-bench-1-2-%s.service", stage);
         snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
                  "/buster.slice/buster-bench.slice/%s", fixture.fake.child.unit);
         snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
@@ -3533,6 +3535,17 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
                  !fixture.fake.child.populated && !bq_test_worker_probe_locked(fixture.lease));
         bq_test_worker_end(&fixture);
     }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
+{
+    /* The worker enumerates every stage name the broker can start; the zen5
+     * cases cover the first, a candidate and the last of zen5_stage.h. */
+    bq_test_worker_child_stage_survives("throughput", 141);
+    bq_test_worker_child_stage_survives("zen5-immutable-generate", 142);
+    bq_test_worker_child_stage_survives("zen5-pmu", 143);
+    bq_test_worker_child_stage_survives("zen5-captures", 144);
+    BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         BqRequest request = bq_test_real_request(150);
@@ -5254,6 +5267,42 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
  * a zen5 job (bq_worker_result_validate), the server's export snapshot
  * writes it, the client unpack replays it and the replay still binds, and a
  * changed capture byte is refused. */
+/* Replace the zen5 result manifest's bytes in place, keeping it read-only. */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_manifest_write(int directory, char const* bytes, size_t size)
+{
+    bool ok = fchmodat(directory, "zen5-calibration-v1.manifest", 0600, 0) == 0;
+    int descriptor = ok ? openat(directory, "zen5-calibration-v1.manifest", O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && descriptor >= 0 && write(descriptor, bytes, size) == (ssize_t)size && fchmod(descriptor, 0444) == 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+/* A fresh finalization must refuse the manifest with `from` replaced by `to`
+ * (or with `to` appended when `from` is NULL); the original is restored. */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_manifest_refused(BqWorkerConfig const* config, BqJob const* job,
+                                                        BqWorkerFinalization const* bound, char const* original,
+                                                        size_t size, char const* from, char const* to)
+{
+    char mutated[8192];
+    char const* at = from ? strstr(original, from) : original + size;
+    size_t prefix = at ? (size_t)(at - original) : 0;
+    size_t skipped = from ? strlen(from) : 0;
+    size_t length = at ? prefix + strlen(to) + (size - prefix - skipped) : 0;
+    bool ok = at != NULL && length < sizeof(mutated);
+    if (ok)
+    {
+        memcpy(mutated, original, prefix);
+        memcpy(mutated + prefix, to, strlen(to));
+        memcpy(mutated + prefix + strlen(to), original + prefix + skipped, size - prefix - skipped);
+    }
+    BqWorkerFinalization fresh = *bound;
+    fresh.result_bound = false;
+    ok = ok && bq_test_zen5_manifest_write(bound->result_directory, mutated, length) &&
+         bq_worker_result_validate(config, job, &fresh) != BQ_OK;
+    ok = bq_test_zen5_manifest_write(bound->result_directory, original, size) && ok;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_zen5_export(char const* root, char const* workspaces, char const* result, int directory)
 {
     String8 fields[BQ_FIELD_COUNT] = {S8(BQ_EXPORT_PRINCIPAL), S8("zen5-bridge"), S8("zen5-calibration-v1"),
@@ -5283,6 +5332,30 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_export(char const* root, char const* works
     BQ_CHECK(ok);
     if (ok)
     {
+        /* Each zen5 binding line is load-bearing: without it, or with an
+         * authorizing line added, finalization refuses the manifest. */
+        char original[8192] = {0};
+        int manifest = openat(directory, "zen5-calibration-v1.manifest", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ssize_t size = manifest >= 0 ? read(manifest, original, sizeof(original) - 1) : -1;
+        if (manifest >= 0) close(manifest);
+        bool read_ok = size > 0 && (size_t)size < sizeof(original) - 1;
+        BQ_CHECK(read_ok);
+        char const* mutations[][2] = {
+            {"\nab-authorized=false\n", "\nab-authorized=unset\n"},
+            {NULL, "ab-authorized=true\n"},
+            {"\naa-decision=not-evaluated\n", "\naa-decision=evaluated\n"},
+            {"\nimmutable-capture-status=complete\n", "\nimmutable-capture-status=invalid\n"},
+            {"\nsame-root-rebuild-capture-status=complete\n", "\nsame-root-rebuild-capture-status=invalid\n"},
+            {"\ncross-root-capture-status=complete\n", "\ncross-root-capture-status=invalid\n"},
+            {"\nstage=complete\n", "\nstage=captures\n"},
+        };
+        for (u32 index = 0; read_ok && index < BUSTER_ARRAY_LENGTH(mutations); index += 1)
+            BQ_CHECK(bq_test_zen5_manifest_refused(&config, job, &finalization, original, (size_t)size,
+                                                   mutations[index][0], mutations[index][1]));
+        BqWorkerFinalization restored = finalization;
+        restored.result_bound = false;
+        BQ_CHECK(read_ok && bq_worker_result_validate(&config, job, &restored) == BQ_OK &&
+                 !memcmp(restored.result_digest, finalization.result_digest, SHA256_HEX_CAPACITY));
         job->result_bound = true;
         snprintf(job->result_root, sizeof(job->result_root), "%s", result);
         memcpy(job->result_manifest_digest, finalization.result_digest, SHA256_HEX_CAPACITY);
@@ -5368,8 +5441,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
              bq_test_zen5_bridge_verdict(false, 1) == BQ_ZEN5_BRIDGE_FAIL &&
              bq_test_zen5_bridge_verdict(true, -1) == BQ_ZEN5_BRIDGE_FAIL &&
              bq_test_zen5_bridge_verdict(true, 0) == BQ_ZEN5_BRIDGE_PASS);
-    char root[] = "/tmp/buster-bench-zen5-bridge-XXXXXX";
-    bool ok = driver != NULL && mkdtemp(root) != NULL;
+    /* Under TMPDIR (default /tmp), like the child self-test's fixtures. */
+    char const* temporary_root = getenv("TMPDIR");
+    temporary_root = temporary_root && temporary_root[0] == '/' ? temporary_root : "/tmp";
+    char root[BQ_PATH_CAP + 1] = {0};
+    int root_length = snprintf(root, sizeof(root), "%s/buster-bench-zen5-bridge-XXXXXX", temporary_root);
+    bool ok = driver != NULL && root_length > 0 && (u32)root_length < sizeof(root) && mkdtemp(root) != NULL;
     if (!driver) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=unavailable\n");
     if (ok)
     {
@@ -5427,8 +5504,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
         free(bundle);
         close(directory);
     }
-    int temporary = open("/tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    int root_fd = temporary >= 0 && root[strlen(root) - 1] != 'X' ?
+    int temporary = root_length > 0 ? open(temporary_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int root_fd = temporary >= 0 && root[0] && root[strlen(root) - 1] != 'X' ?
                   openat(temporary, strrchr(root, '/') + 1, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (root_fd >= 0)
     {

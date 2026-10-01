@@ -15,8 +15,9 @@
  * PMU tool's standard library; a changed plan refused before any child; a
  * pinned-tool mismatch; a missing and an unlisted tree identity; base !=
  * candidate; a budget that cannot cover the timing reserve; a frozen binary
- * changed before the oracle, before the captures stage (only the capture
- * runner's spec digests can notice) and after it; and a stage that
+ * changed before the oracle, before the PMU phase, before the captures stage
+ * (only the capture runner's spec digests can notice) and after it; a pinned
+ * PMU tool copy changed before the PMU stage; and a stage that
  * runs past the recipe deadline. With KEEP_DIR only the success case runs and
  * its result tree is kept for the tests.c export-content bridge. Fixtures
  * honor TMPDIR. Eligibility is exact (bench_service_zen5_test_ineligible_reason:
@@ -247,7 +248,7 @@ BUSTER_GLOBAL_LOCAL int bench_service_zen5_test_python(char const* root, char* c
     int descriptor = bench_service_zen5_path(log, root, "python.log") ?
                      open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     BenchServiceZen5Child child = descriptor >= 0 ?
-        bench_service_zen5_child(argv, NULL, descriptor, bench_service_zen5_now() + 300ull * 1000000000ull) :
+        bench_service_zen5_child(argv, NULL, descriptor, bench_service_zen5_now() + 300ull * 1000000000ull, 0) :
         (BenchServiceZen5Child){.status = -1};
     if (descriptor >= 0) close(descriptor);
     return child.launched && !child.timed_out ? child.status : -1;
@@ -340,6 +341,8 @@ enum BenchServiceZen5TestCase
     BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_ORACLE,
     BENCH_SERVICE_ZEN5_TEST_FROZEN_AFTER_CAPTURES,
     BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES,
+    BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_PMU,
+    BENCH_SERVICE_ZEN5_TEST_PMU_TOOL_BEFORE_PMU,
     BENCH_SERVICE_ZEN5_TEST_STAGE_OVERRUN,
     BENCH_SERVICE_ZEN5_TEST_CASE_COUNT,
 };
@@ -354,7 +357,9 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
     bench_service_zen5_test_reserve_seconds = test_case == BENCH_SERVICE_ZEN5_TEST_TIMING_RESERVE ? 100000u : 0;
     bench_service_zen5_test_tamper_frozen = test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_ORACLE ? 1u :
                                             test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_AFTER_CAPTURES ? 2u :
-                                            test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES ? 3u : 0u;
+                                            test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_CAPTURES ? 3u :
+                                            test_case == BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_PMU ? 4u :
+                                            test_case == BENCH_SERVICE_ZEN5_TEST_PMU_TOOL_BEFORE_PMU ? 5u : 0u;
     /* Overrun: a 4-second budget and a first build that sleeps past it. */
     bool overrun = test_case == BENCH_SERVICE_ZEN5_TEST_STAGE_OVERRUN;
     bench_service_zen5_test_budget_seconds = overrun ? 4u : 0u;
@@ -436,6 +441,20 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_case(Arena* arena, BenchService
              bench_service_zen5_test_manifest(fixture.result, manifest, "captures were refused or failed") &&
              !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable.json") &&
              !bench_service_zen5_test_exists(fixture.attempt, "zen5/staging/captures/immutable/output.o");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_FROZEN_BEFORE_PMU:
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=pmu\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "frozen binaries changed before the PMU phase") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-pmu.log");
+        break;
+    case BENCH_SERVICE_ZEN5_TEST_PMU_TOOL_BEFORE_PMU:
+        /* The copy is re-hashed right before the stage imports it. */
+        ok = ok && result == PROCESS_RESULT_FAILED &&
+             bench_service_zen5_test_manifest(fixture.result, manifest, "status=failed\nstage=pmu\n") &&
+             bench_service_zen5_test_manifest(fixture.result, manifest,
+                                              "pinned tool tools/zen5_qualification_common.py does not match") &&
+             !bench_service_zen5_test_exists(fixture.result, "zen5/logs/zen5-pmu.log");
         break;
     default:
         ok = ok && result == PROCESS_RESULT_FAILED &&

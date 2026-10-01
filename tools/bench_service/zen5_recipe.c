@@ -65,7 +65,9 @@ BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_gap_ns;
 BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_reserve_seconds;
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_tamper_plan;
 /* Change a frozen binary 1: before the oracle; 2: after the captures stage;
- * 3: after the capture specs, so only the capture runner can notice. */
+ * 3: after the capture specs, so only the capture runner can notice;
+ * 4: after the oracle, before the PMU phase. 5: change a pinned PMU tool
+ * copy after the oracle, so only the PMU phase's re-hash can notice. */
 BUSTER_GLOBAL_LOCAL u32 bench_service_zen5_test_tamper_frozen;
 BUSTER_GLOBAL_LOCAL u64 bench_service_zen5_test_budget_seconds;
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_test_cpu_set;
@@ -381,7 +383,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_path(char* output, char const* paren
  * pidfd, so the wall interval is bounded by fork and wait4 with no polling
  * quantum; a deadline kills the whole group. Exit status reports 128+signal. */
 BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const* argv, char const* directory, int output,
-                                                                   u64 deadline_ns)
+                                                                   u64 deadline_ns, u64 output_cap)
 {
     BenchServiceZen5Child child = {.status = -1};
     int null_input = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -391,8 +393,12 @@ BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const* 
     pid_t pid = sink >= 0 && null_input >= 0 ? fork() : -1;
     if (pid == 0)
     {
+        /* A nonzero cap bounds every file the child writes, its output
+         * included; an overrun fails the child (SIGXFSZ or EFBIG). */
+        struct rlimit file_size = {(rlim_t)output_cap, (rlim_t)output_cap};
         bool ready = setpgid(0, 0) == 0 && dup2(null_input, STDIN_FILENO) >= 0 && dup2(sink, STDOUT_FILENO) >= 0 &&
-                     dup2(sink, STDERR_FILENO) >= 0 && (!directory || chdir(directory) == 0);
+                     dup2(sink, STDERR_FILENO) >= 0 && (!directory || chdir(directory) == 0) &&
+                     (!output_cap || setrlimit(RLIMIT_FSIZE, &file_size) == 0);
         if (ready) execv(argv[0], argv);
         _exit(125);
     }
@@ -472,8 +478,19 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_stage(BenchServiceZen5* recipe, u32 
      * timed child only to be killed). */
     child.timed_out = bench_service_zen5_now() >= recipe->deadline_ns;
     if (log >= 0 && !child.timed_out)
-        child = bench_service_zen5_child(bench_service_zen5_direct ? direct : broker, recipe->source, log, recipe->deadline_ns);
+        child = bench_service_zen5_child(bench_service_zen5_direct ? direct : broker, recipe->source, log, recipe->deadline_ns,
+                                         0);
     bool ok = log >= 0 && child.launched && !child.timed_out;
+    if (child.timed_out && child.launched && !bench_service_zen5_direct)
+    {
+        /* Killing the broker client's process group does not stop the stage
+         * unit; ask the broker to KILL it (bounded). The worker's cleanup
+         * still proves every stage unit gone before the workspace is removed. */
+        char unit[192] = {0};
+        char* stop[] = {BENCH_SERVICE_ZEN5_BROKER, "signal", unit, "KILL", NULL};
+        if (snprintf(unit, sizeof(unit), "buster-bench-%s-%s-%s.service", job, token, stage) > 0)
+            (void)bench_service_zen5_child(stop, recipe->source, log, bench_service_zen5_now() + 30ull * 1000000000ull, 0);
+    }
     if (log >= 0)
     {
         if (fchmod(log, 0400) != 0 || fsync(log) != 0) ok = false;
@@ -486,7 +503,10 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_stage(BenchServiceZen5* recipe, u32 
 }
 
 /* `ninja -t commands ide` of one configured root, run by the trusted driver
- * itself (read-only, no candidate code) into logs/zen5-<id>-commands.log. */
+ * itself into logs/zen5-<id>-commands.log. It executes no build rule, but it
+ * parses a build file the revision's CMake generated, as the service account,
+ * so its output is capped at BENCH_SERVICE_ZEN5_TEXT_CAP (the size the driver
+ * later reads) and an overrun fails the build. */
 BUSTER_GLOBAL_LOCAL bool bench_service_zen5_commands(BenchServiceZen5* recipe, BenchServiceZen5Build const* build,
                                                      char* log_name, u32 log_capacity)
 {
@@ -494,7 +514,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_commands(BenchServiceZen5* recipe, B
     bool ok = length > 0 && (u32)length < log_capacity;
     int log = ok ? openat(recipe->logs_directory, log_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     char* argv[] = {recipe->ninja, "-C", (char*)build->root, "-f", "build-Release.ninja", "-t", "commands", "ide", NULL};
-    BenchServiceZen5Child child = log >= 0 ? bench_service_zen5_child(argv, recipe->source, log, recipe->deadline_ns) :
+    BenchServiceZen5Child child = log >= 0 ? bench_service_zen5_child(argv, recipe->source, log, recipe->deadline_ns,
+                                                                      BENCH_SERVICE_ZEN5_TEXT_CAP) :
                                              (BenchServiceZen5Child){.status = -1};
     ok = log >= 0 && child.launched && !child.timed_out && child.status == 0;
     if (log >= 0)
@@ -972,7 +993,7 @@ BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_workload(char const
     bool cleared = unlink(output) == 0 || errno == ENOENT;
     BenchServiceZen5Child child = cleared ?
         bench_service_zen5_child(argv, directory, log,
-                                 bench_service_zen5_now() + BENCH_SERVICE_ZEN5_CHILD_SECONDS * 1000000000ull) :
+                                 bench_service_zen5_now() + BENCH_SERVICE_ZEN5_CHILD_SECONDS * 1000000000ull, 0) :
         (BenchServiceZen5Child){.status = -1};
     digest[0] = 0;
     if (!bench_service_zen5_file_digest(output, BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP, digest, NULL, NULL)) digest[0] = 0;
@@ -1667,6 +1688,11 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_pmu(Arena* arena, BenchServiceZen5* 
     /* Paths are the stage contract's; the tool is the profile's pinned one. */
     char staging[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, record[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
     char identity[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, relative[256] = {0};
+    char tampered[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    if (bench_service_zen5_test_tamper_frozen == 4) (void)bench_service_zen5_test_tamper(recipe->builds[2].frozen);
+    if (bench_service_zen5_test_tamper_frozen == 5 &&
+        bench_service_zen5_path(tampered, recipe->zen5, "pmu-tool/zen5_qualification_common.py"))
+        (void)bench_service_zen5_test_tamper(tampered);
     bool ok = bench_service_zen5_frozen_verify(recipe, "before the PMU phase") &&
               bench_service_zen5_pmu_tools(arena, recipe, false) && bench_service_zen5_staging(recipe, "pmu", staging) &&
               bench_service_zen5_path(record, staging, "zen5-pmu-v1.json") &&

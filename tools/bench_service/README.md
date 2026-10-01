@@ -16,8 +16,9 @@ pass.
 ## Linux installed worker boundary
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
-single-job supervisor. A request may name only an admitted service recipe;
-`validate-buster-v1` is currently the sole admitted entry. It cannot supply a
+single-job supervisor. A request may name only an admitted service recipe:
+`validate-buster-v1` or `zen5-calibration-v1` (one revision named twice). It
+cannot supply a
 program, argument, unit name, resource property, cgroup path or timeout. The
 service sends a typed job/attempt request to the root-owned
 `buster-bench-systemd-broker` socket. The broker constructs the fixed
@@ -603,6 +604,12 @@ took 261 s on a 2.8 GHz Xeon core, and a real-build smoke on one Xeon core
 finished in 1319 s, so five builds are at most about 22 min; the 720 timed
 children of about 50-60 ms, 21 two-second block gaps and binary staging add
 about 2-3 min, and the PMU phase and oracle well under a minute.
+
+**Trust.** A zen5 revision must be as trusted as a smoke base. Every stage
+unit is denied the service and broker control sockets, but the build stages
+still run the revision's CMake as the service account with write access to
+their roots, so the candidate account of the oracle, PMU and captures does not
+protect trusted outputs from the revision itself.
 
 The broker stage contract is `zen5_stage.h`: thirteen typed stages
 (`deploy/SYSTEMD_BROKER.md`). The builds run as the service account with only

@@ -25,9 +25,19 @@
  * of the four pinned files, with -B -E -s so no snapshot file or environment
  * variable can shadow a module.
  *
- * Stop: `systemd-run --wait` returns only after the stage unit is inactive,
- * and KillMode=control-group has killed every process in it, so no stage
- * process survives to rewrite staging after the driver starts reading it.
+ * Stop: a stage that exits normally has returned from `systemd-run --wait`
+ * only after its unit is inactive, and KillMode=control-group has killed every
+ * process in it, so nothing rewrites staging while the driver reads it. A
+ * stage past the recipe deadline is different: the driver kills its broker
+ * client and asks the broker to KILL the unit, then fails the attempt without
+ * reading staging; the worker's cleanup proves every stage unit gone.
+ *
+ * Trust: every stage unit is denied the service and broker control sockets
+ * (/run/buster-bench, /run/buster-bench-systemd-broker). The build stages
+ * still run the revision's CMake as the service account with write access to
+ * their root, so a zen5 revision must be as trusted as a smoke base: the
+ * candidate account of the oracle, PMU and captures does not protect trusted
+ * outputs from the revision itself.
  *
  * Map: BQ_ZEN5_STAGE_NAMES, BQ_ZEN5_STAGE_FIRST_NUMBER, BQ_ZEN5_STAGE_OUTER_VERB,
  * BQ_ZEN5_STAGE_BUILD_ROOTS, BqZen5StageCommand, bq_zen5_stage_command.

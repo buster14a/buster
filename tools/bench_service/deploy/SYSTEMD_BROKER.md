@@ -66,7 +66,14 @@ share:
   as `invalid`, never zero.
 
 Every zen5 stage reads `ATTEMPT/base/source` and `ATTEMPT/zen5` read-only and
-cannot reach the queue, lease or result root. The credential gate admits
+cannot reach the queue, lease or result root. Every stage unit, smoke and zen5
+alike, also lists `/run/buster-bench` and `/run/buster-bench-systemd-broker`
+in `InaccessiblePaths`: both control sockets authenticate only by peer
+uid/gid, and a stage runs revision-controlled code. The broker does not yet
+tie a stage request's selector to the live outer unit's recipe; with the
+sockets out of reach, only the trusted outer unit can make such a request.
+A zen5 revision must still be as trusted as a smoke base, because the build
+stages run its CMake as `buster-bench` with write access to their roots. The credential gate admits
 exactly each stage's program and first argument. `systemd-run --wait` returns
 only after the stage unit is inactive, so no stage process remains when the
 driver reads staging. The worker's cleanup enumerates all eighteen stage
