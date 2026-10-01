@@ -494,7 +494,7 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
 {
     ByteSlice data = information->data;
     s32 result = 0;
-    if (information->kern != 0 && ttf_range_is_valid(data, information->kern, 4))
+    if (information->kern != 0 && ttf_range_is_valid(data, information->kern, 4) && ttf_u16(data, information->kern) == 0)
     {
         u32 table_count = (u32)ttf_u16(data, information->kern + 2);
         u64 subtable = information->kern + 4;
@@ -507,14 +507,16 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
             u32 length = (u32)ttf_u16(data, subtable + 2);
             u16 coverage = ttf_u16(data, subtable + 4);
             u32 format = (u32)(coverage >> 8u);
-            bool horizontal = (coverage & 1u) != 0;
-            if (format == 0u && horizontal && length >= 14u && ttf_range_is_valid(data, subtable, (u64)length))
+            // Minimum distances and cross-stream offsets are not advance deltas.
+            bool horizontal_advance = (coverage & 7u) == 1u;
+            if (ttf_u16(data, subtable) == 0 && format == 0u && horizontal_advance && length >= 14u && ttf_range_is_valid(data, subtable, (u64)length))
             {
                 u32 pair_count = (u32)ttf_u16(data, subtable + 6);
                 u64 pairs = subtable + 14;
                 u32 needle = (glyph_left << 16u) | glyph_right;
                 u32 low = 0;
-                u32 high = pair_count;
+                // A pair array must fit its own subtable, not just the font file.
+                u32 high = pair_count <= (length - 14u) / 6u ? pair_count : 0;
                 while (low < high)
                 {
                     u32 mid = low + (high - low) / 2u;
@@ -530,8 +532,9 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
                     }
                     else
                     {
-                        result = (s32)ttf_s16(data, pair + 4);
-                        return result;
+                        s32 value = (s32)ttf_s16(data, pair + 4);
+                        result = (coverage & 8u) != 0 ? value : result + value;
+                        break;
                     }
                 }
             }
