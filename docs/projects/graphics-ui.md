@@ -105,3 +105,7 @@ addressed XDND messages before source watching, property reads or transfer
 state changes. The default keeps existing behavior. The browser opts out:
 bounded event polling alone does not bound the existing default XDND property's
 reply sizes or cumulative transfer staging allocation.
+
+Required window-arena allocation failure releases native initialization and
+returns failure. The existing arena reservation fault seam exercises this
+recovery before subsequent successful native lifecycles.

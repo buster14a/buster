@@ -206,6 +206,30 @@ BUSTER_GLOBAL_LOCAL void raster_native_bounded_poll(Arena* arena, WmHandle* wind
     arena_destroy(small, 1);
 }
 
+BUSTER_GLOBAL_LOCAL void raster_native_window_arena_failure(void)
+{
+    // Park exactly one arena: native XDND initialization consumes it, so the
+    // existing next-reserve fault seam reaches the required window arena.
+    BUSTER_UNUSED(arena_pool_release_thread());
+    Arena* pooled = arena_create((ArenaCreation){0});
+    raster_native_check(pooled != 0, "window arena failure fixture reservation");
+    if (pooled)
+    {
+        u64 reservation = pooled->reserved_size;
+        arena_destroy(pooled, 1);
+        raster_native_check(arena_test_pool_count(reservation) == 1, "one parked arena isolates window reservation failure");
+        arena_test_fail_next_reserve();
+        WmHandle* windowing = wm_initialize();
+        raster_native_check(windowing == 0, "required window arena failure rejects native initialization");
+        if (windowing)
+        {
+            wm_deinitialize(windowing);
+        }
+        wm_deinitialize(0);
+        BUSTER_UNUSED(arena_pool_release_thread());
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
 {
     WmHandle* windowing = wm_initialize();
@@ -322,6 +346,7 @@ int main(int argc, char* argv[])
     }
     else
     {
+        raster_native_window_arena_failure();
         for (u32 cycle = 0; cycle < 3; cycle += 1)
         {
             raster_native_cycle(arena, cycle);

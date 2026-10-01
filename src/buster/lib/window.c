@@ -258,6 +258,11 @@ WmHandle* wm_initialize(void)
     if (result)
     {
         result->window_arena = arena_create((ArenaCreation){0});
+        if (!result->window_arena)
+        {
+            wm_deinitialize(result);
+            result = 0;
+        }
     }
     return result;
 }
