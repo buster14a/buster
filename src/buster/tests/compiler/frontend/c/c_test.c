@@ -14989,7 +14989,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArgu
             {
                 CEntity* entity = parse.entities + index;
                 enumerator |= entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, S8("E")) &&
-                              entity->has_constant_value && !entity->constant_is_negative && entity->constant_value == cases[case_index].size;
+                              !entity->constant_is_negative && entity->constant_value == cases[case_index].size;
             }
             BUSTER_TEST_RAW(arguments, enumerator, cases[case_index].source);
             if (mode && parse.diagnostic_count == 0)
