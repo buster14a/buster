@@ -1162,10 +1162,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         {
             return false;
         }
+        bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
+                             (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
+        builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
         if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
         {
-            bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
-                                 (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
             plt_matched = direct_branch;
             builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
         }
@@ -1423,10 +1424,9 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
         if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
         {
-            ByteSlice data = builder->result.sections[relocation.section].data;
-            bool direct_branch = width == 4 && relocation.offset &&
-                                 (data.pointer[relocation.offset - 1] == 0xe8 || data.pointer[relocation.offset - 1] == 0xe9);
-            relocation.plt = elf && (relocation.plt || (direct_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
+            // A PC-relative data field can follow an opcode-valued byte. Only
+            // instruction encoding proves that this reference is a branch.
+            relocation.plt = elf && (relocation.plt || (relocation.x86_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
             builder->relocation_lines[kept] = builder->relocation_lines[index];
             builder->result.relocations[kept++] = relocation;
             continue;

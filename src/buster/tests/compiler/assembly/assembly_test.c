@@ -1900,6 +1900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_binding(UnitTestArg
         S8(".text\n.globl chosen\nchosen: ret\njmp chosen@PLT\n"),
         S8(".text\n.globl chosen\n.hidden chosen\nchosen: ret\njmp chosen@PLT\n"),
         S8(".text\ncall chosen\n.section .text.other,\"ax\",@progbits\nchosen: ret\n"),
+        S8(".data\n.byte 0xe8\n.long chosen - .\n"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(controls); index += 1)
     {
