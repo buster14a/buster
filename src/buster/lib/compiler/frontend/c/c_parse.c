@@ -4553,7 +4553,7 @@ BUSTER_C_SHARED u8 c_semantic_integer_rank(CTypeKind kind)
     u8 rank;
     switch (kind)
     {
-    case C_TYPE_BOOL: rank = C_INTEGER_RANK_NONE; break;
+    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
     case C_TYPE_CHAR:
     case C_TYPE_SIGNED_CHAR:
     case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
@@ -4568,7 +4568,7 @@ BUSTER_C_SHARED u8 c_semantic_integer_rank(CTypeKind kind)
     case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
     case C_TYPE_INT128:
     case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
-    default: rank = C_INTEGER_RANK_NONE; break;
+    default: rank = C_INTEGER_RANK_INVALID; break;
     }
     return rank;
 }
@@ -4578,6 +4578,7 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed)
     CTypeKind kind;
     switch (rank)
     {
+    case C_INTEGER_RANK_BOOL: kind = C_TYPE_BOOL; break;
     case C_INTEGER_RANK_CHAR: kind = is_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_UNSIGNED_CHAR; break;
     case C_INTEGER_RANK_SHORT: kind = is_signed ? C_TYPE_SHORT : C_TYPE_UNSIGNED_SHORT; break;
     case C_INTEGER_RANK_INT: kind = is_signed ? C_TYPE_INT : C_TYPE_UNSIGNED_INT; break;
@@ -22729,45 +22730,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 
 BUSTER_C_INTERNAL CIntegerRank c_parse_integer_rank(CTypeKind kind)
 {
-    CIntegerRank rank = C_INTEGER_RANK_INVALID;
-    switch (kind)
-    {
-    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
-    case C_TYPE_CHAR:
-    case C_TYPE_SIGNED_CHAR:
-    case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
-    case C_TYPE_SHORT:
-    case C_TYPE_UNSIGNED_SHORT: rank = C_INTEGER_RANK_SHORT; break;
-    case C_TYPE_INT:
-    case C_TYPE_UNSIGNED_INT: rank = C_INTEGER_RANK_INT; break;
-    case C_TYPE_LONG:
-    case C_TYPE_UNSIGNED_LONG: rank = C_INTEGER_RANK_LONG; break;
-    case C_TYPE_LONG_LONG:
-    case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
-    case C_TYPE_INT128:
-    case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
-    case C_TYPE_INVALID:
-    case C_TYPE_VOID:
-    case C_TYPE_FLOAT16:
-    case C_TYPE_BFLOAT16:
-    case C_TYPE_FLOAT:
-    case C_TYPE_DOUBLE:
-    case C_TYPE_LONG_DOUBLE:
-    case C_TYPE_FLOAT16_COMPLEX:
-    case C_TYPE_FLOAT_COMPLEX:
-    case C_TYPE_DOUBLE_COMPLEX:
-    case C_TYPE_LONG_DOUBLE_COMPLEX:
-    case C_TYPE_VA_LIST:
-    case C_TYPE_NULLPTR:
-    case C_TYPE_POINTER:
-    case C_TYPE_ARRAY:
-    case C_TYPE_VECTOR:
-    case C_TYPE_FUNCTION:
-    case C_TYPE_STRUCT:
-    case C_TYPE_UNION:
-    case C_TYPE_ENUM:
-    case C_TYPE_COUNT: break;
-    }
+    // An unresolved enum has no stable constant rank yet. Scalar kinds share
+    // the arithmetic conversion vocabulary after that existing refusal.
+    CIntegerRank rank = kind == C_TYPE_ENUM ? C_INTEGER_RANK_INVALID : (CIntegerRank)c_semantic_integer_rank(kind);
     return rank;
 }
 

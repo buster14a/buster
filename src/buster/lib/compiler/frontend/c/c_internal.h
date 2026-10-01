@@ -477,17 +477,6 @@ BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
-typedef enum CIntegerConversionRank
-{
-    C_INTEGER_RANK_NONE,
-    C_INTEGER_RANK_CHAR,
-    C_INTEGER_RANK_SHORT,
-    C_INTEGER_RANK_INT,
-    C_INTEGER_RANK_LONG,
-    C_INTEGER_RANK_LONG_LONG,
-    C_INTEGER_RANK_INT128,
-} CIntegerConversionRank;
-
 BUSTER_C_EXTERN u8 c_semantic_integer_rank(CTypeKind kind);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_arithmetic_kind(Target target, CTypeKind left, CTypeKind right);
