@@ -164,10 +164,14 @@ Each ledger `trusted` block has four parts:
   `plan-sha256=` and `*-capture-sha256=` lines, and the bundle bytes must
   match them.
 
-On current main the `zen5-calibration-v1` recipe is still held
-(`bq_recipe_blocked`). The worker does not yet bind a zen5 result, so no zen5
-attempt has these receipts yet. The ledger requires them anyway. An attempt
-without them, or with digests that differ from them, is `invalid`.
+Since #2106 the recipe is served, and a successful zen5 job produces both
+receipts. The worker's terminal hook (`bq_worker_before_terminal`) validates
+the zen5 manifest (`bq_worker_result_validate`) and journals `BQ_RESULT_BIND`.
+The RESULT reply then reports the manifest digest, and `bq_export_snapshot`
+writes it at offset 112 and the SHA-256 of `bq_recipe_profile` at offset 608.
+`bq_test_zen5_served_binding` (`tools/bench_service/tests.c`) checks this end to
+end on the recipe self-test's result tree. An attempt without these receipts,
+or with digests that differ from them, is `invalid`.
 
 The confirmatory set is fixed in advance by the protocol's
 `confirmatory_jobs` range (`first_job_id`..`last_job_id`). The service assigns
