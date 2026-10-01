@@ -189,7 +189,11 @@ class RuntimeTests(unittest.TestCase):
                     libraries.mkdir(parents=True)
                     for name in ("libicui18n", "libicuuc", "libicudata"):
                         (libraries / (name + ".so.70.1")).write_bytes(b"runtime")
-                        (libraries / (name + ".so.70")).symlink_to(name + ".so.70.1")
+                        try:
+                            (libraries / (name + ".so.70")).symlink_to(name + ".so.70.1")
+                        except OSError:
+                            # Windows hosts may lack symlink privilege; staging is Linux-only.
+                            (libraries / (name + ".so.70")).write_bytes(b"runtime")
                     notices = staging / "usr/share/doc/libicu70"
                     notices.mkdir(parents=True)
                     (notices / "copyright").write_text("upstream notices")
@@ -199,7 +203,8 @@ class RuntimeTests(unittest.TestCase):
                         mock.patch.object(ci_llvm.subprocess, "run", side_effect=extract):
                     ci_llvm.provision_linux_runtime(target, work, install, None)
                 self.assertEqual(events, ["verified", "extracted"])
-                self.assertTrue((install / "lib/libicui18n.so.70").is_symlink())
+                if sys.platform != "win32":
+                    self.assertTrue((install / "lib/libicui18n.so.70").is_symlink())
                 self.assertEqual((install / "lib/libicui18n.so.70").read_bytes(), b"runtime")
                 self.assertEqual((install / "share/licenses/icu70/copyright").read_text(), "upstream notices")
                 self.assertFalse((work / "icu-runtime").exists())
@@ -262,6 +267,18 @@ class ReadinessTests(unittest.TestCase):
                                    subprocess.CompletedProcess([], 0, "clang version 23.1.2\n", "")) as run:
                 ci_llvm.validate_tools("x86_64-linux", directory, (23, 1, 2))
             self.assertEqual(len(run.call_args_list), 6)
+
+    def test_failed_readiness_cannot_publish_github_path_or_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path_file, env_file = directory / "path", directory / "env"
+            with mock.patch.object(ci_llvm, "fetch_releases", return_value=[]), \
+                    mock.patch.object(ci_llvm, "install_llvm", side_effect=RuntimeError("linker loader failure")):
+                with self.assertRaisesRegex(RuntimeError, "linker loader failure"):
+                    ci_llvm.main(["--target", "x86_64-linux", "--work-directory", str(directory),
+                                  "--github-path", str(path_file), "--github-env", str(env_file)])
+            self.assertFalse(path_file.exists())
+            self.assertFalse(env_file.exists())
 
 
 class WorkflowTests(unittest.TestCase):

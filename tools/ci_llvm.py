@@ -8,6 +8,7 @@ and already publishes this target's archive. The archive is verified against
 the SHA-256 digest and size GitHub records for that asset before anything is
 extracted, and only the compiler, linker, archiver, and Clang resource tree are
 written, so the multi-gigabyte distribution never lands on the runner disk.
+Linux additionally stages a pinned, verified ICU package privately for LLD.
 
 LLVM releases older than MINIMUM_VERSION are rejected: 22.1.0 is the first
 stable release with the AVX10 host-detection correction (issue #1501).
@@ -259,7 +260,7 @@ def provision_linux_runtime(target, work, install, token):
         staging = work / "icu-runtime"
         if staging.exists():
             shutil.rmtree(staging)
-        print(f"LLVM_RUNTIME package={asset['name']} digest={asset['digest']} "
+        print(f"LLVM_RUNTIME package={asset['name']} size={asset['size']} digest={asset['digest']} "
               f"url={asset['browser_download_url']}")
         download(asset, package, token)
         subprocess.run(["dpkg-deb", "--extract", str(package), str(staging)], check=True, timeout=30)
