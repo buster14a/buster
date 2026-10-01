@@ -3183,7 +3183,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
             // Members are placed by c_record_layout_place, the rule the IR
             // layout in c_gen places them by too, so a sizeof folded during the
             // parse cannot contradict the object it sizes (#1439).
-            u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+            u32 pragma_pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+            u32 pack_alignment = pragma_pack_alignment;
             CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
             if (aggregate_attributes.is_packed)
             {
@@ -3244,6 +3245,23 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     fields_resolved = false;
                     break;
+                }
+                // Pragma pack caps explicit member requests on Itanium and
+                // AAPCS64 targets. GNU packed alone and Microsoft's required
+                // alignment let the request win; zero-width fields keep it.
+                if (pragma_pack_alignment && record.policy != C_RECORD_LAYOUT_MICROSOFT && (!member.is_bit_field || member.bit_width))
+                {
+                    if (member.is_bit_field)
+                    {
+                        member_alignment = BUSTER_MAX(natural_alignment, member_alignment_request);
+                        // An over-ceiling bit-field request contributes to
+                        // alignment but does not move the starting bit.
+                        if (member_alignment_request > pragma_pack_alignment)
+                        {
+                            member_alignment_request = 0;
+                        }
+                    }
+                    member_alignment = BUSTER_MIN(member_alignment, pragma_pack_alignment);
                 }
                 CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
                                                                                       .size = member_size,
