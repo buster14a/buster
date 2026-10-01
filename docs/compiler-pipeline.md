@@ -164,6 +164,15 @@ linear work and compact state. QUALITY may construct more side data and run a
 pressure scheduler, but it remains deterministic and cannot rely on facts that
 the machine verifier does not establish.
 
+For branching machine CFGs, FAST can reuse spill homes and selector frame slots
+when their occupied blocks do not overlap. The block-occupancy colorer has
+scratch-memory and comparison limits; larger functions retain the row-range
+colorer. A selector slot whose frame address escapes or whose access bounds
+cannot be proved keeps dedicated storage. Known narrow writes may end an old
+slot value only when they cover every byte that later reads can observe. Frame
+allocation rounds to the smallest size that covers its slots and preserves the
+target's stack alignment after callee-saved pushes.
+
 ### 6. Encoding
 
 Encoding consumes legal allocated machine IR plus sorted edits and relocation
