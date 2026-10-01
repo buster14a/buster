@@ -119,6 +119,57 @@ def run_self_test() -> int:
     assert comparison["requalification_required"]
     assert comparison["changes"][0]["path"] == "kernel"
 
+    valid_result = synthetic_result(manifest, manifest_digest)
+    assert not validate_result(valid_result, manifest, manifest_digest)
+
+    invalid_result = json.loads(json.dumps(valid_result))
+    first_run = invalid_result["groups"][0]["runs"][0]
+    invalid_rows = json.loads(first_run["perf_json"])
+    invalid_rows[-1]["counter-value"] = "<not supported>"
+    invalid_rows[-1]["event-runtime"] = "0"
+    invalid_rows[-1]["pcnt-running"] = "0.00"
+    raw_invalid = json.dumps(invalid_rows, sort_keys=True, separators=(",", ":"))
+    replay, replay_problems = map_perf_entries(
+        manifest["groups"][0], invalid_rows, float(manifest["minimum_running_fraction"])
+    )
+    assert len(replay_problems) == 1
+    first_run["perf_json"] = raw_invalid
+    first_run["perf_json_sha256"] = sha256_bytes(raw_invalid.encode("utf-8"))
+    first_run["observations"] = replay
+    first_run["valid"] = False
+    first_run["invalid_reasons"] = replay_problems
+    invalid_result["qualification_status"] = "invalid"
+    invalid_result["invalid_reasons"] = [f"core-execution repeat 0: {replay_problems[0]}"]
+    assert not validate_result(invalid_result, manifest, manifest_digest)
+    invalid_result["qualification_status"] = "pmu-qualified"
+    assert any("pmu-qualified result" in problem for problem in validate_result(invalid_result, manifest, manifest_digest))
+
+    with tempfile.TemporaryDirectory(prefix="buster-zen5-identity-") as temporary:
+        root = Path(temporary)
+        identity_path = root / "repository.json"
+        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "c" * 40, "status": ""}), encoding="utf-8")
+        identity, problems = capture_tool.load_repository_identity(identity_path, root)
+        assert not problems and identity["identity_source"] == "service-snapshot"
+        assert identity["revision"] == "b" * 40 and identity["tree"] == "c" * 40 and identity["status"] == ""
+        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "short", "status": "M x"}), encoding="utf-8")
+        _, problems = capture_tool.load_repository_identity(identity_path, root)
+        assert problems == ["repository tree is not a full object id", "repository checkout is not clean"], problems
+        for malformed in ({"revision": "b" * 40, "tree": "c" * 40}, {"revision": "b" * 40, "tree": "c" * 40, "status": 0},
+                          {"revision": "b" * 40, "tree": "c" * 40, "status": "", "extra": 1}, []):
+            identity_path.write_text(json.dumps(malformed), encoding="utf-8")
+            try:
+                capture_tool.load_repository_identity(identity_path, root)
+            except QualificationError:
+                pass
+            else:
+                raise AssertionError(f"malformed repository identity accepted: {malformed!r}")
+
+    print("zen5_host_qualification self-test passed")
+    return 0
+
+
+def synthetic_result(manifest: dict[str, Any], manifest_digest: str) -> dict[str, Any]:
+    """A replayable synthetic pmu-qualified record; reused by other offline fixtures."""
     host = {
         "hostname": "benchpress",
         "selected_cpu": 2,
@@ -256,51 +307,4 @@ def run_self_test() -> int:
         "qualification_status": "pmu-qualified",
         "invalid_reasons": [],
     }
-    assert not validate_result(valid_result, manifest, manifest_digest)
-
-    invalid_result = json.loads(json.dumps(valid_result))
-    first_run = invalid_result["groups"][0]["runs"][0]
-    invalid_rows = json.loads(first_run["perf_json"])
-    invalid_rows[-1]["counter-value"] = "<not supported>"
-    invalid_rows[-1]["event-runtime"] = "0"
-    invalid_rows[-1]["pcnt-running"] = "0.00"
-    raw_invalid = json.dumps(invalid_rows, sort_keys=True, separators=(",", ":"))
-    replay, replay_problems = map_perf_entries(
-        manifest["groups"][0], invalid_rows, float(manifest["minimum_running_fraction"])
-    )
-    assert len(replay_problems) == 1
-    first_run["perf_json"] = raw_invalid
-    first_run["perf_json_sha256"] = sha256_bytes(raw_invalid.encode("utf-8"))
-    first_run["observations"] = replay
-    first_run["valid"] = False
-    first_run["invalid_reasons"] = replay_problems
-    invalid_result["qualification_status"] = "invalid"
-    invalid_result["invalid_reasons"] = [f"core-execution repeat 0: {replay_problems[0]}"]
-    assert not validate_result(invalid_result, manifest, manifest_digest)
-    invalid_result["qualification_status"] = "pmu-qualified"
-    assert any("pmu-qualified result" in problem for problem in validate_result(invalid_result, manifest, manifest_digest))
-
-    with tempfile.TemporaryDirectory(prefix="buster-zen5-identity-") as temporary:
-        root = Path(temporary)
-        identity_path = root / "repository.json"
-        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "c" * 40, "status": ""}), encoding="utf-8")
-        identity, problems = capture_tool.load_repository_identity(identity_path, root)
-        assert not problems and identity["identity_source"] == "service-snapshot"
-        assert identity["revision"] == "b" * 40 and identity["tree"] == "c" * 40 and identity["status"] == ""
-        identity_path.write_text(json.dumps({"revision": "b" * 40, "tree": "short", "status": "M x"}), encoding="utf-8")
-        _, problems = capture_tool.load_repository_identity(identity_path, root)
-        assert problems == ["repository tree is not a full object id", "repository checkout is not clean"], problems
-        for malformed in ({"revision": "b" * 40, "tree": "c" * 40}, {"revision": "b" * 40, "tree": "c" * 40, "status": 0},
-                          {"revision": "b" * 40, "tree": "c" * 40, "status": "", "extra": 1}, []):
-            identity_path.write_text(json.dumps(malformed), encoding="utf-8")
-            try:
-                capture_tool.load_repository_identity(identity_path, root)
-            except QualificationError:
-                pass
-            else:
-                raise AssertionError(f"malformed repository identity accepted: {malformed!r}")
-
-    print("zen5_host_qualification self-test passed")
-    return 0
-
-
+    return valid_result
