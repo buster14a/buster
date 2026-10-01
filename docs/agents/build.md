@@ -297,7 +297,19 @@ work, use every CPU instead of one each (#892 measured macOS arm64 checks at
 454 s build plus 532 s test in a one-job sanitized tree beside 120 s and 90 s
 compile-only trees). A matrix without test trees, or one whose concurrent
 self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
-allocation (`matrix_superbuild_allocate_jobs`). Larger hosts retain the weighted
+allocation (`matrix_superbuild_allocate_jobs`). With two or more test trees and
+no self-host worker (the hosted checks shards), test phases are serialized:
+each test tree keeps its share as the inner Ninja quota but runs its tests with
+the whole CPU budget, one tree at a time in declaration order (sanitized Debug
+first). The superbuild makes each tree's test target wait for the previous test
+tree's, and the phase plan records that edge as `after`. Builds are not
+serialized, so a test phase can still overlap the remaining compiles; that
+deliberately extends the bounded overlap above to the sanitized Release build
+(up to about twice the CPU count in nominal workers for its duration) in
+exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
+Clang CI trees run `test_all` through the isolated-process runner
+(`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
+two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work

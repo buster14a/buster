@@ -728,14 +728,18 @@ class NativeObservationTest(unittest.TestCase):
         workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         lanes = re.search(r"(?m)^        lane: \[([^\]]+)\]$", desktop)
-        shards = re.search(r"(?m)^        shard: \[([^\]]+)\]$", desktop)
+        shards = re.search(r"(?m)^        shard: \$\{\{ fromJSON\((.+)\) \}\}$", desktop)
         self.assertIsNotNone(lanes)
         self.assertIsNotNone(shards)
         self.assertEqual(lanes.group(1).split(", "), [
             "linux-x86_64", "linux-aarch64", "macos-aarch64",
             "windows-x86_64", "windows-aarch64",
         ])
-        self.assertEqual(shards.group(1).split(", "), ["release", "checks"])
+        self.assertEqual(shards.group(1),
+            "github.event_name == 'workflow_dispatch' && "
+            "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
+            "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' "
+            "|| '[\"release\", \"checks\"]'")
         steps = dict(re.findall(
             r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop,
         ))
