@@ -178,6 +178,14 @@ recorded base. The PR event's base SHA may still name the commit that was main
 when the PR opened. Merge groups keep their exact queued base SHA and wait for
 the predecessor to land before final admission.
 
+Merge-conflict preflight also waits for the exact queued predecessor with the
+trusted `merge_queue_admission.py wait-base` helper (bounded to 18,000 seconds
+within its 310-minute merge-group job, matching the other admission callers). It compares the candidate against the event's exact
+`base_sha` after that base becomes live main. This keeps a predecessor's
+generated catch-up delta out of an ordinary successor's ownership diff. A
+replaced group, timeout, or main movement fails without publishing a clean
+status; generated-state attestation and conflict rules remain unchanged.
+
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
 exact next-trusted file digests in the final tree, both generated artifact

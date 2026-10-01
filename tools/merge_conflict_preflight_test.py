@@ -289,6 +289,13 @@ class MergeConflictPreflightTest(unittest.TestCase):
         self.assertIn("persist-credentials: false", trusted)
         self.assertNotIn("pull_request_target", trusted)
         self.assertNotIn("python3 -B tools/merge_conflict_preflight_test.py -v", trusted)
+        waiting = trusted.split("      - name: Wait for the exact queued predecessor\n", 1)[1]
+        waiting = waiting.split("      - name: Analyze exact main/head identities\n", 1)[0]
+        self.assertIn("if: ${{ github.event_name == 'merge_group' }}", waiting)
+        self.assertIn("tools/merge_queue_admission.py wait-base", waiting)
+        self.assertIn("--repo-root . --trusted-root .", waiting)
+        self.assertIn('--sha "$GITHUB_SHA" --wait-seconds 18000', waiting)
+        self.assertNotIn("continue-on-error", waiting)
 
         self.assertIn("pull_request:\n", regression)
         self.assertIn("python3 -B tools/merge_conflict_preflight_test.py -v", regression)
@@ -296,6 +303,48 @@ class MergeConflictPreflightTest(unittest.TestCase):
         self.assertNotIn("statuses: write", regression)
         self.assertNotIn("GITHUB_TOKEN", regression)
         self.assertNotIn("tools/merge_conflict_preflight.py github-event", regression)
+
+    def test_merge_group_requires_landed_exact_base_before_publication(self) -> None:
+        base = self.initial({"source.c": "base\n"})
+        generated = sorted(PREFLIGHT.GENERATED_RETIREMENT_PATHS)[0]
+        self.repo.write(generated, "predecessor catch-up\n")
+        predecessor = self.repo.commit("queued catch-up")
+        self.repo.branch("feature", predecessor)
+        self.repo.write("source.c", "feature\n")
+        member = self.repo.commit("ordinary feature")
+        tree = self.repo.git("rev-parse", member + "^{tree}")
+        head = self.repo.git("commit-tree", tree, "-p", predecessor, "-p", member,
+                             "-m", "synthetic group")
+        event = {"merge_group": {"base_sha": predecessor, "head_sha": head,
+                 "base_ref": "refs/heads/main", "head_ref": "refs/heads/queue"}}
+        api = mock.Mock()
+        api.previous_status.return_value = None
+        route = PREFLIGHT._github_merge_group_event
+        args = (self.root, api, event, self.root / "reports", None, "preflight")
+        for fetched, message in (([base], "base is not live main"),
+                                 ([predecessor, head, member], "main moved")):
+            with self.subTest(fetched=fetched), mock.patch.object(
+                    PREFLIGHT, "_fetch_ref", side_effect=fetched):
+                with self.assertRaisesRegex(PREFLIGHT.PreflightError, message):
+                    route(*args)
+                api.publish_status.assert_not_called()
+        with mock.patch.object(PREFLIGHT, "_fetch_ref",
+                               side_effect=[predecessor, head, predecessor]):
+            self.assertFalse(route(*args))
+        report = api.publish_status.call_args.args[1]
+        self.assertEqual(report["main"]["sha"], predecessor)
+        self.assertEqual(report["outcome"]["number"], 3)
+        self.assertEqual(report["candidate_changes"][
+            "generated_or_integration_owned_retirement_paths"], [])
+
+    def test_merge_group_rejects_missing_base_sha(self) -> None:
+        event = {"merge_group": {"head_sha": "a" * 40,
+                 "head_ref": "refs/heads/queue", "base_ref": "refs/heads/main"}}
+        api = mock.Mock()
+        with self.assertRaisesRegex(PREFLIGHT.PreflightError, "invalid base_sha"):
+            PREFLIGHT._github_merge_group_event(
+                self.root, api, event, self.root / "reports", None, "preflight")
+        api.publish_status.assert_not_called()
 
     def test_workflow_run_payload_requires_one_pull_request(self) -> None:
         event = {

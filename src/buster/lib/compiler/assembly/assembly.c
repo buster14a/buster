@@ -12,8 +12,8 @@
 // selection and encoding go through the generated metadata
 // (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
 // assembly_x86_instruction_size/encode paths retaining preliminary size and
-// legality checks for many families, including EVEX/APX. LEA and the scalar
-// MOVZX/MOVSX/MOVSXD family derive their lengths from metadata selection.
+// legality checks for many families, including EVEX/APX. The scalar integer/control
+// family derives its lengths from metadata selection, retaining that selected form through emission.
 // AArch64 uses the generated
 // syntax/semantic tables and compact architectural front doors such as the
 // scalar GPR memory family, all encoded through aarch64_encoding.h.
@@ -515,6 +515,9 @@ struct AssemblyInstruction
     bool metadata_include_implicit;
     bool metadata_private_pc8_long;
     u32 metadata_form_id;
+    u16 metadata_memory_width;
+    u8 metadata_memory_operand;
+    bool metadata_memory_source_width_cleared;
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
     u32 aarch64_scalar_integer_form_index;
@@ -4473,33 +4476,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_decorators_parse(String8* text, As
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_avx_move(AssemblyOpcode opcode)
-{
-    return (opcode >= ASSEMBLY_OPCODE_X86_VMOVAPS && opcode <= ASSEMBLY_OPCODE_X86_VMOVUPD) ||
-           opcode == ASSEMBLY_OPCODE_X86_VMOVDQA || opcode == ASSEMBLY_OPCODE_X86_VMOVDQU;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_avx_integer(AssemblyOpcode opcode)
 {
     return opcode >= ASSEMBLY_OPCODE_X86_VPADDB && opcode <= ASSEMBLY_OPCODE_X86_VPMULLD;
 }
 
-BUSTER_GLOBAL_LOCAL u8 assembly_x86_avx_map(AssemblyOpcode opcode)
-{
-    return opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ ||
-                   opcode == ASSEMBLY_OPCODE_X86_VPMULLD
-               ? 2
-               : 1;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_legacy_packed(AssemblyOpcode opcode)
 {
     return opcode >= ASSEMBLY_OPCODE_X86_MOVQ_MMX && opcode <= ASSEMBLY_OPCODE_X86_PMULLW_MMX;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_data(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_FLD && opcode <= ASSEMBLY_OPCODE_X86_FISTTP;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_arithmetic(AssemblyOpcode opcode)
@@ -4510,31 +4494,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_arithmetic(AssemblyOpcode op
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_pop_arithmetic(AssemblyOpcode opcode)
 {
     return opcode >= ASSEMBLY_OPCODE_X86_FADDP && opcode <= ASSEMBLY_OPCODE_X86_FDIVRP;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_compare(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_FCOM && opcode <= ASSEMBLY_OPCODE_X86_FCMOVCC;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_integer_arithmetic(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_FIADD && opcode <= ASSEMBLY_OPCODE_X86_FIDIVR;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_state_memory(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_FBLD && opcode <= ASSEMBLY_OPCODE_X86_FSTSW;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_stack_control(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_FFREE && opcode <= ASSEMBLY_OPCODE_X86_FDECSTP;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_x87_zero_operand(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_F2XM1 && opcode <= ASSEMBLY_OPCODE_X86_FWAIT;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_count_valid(AssemblyOpcode opcode, u8 count, u8 canonical_count)
@@ -4638,19 +4597,6 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_x87_normalize_omitted_operands(AssemblyIns
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_needed(u16 width, AssemblyRegister first, AssemblyRegister second)
-{
-    return width == 64 || first.index >= 8 || second.index >= 8 ||
-           (width == 8 && ((first.index >= 4 && !first.high_byte) || (second.index >= 4 && !second.high_byte)));
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_extension_rex_needed(u16 width, AssemblyRegister destination, AssemblyRegister source,
-                                                            u16 source_width)
-{
-    return assembly_x86_rex_needed(width, destination, source) ||
-           (source_width == 8 && source.index >= 4 && !source.high_byte);
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_displacement_size(AssemblyMemory memory, u32* result)
 {
     if (memory.rip_relative || !memory.has_base)
@@ -4703,72 +4649,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_rex_needed(u16 width, AssemblyRegis
            (memory.has_index && memory.index.index >= 8) || (width == 8 && reg.index >= 4 && !reg.high_byte);
 }
 
-BUSTER_GLOBAL_LOCAL u16 assembly_operand_width(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_REGISTER ? operand.reg.width
-           : operand.kind == ASSEMBLY_OPERAND_MEMORY ? operand.memory.width
-                                                      : 0;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_rotate(AssemblyOpcode opcode)
 {
     return opcode == ASSEMBLY_OPCODE_X86_ROL || opcode == ASSEMBLY_OPCODE_X86_ROR || opcode == ASSEMBLY_OPCODE_X86_RCL ||
            opcode == ASSEMBLY_OPCODE_X86_RCR;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_count_is_cl(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_REGISTER && operand.reg.class == ASSEMBLY_REGISTER_GPR && operand.reg.width == 8 &&
-           operand.reg.index == 1;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_vex_three_byte_needed(AssemblyOperand rm)
-{
-    return (rm.kind == ASSEMBLY_OPERAND_REGISTER && rm.reg.index >= 8) ||
-           (rm.kind == ASSEMBLY_OPERAND_MEMORY && ((rm.memory.has_base && rm.memory.base.index >= 8) ||
-                                                   (rm.memory.has_index && rm.memory.index.index >= 8)));
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_immediate_fits(s64 value, u16 width, bool signed_only)
-{
-    if (width == 64)
-    {
-        return true;
-    }
-    s64 signed_minimum = -(INT64_C(1) << (width - 1));
-    u64 unsigned_maximum = (UINT64_C(1) << width) - 1;
-    return value >= signed_minimum && (signed_only ? value <= (s64)(unsigned_maximum >> 1) : value < 0 || (u64)value <= unsigned_maximum);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_count_immediate_valid(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_EXPRESSION && !operand.expression.has_symbol &&
-           assembly_x86_immediate_fits(operand.expression.addend, 8, false);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_bit_atomic(AssemblyOpcode opcode)
-{
-    return opcode >= ASSEMBLY_OPCODE_X86_BSF && opcode <= ASSEMBLY_OPCODE_X86_TZCNT;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_target_has_bit_atomic_feature(Target target, TargetCpuFeature feature)
 {
     return target_cpu_feature_has(target, feature);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_is_gpr(AssemblyOperand operand)
-{
-    return operand.kind == ASSEMBLY_OPERAND_REGISTER && operand.reg.class == ASSEMBLY_REGISTER_GPR;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_rex_conflicts_high_byte(u16 width, AssemblyRegister first, AssemblyRegister second)
-{
-    return assembly_x86_rex_needed(width, first, second) && (first.high_byte || second.high_byte);
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_rex_conflicts_high_byte(u16 width, AssemblyRegister reg, AssemblyMemory memory)
-{
-    return assembly_x86_memory_rex_needed(width, reg, memory) && reg.high_byte;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_set_width(AssemblyOperand* operand, u16 width)
@@ -4806,249 +4695,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_lock_prefix_legal(AssemblyInstruction* ins
     {
         return first.kind == ASSEMBLY_OPERAND_MEMORY;
     }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_bit_atomic_instruction_size(AssemblyInstruction* instruction)
-{
-    AssemblyOpcode opcode = instruction->opcode;
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    u32 lock_size = instruction->lock_prefix ? 1 : 0;
-    if (assembly_x86_lock_prefix_legal(instruction))
-    {
-        if (opcode == ASSEMBLY_OPCODE_X86_BSF || opcode == ASSEMBLY_OPCODE_X86_BSR || opcode == ASSEMBLY_OPCODE_X86_POPCNT ||
-            opcode == ASSEMBLY_OPCODE_X86_LZCNT || opcode == ASSEMBLY_OPCODE_X86_TZCNT)
-        {
-            if (!assembly_x86_operand_is_gpr(*first) || first->reg.width == 8 ||
-                (first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64) ||
-                (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY))
-            {
-                return false;
-            }
-            instruction->width = first->reg.width;
-            if (second->kind == ASSEMBLY_OPERAND_REGISTER)
-            {
-                if (!assembly_x86_operand_is_gpr(*second) || second->reg.width != instruction->width ||
-                    assembly_x86_rex_conflicts_high_byte(instruction->width, first->reg, second->reg))
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                if (!assembly_x86_memory_set_width(second, instruction->width) ||
-                    assembly_x86_memory_rex_conflicts_high_byte(instruction->width, first->reg, second->memory))
-                {
-                    return false;
-                }
-            }
-            u32 address_size = 1;
-            if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
-            {
-                return false;
-            }
-            u8 rex = second->kind == ASSEMBLY_OPERAND_REGISTER
-                           ? assembly_x86_rex_needed(instruction->width, first->reg, second->reg)
-                           : assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
-            u32 mandatory_prefix = opcode == ASSEMBLY_OPCODE_X86_BSF || opcode == ASSEMBLY_OPCODE_X86_BSR ? 0 : 1;
-            instruction->size = lock_size + (instruction->width == 16 ? 1 : 0) + mandatory_prefix + (rex ? 1 : 0) + 2 + address_size;
-            return true;
-        }
-        if (opcode == ASSEMBLY_OPCODE_X86_BSWAP)
-        {
-            if (!assembly_x86_operand_is_gpr(*first) || (first->reg.width != 32 && first->reg.width != 64) ||
-                instruction->operand_count != 1)
-            {
-                return false;
-            }
-            instruction->width = first->reg.width;
-            u8 rex = assembly_x86_rex_needed(instruction->width, (AssemblyRegister){0}, first->reg);
-            instruction->size = lock_size + (rex ? 1 : 0) + 2;
-            return true;
-        }
-        if (opcode == ASSEMBLY_OPCODE_X86_BT || opcode == ASSEMBLY_OPCODE_X86_BTC || opcode == ASSEMBLY_OPCODE_X86_BTR ||
-            opcode == ASSEMBLY_OPCODE_X86_BTS)
-        {
-            if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-                (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_EXPRESSION))
-            {
-                return false;
-            }
-            instruction->width = assembly_operand_width(*first);
-            if (second->kind == ASSEMBLY_OPERAND_REGISTER)
-            {
-                if (!assembly_x86_operand_is_gpr(*second))
-                {
-                    return false;
-                }
-                if (!instruction->width)
-                {
-                    instruction->width = second->reg.width;
-                }
-                if (second->reg.width != instruction->width)
-                {
-                    return false;
-                }
-            }
-            else if (!instruction->width)
-            {
-                return false;
-            }
-            if (instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-            {
-                return false;
-            }
-            if (first->kind == ASSEMBLY_OPERAND_REGISTER && !assembly_x86_operand_is_gpr(*first))
-            {
-                return false;
-            }
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, instruction->width))
-            {
-                return false;
-            }
-            if (second->kind == ASSEMBLY_OPERAND_EXPRESSION &&
-                (second->expression.has_symbol || second->expression.addend < 0 || second->expression.addend > UINT8_MAX))
-            {
-                return false;
-            }
-            u8 reg = second->kind == ASSEMBLY_OPERAND_EXPRESSION
-                         ? opcode == ASSEMBLY_OPCODE_X86_BT   ? 4
-                           : opcode == ASSEMBLY_OPCODE_X86_BTS ? 5
-                           : opcode == ASSEMBLY_OPCODE_X86_BTR ? 6
-                                                           : 7
-                         : second->reg.index;
-            u8 rex = first->kind == ASSEMBLY_OPERAND_REGISTER
-                           ? assembly_x86_rex_needed(instruction->width, (AssemblyRegister){.index = reg}, first->reg)
-                           : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){.index = reg}, first->memory);
-            if (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-                assembly_x86_rex_conflicts_high_byte(instruction->width, (AssemblyRegister){.index = reg}, first->reg))
-            {
-                return false;
-            }
-            u32 address_size = 1;
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-            {
-                return false;
-            }
-            instruction->size = lock_size + (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) +
-                                (second->kind == ASSEMBLY_OPERAND_EXPRESSION ? 3 : 2) + address_size;
-            return true;
-        }
-        if (opcode == ASSEMBLY_OPCODE_X86_XCHG)
-        {
-            AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-            if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-                (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-                (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY))
-            {
-                return false;
-            }
-            if (!assembly_x86_operand_is_gpr(*first) && first->kind != ASSEMBLY_OPERAND_MEMORY)
-            {
-                return false;
-            }
-            if (!assembly_x86_operand_is_gpr(*second) && second->kind != ASSEMBLY_OPERAND_MEMORY)
-            {
-                return false;
-            }
-            instruction->width = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg.width : second->reg.width;
-            if (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-            {
-                return false;
-            }
-            if (first->kind == ASSEMBLY_OPERAND_REGISTER && second->kind == ASSEMBLY_OPERAND_REGISTER &&
-                (first->reg.width != instruction->width || second->reg.width != instruction->width))
-            {
-                return false;
-            }
-            if (memory && !assembly_x86_memory_set_width(memory, instruction->width))
-            {
-                return false;
-            }
-            if (!memory && instruction->width != 8 && (first->reg.index == 0 || second->reg.index == 0))
-            {
-                AssemblyRegister other = first->reg.index == 0 ? second->reg : first->reg;
-                u8 rex = assembly_x86_rex_needed(instruction->width, (AssemblyRegister){0}, other);
-                instruction->size = lock_size + (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1;
-                return true;
-            }
-            AssemblyRegister reg = first->kind == ASSEMBLY_OPERAND_MEMORY ? second->reg : first->reg;
-            AssemblyOperand* rm = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second;
-            if (rm->kind == ASSEMBLY_OPERAND_REGISTER && assembly_x86_rex_conflicts_high_byte(instruction->width, reg, rm->reg))
-            {
-                return false;
-            }
-            u32 address_size = 1;
-            u8 rex = rm->kind == ASSEMBLY_OPERAND_MEMORY
-                           ? assembly_x86_memory_rex_needed(instruction->width, reg, rm->memory)
-                           : assembly_x86_rex_needed(instruction->width, reg, rm->reg);
-            if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-            {
-                return false;
-            }
-            if (rm->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_rex_conflicts_high_byte(instruction->width, reg, rm->memory))
-            {
-                return false;
-            }
-            instruction->size = lock_size + (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 1 + address_size;
-            return true;
-        }
-        if (opcode == ASSEMBLY_OPCODE_X86_XADD || opcode == ASSEMBLY_OPCODE_X86_CMPXCHG)
-        {
-            if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-                !assembly_x86_operand_is_gpr(*second))
-            {
-                return false;
-            }
-            instruction->width = assembly_operand_width(*first);
-            if (!instruction->width)
-            {
-                instruction->width = second->reg.width;
-            }
-            if ((instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64) ||
-                second->reg.width != instruction->width || (first->kind == ASSEMBLY_OPERAND_REGISTER && !assembly_x86_operand_is_gpr(*first)))
-            {
-                return false;
-            }
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, instruction->width))
-            {
-                return false;
-            }
-            u32 address_size = 1;
-            u8 rex = first->kind == ASSEMBLY_OPERAND_MEMORY
-                           ? assembly_x86_memory_rex_needed(instruction->width, second->reg, first->memory)
-                           : assembly_x86_rex_needed(instruction->width, second->reg, first->reg);
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-            {
-                return false;
-            }
-            if ((first->kind == ASSEMBLY_OPERAND_REGISTER && assembly_x86_rex_conflicts_high_byte(instruction->width, second->reg, first->reg)) ||
-                (first->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_rex_conflicts_high_byte(instruction->width, second->reg, first->memory)))
-            {
-                return false;
-            }
-            instruction->size = lock_size + (instruction->width == 16 ? 1 : 0) + (rex ? 1 : 0) + 2 + address_size;
-            return true;
-        }
-        if (opcode == ASSEMBLY_OPCODE_X86_CMPXCHG8B || opcode == ASSEMBLY_OPCODE_X86_CMPXCHG16B)
-        {
-            u8 width = opcode == ASSEMBLY_OPCODE_X86_CMPXCHG8B ? 64 : 128;
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_set_width(first, width))
-            {
-                u32 address_size = 0;
-                if (assembly_x86_memory_encoding_size(first->memory, &address_size))
-                {
-                    u8 rex = assembly_x86_memory_rex_needed(opcode == ASSEMBLY_OPCODE_X86_CMPXCHG16B ? 64 : 0,
-                                                              (AssemblyRegister){.index = 1}, first->memory);
-                    instruction->width = width;
-                    instruction->size = lock_size + (rex ? 1 : 0) + 2 + address_size;
-                    return true;
-                }
-            }
-        }
-    }
-
     return false;
 }
 
@@ -5160,51 +4806,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_apx_nf(AssemblyOpcode opcode)
            assembly_x86_opcode_is_shift(opcode);
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_immediate_encoding(u16 width, s64 value, u8* opcode, u8* size)
-{
-    if (!assembly_x86_immediate_fits(value, width == 64 ? 32 : width, width == 64))
-    {
-        return false;
-    }
-    if (width == 8)
-    {
-        if (!assembly_x86_immediate_fits(value, 8, false))
-        {
-            return false;
-        }
-        *opcode = 0x80;
-        *size = 1;
-    }
-    else if (value >= INT8_MIN && value <= INT8_MAX)
-    {
-        *opcode = 0x83;
-        *size = 1;
-    }
-    else
-    {
-        *opcode = 0x81;
-        *size = (u8)((width == 64 ? 32 : width) / 8);
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_legacy_immediate_encoding(AssemblyOpcode opcode, u16 width, s64 value, u8* immediate_opcode,
-                                                                     u8* immediate_size)
-{
-    if (opcode == ASSEMBLY_OPCODE_X86_TEST)
-    {
-        u16 full_width = width == 64 ? 32 : width;
-        if (!assembly_x86_immediate_fits(value, full_width, width == 64))
-        {
-            return false;
-        }
-        *immediate_opcode = width == 8 ? 0xf6 : 0xf7;
-        *immediate_size = (u8)(full_width / 8);
-        return true;
-    }
-    return assembly_x86_apx_immediate_encoding(width, value, immediate_opcode, immediate_size);
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_extended_gpr(AssemblyInstruction instruction)
 {
     for (u32 index = 0; index < instruction.operand_count; index += 1)
@@ -5292,230 +4893,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_operands_need_rex(AssemblyInst
         }
     }
     return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_memory_displacement_size(AssemblyMemory memory, u32 tuple_scale, u32* result)
-{
-    if (memory.rip_relative || !memory.has_base)
-    {
-        return assembly_x86_memory_displacement_size(memory, result);
-    }
-    if (memory.displacement.has_symbol)
-    {
-        *result = 4;
-        return true;
-    }
-    if (!memory.displacement.addend && (memory.base.index & 7) != 5)
-    {
-        *result = 0;
-        return true;
-    }
-    if (tuple_scale && memory.displacement.addend % (s64)tuple_scale == 0)
-    {
-        s64 scaled = memory.displacement.addend / (s64)tuple_scale;
-        if (scaled >= INT8_MIN && scaled <= INT8_MAX)
-        {
-            *result = 1;
-            return true;
-        }
-    }
-    if (memory.displacement.addend >= INT32_MIN && memory.displacement.addend <= INT32_MAX)
-    {
-        *result = 4;
-        return true;
-    }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_memory_encoding_size(AssemblyMemory memory, u32 tuple_scale, u32* result)
-{
-    u32 displacement_size = 0;
-    if (!assembly_x86_evex_memory_displacement_size(memory, tuple_scale, &displacement_size))
-    {
-        return false;
-    }
-    u8 sib = !memory.rip_relative && (memory.has_index || !memory.has_base || (memory.base.index & 7) == 4);
-    *result = 1u + (u32)sib + displacement_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_evex_instruction_size(AssemblyInstruction* instruction, AssemblyVectorForm const* form)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOperand* third = instruction->operands + 2;
-    u8 move = (form->flags & ASSEMBLY_VECTOR_FORM_MOVE) != 0;
-    u8 mask_destination = (form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) != 0;
-    u8 source_rm = (form->flags & ASSEMBLY_VECTOR_FORM_SOURCE_RM) != 0;
-    u8 immediate = (form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE) != 0;
-    AssemblyRegister vector = {0};
-    AssemblyOperand* memory = 0;
-    if (mask_destination)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_OPMASK ||
-            (first->has_mask && first->mask == 0) || first->zeroing || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-            !assembly_x86_vector_register(second->reg) ||
-            (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        vector = second->reg;
-        memory = third->kind == ASSEMBLY_OPERAND_MEMORY ? third : 0;
-        if (third->kind == ASSEMBLY_OPERAND_REGISTER && third->reg.class != vector.class)
-        {
-            return false;
-        }
-        if (immediate &&
-            (instruction->operands[3].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[3].expression.has_symbol ||
-             instruction->operands[3].expression.addend < 0 || instruction->operands[3].expression.addend > UINT8_MAX))
-        {
-            return false;
-        }
-        u64 immediate_limit = instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPS || instruction->opcode == ASSEMBLY_OPCODE_X86_VCMPPD ? 31 : 7;
-        if (immediate && (u64)instruction->operands[3].expression.addend > immediate_limit)
-        {
-            return false;
-        }
-    }
-    else if (source_rm)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
-            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            instruction->operands[2].kind != ASSEMBLY_OPERAND_EXPRESSION || instruction->operands[2].expression.has_symbol ||
-            instruction->operands[2].expression.addend < INT8_MIN || instruction->operands[2].expression.addend > UINT8_MAX)
-        {
-            return false;
-        }
-        vector = first->reg;
-        memory = second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-        if (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != vector.class)
-        {
-            return false;
-        }
-    }
-    else if (move)
-    {
-        if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        vector = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg : second->reg;
-        memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-        if (!assembly_x86_vector_register(vector) ||
-            (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != vector.class) ||
-            (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != vector.class))
-        {
-            return false;
-        }
-    }
-    else
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-            (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            !assembly_x86_vector_register(first->reg) || second->reg.class != first->reg.class)
-        {
-            return false;
-        }
-        vector = first->reg;
-        memory = third->kind == ASSEMBLY_OPERAND_MEMORY ? third : 0;
-        if (third->kind == ASSEMBLY_OPERAND_REGISTER && third->reg.class != vector.class)
-        {
-            return false;
-        }
-    }
-    if ((form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) && vector.class != ASSEMBLY_REGISTER_XMM)
-    {
-        return false;
-    }
-    if (vector.width != 128 && vector.width != 256 && vector.width != 512)
-    {
-        return false;
-    }
-    if (first->broadcast)
-    {
-        return false;
-    }
-    if (!mask_destination && (first->has_mask || first->zeroing))
-    {
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (!move || !first->has_mask || first->mask == 0 || first->zeroing)
-            {
-                return false;
-            }
-        }
-        else if (first->kind != ASSEMBLY_OPERAND_REGISTER || !assembly_x86_vector_register(first->reg) ||
-                 (first->has_mask && first->mask == 0) || (first->zeroing && !first->has_mask))
-        {
-            return false;
-        }
-    }
-    for (u32 operand_index = 1; operand_index < instruction->operand_count; operand_index += 1)
-    {
-        AssemblyOperand operand = instruction->operands[operand_index];
-        if (operand.has_mask || operand.zeroing || operand.rounding || operand.sae ||
-            (operand.broadcast && (!memory || instruction->operands + operand_index != memory)))
-        {
-            return false;
-        }
-    }
-    if (first->rounding || first->sae)
-    {
-        u8 supports_rounding = (form->flags & ASSEMBLY_VECTOR_FORM_ROUNDING) != 0;
-        u8 supports_sae = (form->flags & ASSEMBLY_VECTOR_FORM_SAE) != 0;
-        if ((first->rounding &&
-             (!supports_rounding || move || memory || (!(form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) && vector.width != 512))) ||
-            (first->sae && !first->rounding && (!supports_sae || move || memory || vector.width != 512)) ||
-            (first->sae && first->rounding && !supports_rounding))
-        {
-            return false;
-        }
-    }
-    if (memory)
-    {
-        u16 element_width = (u16)form->element_width * 8u;
-        u16 expected_width = (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ? element_width : vector.width;
-        if (memory->broadcast)
-        {
-            if (!(form->flags & ASSEMBLY_VECTOR_FORM_BROADCAST) || move || (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) ||
-                memory->broadcast != vector.width / element_width)
-            {
-                return false;
-            }
-            expected_width = element_width;
-        }
-        if (memory->memory.width && memory->memory.width != expected_width)
-        {
-            return false;
-        }
-        memory->memory.width = expected_width;
-        u32 tuple_scale = memory->broadcast ? form->element_width :
-                            (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR ? form->element_width : vector.width / 8u);
-        u32 address_size = 0;
-        if (!assembly_x86_evex_memory_encoding_size(memory->memory, tuple_scale, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = (u8)immediate;
-        instruction->size = 4u + 1u + address_size + immediate;
-    }
-    else
-    {
-        if (first->broadcast || second->broadcast || third->broadcast)
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = 4u + 1u + 1u + immediate;
-    }
-    if (memory && (memory->rounding || memory->sae))
-    {
-        return false;
-    }
-    instruction->width = vector.width;
-    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_amd_vector_register_valid(AssemblyRegister reg, u8 vector_width_mask)
@@ -5980,1816 +5357,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_mask_instruction_size(AssemblyInstruction*
            opcode == ASSEMBLY_OPCODE_X86_KXORW;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_legacy_instruction_size(AssemblyInstruction* instruction)
-{
-    if (!assembly_x86_instruction_has_extended_gpr(*instruction))
-    {
-        return false;
-    }
-    AssemblyOperand* first = instruction->operands;
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_PUSH || instruction->opcode == ASSEMBLY_OPCODE_X86_POP)
-    {
-        if (instruction->operand_count != 1 || first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR ||
-            first->reg.width != 64)
-        {
-            return false;
-        }
-        instruction->size = 3;
-        return true;
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_CALL || instruction->opcode == ASSEMBLY_OPCODE_X86_JMP)
-    {
-        if (instruction->operand_count != 1)
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER)
-        {
-            if (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width != 64 || first->reg.high_byte)
-            {
-                return false;
-            }
-            instruction->width = 64;
-            instruction->size = 4;
-            return true;
-        }
-        if (first->kind != ASSEMBLY_OPERAND_MEMORY || (first->memory.width && first->memory.width != 64))
-        {
-            return false;
-        }
-        first->memory.width = 64;
-        u32 address_size = 1;
-        if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = 64;
-        instruction->size = 3u + address_size;
-        return true;
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_LEA)
-    {
-        if (instruction->operand_count != 2 || first->kind != ASSEMBLY_OPERAND_REGISTER ||
-            first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte ||
-            (first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64) ||
-            instruction->operands[1].kind != ASSEMBLY_OPERAND_MEMORY)
-        {
-            return false;
-        }
-        AssemblyMemory memory = instruction->operands[1].memory;
-        u32 address_size = 1;
-        if (!assembly_x86_memory_encoding_size(memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = first->reg.width;
-        instruction->size = (u32)(instruction->width == 16) + 3u + address_size;
-        return true;
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ||
-        instruction->opcode == ASSEMBLY_OPCODE_X86_NEG || instruction->opcode == ASSEMBLY_OPCODE_X86_NOT)
-    {
-        if (instruction->operand_count != 1 ||
-            (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            !assembly_x86_lock_prefix_legal(instruction))
-        {
-            return false;
-        }
-        u16 width = assembly_operand_width(*first);
-        if (width != 8 && width != 16 && width != 32 && width != 64)
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-            (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte))
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY &&
-            (!assembly_x86_memory_set_width(first, width) || !assembly_x86_memory_encoding_size(first->memory, &address_size)))
-        {
-            return false;
-        }
-        instruction->width = width;
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = (instruction->lock_prefix ? 1u : 0u) + (u32)(width == 16) + 3u + address_size;
-        return true;
-    }
-    if (assembly_x86_opcode_is_sse2(instruction->opcode))
-    {
-        u8 move = instruction->opcode >= ASSEMBLY_OPCODE_X86_MOVAPS && instruction->opcode <= ASSEMBLY_OPCODE_X86_MOVDQU;
-        AssemblyOperand* second = instruction->operands + 1;
-        if (instruction->operand_count != 2 ||
-            (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-            (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
-            (!move && first->kind != ASSEMBLY_OPERAND_REGISTER) ||
-            (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-             (first->reg.class != ASSEMBLY_REGISTER_XMM || first->reg.index >= 16)) ||
-            (second->kind == ASSEMBLY_OPERAND_REGISTER &&
-             (second->reg.class != ASSEMBLY_REGISTER_XMM || second->reg.index >= 16)))
-        {
-            return false;
-        }
-        u16 memory_width = instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSS ? 32
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSD ? 64
-                                                                            : 128;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, memory_width))
-        {
-            return false;
-        }
-        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(second, memory_width))
-        {
-            return false;
-        }
-        AssemblyOperand* rm = !move || first->kind == ASSEMBLY_OPERAND_REGISTER ? second : first;
-        u32 address_size = 1;
-        if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = 128;
-        u8 mandatory_prefix = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVAPD || instruction->opcode == ASSEMBLY_OPCODE_X86_MOVUPD ||
-                                       instruction->opcode == ASSEMBLY_OPCODE_X86_MOVDQA || instruction->opcode == ASSEMBLY_OPCODE_X86_XORPD ||
-                                       instruction->opcode == ASSEMBLY_OPCODE_X86_PXOR || instruction->opcode == ASSEMBLY_OPCODE_X86_ADDPD ||
-                                       instruction->opcode == ASSEMBLY_OPCODE_X86_SUBPD || instruction->opcode == ASSEMBLY_OPCODE_X86_MULPD ||
-                                       instruction->opcode == ASSEMBLY_OPCODE_X86_DIVPD
-                                   ? 1
-                                   : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVDQU || instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSS
-                                       ? 1
-                                       : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSD ? 1 : 0;
-        instruction->size = (u32)mandatory_prefix + 2u + 1u + address_size;
-        return true;
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL)
-    {
-        if (instruction->operand_count != 1 && instruction->operand_count != 2 && instruction->operand_count != 3)
-        {
-            return false;
-        }
-        if (instruction->operand_count == 1 && first->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            instruction->width = first->memory.width;
-            if (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-            {
-                return false;
-            }
-            u32 address_size = 1;
-            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-            {
-                return false;
-            }
-            instruction->size = (u32)(instruction->width == 16) + 3u + address_size;
-            return true;
-        }
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte ||
-            (first->reg.width != 8 && first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64))
-        {
-            return false;
-        }
-        instruction->width = first->reg.width;
-        if (instruction->width == 8 && instruction->operand_count != 1)
-        {
-            return false;
-        }
-        if (instruction->operand_count == 1)
-        {
-            instruction->size = (u32)(instruction->width == 16) + 4u;
-            return true;
-        }
-        AssemblyOperand* source = instruction->operands + 1;
-        if (source->kind != ASSEMBLY_OPERAND_REGISTER && source->kind != ASSEMBLY_OPERAND_MEMORY)
-        {
-            return false;
-        }
-        if (source->kind == ASSEMBLY_OPERAND_REGISTER &&
-            (source->reg.class != ASSEMBLY_REGISTER_GPR || source->reg.width != instruction->width || source->reg.high_byte))
-        {
-            return false;
-        }
-        if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(source, instruction->width))
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source->memory, &address_size))
-        {
-            return false;
-        }
-        if (instruction->operand_count == 2)
-        {
-            instruction->rip_relocation_trailing = 0;
-            instruction->size = (u32)(instruction->width == 16) + 3u + address_size;
-            return true;
-        }
-        AssemblyOperand* immediate = instruction->operands + 2;
-        u16 full_width = instruction->width == 64 ? 32 : instruction->width;
-        if (immediate->kind != ASSEMBLY_OPERAND_EXPRESSION || immediate->expression.has_symbol ||
-            !assembly_x86_immediate_fits(immediate->expression.addend, full_width, true))
-        {
-            return false;
-        }
-        u8 immediate_size = immediate->expression.addend >= INT8_MIN && immediate->expression.addend <= INT8_MAX
-                                ? 1
-                                : (u8)(full_width / 8);
-        instruction->rip_relocation_trailing = source->kind == ASSEMBLY_OPERAND_MEMORY ? immediate_size : 0;
-        instruction->size = (u32)(instruction->width == 16) + 3u + address_size + immediate_size;
-        return true;
-    }
-    if (assembly_x86_opcode_is_shift(instruction->opcode))
-    {
-        if (instruction->operand_count != 2 ||
-            (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-            (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte))
-        {
-            return false;
-        }
-        instruction->width = assembly_operand_width(*first);
-        if (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-        {
-            return false;
-        }
-        u8 immediate = instruction->operands[1].kind == ASSEMBLY_OPERAND_EXPRESSION;
-        if (!immediate && !assembly_x86_count_is_cl(instruction->operands[1]))
-        {
-            return false;
-        }
-        if (immediate && (instruction->operands[1].expression.has_symbol || instruction->operands[1].expression.addend < 0 ||
-                          instruction->operands[1].expression.addend > UINT8_MAX))
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, instruction->width))
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = (u32)(instruction->width == 16) + 3u + address_size +
-                            (u32)(immediate && instruction->operands[1].expression.addend != 1);
-        return true;
-    }
-    if (instruction->opcode != ASSEMBLY_OPCODE_X86_MOV && instruction->opcode != ASSEMBLY_OPCODE_X86_ADD &&
-        instruction->opcode != ASSEMBLY_OPCODE_X86_ADC && instruction->opcode != ASSEMBLY_OPCODE_X86_SUB &&
-        instruction->opcode != ASSEMBLY_OPCODE_X86_SBB && instruction->opcode != ASSEMBLY_OPCODE_X86_AND &&
-        instruction->opcode != ASSEMBLY_OPCODE_X86_OR && instruction->opcode != ASSEMBLY_OPCODE_X86_XOR &&
-        instruction->opcode != ASSEMBLY_OPCODE_X86_CMP && instruction->opcode != ASSEMBLY_OPCODE_X86_TEST)
-    {
-        return false;
-    }
-    AssemblyOperand* second = instruction->operands + 1;
-    if (instruction->operand_count == 2 && second->kind == ASSEMBLY_OPERAND_EXPRESSION)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY)
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER)
-        {
-            if (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte)
-            {
-                return false;
-            }
-            instruction->width = first->reg.width;
-        }
-        else
-        {
-            instruction->width = first->memory.width;
-        }
-        if (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-        {
-            return false;
-        }
-        u8 immediate_opcode = 0;
-        u8 immediate_size = 0;
-        if (second->expression.has_symbol)
-        {
-            return false;
-        }
-        if (instruction->opcode == ASSEMBLY_OPCODE_X86_MOV)
-        {
-            u8 register_immediate_64 = (u8)(first->kind == ASSEMBLY_OPERAND_REGISTER && instruction->width == 64 &&
-                                            !assembly_x86_immediate_fits(second->expression.addend, 32, true));
-            u16 immediate_width = register_immediate_64 ? 64 : instruction->width == 64 ? 32 : instruction->width;
-            if (!assembly_x86_immediate_fits(second->expression.addend, immediate_width,
-                                             instruction->width == 64))
-            {
-                return false;
-            }
-            immediate_opcode = first->kind == ASSEMBLY_OPERAND_MEMORY ? (instruction->width == 8 ? 0xc6 : 0xc7)
-                                                                       : instruction->width == 8 ? 0xb0
-                                                                                                  : register_immediate_64 ? 0xb8
-                                                                                                                          : instruction->width == 64 ? 0xc7 : 0xb8;
-            immediate_size = (u8)(immediate_width / 8);
-            if (first->kind == ASSEMBLY_OPERAND_REGISTER && instruction->width == 64 && register_immediate_64)
-            {
-                immediate_opcode = 0xb8;
-            }
-        }
-        else if (!assembly_x86_apx_legacy_immediate_encoding(instruction->opcode, instruction->width,
-                                                             second->expression.addend, &immediate_opcode, &immediate_size))
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, instruction->width))
-        {
-            return false;
-        }
-        u8 has_modrm = (u8)(instruction->opcode == ASSEMBLY_OPCODE_X86_MOV && first->kind == ASSEMBLY_OPERAND_REGISTER &&
-                            instruction->width == 64 && immediate_size == 4);
-        u32 address_size = first->kind == ASSEMBLY_OPERAND_MEMORY
-                               ? 1
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_MOV ? 0 : 1;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = first->kind == ASSEMBLY_OPERAND_MEMORY ? immediate_size : 0;
-        instruction->size = (instruction->lock_prefix ? 1u : 0u) + (u32)(instruction->width == 16) + 2u + 1u + has_modrm +
-                            address_size + immediate_size;
-        return true;
-    }
-    if (instruction->operand_count != 2 ||
-        (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != ASSEMBLY_REGISTER_GPR) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != ASSEMBLY_REGISTER_GPR))
-    {
-        return false;
-    }
-    instruction->width = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg.width : second->reg.width;
-    if (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-    {
-        return false;
-    }
-    if ((first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.width != instruction->width) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.width != instruction->width))
-    {
-        return false;
-    }
-    if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        if (first->memory.width && first->memory.width != instruction->width)
-        {
-            return false;
-        }
-        first->memory.width = instruction->width;
-    }
-    if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        if (second->memory.width && second->memory.width != instruction->width)
-        {
-            return false;
-        }
-        second->memory.width = instruction->width;
-    }
-    u32 address_size = 1;
-    AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-    if (memory && !assembly_x86_memory_encoding_size(memory->memory, &address_size))
-    {
-        return false;
-    }
-    u32 lock_size = instruction->lock_prefix ? 1 : 0;
-    instruction->size = lock_size + 2u + (instruction->width == 16) + 1u + address_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_imul_evex_instruction_size(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    if ((instruction->operand_count != 2 && instruction->operand_count != 3) || first->kind != ASSEMBLY_OPERAND_REGISTER ||
-        first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte ||
-        (first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64))
-    {
-        return false;
-    }
-    instruction->width = first->reg.width;
-    AssemblyOperand* source = instruction->operands + 1;
-    if (source->kind != ASSEMBLY_OPERAND_REGISTER && source->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        return false;
-    }
-    if (source->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (source->reg.class != ASSEMBLY_REGISTER_GPR || source->reg.width != instruction->width || source->reg.high_byte))
-    {
-        return false;
-    }
-    if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(source, instruction->width))
-    {
-        return false;
-    }
-    if (instruction->operand_count == 2)
-    {
-        if (!instruction->no_flags)
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = 5u + address_size;
-        return true;
-    }
-    AssemblyOperand* third = instruction->operands + 2;
-    if (third->kind == ASSEMBLY_OPERAND_EXPRESSION)
-    {
-        u16 full_width = instruction->width == 64 ? 32 : instruction->width;
-        if (third->expression.has_symbol || !assembly_x86_immediate_fits(third->expression.addend, full_width, true))
-        {
-            return false;
-        }
-        u8 immediate_size = third->expression.addend >= INT8_MIN && third->expression.addend <= INT8_MAX
-                                ? 1
-                                : (u8)(full_width / 8);
-        u32 address_size = 1;
-        if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->rip_relocation_trailing = source->kind == ASSEMBLY_OPERAND_MEMORY ? immediate_size : 0;
-        instruction->size = 5u + address_size + immediate_size;
-        return true;
-    }
-    if (source->kind != ASSEMBLY_OPERAND_REGISTER)
-    {
-        return false;
-    }
-    if (third->kind != ASSEMBLY_OPERAND_REGISTER && third->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        return false;
-    }
-    if (third->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (third->reg.class != ASSEMBLY_REGISTER_GPR || third->reg.width != instruction->width || third->reg.high_byte))
-    {
-        return false;
-    }
-    u32 address_size = 1;
-    if (third->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        if (!assembly_x86_memory_set_width(third, instruction->width) ||
-            !assembly_x86_memory_encoding_size(third->memory, &address_size))
-        {
-            return false;
-        }
-    }
-    instruction->rip_relocation_trailing = 0;
-    instruction->size = 5u + address_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_shift_evex_instruction_size(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    if ((instruction->operand_count != 2 && instruction->operand_count != 3) ||
-        (instruction->operand_count == 2 && !instruction->no_flags))
-    {
-        return false;
-    }
-    if (instruction->operand_count == 2)
-    {
-        if (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY)
-        {
-            return false;
-        }
-    }
-    else if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte)
-    {
-        return false;
-    }
-    u16 width = assembly_operand_width(*first);
-    if (width != 8 && width != 16 && width != 32 && width != 64)
-    {
-        return false;
-    }
-    if (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != ASSEMBLY_REGISTER_GPR)
-    {
-        return false;
-    }
-    instruction->width = width;
-    AssemblyOperand* source = instruction->operand_count == 2 ? first : instruction->operands + 1;
-    if (instruction->operand_count == 3 && source->kind != ASSEMBLY_OPERAND_REGISTER && source->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        return false;
-    }
-    if (source->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (source->reg.class != ASSEMBLY_REGISTER_GPR || source->reg.width != width || source->reg.high_byte))
-    {
-        return false;
-    }
-    if (source->kind == ASSEMBLY_OPERAND_MEMORY &&
-        !assembly_x86_memory_set_width(source, width))
-    {
-        return false;
-    }
-    AssemblyOperand* count = instruction->operands + (instruction->operand_count == 2 ? 1 : 2);
-    u8 immediate = count->kind == ASSEMBLY_OPERAND_EXPRESSION;
-    if (!immediate && !assembly_x86_count_is_cl(*count))
-    {
-        return false;
-    }
-    if (immediate && (count->expression.has_symbol || count->expression.addend < 0 || count->expression.addend > UINT8_MAX))
-    {
-        return false;
-    }
-    u32 address_size = 1;
-    if (source->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(source->memory, &address_size))
-    {
-        return false;
-    }
-    u8 trailing = (u8)(immediate && count->expression.addend != 1);
-    instruction->rip_relocation_trailing = (u8)(source->kind == ASSEMBLY_OPERAND_MEMORY && trailing);
-    instruction->size = 5u + address_size + trailing;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_ndd_instruction_size(AssemblyInstruction* instruction)
-{
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL)
-    {
-        return assembly_x86_apx_imul_evex_instruction_size(instruction);
-    }
-    if (assembly_x86_opcode_is_shift(instruction->opcode))
-    {
-        return assembly_x86_apx_shift_evex_instruction_size(instruction);
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_APX_PUSH2 || instruction->opcode == ASSEMBLY_OPCODE_X86_APX_POP2)
-    {
-        if (instruction->operand_count != 2 || instruction->operands[0].kind != ASSEMBLY_OPERAND_REGISTER ||
-            instruction->operands[1].kind != ASSEMBLY_OPERAND_REGISTER || instruction->operands[0].reg.class != ASSEMBLY_REGISTER_GPR ||
-            instruction->operands[1].reg.class != ASSEMBLY_REGISTER_GPR || instruction->operands[0].reg.width != 64 ||
-            instruction->operands[1].reg.width != 64 || instruction->operands[0].reg.index == 4 || instruction->operands[1].reg.index == 4)
-        {
-            return false;
-        }
-        if (instruction->opcode == ASSEMBLY_OPCODE_X86_APX_POP2 &&
-            instruction->operands[0].reg.index == instruction->operands[1].reg.index)
-        {
-            return false;
-        }
-        instruction->size = 6;
-        return true;
-    }
-    if (!assembly_x86_opcode_is_apx_ndd(instruction->opcode) || instruction->operand_count != 3)
-    {
-        return false;
-    }
-    AssemblyOperand* destination = instruction->operands;
-    AssemblyOperand* source_1 = instruction->operands + 1;
-    AssemblyOperand* source_2 = instruction->operands + 2;
-    if (destination->kind != ASSEMBLY_OPERAND_REGISTER || destination->reg.class != ASSEMBLY_REGISTER_GPR ||
-        source_1->kind == ASSEMBLY_OPERAND_EXPRESSION ||
-        (source_1->kind != ASSEMBLY_OPERAND_REGISTER && source_1->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (source_2->kind != ASSEMBLY_OPERAND_REGISTER && source_2->kind != ASSEMBLY_OPERAND_MEMORY &&
-         source_2->kind != ASSEMBLY_OPERAND_EXPRESSION) || destination->reg.high_byte)
-    {
-        return false;
-    }
-    if (source_1->kind == ASSEMBLY_OPERAND_MEMORY && source_2->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        return false;
-    }
-    u16 width = destination->reg.width;
-    if (width != 8 && width != 16 && width != 32 && width != 64)
-    {
-        return false;
-    }
-    if (source_1->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (source_1->reg.class != ASSEMBLY_REGISTER_GPR || source_1->reg.width != width || source_1->reg.high_byte))
-    {
-        return false;
-    }
-    if (source_2->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (source_2->reg.class != ASSEMBLY_REGISTER_GPR || source_2->reg.width != width || source_2->reg.high_byte))
-    {
-        return false;
-    }
-    if (source_1->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(source_1, width))
-    {
-        return false;
-    }
-    if (source_2->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(source_2, width))
-    {
-        return false;
-    }
-    instruction->width = width;
-    instruction->rip_relocation_trailing = 0;
-    if (source_2->kind == ASSEMBLY_OPERAND_EXPRESSION)
-    {
-        u8 immediate_opcode = 0;
-        u8 immediate_size = 0;
-        if (source_2->expression.has_symbol ||
-            !assembly_x86_apx_immediate_encoding(width, source_2->expression.addend, &immediate_opcode, &immediate_size))
-        {
-            return false;
-        }
-        if (source_1->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            u32 address_size = 1;
-            if (!assembly_x86_memory_encoding_size(source_1->memory, &address_size))
-            {
-                return false;
-            }
-            instruction->rip_relocation_trailing = immediate_size;
-            instruction->size = 5u + address_size + immediate_size;
-        }
-        else
-        {
-            instruction->rip_relocation_trailing = 0;
-            instruction->size = 6u + immediate_size;
-        }
-        return true;
-    }
-    AssemblyOperand* memory = source_1->kind == ASSEMBLY_OPERAND_MEMORY ? source_1
-                              : source_2->kind == ASSEMBLY_OPERAND_MEMORY ? source_2
-                                                                          : 0;
-    u32 address_size = 1;
-    if (memory && !assembly_x86_memory_encoding_size(memory->memory, &address_size))
-    {
-        return false;
-    }
-    instruction->size = 5u + address_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_apx_nf_instruction_size(AssemblyInstruction* instruction)
-{
-    if (instruction->lock_prefix || !assembly_x86_opcode_is_apx_nf(instruction->opcode))
-    {
-        return false;
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL)
-    {
-        return assembly_x86_apx_imul_evex_instruction_size(instruction);
-    }
-    if (assembly_x86_opcode_is_shift(instruction->opcode))
-    {
-        return assembly_x86_apx_shift_evex_instruction_size(instruction);
-    }
-    if (instruction->opcode == ASSEMBLY_OPCODE_X86_INC || instruction->opcode == ASSEMBLY_OPCODE_X86_DEC ||
-        instruction->opcode == ASSEMBLY_OPCODE_X86_NEG)
-    {
-        if (instruction->operand_count != 1 ||
-            (instruction->operands[0].kind != ASSEMBLY_OPERAND_REGISTER && instruction->operands[0].kind != ASSEMBLY_OPERAND_MEMORY))
-        {
-            return false;
-        }
-        AssemblyOperand* operand = instruction->operands;
-        u16 width = assembly_operand_width(*operand);
-        if (width != 8 && width != 16 && width != 32 && width != 64)
-        {
-            return false;
-        }
-        if (operand->kind == ASSEMBLY_OPERAND_REGISTER &&
-            (operand->reg.class != ASSEMBLY_REGISTER_GPR || operand->reg.high_byte))
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (operand->kind == ASSEMBLY_OPERAND_MEMORY &&
-            (!assembly_x86_memory_set_width(operand, width) || !assembly_x86_memory_encoding_size(operand->memory, &address_size)))
-        {
-            return false;
-        }
-        instruction->width = width;
-        instruction->rip_relocation_trailing = 0;
-        instruction->size = 5u + address_size;
-        return true;
-    }
-    if (instruction->operand_count != 2)
-    {
-        return false;
-    }
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY &&
-         second->kind != ASSEMBLY_OPERAND_EXPRESSION) ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY))
-    {
-        return false;
-    }
-    if (second->kind == ASSEMBLY_OPERAND_EXPRESSION)
-    {
-        u16 width = assembly_operand_width(*first);
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-            (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte))
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !width)
-        {
-            return false;
-        }
-        if (width != 8 && width != 16 && width != 32 && width != 64)
-        {
-            return false;
-        }
-        u8 immediate_opcode = 0;
-        u8 immediate_size = 0;
-        if (second->expression.has_symbol ||
-            !assembly_x86_apx_immediate_encoding(width, second->expression.addend, &immediate_opcode, &immediate_size))
-        {
-            return false;
-        }
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_set_width(first, width))
-        {
-            return false;
-        }
-        u32 address_size = 1;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = width;
-        instruction->rip_relocation_trailing = immediate_size;
-        instruction->size = 5u + address_size + immediate_size;
-        return true;
-    }
-    u16 width = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg.width
-                : second->kind == ASSEMBLY_OPERAND_REGISTER ? second->reg.width
-                                                             : first->memory.width;
-    if (width != 8 && width != 16 && width != 32 && width != 64)
-    {
-        return false;
-    }
-    if (first->kind == ASSEMBLY_OPERAND_REGISTER && (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.high_byte))
-    {
-        return false;
-    }
-    if (second->kind == ASSEMBLY_OPERAND_REGISTER &&
-        (second->reg.class != ASSEMBLY_REGISTER_GPR || second->reg.width != width || second->reg.high_byte))
-    {
-        return false;
-    }
-    if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        if (first->memory.width && first->memory.width != width)
-        {
-            return false;
-        }
-        first->memory.width = width;
-    }
-    if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-    {
-        if (second->memory.width && second->memory.width != width)
-        {
-            return false;
-        }
-        second->memory.width = width;
-    }
-    u32 address_size = 1;
-    AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-    if (memory && !assembly_x86_memory_encoding_size(memory->memory, &address_size))
-    {
-        return false;
-    }
-    instruction->width = width;
-    instruction->size = (instruction->lock_prefix ? 1u : 0u) + 4u + 1u + address_size;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_lea(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR ||
-        (first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64) || second->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        sized = false;
-    }
-    else
-    {
-        u32 address_size = 0;
-        if (!assembly_x86_memory_encoding_size(second->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->width = first->reg.width;
-            u8 rex = assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
-            instruction->size = (u32)(instruction->width == 16) + (u32)rex + 1u + address_size;
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_move_extend(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    bool sized = first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class == ASSEMBLY_REGISTER_GPR &&
-                 (first->reg.width == 16 || first->reg.width == 32 || first->reg.width == 64) &&
-                 (second->kind == ASSEMBLY_OPERAND_REGISTER || second->kind == ASSEMBLY_OPERAND_MEMORY);
-    u16 source_width = 0;
-    if (sized)
-    {
-        source_width = second->kind == ASSEMBLY_OPERAND_REGISTER ? second->reg.width : second->memory.width;
-        if (opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
-        {
-            // MOVSXD is the one form whose source width the opcode fixes rather
-            // than the operand reporting it.
-            if (first->reg.width != 64)
-            {
-                sized = false;
-            }
-            else if (second->kind == ASSEMBLY_OPERAND_REGISTER)
-            {
-                sized = second->reg.class == ASSEMBLY_REGISTER_GPR && second->reg.width == 32;
-            }
-            else if (second->memory.width && second->memory.width != 32)
-            {
-                sized = false;
-            }
-            else
-            {
-                second->memory.width = 32;
-            }
-            source_width = 32;
-        }
-        else
-        {
-            sized = (source_width == 8 || source_width == 16) && !(source_width == 16 && first->reg.width == 16) &&
-                    first->reg.width > source_width;
-        }
-    }
-    if (sized)
-    {
-        if (second->kind == ASSEMBLY_OPERAND_REGISTER)
-        {
-            sized = second->reg.class == ASSEMBLY_REGISTER_GPR && second->reg.width == source_width;
-        }
-        else
-        {
-            if (!second->memory.width)
-            {
-                second->memory.width = source_width;
-            }
-            sized = second->memory.width == source_width;
-        }
-    }
-    if (sized)
-    {
-        u8 rex = second->kind == ASSEMBLY_OPERAND_REGISTER
-                       ? assembly_x86_extension_rex_needed(first->reg.width, first->reg, second->reg, source_width)
-                       : assembly_x86_memory_rex_needed(first->reg.width, first->reg, second->memory);
-        u32 address_size = 1;
-        if ((second->kind == ASSEMBLY_OPERAND_REGISTER && rex && (first->reg.high_byte || second->reg.high_byte)) ||
-            (second->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_rex_conflicts_high_byte(first->reg.width, first->reg, second->memory)))
-        {
-            sized = false;
-        }
-        else if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->width = first->reg.width;
-            instruction->size = (u32)(instruction->width == 16) + (u32)rex + (opcode == ASSEMBLY_OPCODE_X86_MOVSXD ? 1u : 2u) + address_size;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_rotate(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_REGISTER &&
-         (first->reg.class != ASSEMBLY_REGISTER_GPR ||
-          (first->reg.width != 8 && first->reg.width != 16 && first->reg.width != 32 && first->reg.width != 64))) ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY &&
-         (first->memory.width != 8 && first->memory.width != 16 && first->memory.width != 32 && first->memory.width != 64)) ||
-        (!assembly_x86_count_is_cl(*second) && !assembly_x86_count_immediate_valid(*second)))
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = assembly_operand_width(*first);
-        u32 address_size = 1;
-        u8 rex = false;
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-            {
-                return false;
-            }
-            rex = assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
-        }
-        else
-        {
-            rex = assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0});
-        }
-        instruction->size = (u32)(instruction->width == 16) + (u32)rex + 1u + address_size +
-                            (u32)(second->kind == ASSEMBLY_OPERAND_EXPRESSION && second->expression.addend != 1);
-        instruction->rip_relocation_trailing = second->kind == ASSEMBLY_OPERAND_EXPRESSION && second->expression.addend != 1;
-        sized = true;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_double_shift(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != ASSEMBLY_REGISTER_GPR) ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER || second->reg.class != ASSEMBLY_REGISTER_GPR) ||
-        (!assembly_x86_count_is_cl(instruction->operands[2]) && !assembly_x86_count_immediate_valid(instruction->operands[2])))
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = assembly_operand_width(*first);
-        if (!instruction->width)
-        {
-            instruction->width = second->reg.width;
-        }
-        if (instruction->width != 16 && instruction->width != 32 && instruction->width != 64)
-        {
-            sized = false;
-        }
-        else
-        {
-            if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-            {
-                if (!assembly_x86_memory_set_width(first, instruction->width))
-                {
-                    return false;
-                }
-            }
-            if (second->reg.width != instruction->width)
-            {
-                sized = false;
-            }
-            else
-            {
-                u32 address_size = 1;
-                u8 rex = false;
-                if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-                {
-                    if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-                    {
-                        return false;
-                    }
-                    rex = assembly_x86_memory_rex_needed(instruction->width, second->reg, first->memory);
-                }
-                else
-                {
-                    rex = assembly_x86_rex_needed(instruction->width, second->reg, first->reg);
-                }
-                instruction->size = (u32)(instruction->width == 16) + (u32)rex + 2u + address_size +
-                                    (u32)(instruction->operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION);
-                instruction->rip_relocation_trailing = instruction->operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION;
-                sized = true;
-            }
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_data(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOpcode opcode = instruction->opcode;
-    bool sized;
-    if (first->kind == ASSEMBLY_OPERAND_REGISTER)
-    {
-        if ((opcode != ASSEMBLY_OPCODE_X86_FLD && opcode != ASSEMBLY_OPCODE_X86_FST && opcode != ASSEMBLY_OPCODE_X86_FSTP) ||
-            first->reg.class != ASSEMBLY_REGISTER_X87)
-        {
-            return false;
-        }
-        instruction->width = 80;
-        instruction->size = 2;
-        sized = true;
-    }
-    else if (first->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        sized = false;
-    }
-    else
-    {
-        u16 width = first->memory.width;
-        u8 valid_width = opcode == ASSEMBLY_OPCODE_X86_FLD ? width == 32 || width == 64 || width == 80
-                           : opcode == ASSEMBLY_OPCODE_X86_FST ? width == 32 || width == 64
-                           : opcode == ASSEMBLY_OPCODE_X86_FSTP ? width == 32 || width == 64 || width == 80
-                           : opcode == ASSEMBLY_OPCODE_X86_FILD ? width == 16 || width == 32 || width == 64
-                           : opcode == ASSEMBLY_OPCODE_X86_FIST ? width == 16 || width == 32
-                                                               : width == 16 || width == 32 || width == 64;
-        u32 address_size = 0;
-        if (!valid_width || !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->width = width;
-            instruction->size = (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_arithmetic(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if (instruction->operand_count == 1 && first->kind == ASSEMBLY_OPERAND_MEMORY &&
-        (first->memory.width == 32 || first->memory.width == 64))
-    {
-        u32 address_size = 0;
-        if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = first->memory.width;
-        instruction->size = (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-        sized = true;
-    }
-    else if (instruction->operand_count != 2 || first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-        first->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.class != ASSEMBLY_REGISTER_X87 ||
-        (first->reg.index != 0 && second->reg.index != 0))
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = 80;
-        instruction->size = 2;
-        sized = true;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_pop_arithmetic(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER ||
-        first->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.class != ASSEMBLY_REGISTER_X87 || second->reg.index != 0)
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = 80;
-        instruction->size = 2;
-        sized = true;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_compare(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    bool sized;
-    if (opcode == ASSEMBLY_OPCODE_X86_FCOMPP || opcode == ASSEMBLY_OPCODE_X86_FUCOMPP)
-    {
-        instruction->size = 2;
-        sized = instruction->operand_count == 0;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_FCOM || opcode == ASSEMBLY_OPCODE_X86_FCOMP)
-    {
-        if (first->kind == ASSEMBLY_OPERAND_REGISTER)
-        {
-            instruction->size = 2;
-            return first->reg.class == ASSEMBLY_REGISTER_X87;
-        }
-        u32 address_size = 0;
-        if (first->kind != ASSEMBLY_OPERAND_MEMORY || (first->memory.width != 32 && first->memory.width != 64) ||
-            !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = first->memory.width;
-        instruction->size = (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-        sized = true;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_FUCOM || opcode == ASSEMBLY_OPCODE_X86_FUCOMP)
-    {
-        instruction->size = 2;
-        sized = first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class == ASSEMBLY_REGISTER_X87;
-    }
-    else
-    {
-        instruction->size = 2;
-        sized = first->kind == ASSEMBLY_OPERAND_REGISTER && second->kind == ASSEMBLY_OPERAND_REGISTER &&
-               first->reg.class == ASSEMBLY_REGISTER_X87 && second->reg.class == ASSEMBLY_REGISTER_X87 && first->reg.index == 0;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_integer_arithmetic(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    u32 address_size = 0;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_MEMORY || (first->memory.width != 16 && first->memory.width != 32) ||
-        !assembly_x86_memory_encoding_size(first->memory, &address_size))
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = first->memory.width;
-        instruction->size = (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-        sized = true;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_state_memory(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOpcode opcode = instruction->opcode;
-    u8 waited = opcode == ASSEMBLY_OPCODE_X86_FSTCW || opcode == ASSEMBLY_OPCODE_X86_FSTENV ||
-                  opcode == ASSEMBLY_OPCODE_X86_FSAVE || opcode == ASSEMBLY_OPCODE_X86_FSTSW;
-    bool sized;
-    if ((opcode == ASSEMBLY_OPCODE_X86_FNSTSW || opcode == ASSEMBLY_OPCODE_X86_FSTSW) &&
-        first->kind == ASSEMBLY_OPERAND_REGISTER)
-    {
-        instruction->width = 16;
-        instruction->size = waited ? 3 : 2;
-        sized = first->reg.class == ASSEMBLY_REGISTER_GPR && first->reg.width == 16 && first->reg.index == 0;
-    }
-    else if (first->kind != ASSEMBLY_OPERAND_MEMORY)
-    {
-        sized = false;
-    }
-    else
-    {
-        u16 expected_width = opcode == ASSEMBLY_OPCODE_X86_FBLD || opcode == ASSEMBLY_OPCODE_X86_FBSTP ? 80
-                            : opcode == ASSEMBLY_OPCODE_X86_FLDCW || opcode == ASSEMBLY_OPCODE_X86_FNSTCW ||
-                                      opcode == ASSEMBLY_OPCODE_X86_FSTCW || opcode == ASSEMBLY_OPCODE_X86_FNSTSW ||
-                                      opcode == ASSEMBLY_OPCODE_X86_FSTSW
-                                ? 16
-                                : 0;
-        if (first->memory.width && first->memory.width != expected_width)
-        {
-            sized = false;
-        }
-        else
-        {
-            u32 address_size = 0;
-            if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-            {
-                sized = false;
-            }
-            else
-            {
-                instruction->width = expected_width;
-                instruction->size = (u32)waited + (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-                sized = true;
-            }
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_x87_stack_control(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOpcode opcode = instruction->opcode;
-    instruction->width = 80;
-    instruction->size = 2;
-    bool sized;
-    if (opcode == ASSEMBLY_OPCODE_X86_FINCSTP || opcode == ASSEMBLY_OPCODE_X86_FDECSTP)
-    {
-        sized = instruction->operand_count == 0;
-    }
-    else
-    {
-        sized = first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class == ASSEMBLY_REGISTER_X87;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_legacy_packed(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    u8 move = opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX;
-    bool sized;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
-        (!move && first->kind != ASSEMBLY_OPERAND_REGISTER))
-    {
-        sized = false;
-    }
-    else
-    {
-        AssemblyRegister packed_reg = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg : second->reg;
-        if ((packed_reg.class != ASSEMBLY_REGISTER_MMX && packed_reg.class != ASSEMBLY_REGISTER_XMM) ||
-            (move && packed_reg.class != ASSEMBLY_REGISTER_MMX) ||
-            (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != packed_reg.class) ||
-            (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != packed_reg.class))
-        {
-            sized = false;
-        }
-        else
-        {
-            AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : second->kind == ASSEMBLY_OPERAND_MEMORY ? second : 0;
-            if (memory)
-            {
-                if (memory->memory.width && memory->memory.width != packed_reg.width)
-                {
-                    return false;
-                }
-                memory->memory.width = packed_reg.width;
-            }
-            u8 load = !move || first->kind == ASSEMBLY_OPERAND_REGISTER;
-            AssemblyRegister reg = load ? packed_reg : second->reg;
-            AssemblyOperand* rm = load ? second : first;
-            u32 address_size = 1;
-            u8 rex = rm->kind == ASSEMBLY_OPERAND_REGISTER
-                           ? assembly_x86_rex_needed(0, reg, rm->reg)
-                           : assembly_x86_memory_rex_needed(0, reg, rm->memory);
-            if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-            {
-                sized = false;
-            }
-            else
-            {
-                instruction->width = packed_reg.width;
-                instruction->size = (u32)(packed_reg.class == ASSEMBLY_REGISTER_XMM) + (u32)rex + 2u + address_size;
-                sized = true;
-            }
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_setcc(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    bool sized;
-    if (first->kind == ASSEMBLY_OPERAND_REGISTER)
-    {
-        if (first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width != 8)
-        {
-            return false;
-        }
-        instruction->width = 8;
-        instruction->size = (assembly_x86_rex_needed(8, (AssemblyRegister){0}, first->reg) ? 1 : 0) + 3;
-        sized = true;
-    }
-    else if (first->kind == ASSEMBLY_OPERAND_MEMORY && (!first->memory.width || first->memory.width == 8))
-    {
-        u32 address_size = 0;
-        if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        first->memory.width = 8;
-        instruction->width = 8;
-        instruction->size = (u32)assembly_x86_memory_rex_needed(8, (AssemblyRegister){0}, first->memory) + 2u + address_size;
-        sized = true;
-    }
-    else
-    {
-        sized = false;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_cmovcc(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width == 8 ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER &&
-         (second->reg.class != ASSEMBLY_REGISTER_GPR || second->reg.width != first->reg.width)))
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = first->reg.width;
-        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (second->memory.width && second->memory.width != instruction->width)
-            {
-                return false;
-            }
-            second->memory.width = instruction->width;
-        }
-        u32 address_size = 1;
-        u8 rex = second->kind == ASSEMBLY_OPERAND_REGISTER
-                       ? assembly_x86_rex_needed(instruction->width, first->reg, second->reg)
-                       : assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
-        if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->size = (u32)(instruction->width == 16) + (u32)rex + 2u + address_size;
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_sse2(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    u8 move = opcode >= ASSEMBLY_OPCODE_X86_MOVAPS && opcode <= ASSEMBLY_OPCODE_X86_MOVDQU;
-    bool sized;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
-        (!move && first->kind != ASSEMBLY_OPERAND_REGISTER) ||
-        (first->kind == ASSEMBLY_OPERAND_REGISTER && (first->reg.class != ASSEMBLY_REGISTER_XMM || first->reg.index >= 16)) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER && (second->reg.class != ASSEMBLY_REGISTER_XMM || second->reg.index >= 16)))
-    {
-        sized = false;
-    }
-    else
-    {
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (first->memory.width && first->memory.width != 128)
-            {
-                return false;
-            }
-            first->memory.width = 128;
-        }
-        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (second->memory.width && second->memory.width != 128)
-            {
-                return false;
-            }
-            second->memory.width = 128;
-        }
-        u8 load = !move || first->kind == ASSEMBLY_OPERAND_REGISTER;
-        AssemblyRegister reg = load ? first->reg : second->reg;
-        AssemblyOperand* rm = load ? second : first;
-        u32 address_size = 1;
-        u8 rex = rm->kind == ASSEMBLY_OPERAND_REGISTER
-                       ? assembly_x86_rex_needed(0, reg, rm->reg)
-                       : assembly_x86_memory_rex_needed(0, reg, rm->memory);
-        if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            u8 mandatory_prefix = opcode == ASSEMBLY_OPCODE_X86_MOVAPD || opcode == ASSEMBLY_OPCODE_X86_MOVUPD ||
-                                    opcode == ASSEMBLY_OPCODE_X86_MOVDQA || opcode == ASSEMBLY_OPCODE_X86_MOVDQU ||
-                                    opcode == ASSEMBLY_OPCODE_X86_XORPD || opcode == ASSEMBLY_OPCODE_X86_PXOR ||
-                                    opcode == ASSEMBLY_OPCODE_X86_ADDPD || opcode == ASSEMBLY_OPCODE_X86_ADDSS ||
-                                    opcode == ASSEMBLY_OPCODE_X86_ADDSD || opcode == ASSEMBLY_OPCODE_X86_SUBPD ||
-                                    opcode == ASSEMBLY_OPCODE_X86_MULPD || opcode == ASSEMBLY_OPCODE_X86_DIVPD;
-            instruction->width = 128;
-            instruction->size = (u32)mandatory_prefix + (u32)rex + 2u + address_size;
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_avx(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    u8 move = assembly_x86_opcode_is_avx_move(opcode);
-    u8 scalar = opcode == ASSEMBLY_OPCODE_X86_VADDSS || opcode == ASSEMBLY_OPCODE_X86_VADDSD;
-    AssemblyOperand* source = move ? second : instruction->operands + 2;
-    bool sized;
-    if ((first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        source->kind == ASSEMBLY_OPERAND_EXPRESSION || source->kind == ASSEMBLY_OPERAND_NONE ||
-        (first->kind == ASSEMBLY_OPERAND_MEMORY && source->kind == ASSEMBLY_OPERAND_MEMORY) ||
-        (!move && (first->kind != ASSEMBLY_OPERAND_REGISTER || second->kind != ASSEMBLY_OPERAND_REGISTER)) ||
-        (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class != ASSEMBLY_REGISTER_XMM &&
-         first->reg.class != ASSEMBLY_REGISTER_YMM) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != ASSEMBLY_REGISTER_XMM &&
-         second->reg.class != ASSEMBLY_REGISTER_YMM) ||
-        (source->kind == ASSEMBLY_OPERAND_REGISTER && source->reg.class != ASSEMBLY_REGISTER_XMM &&
-         source->reg.class != ASSEMBLY_REGISTER_YMM))
-    {
-        sized = false;
-    }
-    else
-    {
-        AssemblyRegister vector_reg = first->kind == ASSEMBLY_OPERAND_REGISTER ? first->reg : second->reg;
-        if ((scalar && vector_reg.class != ASSEMBLY_REGISTER_XMM) ||
-            (second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.class != vector_reg.class) ||
-            (source->kind == ASSEMBLY_OPERAND_REGISTER && source->reg.class != vector_reg.class))
-        {
-            sized = false;
-        }
-        else
-        {
-            u16 memory_width = scalar ? (opcode == ASSEMBLY_OPCODE_X86_VADDSS ? 32 : 64) : vector_reg.width;
-            AssemblyOperand* memory = first->kind == ASSEMBLY_OPERAND_MEMORY ? first : source->kind == ASSEMBLY_OPERAND_MEMORY ? source : 0;
-            if (memory)
-            {
-                if (memory->memory.width && memory->memory.width != memory_width)
-                {
-                    return false;
-                }
-                memory->memory.width = memory_width;
-            }
-            u8 load = !move || first->kind == ASSEMBLY_OPERAND_REGISTER;
-            AssemblyOperand* rm = load ? source : first;
-            u32 address_size = 1;
-            if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-            {
-                sized = false;
-            }
-            else
-            {
-                instruction->width = vector_reg.width;
-                instruction->size = (assembly_x86_avx_map(opcode) != 1 || assembly_x86_vex_three_byte_needed(*rm) ? 3u : 2u) + 1u + address_size;
-                sized = true;
-            }
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_branch_target(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    bool sized;
-    if (first->kind == ASSEMBLY_OPERAND_EXPRESSION)
-    {
-        instruction->size = 5;
-        sized = true;
-    }
-    else if (first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.width == 64)
-    {
-        instruction->width = 64;
-        instruction->size = first->reg.index >= 8 ? 3 : 2;
-        sized = true;
-    }
-    else if (first->kind == ASSEMBLY_OPERAND_MEMORY && (!first->memory.width || first->memory.width == 64))
-    {
-        u32 address_size = 0;
-        if (!assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            return false;
-        }
-        instruction->width = 64;
-        first->memory.width = 64;
-        instruction->size = (u32)assembly_x86_memory_rex_needed(0, (AssemblyRegister){0}, first->memory) + 1u + address_size;
-        sized = true;
-    }
-    else
-    {
-        sized = false;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_push_pop(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.width != 64)
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = 64;
-        instruction->size = first->reg.index >= 8 ? 2 : 1;
-        sized = true;
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_unary_group(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    u32 lock_size = instruction->lock_prefix ? 1 : 0;
-    instruction->width = assembly_operand_width(*first);
-    bool sized;
-    if (!instruction->width || (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64) ||
-        instruction->operand_count != 1 ||
-        (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY))
-    {
-        sized = false;
-    }
-    else
-    {
-        u32 address_size = 1;
-        u8 rex = first->kind == ASSEMBLY_OPERAND_REGISTER
-                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
-                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->size = lock_size + (u32)(instruction->width == 16) + (u32)rex + 1u + address_size;
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_imul_immediate(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOperand* third = instruction->operands + 2;
-    bool sized;
-    if (first->kind != ASSEMBLY_OPERAND_REGISTER || first->reg.class != ASSEMBLY_REGISTER_GPR || first->reg.width == 8 ||
-        (second->kind != ASSEMBLY_OPERAND_REGISTER && second->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        (second->kind == ASSEMBLY_OPERAND_REGISTER &&
-         (second->reg.class != ASSEMBLY_REGISTER_GPR || second->reg.width != first->reg.width)) ||
-        third->kind != ASSEMBLY_OPERAND_EXPRESSION || third->expression.has_symbol)
-    {
-        sized = false;
-    }
-    else
-    {
-        instruction->width = first->reg.width;
-        if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            if (second->memory.width && second->memory.width != instruction->width)
-            {
-                return false;
-            }
-            second->memory.width = instruction->width;
-        }
-        u16 full_immediate_width = instruction->width == 64 ? 32 : instruction->width;
-        s64 immediate = third->expression.addend;
-        if (!assembly_x86_immediate_fits(immediate, full_immediate_width, true))
-        {
-            sized = false;
-        }
-        else
-        {
-            u32 address_size = 1;
-            u8 rex = second->kind == ASSEMBLY_OPERAND_REGISTER
-                           ? assembly_x86_rex_needed(instruction->width, first->reg, second->reg)
-                           : assembly_x86_memory_rex_needed(instruction->width, first->reg, second->memory);
-            if (second->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(second->memory, &address_size))
-            {
-                sized = false;
-            }
-            else
-            {
-                u32 immediate_size = immediate >= INT8_MIN && immediate <= INT8_MAX ? 1 : full_immediate_width / 8;
-                instruction->size = (u32)(instruction->width == 16) + (u32)rex + 1u + address_size + immediate_size;
-                sized = true;
-            }
-        }
-    }
-    return sized;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_size_shift(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    instruction->width = assembly_operand_width(*first);
-    bool sized;
-    if (!instruction->width || (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY) ||
-        second->kind != ASSEMBLY_OPERAND_EXPRESSION || second->expression.has_symbol ||
-        second->expression.addend < 0 || second->expression.addend > UINT8_MAX)
-    {
-        sized = false;
-    }
-    else
-    {
-        u32 address_size = 1;
-        u8 rex = first->kind == ASSEMBLY_OPERAND_REGISTER
-                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
-                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
-        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->size = (u32)(instruction->width == 16) + (u32)rex + 1u + address_size +
-                                (u32)(second->expression.addend != 1);
-            sized = true;
-        }
-    }
-    return sized;
-}
-
-// Everything the family ladder did not claim: a general-register operation
-// whose size follows from its operand kinds and immediate width.
-BUSTER_GLOBAL_LOCAL bool assembly_x86_general_instruction_size(AssemblyInstruction* instruction)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOpcode opcode = instruction->opcode;
-    u32 lock_size = instruction->lock_prefix ? 1 : 0;
-    // A general-register operation is exactly that: any operand naming another
-    // register class belongs to a family above, not here.
-    bool sized = true;
-    for (u32 operand_index = 0; operand_index < instruction->operand_count && sized; operand_index += 1)
-    {
-        sized = instruction->operands[operand_index].kind != ASSEMBLY_OPERAND_REGISTER ||
-                instruction->operands[operand_index].reg.class == ASSEMBLY_REGISTER_GPR;
-    }
-    if (sized)
-    {
-        if (opcode == ASSEMBLY_OPCODE_X86_CALL || opcode == ASSEMBLY_OPCODE_X86_JMP)
-        {
-            sized = assembly_x86_size_branch_target(instruction);
-        }
-        else if (opcode == ASSEMBLY_OPCODE_X86_PUSH || opcode == ASSEMBLY_OPCODE_X86_POP)
-        {
-            sized = assembly_x86_size_push_pop(instruction);
-        }
-        else if (opcode == ASSEMBLY_OPCODE_X86_INC || opcode == ASSEMBLY_OPCODE_X86_DEC || opcode == ASSEMBLY_OPCODE_X86_NEG ||
-            opcode == ASSEMBLY_OPCODE_X86_NOT || opcode == ASSEMBLY_OPCODE_X86_MUL || opcode == ASSEMBLY_OPCODE_X86_DIV ||
-            opcode == ASSEMBLY_OPCODE_X86_IDIV || (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 1))
-        {
-            sized = assembly_x86_size_unary_group(instruction);
-        }
-        else if (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 3)
-        {
-            sized = assembly_x86_size_imul_immediate(instruction);
-        }
-        else if (opcode == ASSEMBLY_OPCODE_X86_SHL || opcode == ASSEMBLY_OPCODE_X86_SHR || opcode == ASSEMBLY_OPCODE_X86_SAR)
-        {
-            sized = assembly_x86_size_shift(instruction);
-        }
-        else if (first->kind != ASSEMBLY_OPERAND_REGISTER && first->kind != ASSEMBLY_OPERAND_MEMORY)
-        {
-            sized = false;
-        }
-        else
-        {
-            instruction->width = assembly_operand_width(*first);
-            if (!instruction->width)
-            {
-                instruction->width = assembly_operand_width(*second);
-            }
-            if (!instruction->width ||
-                (instruction->width != 8 && instruction->width != 16 && instruction->width != 32 && instruction->width != 64))
-            {
-                sized = false;
-            }
-            else
-            {
-                if (first->kind == ASSEMBLY_OPERAND_MEMORY)
-                {
-                    if (first->memory.width && first->memory.width != instruction->width)
-                    {
-                        return false;
-                    }
-                    first->memory.width = instruction->width;
-                }
-                if (second->kind == ASSEMBLY_OPERAND_MEMORY)
-                {
-                    if (second->memory.width && second->memory.width != instruction->width)
-                    {
-                        return false;
-                    }
-                    second->memory.width = instruction->width;
-                }
-                if (second->kind == ASSEMBLY_OPERAND_REGISTER || second->kind == ASSEMBLY_OPERAND_MEMORY)
-                {
-                    if ((second->kind == ASSEMBLY_OPERAND_REGISTER && second->reg.width != instruction->width) ||
-                        (first->kind == ASSEMBLY_OPERAND_MEMORY && second->kind == ASSEMBLY_OPERAND_MEMORY) ||
-                        (opcode == ASSEMBLY_OPCODE_X86_IMUL && first->kind != ASSEMBLY_OPERAND_REGISTER) ||
-                        (opcode != ASSEMBLY_OPCODE_X86_MOV && opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_ADC &&
-                         opcode != ASSEMBLY_OPCODE_X86_SUB && opcode != ASSEMBLY_OPCODE_X86_SBB &&
-                         opcode != ASSEMBLY_OPCODE_X86_AND && opcode != ASSEMBLY_OPCODE_X86_OR && opcode != ASSEMBLY_OPCODE_X86_XOR &&
-                         opcode != ASSEMBLY_OPCODE_X86_CMP && opcode != ASSEMBLY_OPCODE_X86_TEST && opcode != ASSEMBLY_OPCODE_X86_IMUL))
-                    {
-                        return false;
-                    }
-                    if (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->width == 8)
-                    {
-                        return false;
-                    }
-                    AssemblyRegister reg = opcode == ASSEMBLY_OPCODE_X86_IMUL || second->kind == ASSEMBLY_OPERAND_MEMORY ? first->reg : second->reg;
-                    AssemblyOperand* rm = opcode == ASSEMBLY_OPCODE_X86_IMUL || second->kind == ASSEMBLY_OPERAND_MEMORY ? second : first;
-                    u32 address_size = 1;
-                    u8 rex = rm->kind == ASSEMBLY_OPERAND_REGISTER
-                                   ? assembly_x86_rex_needed(instruction->width, reg, rm->reg)
-                                   : assembly_x86_memory_rex_needed(instruction->width, reg, rm->memory);
-                    if (rm->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(rm->memory, &address_size))
-                    {
-                        return false;
-                    }
-                    if ((rm->kind == ASSEMBLY_OPERAND_REGISTER && assembly_x86_rex_conflicts_high_byte(instruction->width, reg, rm->reg)) ||
-                        (rm->kind == ASSEMBLY_OPERAND_MEMORY && assembly_x86_memory_rex_conflicts_high_byte(instruction->width, reg, rm->memory)))
-                    {
-                        return false;
-                    }
-                    instruction->size = lock_size + (u32)(instruction->width == 16) + (u32)rex +
-                                        (opcode == ASSEMBLY_OPCODE_X86_IMUL ? 2u : 1u) + address_size;
-                    sized = true;
-                }
-                else if (second->kind != ASSEMBLY_OPERAND_EXPRESSION || second->expression.has_symbol || opcode == ASSEMBLY_OPCODE_X86_IMUL)
-                {
-                    sized = false;
-                }
-                else
-                {
-                    s64 immediate = second->expression.addend;
-                    if (opcode == ASSEMBLY_OPCODE_X86_MOV)
-                    {
-                        u16 immediate_width = first->kind == ASSEMBLY_OPERAND_MEMORY && instruction->width == 64 ? 32 : instruction->width;
-                        if (!assembly_x86_immediate_fits(immediate, immediate_width, first->kind == ASSEMBLY_OPERAND_MEMORY && instruction->width == 64))
-                        {
-                            return false;
-                        }
-                        u32 address_size = 1;
-                        u8 rex = first->kind == ASSEMBLY_OPERAND_REGISTER
-                                       ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
-                                       : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
-                        if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-                        {
-                            return false;
-                        }
-                        instruction->size = (u32)(instruction->width == 16) + (u32)rex + 1u +
-                                            (first->kind == ASSEMBLY_OPERAND_MEMORY ? address_size : 0u) + immediate_width / 8;
-                        sized = true;
-                    }
-                    else if (opcode != ASSEMBLY_OPCODE_X86_ADD && opcode != ASSEMBLY_OPCODE_X86_ADC && opcode != ASSEMBLY_OPCODE_X86_SUB &&
-                        opcode != ASSEMBLY_OPCODE_X86_SBB && opcode != ASSEMBLY_OPCODE_X86_AND && opcode != ASSEMBLY_OPCODE_X86_OR &&
-                        opcode != ASSEMBLY_OPCODE_X86_XOR && opcode != ASSEMBLY_OPCODE_X86_CMP &&
-                        opcode != ASSEMBLY_OPCODE_X86_TEST)
-                    {
-                        sized = false;
-                    }
-                    else
-                    {
-                        u8 signed_only = instruction->width == 64;
-                        u16 full_immediate_width = instruction->width == 64 ? 32 : instruction->width;
-                        if (!assembly_x86_immediate_fits(immediate, full_immediate_width, signed_only))
-                        {
-                            sized = false;
-                        }
-                        else
-                        {
-                            u32 immediate_size = opcode != ASSEMBLY_OPCODE_X86_TEST && immediate >= INT8_MIN && immediate <= INT8_MAX ? 1 : full_immediate_width / 8;
-                            u32 address_size = 1;
-                            u8 rex = first->kind == ASSEMBLY_OPERAND_REGISTER
-                                           ? assembly_x86_rex_needed(instruction->width, first->reg, (AssemblyRegister){0})
-                                           : assembly_x86_memory_rex_needed(instruction->width, (AssemblyRegister){0}, first->memory);
-                            if (first->kind == ASSEMBLY_OPERAND_MEMORY && !assembly_x86_memory_encoding_size(first->memory, &address_size))
-                            {
-                                sized = false;
-                            }
-                            else
-                            {
-                                instruction->size = lock_size + (u32)(instruction->width == 16) + (u32)rex + 1u + address_size + immediate_size;
-                                sized = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return sized;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* instruction)
 {
-    AssemblyOperand* first = instruction->operands;
     AssemblyOpcode opcode = instruction->opcode;
-    AssemblyVectorForm const* vector_form = assembly_x86_vector_form(opcode);
     bool sized;
     if (!assembly_x86_lock_prefix_legal(instruction))
     {
@@ -7801,7 +5371,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         sized = false;
     }
-    else if (!vector_form && assembly_x86_instruction_has_any_decorator(*instruction))
+    else if (!assembly_x86_vector_form(opcode) && assembly_x86_instruction_has_any_decorator(*instruction))
     {
         sized = false;
     }
@@ -7821,135 +5391,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
     {
         sized = assembly_x86_mask_instruction_size(instruction);
     }
-    else if (opcode == ASSEMBLY_OPCODE_X86_APX_PUSH2 || opcode == ASSEMBLY_OPCODE_X86_APX_POP2 ||
-        (assembly_x86_opcode_is_apx_ndd(opcode) && instruction->operand_count == 3 &&
-         !(opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION)))
-    {
-        sized = assembly_x86_apx_ndd_instruction_size(instruction);
-    }
-    else if (instruction->no_flags && assembly_x86_opcode_is_apx_nf(opcode) &&
-        (instruction->operand_count == 1 || instruction->operand_count == 2 ||
-         (opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operand_count == 3 &&
-          instruction->operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION)))
-    {
-        sized = assembly_x86_apx_nf_instruction_size(instruction);
-    }
-    else if (instruction->evex && vector_form)
-    {
-        sized = assembly_x86_evex_instruction_size(instruction, vector_form);
-    }
-    else if (assembly_x86_instruction_has_extended_gpr(*instruction))
-    {
-        sized = assembly_x86_apx_legacy_instruction_size(instruction);
-    }
-    else if (assembly_x86_opcode_is_bit_atomic(opcode))
-    {
-        sized = assembly_x86_bit_atomic_instruction_size(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_LEA)
-    {
-        sized = assembly_x86_size_lea(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_MOVZX || opcode == ASSEMBLY_OPCODE_X86_MOVSX || opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
-    {
-        sized = assembly_x86_size_move_extend(instruction);
-    }
-    else if (assembly_x86_opcode_is_rotate(opcode))
-    {
-        sized = assembly_x86_size_rotate(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_SHLD || opcode == ASSEMBLY_OPCODE_X86_SHRD)
-    {
-        sized = assembly_x86_size_double_shift(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_NOP || opcode == ASSEMBLY_OPCODE_X86_RET || opcode == ASSEMBLY_OPCODE_X86_INT3 ||
-        opcode == ASSEMBLY_OPCODE_X86_CWDE || opcode == ASSEMBLY_OPCODE_X86_CDQ)
-    {
-        instruction->size = 1;
-        sized = instruction->operand_count == 0;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_CBW || opcode == ASSEMBLY_OPCODE_X86_CDQE || opcode == ASSEMBLY_OPCODE_X86_CWD ||
-        opcode == ASSEMBLY_OPCODE_X86_CQO)
-    {
-        instruction->size = 2;
-        sized = instruction->operand_count == 0;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_EMMS)
-    {
-        instruction->size = 2;
-        sized = instruction->operand_count == 0;
-    }
-    else if (assembly_x86_opcode_is_x87_zero_operand(opcode))
-    {
-        instruction->size = opcode == ASSEMBLY_OPCODE_X86_FWAIT ? 1
-                            : opcode == ASSEMBLY_OPCODE_X86_FINIT || opcode == ASSEMBLY_OPCODE_X86_FCLEX ? 3
-                                                                                                          : 2;
-        sized = instruction->operand_count == 0;
-    }
-    else if (assembly_x86_opcode_is_x87_data(opcode))
-    {
-        sized = assembly_x86_size_x87_data(instruction);
-    }
-    else if (assembly_x86_opcode_is_x87_arithmetic(opcode))
-    {
-        sized = assembly_x86_size_x87_arithmetic(instruction);
-    }
-    else if (assembly_x86_opcode_is_x87_pop_arithmetic(opcode))
-    {
-        sized = assembly_x86_size_x87_pop_arithmetic(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_FXCH)
-    {
-        instruction->width = 80;
-        instruction->size = 2;
-        sized = first->kind == ASSEMBLY_OPERAND_REGISTER && first->reg.class == ASSEMBLY_REGISTER_X87;
-    }
-    else if (assembly_x86_opcode_is_x87_compare(opcode))
-    {
-        sized = assembly_x86_size_x87_compare(instruction);
-    }
-    else if (assembly_x86_opcode_is_x87_integer_arithmetic(opcode))
-    {
-        sized = assembly_x86_size_x87_integer_arithmetic(instruction);
-    }
-    else if (assembly_x86_opcode_is_x87_state_memory(opcode))
-    {
-        sized = assembly_x86_size_x87_state_memory(instruction);
-    }
-    else if (assembly_x86_opcode_is_x87_stack_control(opcode))
-    {
-        sized = assembly_x86_size_x87_stack_control(instruction);
-    }
-    else if (assembly_x86_opcode_is_legacy_packed(opcode))
-    {
-        sized = assembly_x86_size_legacy_packed(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_JCC)
-    {
-        instruction->size = 6;
-        sized = first->kind == ASSEMBLY_OPERAND_EXPRESSION;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_SETCC)
-    {
-        sized = assembly_x86_size_setcc(instruction);
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_CMOVCC)
-    {
-        sized = assembly_x86_size_cmovcc(instruction);
-    }
-    else if (assembly_x86_opcode_is_sse2(opcode))
-    {
-        sized = assembly_x86_size_sse2(instruction);
-    }
-    else if (assembly_x86_opcode_is_avx(opcode))
-    {
-        sized = assembly_x86_size_avx(instruction);
-    }
     else
     {
-        sized = assembly_x86_general_instruction_size(instruction);
+        sized = false;
     }
     return sized;
+}
+
+// Source syntax and aliases are normalized before this boundary. These
+// closed families defer all encoding size/legality decisions to the same
+// checked metadata form retained for layout and emission.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_source_layout_uses_metadata(AssemblyInstruction instruction)
+{
+    AssemblyOpcode opcode = instruction.opcode;
+    bool result = (opcode >= ASSEMBLY_OPCODE_X86_NOP && opcode <= ASSEMBLY_OPCODE_X86_CMOVCC) ||
+                  (opcode >= ASSEMBLY_OPCODE_X86_FLD && opcode <= ASSEMBLY_OPCODE_X86_FWAIT) ||
+                  opcode == ASSEMBLY_OPCODE_X86_EMMS || assembly_x86_opcode_is_legacy_packed(opcode) ||
+                  (assembly_x86_opcode_is_sse2(opcode) || assembly_x86_opcode_is_avx(opcode)) ||
+                  (opcode >= ASSEMBLY_OPCODE_X86_VMOVDQA32 && opcode <= ASSEMBLY_OPCODE_X86_VRNDSCALEPD) ||
+                  instruction.no_flags || assembly_x86_instruction_has_extended_gpr(instruction) ||
+                  opcode == ASSEMBLY_OPCODE_X86_APX_PUSH2 || opcode == ASSEMBLY_OPCODE_X86_APX_POP2;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_condition(String8 text, u64* value)
@@ -10869,10 +8331,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         {
             // These source layouts are selected with checked metadata forms
             // below; the parser only supplies operands and syntax aliases.
-            bool metadata_layout = instruction.opcode == ASSEMBLY_OPCODE_X86_LEA ||
-                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVZX ||
-                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSX ||
-                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSXD;
+            bool metadata_layout = assembly_x86_source_layout_uses_metadata(instruction);
             if ((!metadata_layout && !assembly_x86_instruction_size(&instruction)) ||
                 (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
             {
@@ -11239,6 +8698,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_operand(AssemblyBuilder*
     if (operand.expression.has_symbol)
     {
         result->symbol = assembly_x86_metadata_symbol_name(builder, operand.expression.symbol);
+        AssemblyRegister reserved_register = {0};
+        if (assembly_numbered_register_parse(result->symbol, S8("cr"), UINT32_MAX, 64, ASSEMBLY_REGISTER_CONTROL, &reserved_register) ||
+            assembly_numbered_register_parse(result->symbol, S8("dr"), UINT32_MAX, 64, ASSEMBLY_REGISTER_DEBUG, &reserved_register))
+            return false;
         result->has_symbol = result->symbol.length != 0;
         result->addend = operand.expression.addend;
         return result->has_symbol;
@@ -11634,6 +9097,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     {
         return false;
     }
+    if (has_handwritten_base && info.opcode == ASSEMBLY_OPCODE_X86_CMOVCC)
+    {
+        // The suffix describes the operand width; the condition alias remains
+        // syntax policy and uses the same condition identity as the parser.
+        static String8 const canonical[] = {
+            S8_INITIALIZER("cmovo"), S8_INITIALIZER("cmovno"), S8_INITIALIZER("cmovb"), S8_INITIALIZER("cmovnb"),
+            S8_INITIALIZER("cmovz"), S8_INITIALIZER("cmovnz"), S8_INITIALIZER("cmovbe"), S8_INITIALIZER("cmovnbe"),
+            S8_INITIALIZER("cmovs"), S8_INITIALIZER("cmovns"), S8_INITIALIZER("cmovp"), S8_INITIALIZER("cmovnp"),
+            S8_INITIALIZER("cmovl"), S8_INITIALIZER("cmovnl"), S8_INITIALIZER("cmovle"), S8_INITIALIZER("cmovnle"),
+        };
+        if (info.condition < BUSTER_ARRAY_LENGTH(canonical)) candidate = canonical[info.condition];
+    }
     *base = candidate;
     if (base_info)
     {
@@ -11705,6 +9180,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(AssemblyInst
             operands[0].kind == ASSEMBLY_OPERAND_EXPRESSION);
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_legacy_qualifier_matches(
+    BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query, AssemblyOperand const* operands)
+{
+    bool result = true;
+    bool legacy_prefix = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
+                         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
+    if (legacy_prefix && operands)
+    {
+        bool legacy_shape = assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("X87_ALU"));
+        u16 requested_width = 0;
+        for (u32 index = 0; index < query.operand_count; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = query.operands[index];
+            legacy_shape |= operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                            (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX ||
+                             operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM);
+            if (operands[index].kind == ASSEMBLY_OPERAND_MEMORY && operands[index].memory.width_explicit)
+                requested_width = operands[index].memory.width;
+        }
+        if (legacy_shape && requested_width)
+        {
+            for (u32 index = 0; index < form.operand_count; index += 1)
+            {
+                BusterX86MetadataOperand operand = {0};
+                if (!buster_x86_metadata_operand(form.id, index, &operand))
+                {
+                    result = false;
+                    break;
+                }
+                if (operand.visible && operand.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+                {
+                    u16 published_width = buster_x86_metadata_form_memory_source_width(form, operand.atom);
+                    result = !published_width || requested_width == published_width;
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_source_form(
     BusterX86MetadataPhysicalQuery query, String8 mnemonic, String8 suffix_base, AssemblyInstructionInfo suffix_info,
     u8 suffix_width, AssemblyOperand const* operands, BusterX86MetadataPhysicalOperand* physical, u32 operand_count,
@@ -11715,6 +9231,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_s
         *selected_mnemonic = mnemonic;
     }
     BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(query);
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+    {
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(selection.form_id, &form) ||
+            !assembly_x86_metadata_legacy_qualifier_matches(form, query, operands))
+            selection.status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+    }
     if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS || !suffix_base.length)
     {
         return selection;
@@ -12600,7 +10123,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
-                bool conversion_source_width = false;
+                bool schema_source_width = false;
+                bool vex_vector_source = vector_memory_width && vector_memory_width <= 256;
+                for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+                {
+                    vex_vector_source &= !operands[operand_index].has_mask && !operands[operand_index].zeroing &&
+                                         !operands[operand_index].broadcast &&
+                                         (physical[operand_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                                          physical[operand_index].reg.index < 16);
+                }
                 BusterX86MetadataCandidateRange conversion_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
                 for (u32 candidate_index = 0; candidate_index < conversion_candidates.count; candidate_index += 1)
                 {
@@ -12608,16 +10139,28 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                     BusterX86MetadataForm form = {0};
                     if (buster_x86_metadata_candidate_at(conversion_candidates, candidate_index, &form_id) &&
                         buster_x86_metadata_form(form_id, &form) &&
-                        assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")))
+                        (assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) ||
+                         (vex_vector_source && form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX)))
                     {
-                        conversion_source_width = true;
+                        schema_source_width = assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT"));
+                        for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+                        {
+                            BusterX86MetadataOperand metadata = {0};
+                            if (buster_x86_metadata_operand(form.id, metadata_index, &metadata) && metadata.visible &&
+                                metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                                buster_x86_metadata_form_memory_source_width(form, metadata.atom))
+                                schema_source_width = true;
+                        }
+                    }
+                    if (schema_source_width)
+                    {
                         break;
                     }
                 }
-                if (conversion_source_width)
+                if (schema_source_width)
                 {
                     // The selector projects and validates this qualifier from
-                    // each compatible conversion row. Do not compare it with
+                    // each compatible conversion/VEX row. Do not compare it with
                     // the destination vector width in the syntax adapter.
                     continue;
                 }
@@ -12837,14 +10380,42 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             }
         }
     }
-    if (suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
-                                                                               physical, operand_count))
-    {
-        return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-    }
     AssemblyInstructionInfo mnemonic_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     bool is_push_mnemonic = assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info) &&
                             mnemonic_info.opcode == ASSEMBLY_OPCODE_X86_PUSH;
+    AssemblyOpcode source_opcode = mnemonic_info.opcode != ASSEMBLY_OPCODE_COUNT ? mnemonic_info.opcode : mnemonic_suffix_info.opcode;
+    bool duplicate_pop2_destination = source_opcode == ASSEMBLY_OPCODE_X86_APX_POP2 && operand_count == 2 &&
+                                     physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                     physical[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                     physical[0].reg.physical_class == physical[1].reg.physical_class &&
+                                     physical[0].reg.index == physical[1].reg.index;
+    if ((suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
+                                                                            physical, operand_count)) ||
+        duplicate_pop2_destination)
+    {
+        return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+    }
+    if ((source_opcode >= ASSEMBLY_OPCODE_X86_FLD && source_opcode <= ASSEMBLY_OPCODE_X86_FISTTP) ||
+        assembly_x86_opcode_is_x87_arithmetic(source_opcode))
+    {
+        // These x87 data/arithmetic source spellings require an element width.
+        // A shortest metadata row cannot resolve the source's intended type.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
+    if (source_opcode >= ASSEMBLY_OPCODE_X86_ADD && source_opcode <= ASSEMBLY_OPCODE_X86_IMUL)
+    {
+        // Symbolic arithmetic immediates remain outside the source/object
+        // policy. Metadata's physical relocation capability does not widen it.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
+                return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
     // An unresolved PUSH immediate cannot be proven to fit the short form.
     // Reserve the architectural sign-extended imm32 relocation so linking a
     // normal symbol address does not depend on it happening to fit in 8 bits.
@@ -12903,15 +10474,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     // `movl $0xc2820000,-4(%rsp)` and `or $0x8000,%ax` each name a field whose
     // top bit is set. Re-express such a literal as the signed value that field
     // holds, so form selection sees a width it can encode instead of a
-    // magnitude past the signed maximum. Only the 16- and 32-bit widths need
-    // it: those are the IMMz fields whose literal is range-checked as signed,
-    // while a byte operand's immediate is the operand's own width and the
-    // unsigned spelling already fits it.
+    // magnitude past the signed maximum. Apply it at 8, 16 and 32 bits; metadata may
+    // use a signed field even when the source names the full-width bit pattern.
     for (u32 index = 0; index < operand_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand* immediate = physical + index;
         if (immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !immediate->has_value || immediate->value <= 0 ||
-            (immediate->width != 16 && immediate->width != 32))
+            (immediate->width != 8 && immediate->width != 16 && immediate->width != 32))
         {
             continue;
         }
@@ -12970,9 +10539,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         (assembly_word_equal(mnemonic, S8("add")) || assembly_word_equal(mnemonic, S8("adc")) ||
          assembly_word_equal(mnemonic, S8("sub")) || assembly_word_equal(mnemonic, S8("sbb")) ||
          assembly_word_equal(mnemonic, S8("and")) || assembly_word_equal(mnemonic, S8("or")) ||
-         assembly_word_equal(mnemonic, S8("xor")) || assembly_word_equal(mnemonic, S8("imul")) ||
-         assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("shr")) ||
-         assembly_word_equal(mnemonic, S8("sar"))))
+         assembly_word_equal(mnemonic, S8("xor")) || assembly_word_equal(mnemonic, S8("imul"))))
     {
         for (u32 index = 0; index < operand_count; index += 1)
         {
@@ -12980,6 +10547,21 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 physical[index].value < 0 || physical[index].value > UINT8_MAX)
                 continue;
             physical[index].value = (s64)(s8)(u8)physical[index].value;
+            physical[index].width = 8;
+        }
+    }
+    if (attributes.apx_flags && assembly_x86_opcode_is_shift(source_opcode))
+    {
+        // Shift counts are unsigned byte fields, including NF forms. Preserve
+        // the source's low-byte pattern without using signed arithmetic rules.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !physical[index].has_value ||
+                physical[index].value < INT8_MIN || physical[index].value > UINT8_MAX)
+                continue;
+            physical[index].unsigned_value = (u64)(u8)physical[index].value;
+            physical[index].has_unsigned_value = true;
+            physical[index].has_value = false;
             physical[index].width = 8;
         }
     }
@@ -13118,6 +10700,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
         }
     }
+    AssemblyInstructionInfo source_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+        assembly_instruction_lookup(target, syntax, mnemonic, &source_info) &&
+        assembly_x86_source_layout_uses_metadata((AssemblyInstruction){.opcode = source_info.opcode}))
+    {
+        // Disabled shadow forms must not turn malformed migrated source into
+        // a missing-feature diagnostic. This read-only probe publishes no
+        // instruction and does not authorize the feature-disabled encoding.
+        String8 structural_features[] = {S8("*")};
+        BusterX86MetadataPhysicalQuery structural_query = query;
+        structural_query.operands = physical;
+        structural_query.features = (BusterX86MetadataFeatureInput){.names = structural_features, .count = 1};
+        String8 structural_mnemonic = mnemonic;
+        BusterX86MetadataSelectResult structural = assembly_x86_metadata_select_source_form(
+            structural_query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width,
+            operands, physical, operand_count, &structural_mnemonic);
+        if (structural.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+            structural.status != BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+            selection = structural;
+    }
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
         BusterX86MetadataForm failure_form = {0};
@@ -13182,6 +10784,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .metadata_operand_count = (u8)operand_count,
         .metadata_include_implicit = query.include_implicit,
         .metadata_form_id = selection.form_id,
+        .metadata_memory_width = selection.selected_memory_width,
+        .metadata_memory_operand = selection.selected_memory_operand,
+        .metadata_memory_source_width_cleared = selection.selected_memory_source_width_cleared,
         .metadata_mnemonic = mnemonic,
         .metadata_address_size = address_size,
         .metadata_attributes = attributes,
@@ -13718,6 +11323,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                 builder->result.diagnostic_count = diagnostic_count;
                 builder->output_count = output_count;
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
+                if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                    assembly_x86_source_layout_uses_metadata(builder->instructions[instruction_count]))
+                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
                 assembly_x86_metadata_diagnostic(builder, status, line, column, length);
                 return;
             }
@@ -14204,12 +11812,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     };
     u8 bytes[64] = {0};
     BusterX86MetadataRelocation metadata_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+    // Retain layout's identity and source projections; emission checks the
+    // same form and does not search for another encoding.
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_selection((BusterX86MetadataEmitQuery){
         .physical = physical,
+        .form_id = instruction->metadata_form_id,
         .output = bytes,
         .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
         .relocations = metadata_relocations,
         .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
+    }, (BusterX86MetadataSelectResult){
+        .status = BUSTER_X86_METADATA_ENCODE_SUCCESS,
+        .form_id = instruction->metadata_form_id,
+        .selected_memory_width = instruction->metadata_memory_width,
+        .selected_memory_operand = instruction->metadata_memory_operand,
+        .selected_memory_source_width_cleared = instruction->metadata_memory_source_width_cleared,
     });
     u32 metadata_size = instruction->size - (instruction->metadata_private_pc8_long ? 7u : 0u);
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != metadata_size ||

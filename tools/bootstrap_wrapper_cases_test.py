@@ -300,7 +300,7 @@ sys.exit(0 if summary['success'] else 1)
         wrappers = desktop.split("- name: Bootstrap wrapper regression tests", 1)[1].split("- name: Install mold", 1)[0]
         self.assertIn("matrix.shard == 'release'", policy)
         self.assertIn("tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log", policy)
-        self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" == checks ]]', wrappers)
+        self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" != release ]]', wrappers)
         self.assertIn('if [[ "$RUNNER_OS" == Windows ]]', wrappers)
         self.assertIn("tools/bootstrap_wrapper_cases.py --jobs 2", wrappers)
         self.assertIn("tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v", wrappers)

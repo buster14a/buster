@@ -12,6 +12,8 @@ queue-collect/queue-summarize measure runner scheduling across every workflow
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get) and an unsuccessful verdict is printed (report_gate_failure).
+combination_jobs selects the complete combined or dispatch-only split layout;
+measure recognizes both as distinct timing cohorts and rejects mixed inventories.
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
 deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
 keep a "Re-run failed jobs" attempt's re-stamped deferrals at attempt 1 (#2052).
@@ -55,6 +57,14 @@ COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS fo
 LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
+SPLIT_COMBINATION_PLATFORMS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + SPLIT_CHECK_SHARDS
+                  if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
+SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 # Only these four retained Apple jobs may defer on first-attempt draft PRs.
 MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBILE
                           if name.startswith(("macOS ", "iOS ")))
@@ -96,6 +106,13 @@ def timestamp(value):
     return result
 
 
+def combination_jobs(checks_layout="combined"):
+    """Exactly one complete desktop layout; the default remains accepted policy."""
+    if checks_layout not in ("combined", "split"):
+        raise ValueError("Unknown checks layout")
+    return SPLIT_COMBINATION_JOBS if checks_layout == "split" else COMBINATION_JOBS
+
+
 def measure(run):
     """A successful declared-inventory first attempt, or an explicit exclusion reason."""
     reason = None
@@ -104,10 +121,10 @@ def measure(run):
     # reused main run is a separate cohort and cannot be pooled with full runs.
     jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
-    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
+                             sorted(COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
-                       sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS),
-                       sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+                       sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -133,7 +150,7 @@ def measure(run):
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in HISTORICAL_PLATFORMS or name in HISTORICAL_COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -271,7 +288,7 @@ def _required_job_steps(name):
     required = set()
     if deferred_base_name(name) is not None:
         required.add(DEFERRAL_STEP)
-    elif name in COMBINATION_PLATFORMS:
+    elif name in COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
         required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
                          "Combination matrix (Windows)" if name.startswith("Windows")
                          else "Combination matrix (Linux, macOS)"))
@@ -616,6 +633,12 @@ def require_jobs(args):
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
+    checks_layout = getattr(args, "checks_layout", "combined")
+    expected_names = combination_jobs(checks_layout)
+    if checks_layout == "split" and run.get("event") != "workflow_dispatch":
+        raise ValueError("The split checks layout requires a workflow_dispatch run")
+    if checks_layout == "split" and run.get("head_branch") != SPLIT_QUALIFICATION_BRANCH:
+        raise ValueError("The split checks layout requires the exact qualification branch")
     draft = draft_pull_request_run(run, head_sha, getattr(args, "event_name", None),
                                    getattr(args, "event_path", None))
     jobs = []
@@ -672,7 +695,8 @@ def require_jobs(args):
                 jobs, decision_errors = separate_reuse_job(
                     jobs, args.run_id, args.run_attempt, head_sha)
                 errors = decision_errors + validate_required_jobs(
-                    jobs, args.run_id, args.run_attempt, head_sha, draft)
+                    jobs, args.run_id, args.run_attempt, head_sha, draft,
+                    expected_names=expected_names)
         if not _metadata_can_refresh(errors) or snapshot_attempt >= len(JOB_METADATA_REFRESH_DELAYS_SECONDS):
             break
         delay = JOB_METADATA_REFRESH_DELAYS_SECONDS[snapshot_attempt]
@@ -694,6 +718,7 @@ def require_jobs(args):
     return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
             "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
             "success": not errors, "errors": errors,
+            "checks_layout": checks_layout,
             "draft_pull_request": draft, "deferred_macos_jobs": deferred,
             "job_metadata": {"snapshot_attempts": snapshot_attempts,
                              "refreshes": max(0, snapshot_attempts - 1),
@@ -1094,6 +1119,7 @@ def main():
     gate.add_argument("--run-attempt", type=int, default=os.getenv("GITHUB_RUN_ATTEMPT", "0"))
     gate.add_argument("--event-name", default=os.getenv("GITHUB_EVENT_NAME"))
     gate.add_argument("--event-path", default=os.getenv("GITHUB_EVENT_PATH"))
+    gate.add_argument("--checks-layout", choices=("combined", "split"), default="combined")
     gate.add_argument("--output")
     report = sub.add_parser("summarize")
     report.add_argument("input")
