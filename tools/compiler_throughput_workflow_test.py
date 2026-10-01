@@ -83,9 +83,24 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
         self.assertEqual(pending[:4], ["manual-1", "manual-2", "schedule-1", "manual-3"])
 
     def test_only_reviewed_queue_uses_actionlint_exception(self):
-        queued = [path for path in WORKFLOWS.glob("*.yml")
-                  if re.search(r"^\s+queue:", path.read_text(), re.MULTILINE)]
-        self.assertEqual(queued, [REQUEST_WORKFLOW])
+        reviewed = {
+            REQUEST_WORKFLOW,
+            WORKFLOWS / "native-retirement-catch-up.yml",
+            WORKFLOWS / "native-retirement-automation.yml",
+            WORKFLOWS / "merge-queue-reconcile.yml",
+        }
+        queued = {path for path in WORKFLOWS.glob("*.yml")
+                  if re.search(r"^\s+queue:", path.read_text(), re.MULTILINE)}
+        self.assertEqual(queued, reviewed)
+        for path in reviewed:
+            with self.subTest(workflow=path.name):
+                text = path.read_text()
+                concurrency = top_level_section(text, "concurrency")
+                self.assertIn("  queue: max\n", concurrency)
+                self.assertIn("  cancel-in-progress: false\n", concurrency)
+                self.assertEqual(len(re.findall(r"^\s+queue:", text, re.MULTILINE)), 1)
+                self.assertNotIn("${{", re.search(r"^  group: (.*)$", concurrency,
+                                                  re.MULTILINE).group(1))
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 tools/compiler_throughput_workflow_test.py", ci)
         self.assertIn("-ignore 'unexpected key \"queue\" for \"concurrency\" section'", ci)
