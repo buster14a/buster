@@ -8,6 +8,10 @@
 // one thread before any parallel phase reads them (AGENTS.md).
 //
 // Layout, in file order; each anchor is a definition to search for:
+//   CCensusState, c_census_record ..           the source-fact census
+//   c_census_phase_name                        (c_census.h), compiled only
+//                                              into BUSTER_BENCH_ALLOCATIONS
+//                                              builds
 //   c_space_local .. c_space_retoken           spelling spaces: append-only
 //                                              storage token spellings point
 //                                              into
@@ -54,6 +58,11 @@
 //   c_pp_parenthesis_depth                     shape sidecar, and what the
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
+//   c_integer_operation,                       C integer operators over the
+//   c_integer_constant_binary/unary            shared ir_integer_* semantics:
+//                                              one operation table for runtime
+//                                              lowering and every constant
+//                                              evaluator
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
 //   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
@@ -64,12 +73,305 @@
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
+//   c_preprocess_seal, c_phase_arena_retire    the phase boundary: the result
+//                                              copied out of the phase arena
+//                                              before its release
+//                                              (docs/compiler-lifetime.md)
 //   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
 
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+
+#if BUSTER_BENCH_ALLOCATIONS
+// The source-fact census (c_census.h). The fact map holds one u16 per
+// spelling-space offset of the registered space: bits [0, C_CENSUS_PHASE_COUNT)
+// record which phases read the spelling at that offset, the bits above them
+// which conversion kinds already ran there. It is its own reservation,
+// committed in steps as offsets are touched, so it neither perturbs the arena
+// allocation counters nor commits memory for untouched offsets.
+typedef struct CCensusState CCensusState;
+struct CCensusState
+{
+    CCensusCounters counters;
+    u16* facts;
+    u64 fact_reserved;
+    u64 fact_committed;
+    u64 fact_touched;
+    char8 const* space_base;
+    u64 space_reserved;
+    CCensusPhase phase;
+    // Library traffic at the last phase boundary: the delta since then
+    // belongs to the phase active over that interval.
+    StringEqualCensus string_equal_mark;
+    BusterHashCensus hash_mark;
+    ArenaBenchmarkCounters arena_mark;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CCensusState c_census_state;
+
+enum
+{
+    C_CENSUS_FACT_SHIFT = C_CENSUS_PHASE_COUNT,
+    C_CENSUS_FACT_COMMIT_STEP = 1u << 24,
+};
+BUSTER_CT_CHECK(C_CENSUS_FACT_SHIFT + C_CENSUS_FACT_COUNT <= 16);
+
+BUSTER_GLOBAL_LOCAL void c_census_add(u64* value, u64 amount)
+{
+    if (amount > UINT64_MAX - *value)
+    {
+        *value = UINT64_MAX;
+        c_census_state.counters.overflowed = true;
+    }
+    else
+    {
+        *value += amount;
+    }
+}
+
+void c_census_record(CCensusCounter counter, u64 amount)
+{
+    if ((u32)counter < C_CENSUS_COUNT)
+    {
+        c_census_add(c_census_state.counters.values + counter, amount);
+    }
+    else
+    {
+        c_census_state.counters.overflowed = true;
+    }
+}
+
+void c_census_phase_record(CCensusPhaseCounter counter, u64 amount)
+{
+    if ((u32)counter < C_CENSUS_PHASE_COUNTER_COUNT)
+    {
+        c_census_add(c_census_state.counters.phase_values[c_census_state.phase] + counter, amount);
+    }
+    else
+    {
+        c_census_state.counters.overflowed = true;
+    }
+}
+
+// Charges the library traffic since the last boundary to the active phase.
+BUSTER_GLOBAL_LOCAL void c_census_flush(void)
+{
+    StringEqualCensus string_equal = string_equal_census();
+    BusterHashCensus hash = buster_hash_census();
+    ArenaBenchmarkCounters arena = arena_benchmark_counters();
+    u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+    c_census_add(phase + C_CENSUS_PHASE_STRING_EQUAL_CALLS, string_equal.calls - c_census_state.string_equal_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_STRING_EQUAL_BYTES, string_equal.compared_bytes - c_census_state.string_equal_mark.compared_bytes);
+    c_census_add(phase + C_CENSUS_PHASE_HASH_CALLS, hash.calls - c_census_state.hash_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_HASH_BYTES, hash.bytes - c_census_state.hash_mark.bytes);
+    c_census_add(phase + C_CENSUS_PHASE_ARENA_CALLS, arena.calls - c_census_state.arena_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_ARENA_BYTES, arena.requested_bytes - c_census_state.arena_mark.requested_bytes);
+    c_census_state.string_equal_mark = string_equal;
+    c_census_state.hash_mark = hash;
+    c_census_state.arena_mark = arena;
+}
+
+CCensusPhase c_census_phase_enter(CCensusPhase phase)
+{
+    CCensusPhase previous = c_census_state.phase;
+    c_census_flush();
+    c_census_state.phase = (u32)phase < C_CENSUS_PHASE_COUNT ? phase : C_CENSUS_PHASE_OTHER;
+    return previous;
+}
+
+void c_census_phase_exit(CCensusPhase previous)
+{
+    c_census_flush();
+    c_census_state.phase = previous;
+}
+
+void c_census_space_begin(char8 const* base, u64 reserved_size)
+{
+    if (c_census_state.facts && reserved_size * sizeof(*c_census_state.facts) > c_census_state.fact_reserved)
+    {
+        // The map was reserved for a smaller space; the next fact reserves
+        // one that covers this space.
+        os_unreserve(c_census_state.facts, c_census_state.fact_reserved);
+        c_census_state.facts = 0;
+        c_census_state.fact_reserved = 0;
+        c_census_state.fact_committed = 0;
+    }
+    else if (c_census_state.facts && c_census_state.fact_touched)
+    {
+        memset(c_census_state.facts, 0, c_census_state.fact_touched * sizeof(*c_census_state.facts));
+    }
+    c_census_state.fact_touched = 0;
+    c_census_state.space_base = base;
+    c_census_state.space_reserved = reserved_size;
+}
+
+// The fact word of `pointer`, or null when it lies outside the registered
+// space or the map cannot grow to reach it.
+BUSTER_GLOBAL_LOCAL u16* c_census_fact_word(char8 const* pointer)
+{
+    u16* result = 0;
+    char8 const* base = c_census_state.space_base;
+    if (base && pointer >= base && (u64)(pointer - base) < c_census_state.space_reserved)
+    {
+        u64 key = (u64)(pointer - base);
+        if (!c_census_state.facts)
+        {
+            u64 reserved = c_census_state.space_reserved * sizeof(u16);
+            c_census_state.facts = (u16*)os_reserve(0, reserved, (ProtectionFlags){.read = 1, .write = 1},
+                                                    (MapFlags){.priv = 1, .anonymous = 1, .no_reserve = 1});
+            c_census_state.fact_reserved = c_census_state.facts ? reserved : 0;
+        }
+        u64 needed = (key + 1) * sizeof(u16);
+        while (c_census_state.facts && needed > c_census_state.fact_committed && c_census_state.fact_committed < c_census_state.fact_reserved)
+        {
+            u64 step = BUSTER_MIN((u64)C_CENSUS_FACT_COMMIT_STEP, c_census_state.fact_reserved - c_census_state.fact_committed);
+            if (!os_commit((u8*)c_census_state.facts + c_census_state.fact_committed, step, (ProtectionFlags){.read = 1, .write = 1}, false))
+            {
+                break;
+            }
+            c_census_state.fact_committed += step;
+        }
+        if (c_census_state.facts && needed <= c_census_state.fact_committed)
+        {
+            c_census_state.fact_touched = BUSTER_MAX(c_census_state.fact_touched, key + 1);
+            result = c_census_state.facts + key;
+        }
+    }
+    return result;
+}
+
+void c_census_spelling_read(char8 const* pointer, u64 length)
+{
+    u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+    c_census_add(phase + C_CENSUS_PHASE_SPELLING_READS, 1);
+    c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_BYTES, length);
+    u16* word = c_census_fact_word(pointer);
+    if (!word)
+    {
+        c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_UNTRACKED, 1);
+    }
+    else if (!(*word & (1u << c_census_state.phase)))
+    {
+        *word |= (u16)(1u << c_census_state.phase);
+        c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_DISTINCT, 1);
+    }
+}
+
+void c_census_fact(CCensusFact fact, char8 const* pointer, u64 length)
+{
+    // Each kind owns four consecutive phase counters: total, bytes, distinct,
+    // untracked (characters, which have no byte counter, own three).
+    CCensusPhaseCounter total = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter bytes = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter distinct = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter untracked = C_CENSUS_PHASE_COUNTER_COUNT;
+    switch (fact)
+    {
+    case C_CENSUS_FACT_INTEGER:
+        total = C_CENSUS_PHASE_INTEGER_CONVERSIONS;
+        bytes = C_CENSUS_PHASE_INTEGER_CONVERSION_BYTES;
+        distinct = C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT;
+        untracked = C_CENSUS_PHASE_INTEGER_CONVERSION_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_FLOAT:
+        total = C_CENSUS_PHASE_FLOAT_CONVERSIONS;
+        bytes = C_CENSUS_PHASE_FLOAT_CONVERSION_BYTES;
+        distinct = C_CENSUS_PHASE_FLOAT_CONVERSION_DISTINCT;
+        untracked = C_CENSUS_PHASE_FLOAT_CONVERSION_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_CHARACTER:
+        total = C_CENSUS_PHASE_CHARACTER_DECODES;
+        distinct = C_CENSUS_PHASE_CHARACTER_DECODE_DISTINCT;
+        untracked = C_CENSUS_PHASE_CHARACTER_DECODE_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_STRING_DECODE:
+        total = C_CENSUS_PHASE_STRING_DECODES;
+        bytes = C_CENSUS_PHASE_STRING_DECODE_BYTES;
+        distinct = C_CENSUS_PHASE_STRING_DECODE_DISTINCT;
+        untracked = C_CENSUS_PHASE_STRING_DECODE_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_STRING_COUNT:
+        total = C_CENSUS_PHASE_STRING_COUNTS;
+        bytes = C_CENSUS_PHASE_STRING_COUNT_BYTES;
+        distinct = C_CENSUS_PHASE_STRING_COUNT_DISTINCT;
+        untracked = C_CENSUS_PHASE_STRING_COUNT_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_COUNT:
+    default:
+        c_census_state.counters.overflowed = true;
+        break;
+    }
+    if (total != C_CENSUS_PHASE_COUNTER_COUNT)
+    {
+        u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+        c_census_add(phase + total, 1);
+        if (bytes != C_CENSUS_PHASE_COUNTER_COUNT)
+        {
+            c_census_add(phase + bytes, length);
+        }
+        u16* word = c_census_fact_word(pointer);
+        u16 bit = (u16)(1u << (C_CENSUS_FACT_SHIFT + fact));
+        if (!word)
+        {
+            c_census_add(phase + untracked, 1);
+        }
+        else if (!(*word & bit))
+        {
+            *word |= bit;
+            c_census_add(phase + distinct, 1);
+        }
+    }
+}
+
+CCensusCounters c_census_counters(void)
+{
+    c_census_flush();
+    return c_census_state.counters;
+}
+
+String8 c_census_counter_name(CCensusCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define C_CENSUS_NAME(id, name) case C_CENSUS_##id: result = S8(#name); break;
+        C_CENSUS_COUNTERS(C_CENSUS_NAME)
+#undef C_CENSUS_NAME
+        default: break;
+    }
+    return result;
+}
+
+String8 c_census_phase_counter_name(CCensusPhaseCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define C_CENSUS_PHASE_NAME(id, name) case C_CENSUS_PHASE_##id: result = S8(#name); break;
+        C_CENSUS_PHASE_COUNTERS(C_CENSUS_PHASE_NAME)
+#undef C_CENSUS_PHASE_NAME
+        default: break;
+    }
+    return result;
+}
+
+String8 c_census_phase_name(CCensusPhase phase)
+{
+    String8 result = {0};
+    switch (phase)
+    {
+    case C_CENSUS_PHASE_OTHER: result = S8("other"); break;
+    case C_CENSUS_PHASE_PREPROCESS: result = S8("preprocess"); break;
+    case C_CENSUS_PHASE_PARSE: result = S8("parse"); break;
+    case C_CENSUS_PHASE_SEMANTIC: result = S8("semantic"); break;
+    case C_CENSUS_PHASE_LOWER: result = S8("lower"); break;
+    case C_CENSUS_PHASE_COUNT: default: break;
+    }
+    return result;
+}
+#endif
 
 // Locations are recorded as checkpoints instead of one entry per translated
 // byte: within a run the original offset and the column both advance one per
@@ -201,6 +503,18 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
     // The sentinel is only valid on terminated literals; no other caller
     // synthesizes a spelling anywhere near it.
     BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
+#if BUSTER_BENCH_ALLOCATIONS
+    if (space->arena)
+    {
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_COPIES, 1);
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_BYTES, text.length);
+    }
+    else
+    {
+        C_CENSUS_PHASE_RECORD(TEMP_TOKENS, 1);
+        C_CENSUS_PHASE_RECORD(TEMP_SPELLING_BYTES, text.length);
+    }
+#endif
     char8* copy = c_space_allocate(space, text.length);
     if (text.length)
     {
@@ -220,6 +534,18 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
 BUSTER_C_SHARED CToken c_space_retoken(CSpellingSpace* space, char8 const* from_base, CToken token)
 {
     String8 spelling = c_token_spelling(from_base, token);
+#if BUSTER_BENCH_ALLOCATIONS
+    if (space->arena)
+    {
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_COPIES, 1);
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_BYTES, spelling.length);
+    }
+    else
+    {
+        C_CENSUS_PHASE_RECORD(TEMP_TOKENS, 1);
+        C_CENSUS_PHASE_RECORD(TEMP_SPELLING_BYTES, spelling.length);
+    }
+#endif
     char8* copy = c_space_allocate(space, spelling.length);
     if (spelling.length)
     {
@@ -236,6 +562,8 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     CSpellingSpace space = {
         .capacity = capacity + C_SPELLING_PRELUDE_LENGTH,
     };
+    C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
+    C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
     space.base = arena_allocate(arena, char8, space.capacity);
     memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
     return space;
@@ -861,6 +1189,12 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             // unused tail back so the next spelling packs against it.
             c_space_shrink(space, source.length - output);
         }
+        C_CENSUS_RECORD(TRANSLATE_CALLS, 1);
+        C_CENSUS_RECORD(TRANSLATE_INPUT_BYTES, source.length);
+        C_CENSUS_RECORD(TRANSLATE_COPIED_BYTES, output);
+        C_CENSUS_RECORD(TRANSLATE_CHECKPOINTS, checkpoint_count);
+        // Capacity, not use: both arrays are sized by the source length.
+        C_CENSUS_RECORD(TRANSLATE_CHECKPOINT_BYTES, (source.length + 2) * (sizeof(*checkpoints) + sizeof(*checkpoint_offsets)));
         result.source = (String8){
             .pointer = translated,
             .length = output,
@@ -896,6 +1230,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
 // non-decreasing offsets advance instead of searching.
 BUSTER_C_INTERNAL CSourceLocation c_lex_local_location(CLexResult* result, u64 offset)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     if (!result->checkpoint_count)
     {
         return (CSourceLocation){0};
@@ -951,6 +1286,7 @@ BUSTER_C_INTERNAL CSourceLocation c_source_location_from_position(u32 map_offset
 
 CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
@@ -996,6 +1332,7 @@ CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, 
 // walks tokens roughly in stream order).
 BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return c_source_location_from_position(token.offset,
                                            recovery ? ir_source_map_position(&recovery->map, token.offset, cursor) : (IrSourcePosition){0});
@@ -2814,6 +3151,11 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
                     result.metrics.tokens = result.token_count - state.newline_tokens;
                     c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+                    C_CENSUS_RECORD(LEX_CALLS, 1);
+                    C_CENSUS_RECORD(LEX_INPUT_BYTES, translated.source.length);
+                    C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
+                    C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
+                    C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -2938,6 +3280,8 @@ struct CMacroPushMacro
 
 BUSTER_C_SHARED u64 c_macro_name_hash(String8 name)
 {
+    C_CENSUS_PHASE_RECORD(HASH_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(HASH_BYTES, name.length);
     u64 hash = 1469598103934665603ull;
     for (u64 index = 0; index < name.length; index += 1)
     {
@@ -3279,14 +3623,20 @@ BUSTER_C_INTERNAL bool c_symbol_middle_equal(String8 stored, String8 name)
 
 BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
 {
+    WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERNS, 1);
+    WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERN_BYTES_HASHED, name.length);
     CSymbolKey key = c_symbol_key(name);
     u64 length_word = (u64)name.length << 32;
     u32 mask = table->slot_capacity - 1;
     u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    C_CENSUS_PHASE_RECORD(INTERN_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(INTERN_KEY_BYTES, BUSTER_MIN(name.length, (u64)16));
     for (;;)
     {
+        WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERN_PROBES, 1);
         CSymbolSlot* entry = &table->slots[slot];
         u64 length_and_id = entry->length_and_id;
+        C_CENSUS_PHASE_RECORD(INTERN_PROBES, 1);
         if (!length_and_id)
         {
             break;
@@ -3294,6 +3644,13 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
         {
             u32 id = (u32)length_and_id;
+#if BUSTER_BENCH_ALLOCATIONS
+            if (name.length > 16)
+            {
+                C_CENSUS_PHASE_RECORD(INTERN_MIDDLE_COMPARES, 1);
+                C_CENSUS_PHASE_RECORD(INTERN_MIDDLE_BYTES, name.length - 16);
+            }
+#endif
             if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
             {
                 return id;
@@ -3301,6 +3658,7 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         }
         slot = (slot + 1) & mask;
     }
+    C_CENSUS_PHASE_RECORD(INTERN_INSERTS, 1);
     if (table->count + 1 == table->name_capacity)
     {
         u32 name_capacity = table->name_capacity * 2;
@@ -3315,6 +3673,7 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
     if (table->count + 1 > table->slot_capacity / 2)
     {
         u32 slot_capacity = table->slot_capacity * 2;
+        C_CENSUS_PHASE_RECORD(INTERN_REHASH_SLOTS, table->slot_capacity);
         CSymbolSlot* slots = arena_allocate(table->arena, CSymbolSlot, slot_capacity);
         memset(slots, 0, sizeof(*slots) * slot_capacity);
         for (u32 old_slot = 0; old_slot < table->slot_capacity; old_slot += 1)
@@ -3570,6 +3929,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
             while (identifiers)
             {
                 u64 index = window_base + mask64_first_set(identifiers);
+                C_CENSUS_RECORD(INTERN_PASS_TOKENS, 1);
                 tokens[index].symbol = c_symbol_intern(table, c_token_spelling(spelling_base, tokens[index]));
                 identifiers = mask64_and(identifiers, identifiers - 1);
             }
@@ -3581,6 +3941,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
         {
             if (tokens[index].kind == C_TOKEN_IDENTIFIER)
             {
+                C_CENSUS_RECORD(INTERN_PASS_TOKENS, 1);
                 tokens[index].symbol = c_symbol_intern(table, c_token_spelling(spelling_base, tokens[index]));
             }
         }
@@ -3907,6 +4268,8 @@ struct CMacroReplacementToken
 
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
 {
+    C_CENSUS_PHASE_RECORD(SPELLING_EQUAL_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(SPELLING_EQUAL_BYTES, spelling.length);
     return string_equal(c_token_spelling(spelling_base, token), spelling);
 }
 
@@ -5282,6 +5645,8 @@ BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
 
 BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
 {
+    C_CENSUS_FACT(INTEGER, spelling.pointer, spelling.length);
+    WORK_LEDGER_RECORD(LITERAL_NUMBER_CONVERSIONS, 1);
     u32 base = 10;
     u64 index = 0;
     if (spelling.length >= 2 && spelling.pointer[0] == '0')
@@ -5352,8 +5717,79 @@ enum
     C_CONDITIONAL_VALUE_FAULT = 2,
 };
 
+BUSTER_C_SHARED bool c_integer_operation(CConditionalOperator operation, bool is_signed, IrUnaryOperation* unary_out, IrBinaryOperation* binary_out)
+{
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    switch (operation)
+    {
+    case C_CONDITIONAL_UNARY_MINUS: unary = IR_UNARY_INTEGER_NEGATE; break;
+    case C_CONDITIONAL_BITWISE_NOT: unary = IR_UNARY_INTEGER_BITWISE_NOT; break;
+    case C_CONDITIONAL_LOGICAL_NOT: unary = IR_UNARY_BOOLEAN_NOT; break;
+    case C_CONDITIONAL_MULTIPLY: binary = IR_BINARY_INTEGER_MULTIPLY; break;
+    case C_CONDITIONAL_DIVIDE: binary = is_signed ? IR_BINARY_SIGNED_DIVIDE : IR_BINARY_UNSIGNED_DIVIDE; break;
+    case C_CONDITIONAL_REMAINDER: binary = is_signed ? IR_BINARY_SIGNED_REMAINDER : IR_BINARY_UNSIGNED_REMAINDER; break;
+    case C_CONDITIONAL_ADD: binary = IR_BINARY_INTEGER_ADD; break;
+    case C_CONDITIONAL_SUBTRACT: binary = IR_BINARY_INTEGER_SUBTRACT; break;
+    case C_CONDITIONAL_SHIFT_LEFT: binary = IR_BINARY_SHIFT_LEFT; break;
+    case C_CONDITIONAL_SHIFT_RIGHT: binary = is_signed ? IR_BINARY_SIGNED_SHIFT_RIGHT : IR_BINARY_UNSIGNED_SHIFT_RIGHT; break;
+    case C_CONDITIONAL_BITWISE_AND: binary = IR_BINARY_INTEGER_BITWISE_AND; break;
+    case C_CONDITIONAL_BITWISE_XOR: binary = IR_BINARY_INTEGER_BITWISE_XOR; break;
+    case C_CONDITIONAL_BITWISE_OR: binary = IR_BINARY_INTEGER_BITWISE_OR; break;
+    case C_CONDITIONAL_LESS: binary = is_signed ? IR_BINARY_SIGNED_LESS : IR_BINARY_UNSIGNED_LESS; break;
+    case C_CONDITIONAL_LESS_EQUAL: binary = is_signed ? IR_BINARY_SIGNED_LESS_EQUAL : IR_BINARY_UNSIGNED_LESS_EQUAL; break;
+    case C_CONDITIONAL_GREATER: binary = is_signed ? IR_BINARY_SIGNED_GREATER : IR_BINARY_UNSIGNED_GREATER; break;
+    case C_CONDITIONAL_GREATER_EQUAL: binary = is_signed ? IR_BINARY_SIGNED_GREATER_EQUAL : IR_BINARY_UNSIGNED_GREATER_EQUAL; break;
+    case C_CONDITIONAL_EQUAL: binary = IR_BINARY_INTEGER_EQUAL; break;
+    case C_CONDITIONAL_NOT_EQUAL: binary = IR_BINARY_INTEGER_NOT_EQUAL; break;
+    default: break;
+    }
+    *unary_out = unary;
+    *binary_out = binary;
+    return unary != IR_UNARY_COUNT || binary != IR_BINARY_COUNT;
+}
+
+BUSTER_C_SHARED CIntegerConstantResult c_integer_constant_binary(CConditionalOperator operation, IrInteger left, IrInteger right, u32 width,
+                                                                bool is_signed, u32 count_width)
+{
+    CIntegerConstantResult result = {.faults = IR_INTEGER_FAULT_UNSUPPORTED};
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    if (c_integer_operation(operation, is_signed, &unary, &binary) && binary != IR_BINARY_COUNT)
+    {
+        bool shift = binary == IR_BINARY_SHIFT_LEFT || binary == IR_BINARY_SIGNED_SHIFT_RIGHT || binary == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+        IrIntegerResult computed = ir_integer_binary(binary, left, right, width, shift ? count_width : width);
+        result.bits = computed.bits;
+        result.faults = computed.faults;
+        result.comparison = ir_integer_binary_is_comparison(binary);
+    }
+    result.constant = !(result.faults & (IR_INTEGER_FAULT_UNSUPPORTED | IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_SHIFT_COUNT));
+    return result;
+}
+
+BUSTER_C_SHARED CIntegerConstantResult c_integer_constant_unary(CConditionalOperator operation, IrInteger operand, u32 width)
+{
+    CIntegerConstantResult result = {.bits = ir_integer_mask(operand, width)};
+    IrUnaryOperation unary = IR_UNARY_COUNT;
+    IrBinaryOperation binary = IR_BINARY_COUNT;
+    if (c_integer_operation(operation, true, &unary, &binary) && unary != IR_UNARY_COUNT)
+    {
+        IrIntegerResult computed = ir_integer_unary(unary, operand, width);
+        result.bits = computed.bits;
+        result.faults = computed.faults;
+        result.comparison = unary == IR_UNARY_BOOLEAN_NOT;
+    }
+    else if (operation != C_CONDITIONAL_UNARY_PLUS)
+    {
+        result.faults = IR_INTEGER_FAULT_UNSUPPORTED;
+    }
+    result.constant = !(result.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, u8* value_flags, u32* value_count)
 {
+    IR_SEMANTIC_RECORD(PREPROCESSOR_NODES, 1);
     bool valid = true;
     if (c_conditional_is_unary(operation))
     {
@@ -5365,23 +5801,12 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         {
             u32 index = *value_count - 1;
             u64* value = values + index;
-            switch (operation)
+            CIntegerConstantResult computed = c_integer_constant_unary(operation, (IrInteger){.low = *value}, 64);
+            valid = computed.constant;
+            *value = computed.bits.low;
+            if (computed.comparison)
             {
-            case C_CONDITIONAL_UNARY_PLUS:
-                break;
-            case C_CONDITIONAL_UNARY_MINUS:
-                *value = 0 - *value;
-                break;
-            case C_CONDITIONAL_LOGICAL_NOT:
-                *value = !*value;
                 value_flags[index] &= C_CONDITIONAL_VALUE_FAULT;
-                break;
-            case C_CONDITIONAL_BITWISE_NOT:
-                *value = ~*value;
-                break;
-            default:
-                valid = false;
-                break;
             }
         }
     }
@@ -5420,95 +5845,55 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         u8 left_flags = value_flags[index];
         u8 flags = (u8)(left_flags | right_flags);
         bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
-        switch (operation)
+        bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
+        bool division = operation == C_CONDITIONAL_DIVIDE || operation == C_CONDITIONAL_REMAINDER;
+        if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
         {
-        case C_CONDITIONAL_MULTIPLY:
-            *left *= right;
-            break;
-        case C_CONDITIONAL_DIVIDE:
-        case C_CONDITIONAL_REMAINDER:
-            // Never execute an invalid host division, even in a subtree
-            // whose fault will be discarded by an enclosing short circuit.
-            if ((flags & C_CONDITIONAL_VALUE_FAULT) || !right ||
-                (!mixed_unsigned && (s64)*left == INT64_MIN && (s64)right == -1))
+            // Only an operand the operator evaluates contributes its fault.
+            bool conjunction = operation == C_CONDITIONAL_LOGICAL_AND;
+            flags = (u8)((left_flags | ((*left != 0) == conjunction ? right_flags : 0)) & C_CONDITIONAL_VALUE_FAULT);
+            *left = conjunction ? *left && right : *left || right;
+        }
+        else if (division && (flags & C_CONDITIONAL_VALUE_FAULT))
+        {
+            // Never divide under an operand's fault, even in a subtree an
+            // enclosing short circuit will discard.
+            *left = 0;
+        }
+        else
+        {
+            // Preprocessing arithmetic is C arithmetic at intmax_t/uintmax_t
+            // (C17 6.10.1p4): 64 bits, unsigned when either operand is, and a
+            // shift takes the left operand's signedness with its count read
+            // as the unsigned 64-bit value it carries.
+            bool is_signed = shift ? !(left_flags & C_CONDITIONAL_VALUE_UNSIGNED) : !mixed_unsigned;
+            CIntegerConstantResult computed = c_integer_constant_binary(operation, (IrInteger){.low = *left}, (IrInteger){.low = right}, 64, is_signed, 64);
+            valid = !(computed.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+            if (division && (computed.faults & (IR_INTEGER_FAULT_DIVIDE_BY_ZERO | IR_INTEGER_FAULT_SIGNED_OVERFLOW)))
             {
+                // A division by zero and INT64_MIN / -1 (and their remainders)
+                // are this evaluator's deferred faults.
                 flags |= C_CONDITIONAL_VALUE_FAULT;
                 *left = 0;
             }
-            else if (mixed_unsigned)
+            else if (shift && (computed.faults & IR_INTEGER_FAULT_SHIFT_COUNT))
             {
-                *left = operation == C_CONDITIONAL_DIVIDE ? *left / right : *left % right;
+                // A count of 64 or more shifts every bit out: zero, or the
+                // sign for an arithmetic right shift.
+                *left = operation == C_CONDITIONAL_SHIFT_RIGHT && is_signed ? (u64)((s64)*left >> 63) : 0;
             }
             else
             {
-                *left = operation == C_CONDITIONAL_DIVIDE ? (u64)((s64)*left / (s64)right) : (u64)((s64)*left % (s64)right);
+                *left = computed.bits.low;
             }
-            break;
-        case C_CONDITIONAL_ADD:
-            *left += right;
-            break;
-        case C_CONDITIONAL_SUBTRACT:
-            *left -= right;
-            break;
-        case C_CONDITIONAL_SHIFT_LEFT:
-            *left = right < 64 ? *left << right : 0;
-            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
-            break;
-        case C_CONDITIONAL_SHIFT_RIGHT:
-            if (left_flags & C_CONDITIONAL_VALUE_UNSIGNED)
+            if (shift)
             {
-                *left = right < 64 ? *left >> right : 0;
+                flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
             }
-            else
+            else if (computed.comparison)
             {
-                *left = right < 64 ? (u64)((s64)*left >> right) : (u64)((s64)*left >> 63);
+                flags &= C_CONDITIONAL_VALUE_FAULT;
             }
-            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
-            break;
-        case C_CONDITIONAL_LESS:
-            *left = mixed_unsigned ? *left < right : (s64)*left < (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_LESS_EQUAL:
-            *left = mixed_unsigned ? *left <= right : (s64)*left <= (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_GREATER:
-            *left = mixed_unsigned ? *left > right : (s64)*left > (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_GREATER_EQUAL:
-            *left = mixed_unsigned ? *left >= right : (s64)*left >= (s64)right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_EQUAL:
-            *left = *left == right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_NOT_EQUAL:
-            *left = *left != right;
-            flags &= C_CONDITIONAL_VALUE_FAULT;
-            break;
-        case C_CONDITIONAL_BITWISE_AND:
-            *left &= right;
-            break;
-        case C_CONDITIONAL_BITWISE_XOR:
-            *left ^= right;
-            break;
-        case C_CONDITIONAL_BITWISE_OR:
-            *left |= right;
-            break;
-        case C_CONDITIONAL_LOGICAL_AND:
-            flags = (u8)((left_flags | (*left ? right_flags : 0)) & C_CONDITIONAL_VALUE_FAULT);
-            *left = *left && right;
-            break;
-        case C_CONDITIONAL_LOGICAL_OR:
-            flags = (u8)((left_flags | (*left ? 0 : right_flags)) & C_CONDITIONAL_VALUE_FAULT);
-            *left = *left || right;
-            break;
-        default:
-            valid = false;
-            break;
         }
         value_flags[index] = flags;
     }
@@ -5858,6 +6243,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                                                                      CPreprocessOptions* options, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
+    IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
     CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
@@ -6160,6 +6546,7 @@ BUSTER_C_INTERNAL void c_pp_class_masks_build(Arena* arena, CPpClassMasks* masks
 {
     u64 word_count = (token_count + (C_PP_CLASS_MASK_WINDOW - 1)) / C_PP_CLASS_MASK_WINDOW;
     *masks = (CPpClassMasks){0};
+    C_CENSUS_RECORD(CLASS_MASK_TOKENS, shapes ? token_count : 0);
     if (shapes && word_count)
     {
         masks->stop = arena_allocate(arena, Mask64, word_count);
@@ -6890,7 +7277,9 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
     {
         foreign_length += node->token.foreign ? c_token_length(space->base, node->token.token) : 0;
+        C_CENSUS_RECORD(SPACE_FOREIGN_COPIES, node->token.foreign);
     }
+    C_CENSUS_RECORD(SPACE_FOREIGN_BYTES, foreign_length);
     char8* copy = foreign_length ? c_space_allocate(space, foreign_length) : 0;
     bool run_open = false;
     // Every stamp of a line is pushed from a distinct token, so two tokens
@@ -8289,7 +8678,260 @@ BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
     { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
 };
 
-CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
+// The preprocessor's end-of-phase boundary. Everything c_preprocess builds is
+// allocated in its phase arena; before that arena is released, the seal
+// copies the graph a later phase can reach from CPreprocessResult into the
+// caller's arena, at exact sizes, and leaves the rest behind: per-file lexed
+// rows and shapes, macro records and their argument/expansion staging, class
+// masks, include identity tables, line staging, the region-name table and the
+// worst-case checkpoint reservations. Tokens, token shapes and spellings live
+// in their own recovery arenas and are not part of the phase arena.
+//
+// The copied graph is complete by construction of these structures, and the
+// size checks below fail the build when one of them changes shape, so a new
+// pointer field cannot cross the boundary without a matching rule here. A
+// pointer the phase arena does not own -- a caller's path, a static spelling,
+// the spelling space -- is left as it is.
+typedef struct CPreprocessSeal CPreprocessSeal;
+struct CPreprocessSeal
+{
+    Arena* destination;
+    Arena* phase_arena;
+    u64 phase_start;
+    CPhaseBoundaryMetrics metrics;
+};
+
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 184);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 80);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceMap) == 32);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 64);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 8 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
+BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
+
+BUSTER_C_INTERNAL bool c_preprocess_seal_owns(CPreprocessSeal const* seal, void const* pointer)
+{
+    return arena_range_contains(seal->phase_arena, seal->phase_start, seal->phase_arena->position, pointer);
+}
+
+// One surviving array: copied when the phase arena owns it, kept otherwise.
+BUSTER_C_INTERNAL void* c_preprocess_seal_array(CPreprocessSeal* seal, void const* pointer, u64 element_size, u64 count, u64 alignment)
+{
+    void* result = (void*)pointer;
+    if (pointer)
+    {
+        seal->metrics.references += 1;
+        if (c_preprocess_seal_owns(seal, pointer))
+        {
+            u64 size = arena_array_size(element_size, count);
+            result = arena_allocate_bytes(seal->destination, size, alignment);
+            if (size)
+            {
+                memcpy(result, pointer, size);
+            }
+            seal->metrics.sealed_bytes += size;
+            seal->metrics.sealed_objects += 1;
+        }
+    }
+    return result;
+}
+
+#define c_preprocess_seal_typed(seal, pointer, T, count) ((T*)c_preprocess_seal_array((seal), (pointer), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
+
+BUSTER_C_INTERNAL String8 c_preprocess_seal_string(CPreprocessSeal* seal, String8 string)
+{
+    String8 result = string;
+    if (string.pointer)
+    {
+        result.pointer = (char8*)c_preprocess_seal_array(seal, string.pointer, 1, string.length, 1);
+    }
+    return result;
+}
+
+// Regions of one lexed file share its checkpoint arrays -- every include it
+// makes splits it into another region -- so each array is copied once and the
+// later regions are pointed at that copy. The table is keyed by the old
+// address and sized for at most half occupancy.
+typedef struct CPreprocessSealCheckpoints CPreprocessSealCheckpoints;
+struct CPreprocessSealCheckpoints
+{
+    IrSourceCheckpoint* old_checkpoints;
+    IrSourceCheckpoint* checkpoints;
+    u32* checkpoint_offsets;
+    u32* checkpoint_pages;
+    u32 checkpoint_count;
+    u32 checkpoint_page_count;
+};
+
+BUSTER_C_INTERNAL void c_preprocess_seal_map(CPreprocessSeal* seal, IrSourceMap* map)
+{
+    map->keys = c_preprocess_seal_typed(seal, map->keys, IrSourceRegionKey, map->keys ? (u64)map->count + 1 : 0);
+    map->pages = c_preprocess_seal_typed(seal, map->pages, u32, map->page_count);
+    map->regions = c_preprocess_seal_typed(seal, map->regions, IrSourceRegion, map->count);
+    Arena* conflicts[] = {
+        seal->destination,
+        seal->phase_arena,
+    };
+    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    u32 slot_count = 16;
+    while (slot_count < (u64)map->count * 2)
+    {
+        slot_count <<= 1;
+    }
+    CPreprocessSealCheckpoints* slots = arena_allocate_zeroed(temporary.arena, CPreprocessSealCheckpoints, slot_count);
+    for (u32 index = 0; index < map->count; index += 1)
+    {
+        IrSourceRegion* region = &map->regions[index];
+        if (!region->checkpoints)
+        {
+            continue;
+        }
+        u64 hash = ((u64)region->checkpoints >> 4) * 0x9E3779B97F4A7C15ull;
+        u32 slot = (u32)(hash >> 32) & (slot_count - 1);
+        while (slots[slot].old_checkpoints && slots[slot].old_checkpoints != region->checkpoints)
+        {
+            slot = (slot + 1) & (slot_count - 1);
+        }
+        CPreprocessSealCheckpoints* entry = &slots[slot];
+        // Every region of one lex carries that lex's counts; a larger count
+        // would only ever get a larger copy, never a read past a shorter one.
+        if (!entry->old_checkpoints || region->checkpoint_count > entry->checkpoint_count ||
+            region->checkpoint_page_count > entry->checkpoint_page_count)
+        {
+            entry->old_checkpoints = region->checkpoints;
+            entry->checkpoints = c_preprocess_seal_typed(seal, region->checkpoints, IrSourceCheckpoint, region->checkpoint_count);
+            entry->checkpoint_offsets = c_preprocess_seal_typed(seal, region->checkpoint_offsets, u32, region->checkpoint_count);
+            entry->checkpoint_pages = c_preprocess_seal_typed(seal, region->checkpoint_pages, u32, region->checkpoint_page_count);
+            entry->checkpoint_count = region->checkpoint_count;
+            entry->checkpoint_page_count = region->checkpoint_page_count;
+        }
+        else
+        {
+            seal->metrics.references += (u64)(region->checkpoint_offsets != 0) + (u64)(region->checkpoint_pages != 0) + 1;
+        }
+        region->checkpoints = entry->checkpoints;
+        region->checkpoint_offsets = entry->checkpoint_offsets;
+        region->checkpoint_pages = entry->checkpoint_pages;
+    }
+    scratch_end(temporary);
+}
+
+BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResult* result)
+{
+    if (result->recovery)
+    {
+        CSourceMapRecovery* recovery = c_preprocess_seal_typed(seal, result->recovery, CSourceMapRecovery, 1);
+        c_preprocess_seal_map(seal, &recovery->map);
+        // Nothing appends a region once the phase ends; the copy is exact.
+        recovery->capacity = recovery->map.count;
+        result->recovery = recovery;
+    }
+    if (result->symbols)
+    {
+        // Parsing and lowering keep interning into the table, so it moves to
+        // the caller's arena whole, spare capacity included, and grows there.
+        CSymbolTable* table = c_preprocess_seal_typed(seal, result->symbols, CSymbolTable, 1);
+        table->arena = seal->destination;
+        table->names = c_preprocess_seal_typed(seal, table->names, String8, table->name_capacity);
+        table->slots = c_preprocess_seal_typed(seal, table->slots, CSymbolSlot, table->slot_capacity);
+        table->builtin_kinds = c_preprocess_seal_typed(seal, table->builtin_kinds, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        table->class_bits = c_preprocess_seal_typed(seal, table->class_bits, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        table->word_bits = c_preprocess_seal_typed(seal, table->word_bits, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+        for (u32 id = 1; id <= table->count; id += 1)
+        {
+            table->names[id] = c_preprocess_seal_string(seal, table->names[id]);
+        }
+        result->symbols = table;
+    }
+    result->diagnostics = c_preprocess_seal_typed(seal, result->diagnostics, CDiagnostic, result->diagnostic_count);
+    result->diagnostic_capacity = result->diagnostic_count;
+    for (u64 index = 0; index < result->diagnostic_count; index += 1)
+    {
+        result->diagnostics[index].message = c_preprocess_seal_string(seal, result->diagnostics[index].message);
+    }
+    result->files = c_preprocess_seal_typed(seal, result->files, String8, result->file_count);
+    for (u32 index = 0; index < result->file_count; index += 1)
+    {
+        result->files[index] = c_preprocess_seal_string(seal, result->files[index]);
+    }
+    result->pack_changes = c_preprocess_seal_typed(seal, result->pack_changes, CPackAlignment, result->pack_change_count);
+    if (result->detail)
+    {
+        CPreprocessDetail* detail = c_preprocess_seal_typed(seal, result->detail, CPreprocessDetail, 1);
+        detail->lexed_files = c_preprocess_seal_typed(seal, detail->lexed_files, CSourceFileMetrics, detail->lexed_file_count);
+        for (u32 index = 0; index < detail->lexed_file_count; index += 1)
+        {
+            detail->lexed_files[index].path = c_preprocess_seal_string(seal, detail->lexed_files[index].path);
+        }
+        result->detail = detail;
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u64 c_test_pointer_in_range(void const* pointer, void const* start, void const* end)
+{
+    u8 const* address = (u8 const*)pointer;
+    return address >= (u8 const*)start && address < (u8 const*)end;
+}
+
+u64 c_test_preprocess_references_range(CPreprocessResult const* result, void const* start, void const* end)
+{
+    u64 count = c_test_pointer_in_range(result->tokens, start, end) + c_test_pointer_in_range(result->spelling_base, start, end) +
+                c_test_pointer_in_range(result->recovery, start, end) + c_test_pointer_in_range(result->symbols, start, end) +
+                c_test_pointer_in_range(result->diagnostics, start, end) + c_test_pointer_in_range(result->files, start, end) +
+                c_test_pointer_in_range(result->pack_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
+    CSourceMapRecovery const* recovery = result->recovery;
+    if (recovery)
+    {
+        IrSourceMap const* map = &recovery->map;
+        count += c_test_pointer_in_range(recovery->token_shapes, start, end) + c_test_pointer_in_range(map->keys, start, end) +
+                 c_test_pointer_in_range(map->regions, start, end) + c_test_pointer_in_range(map->pages, start, end);
+        for (u32 index = 0; index < map->count; index += 1)
+        {
+            IrSourceRegion const* region = &map->regions[index];
+            count += c_test_pointer_in_range(region->checkpoints, start, end) + c_test_pointer_in_range(region->checkpoint_offsets, start, end) +
+                     c_test_pointer_in_range(region->checkpoint_pages, start, end);
+        }
+    }
+    CSymbolTable const* table = result->symbols;
+    if (table)
+    {
+        count += c_test_pointer_in_range(table->arena, start, end) + c_test_pointer_in_range(table->names, start, end) +
+                 c_test_pointer_in_range(table->slots, start, end) + c_test_pointer_in_range(table->builtin_kinds, start, end) +
+                 c_test_pointer_in_range(table->class_bits, start, end) + c_test_pointer_in_range(table->word_bits, start, end);
+        for (u32 id = 1; id <= table->count; id += 1)
+        {
+            count += c_test_pointer_in_range(table->names[id].pointer, start, end);
+        }
+    }
+    for (u64 index = 0; index < result->diagnostic_count; index += 1)
+    {
+        count += c_test_pointer_in_range(result->diagnostics[index].message.pointer, start, end);
+    }
+    for (u32 index = 0; index < result->file_count; index += 1)
+    {
+        count += c_test_pointer_in_range(result->files[index].pointer, start, end);
+    }
+    if (result->detail)
+    {
+        count += c_test_pointer_in_range(result->detail->lexed_files, start, end);
+        for (u32 index = 0; index < result->detail->lexed_file_count; index += 1)
+        {
+            count += c_test_pointer_in_range(result->detail->lexed_files[index].path.pointer, start, end);
+        }
+    }
+    return count;
+}
+#endif
+
+void c_phase_arena_retire(Arena* arena)
+{
+    arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
+}
+
+BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
     {
@@ -8303,14 +8945,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .target = options.target,
         .dialect = options.dialect,
     };
-    if (!arena)
+    if (!result_arena)
     {
         return result;
     }
     // The detail block outlives this call in the caller's arena: the result is
     // returned and then copied by value all the way down the frontend, and
     // every copy shares this one block.
-    result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+    result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
     };
@@ -8341,8 +8983,24 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                                .flags = {.pool_reuse = 1},
                                                            })
                                           : 0;
-    if (!token_shape_arena)
+    // Everything below that names `arena` is phase-local: it is allocated in
+    // the phase arena above its entry position, and what a later phase needs
+    // is copied out by c_preprocess_seal before the release at the end.
+    Arena* phase_arena = options.phase_arena;
+    bool phase_arena_owned = !phase_arena && token_shape_arena;
+    if (phase_arena_owned)
     {
+        phase_arena = arena_create((ArenaCreation){
+            .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+    }
+    if (!token_shape_arena || !phase_arena)
+    {
+        if (token_shape_arena)
+        {
+            arena_destroy(token_shape_arena, 1);
+        }
         if (token_arena)
         {
             arena_destroy(token_arena, 1);
@@ -8353,16 +9011,22 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         return result;
     }
+    u64 phase_start = phase_arena->position;
+    Arena* arena = phase_arena;
     CSpellingSpace space_storage = {
         .base = (char8*)spelling_arena + arena_minimum_position,
         .arena = spelling_arena,
     };
     CSpellingSpace* space = &space_storage;
+#if BUSTER_BENCH_ALLOCATIONS
+    c_census_space_begin(space->base, spelling_arena->reserved_size - arena_minimum_position);
+#endif
     CSourceMapRecovery* recovery = arena_allocate(arena, CSourceMapRecovery, 1);
     *recovery = (CSourceMapRecovery){
         .spelling_arena = spelling_arena,
         .token_arena = token_arena,
         .token_shape_arena = token_shape_arena,
+        .phase_arena = options.phase_arena,
     };
     result.recovery = recovery;
     result.spelling_base = space->base;
@@ -9700,6 +10364,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         result.detail->preprocessed.bytes += spelled_bytes;
     }
     result.detail->preprocessed.spelling_bytes = space->used;
+    C_CENSUS_RECORD(OUTPUT_TOKEN_ROWS, result.token_count);
+    C_CENSUS_RECORD(OUTPUT_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
+    C_CENSUS_RECORD(SPACE_TOTAL_BYTES, space->used);
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
 #if BUSTER_INCLUDE_TESTS
@@ -9739,6 +10406,26 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             diagnostic->location = c_source_location_from_position(diagnostic->location.map_offset, position);
         }
     }
+    CPreprocessSeal seal = {
+        .destination = result_arena,
+        .phase_arena = phase_arena,
+        .phase_start = phase_start,
+    };
+    c_preprocess_seal(&seal, &result);
+    seal.metrics.released_bytes = arena_release_to_position(phase_arena, phase_start);
+    result.detail->boundary = seal.metrics;
+    if (phase_arena_owned)
+    {
+        c_phase_arena_retire(phase_arena);
+    }
+    return result;
+}
+
+CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
+{
+    C_CENSUS_PHASE_BEGIN(PREPROCESS);
+    CPreprocessResult result = c_preprocess_run(arena, source, options);
+    C_CENSUS_PHASE_END();
     return result;
 }
 

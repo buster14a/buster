@@ -1783,6 +1783,72 @@ static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
     {S8_INITIALIZER("xpaci x1\n"), {225, 67, 193, 218}},
 };
 
+// Independently specified relocation algebra: GNU as and llvm-mc produce
+// PC32/PREL32 with addend 5 at offset 8, PC64/PREL64 with addend -7 at 16,
+// and section-base absolute addresses for each separate `.` field. The
+// driver fixture below the public API checks the emitted ELF records too.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_location_counter(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 source = S8(".data\nstart:\n.zero 8\n.long \"external\" - . + 5, external - .\n"
+                        ".quad external - . - 7\n.quad ., . + 3\n"
+                        ".long later - ., . - start, later - start\n"
+                        "later:\n.long -1\n.text\nother:\n.byte 0\n.data\n.long other - .\n.quad other + 2\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count == 2 && unit.relocation_count == 7);
+        if (!unit.diagnostic_count && unit.section_count == 2 && unit.relocation_count == 7)
+        {
+            u64 offsets[] = {8, 12, 16, 24, 32, 56, 60};
+            s64 addends[] = {5, 0, -7, 24, 35, 0, 2};
+            for (u32 index = 0; index < unit.relocation_count; index += 1)
+            {
+                AssemblyUnitRelocation relocation = unit.relocations[index];
+                AssemblyRelocationKind expected = index == 2 ? (target ? ASSEMBLY_RELOCATION_AARCH64_PREL64 : ASSEMBLY_RELOCATION_X86_PC64)
+                                                  : index < 2 || index == 5 ? (target ? ASSEMBLY_RELOCATION_AARCH64_PREL32 : ASSEMBLY_RELOCATION_X86_PC32)
+                                                                           : ASSEMBLY_RELOCATION_X86_ABSOLUTE64;
+                String8 name = index < 3 ? S8("external") : index < 5 ? S8(".data") : S8("other");
+                BUSTER_TEST(arguments, relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                       relocation.kind == expected && relocation.symbol < unit.symbol_count &&
+                                       string_equal(unit.symbols[relocation.symbol].name, name));
+            }
+            ByteSlice data = unit.sections[0].data;
+            BUSTER_TEST(arguments, data.length == 68);
+            if (data.length == 68)
+            {
+                u32 values[4];
+                memcpy(values, data.pointer + 40, sizeof(values));
+                BUSTER_TEST(arguments, values[0] == 12 && values[1] == 44 && values[2] == 52 && values[3] == UINT32_MAX);
+            }
+        }
+        String8 rejected[] = {
+            S8(".data\n.long . - missing\n"),
+            S8(".text\na:\n.data\nb:\n.long a - b\n"),
+            S8(".data\n.quad a + b\n"),
+            S8(".data\n.short missing - .\n"),
+            S8(".data\n.long . - . - .\n"),
+            S8(".data\n.long missing - . +\n"),
+        };
+        u32 lines[] = {2, 5, 2, 2, 2, 2};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            AssemblyUnitResult control = assembly_unit_encode(arguments->arena, rejected[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, control.diagnostic_count == 1);
+            if (control.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, control.diagnostics[0].line == lines[index] &&
+                                       string_first_sequence(control.diagnostics[0].message, index == 3 ? S8(".short") : index == 2 ? S8(".quad") : S8(".long")) < control.diagnostics[0].message.length);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_binding(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2021,6 +2087,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArgu
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
