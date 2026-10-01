@@ -699,7 +699,12 @@ class StepDeadlineTests(unittest.TestCase):
         self.assertTrue(suffix == "" or (
             suffix.startswith("${{ github.event_name == 'pull_request' && ") and
             suffix.endswith(" || '' }}")), suffix)
-        self.assertIn("        shard: [release, checks]\n", test_job)
+        # Qualification dispatches expand checks; merge groups retain the
+        # combined matrix that this watcher budgets.
+        self.assertIn("        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
+                      "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
+                      "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' || "
+                      "'[\"release\", \"checks\"]') }}\n", test_job)
         lanes = re.findall(r"^          - name: (.+)\n(?:            \w+: .+\n)*?"
                            r"            os: (\w+)$", test_job, re.M)
         self.assertEqual(workflow.count("- name: " + recovery.WORKFLOW_TOOLS_STEP + "\n"), 1)
