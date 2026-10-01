@@ -179,6 +179,41 @@ trailing letter must not turn `bts` into `bt`. Typed aliases such as scalar
 `movq` still select their base family when the distinct metadata `MOVQ` family
 does not match. These are syntax projections, not another byte authority.
 
+Migrated source-layout families preserve the source diagnostic policy: malformed
+operands, illegal prefixes and immediate limits are invalid operands. If a
+disabled metadata alternative hides such a rejection, the adapter performs a
+diagnostic-only structural query; it publishes no bytes and cannot enable the
+missing feature. Valid forms on unsupported targets retain the feature diagnostic.
+
+Scalar/control syntax policy also retains full-width byte immediates, typed
+conditional-move aliases, the metadata-owned EMMS form, and the existing limits
+on symbolic arithmetic immediates and reserved control/debug register spellings.
+These projections do not create another encoding or relocation authority.
+
+Legacy XMM, MMX and x87 source memory qualifiers are checked against the generated
+operand schema. Candidate-local normalization keeps public vector source widths
+separate from encoded element widths; invalid qualifiers cannot choose another
+form or publish symbols/relocations. Unsized x87 data/arithmetic source is rejected
+instead of picking a type by encoded size. The source census uses the same schema
+projection, including the accepted unsized x87 environment-image spelling.
+
+The legacy migration characterizes all 11,013 stable census records and pins the
+175 changed outcomes, byte counts and relocation counts. Intel exact witnesses
+increase by 105 and AT&T exact witnesses by 54, with no previously exact witness
+losing its complete outcome. Twelve x87 state-image operand-size variants and one
+alternate MOVQ encoding remain strict byte mismatches; equivalent operations are
+not counted as identical bytes.
+
+APX source shifts retain their unsigned byte count pattern, including NF counts
+of 255. POP2 source destinations must be distinct registers. Explicit target
+fixtures enable APX_NCI_NDD_NF independently from the APX register-extension
+feature when requesting NDD/NF forms.
+
+The EVEX source migration adds eight five-byte exact census witnesses in each
+dialect (stable form IDs 3092–3099); all other 11,005 records retain their full
+classification, reason, byte count and relocation count. The APX descendant
+retains these results without an additional census outcome change.
+
 ### Throughput and publication
 
 Keep compact contiguous records, integer IDs, immutable normalized plans and
