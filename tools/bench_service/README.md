@@ -545,8 +545,9 @@ All other missing-attempt combinations retain active admission.
 Zen 5 calibration attempt. One attempt names one immutable source twice
 (base and candidate revision must be equal). It reads the tree identity from a
 `.bq-source-tree` file that the operator's installation lists, with its digest,
-in the installed source manifest; an unlisted or mismatched file stops the
-attempt. It verifies the four pinned PMU tool/manifest digests of its
+in the installed source manifest (exact format in
+`deploy/VALIDATE_BUSTER_V1.md`; no tool in this repository writes installed
+sources); an unlisted or mismatched file stops the attempt. It verifies the four pinned PMU tool/manifest digests of its
 installed profile and copies them read-only into the driver-owned
 `zen5/pmu-tool` before it runs anything. It then runs, strictly in order:
 
@@ -598,6 +599,14 @@ bounded by the broker's 3600-second `RuntimeMaxSec`), and refuses to start
 timing unless `timing-reserve-seconds` remain. That budget starts inside the
 outer unit, after materialization, so the dispatch workflow waits for the
 broker's 3600 seconds plus its finalization allowance instead.
+
+Host readback (OPUS-LOCAL, 2026-10-01, not a run of this recipe): kernel
+6.18.50-2-lts, perf 7.2.4, microcode 0xb404038, Python 3.14.7, and
+`perf_event_paranoid=2`, under which
+`sudo -u buster-bench-candidate perf stat -e instructions:u,cycles:u -- true`
+counts, so the no-capability PMU design needs no host change. The zen5 tool
+self-tests pass under Python 3.14.0rc2 and 3.13 with DeprecationWarning as an
+error.
 
 Runtime estimate (unverified on the 9700X): a single-core Release `ide` build
 took 261 s on a 2.8 GHz Xeon core, and a real-build smoke on one Xeon core

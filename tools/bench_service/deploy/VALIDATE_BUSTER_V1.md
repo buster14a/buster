@@ -156,6 +156,30 @@ that a human-labelled revision is that Git commit's tree. The installation
 receipt must supply that relation. Include the complete fixed build's source
 closure, generated inputs and dependencies; do not omit files to meet bounds.
 
+`zen5-calibration-v1` also needs the tree identity bound into the installed
+source. No tool in this repository writes `installed/sources/REVISION/`; the
+operator's installation tool does, and it must add, for every revision a zen5
+job may name:
+
+- a file `.bq-source-tree` at the snapshot root whose bytes are exactly the
+  40 lowercase hex digits of `git rev-parse REVISION^{tree}` followed by one
+  `\n` (41 bytes);
+- the manifest entry `SHA256 .bq-source-tree`, where `SHA256` is the 64
+  lowercase hex digits of the SHA-256 of those 41 bytes, placed in the
+  manifest's sorted entry order like every other `DIGEST PATH` line.
+
+For example (after copying the closure and before sorting the entries):
+
+```sh
+git -C "$CHECKOUT" rev-parse "$REVISION^{tree}" > "$SNAPSHOT/.bq-source-tree"
+printf '%s .bq-source-tree\n' "$(sha256sum "$SNAPSHOT/.bq-source-tree" | cut -c1-64)"
+```
+
+The recipe stops at `stage=source` when the file is missing, malformed,
+unlisted or listed with another digest. A 2026-10-01 readback of the 9700X
+host found that none of its seven installed manifests lists the file, so the
+sources must be reinstalled this way before a zen5 window.
+
 `BQ-SOURCE-V1` allows at most 64 KiB of manifest, 4,096 sorted unique entries,
 64 MiB per file, 512 MiB per snapshot and 480 copied directories. Hash and
 validate the real closure before publication. A size violation blocks this
