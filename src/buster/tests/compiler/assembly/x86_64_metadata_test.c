@@ -8747,6 +8747,58 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        {
+            // These ABI recipes validate symbolic immediate fixups while
+            // preparing their tables. A stale unsigned expectation must not
+            // disable every GOT row or the initial-exec TLS replacement.
+            u8 tls[] = {0x48, 0x03, 0x05, 1, 2, 3, 4};
+            BUSTER_TEST(arguments, buster_x86_metadata_relax_tls(
+                tls, BUSTER_ARRAY_LENGTH(tls), BUSTER_X86_METADATA_TLS_INITIAL_EXEC, -16));
+            BUSTER_TEST(arguments, x86_64_metadata_test_bytes_equal(
+                tls, BUSTER_ARRAY_LENGTH(tls), (u8 const[]){0x48, 0x81, 0xc0, 0xf0, 0xff, 0xff, 0xff}, 7));
+            u8 tls_invalid[] = {0x48, 0x89, 0x05, 1, 2, 3, 4};
+            u8 tls_short[] = {0x48, 0x03, 0x05, 1, 2, 3, 4};
+            BUSTER_TEST(arguments, !buster_x86_metadata_relax_tls(
+                tls_invalid, BUSTER_ARRAY_LENGTH(tls_invalid), BUSTER_X86_METADATA_TLS_INITIAL_EXEC, -16) &&
+                x86_64_metadata_test_bytes_equal(tls_invalid, BUSTER_ARRAY_LENGTH(tls_invalid),
+                                                 (u8 const[]){0x48, 0x89, 0x05, 1, 2, 3, 4}, 7));
+            BUSTER_TEST(arguments, !buster_x86_metadata_relax_tls(
+                tls_short, BUSTER_ARRAY_LENGTH(tls_short) - 1, BUSTER_X86_METADATA_TLS_INITIAL_EXEC, -16) &&
+                x86_64_metadata_test_bytes_equal(tls_short, BUSTER_ARRAY_LENGTH(tls_short),
+                                                 (u8 const[]){0x48, 0x03, 0x05, 1, 2, 3, 4}, 7));
+            typedef struct X86_64MetadataImmediateRecipeCase X86_64MetadataImmediateRecipeCase;
+            struct X86_64MetadataImmediateRecipeCase
+            {
+                u8 source[7];
+                u8 direct[7];
+                u8 size;
+                u8 offset;
+                BusterX86MetadataGotSite site;
+            };
+            X86_64MetadataImmediateRecipeCase got_cases[] = {
+                {{0x8b, 0x05, 1, 2, 3, 4}, {0x90, 0xb8, 1, 2, 3, 4}, 6, 2, BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX},
+                {{0x03, 0x05, 1, 2, 3, 4}, {0x81, 0xc0, 1, 2, 3, 4}, 6, 2, BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX},
+                {{0x48, 0x03, 0x05, 1, 2, 3, 4}, {0x48, 0x81, 0xc0, 1, 2, 3, 4}, 7, 3, BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX},
+                {{0x48, 0x85, 0x05, 1, 2, 3, 4}, {0x48, 0xf7, 0xc0, 1, 2, 3, 4}, 7, 3, BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX},
+                {{0xff, 0x35, 1, 2, 3, 4}, {0x90, 0x68, 1, 2, 3, 4}, 6, 2, BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(got_cases); case_index += 1)
+            {
+                X86_64MetadataImmediateRecipeCase test = got_cases[case_index];
+                u8 bytes[7] = {0};
+                memcpy(bytes, test.source, test.size);
+                BUSTER_TEST(arguments, buster_x86_metadata_relax_got_reference(test.site, bytes, test.offset, test.size, -4) ==
+                                           BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32 &&
+                                       x86_64_metadata_test_bytes_equal(bytes, test.size, test.direct, test.size));
+                memcpy(bytes, test.source, test.size);
+                BUSTER_TEST(arguments, buster_x86_metadata_relax_got_reference(test.site, bytes, test.offset, test.size, 0) ==
+                                           BUSTER_X86_METADATA_GOT_PATCH_NONE &&
+                                       x86_64_metadata_test_bytes_equal(bytes, test.size, test.source, test.size));
+                BUSTER_TEST(arguments, buster_x86_metadata_relax_got_reference(test.site, bytes, test.offset, test.size - 1, -4) ==
+                                           BUSTER_X86_METADATA_GOT_PATCH_NONE &&
+                                       x86_64_metadata_test_bytes_equal(bytes, test.size, test.source, test.size));
+            }
+        }
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("RET_NEAR"), 10019, &ret_imm16, 1,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
                                                                  (u8 const[]){0xc2, 0x34, 0x12}, 3));

@@ -12190,7 +12190,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
                 };
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_add[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
-                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED);
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
         }
@@ -12770,7 +12770,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare_class(u32 class_index, 
             valid = valid && direct_field.offset + pad == prefix &&
                     direct_field.kind == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32
                                               ? (u8)BUSTER_X86_METADATA_RELOCATION_PC32
-                                              : (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32) &&
+                                              : width == 64 ? (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED
+                                                            : (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32) &&
                     direct_field.addend == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32 ? addend : 0);
             if (valid)
             {
