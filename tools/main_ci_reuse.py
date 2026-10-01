@@ -27,6 +27,7 @@ import urllib.error
 
 import github_ci_time
 from merge_queue_admission import AdmissionError, GitHub, require
+from native_retirement_integration import APIReadError
 
 REPOSITORY = "buster14a/buster"
 REPOSITORY_ID = 1071732997
@@ -135,7 +136,8 @@ def failure_record(error):
     code = "invalid-evidence" if isinstance(error, AdmissionError) else "internal-error"
     if isinstance(error, ReuseError):
         code = error.code
-    elif isinstance(error, urllib.error.HTTPError):
+    elif isinstance(error, urllib.error.HTTPError) or (isinstance(error, APIReadError) and
+                                                      type(error.status) is int):
         code = "http-error"
     elif isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
         code = "transport-or-io-error"
@@ -150,6 +152,8 @@ def failure_record(error):
     result = {"code": code, "type": type(error).__name__, "message": message}
     if isinstance(error, urllib.error.HTTPError):
         result["http_status"] = error.code
+    elif isinstance(error, APIReadError) and type(error.status) is int:
+        result["http_status"] = error.status
     return result
 
 
@@ -191,6 +195,11 @@ def discovery_retryable(error):
     # attempts, permission errors, malformed pages, or exhausted page bounds.
     if isinstance(error, ReuseError):
         retry = error.code in ("missing-source", "moving-list")
+    elif isinstance(error, APIReadError):
+        # GitHub.get wraps exhausted GET errors from the shared reader. Only
+        # transport, throttling and server failures are inconclusive evidence.
+        retry = error.status is None or (type(error.status) is int and
+                                         (error.status == 429 or 500 <= error.status < 600))
     elif isinstance(error, urllib.error.HTTPError):
         retry = error.code == 429 or 500 <= error.code < 600
     else:
@@ -207,7 +216,10 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
         source = read_source(api, expected["source_run_id"], diagnostics)
         check_source(source, sha, expected["source_run_id"], expected["source_branch"],
                      expected["source_completed_at"])
-    delays = DISCOVERY_DELAYS if expected is not None else ()
+    # Recollect at most three complete discovery snapshots in either phase.
+    # Per-GET retries have their own budget; these delays are not a wall-time
+    # bound. No pages, jobs or artifacts are borrowed from failed snapshots.
+    delays = DISCOVERY_DELAYS
     for attempt in range(len(delays) + 1):
         diagnostics["stage"] = "source-discovery"
         snapshot = {"read": attempt + 1, "path": DISCOVERY_PATH,
@@ -244,10 +256,11 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
             time.sleep(delays[attempt])
             # A source rerun/failure during backoff must stop immediately, even
             # when discovery is still inconsistent on the following read.
-            diagnostics["stage"] = "bound-source"
-            source = read_source(api, expected["source_run_id"], diagnostics)
-            check_source(source, sha, expected["source_run_id"], expected["source_branch"],
-                         expected["source_completed_at"])
+            if expected is not None:
+                diagnostics["stage"] = "bound-source"
+                source = read_source(api, expected["source_run_id"], diagnostics)
+                check_source(source, sha, expected["source_run_id"], expected["source_branch"],
+                             expected["source_completed_at"])
         else:
             break
     diagnostics["stage"] = "source-run"
