@@ -21990,9 +21990,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     value = c_ir_emit_cast(builder, value, builder->f64_type, source);
                 }
-                else if (c_ir_integer_promoted_value_type(builder, value).value != value_type_id.value)
+                else
                 {
-                    value = c_ir_emit_cast(builder, value, builder->s32_type, source);
+                    IrTypeId promoted_type = c_ir_integer_promoted_value_type(builder, value);
+                    if (promoted_type.value != value_type_id.value)
+                    {
+                        value = c_ir_emit_cast(builder, value, promoted_type, source);
+                    }
                 }
             }
             if (value.value == IR_ID_UNDERLYING_INVALID)

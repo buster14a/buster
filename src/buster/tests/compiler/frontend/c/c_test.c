@@ -17662,7 +17662,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                   "__typeof__(((struct Bits *)0)->e << 1) narrow_long(struct Bits *p) { return p->e << 1; }\n"
                                   "__typeof__(((struct Bits *)0)->sn ? ((struct Bits *)0)->sn : ((struct Bits *)0)->sn) signed_narrow(struct Bits *p) { return p->sn ? p->sn : p->sn; }\n"
                                   "__typeof__(+((struct Bits *)0)->sf) signed_full(struct Bits *p) { return +p->sf; }\n"
-                                  "__typeof__(+((struct Bits *)0)->wide) unpromoted_wide(struct Bits *p) { return +p->wide; }\n");
+                                  "__typeof__(+((struct Bits *)0)->wide) unpromoted_wide(struct Bits *p) { return +p->wide; }\n"
+                                  "extern int take(int marker, ...);\n"
+                                  "int variadic_bits(struct Bits *p) { return take(0, p->a, p->b, p->sn); }\n");
     Target promotion_targets[] = {target_native, target_native};
     promotion_targets[0].cpu_arch = CPU_ARCH_X86_64;
     promotion_targets[0].os = OPERATING_SYSTEM_LINUX;
@@ -17711,6 +17713,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                                     return_type->bit_width == promotion_expected[name_index].bit_width &&
                                                     return_type->is_signed == promotion_expected[name_index].is_signed);
                     }
+                    IrFunction* variadic = c_test_find_ir_function(module, S8("variadic_bits"));
+                    BUSTER_TEST(arguments, variadic != 0);
+                    u32 call_count = 0;
+                    if (variadic)
+                    {
+                        for (u32 row = 0; row < variadic->instruction_count; row += 1)
+                        {
+                            IrInstruction* call = variadic->instructions + row;
+                            if (call->opcode == IR_OPCODE_CALL)
+                            {
+                                call_count += 1;
+                                BUSTER_TEST(arguments, call->operand_count == 5);
+                                if (call->operand_count == 5)
+                                {
+                                    for (u32 argument = 0; argument < 3; argument += 1)
+                                    {
+                                        IrValueId value = call->operands[argument + 2];
+                                        BUSTER_TEST(arguments, value.value < variadic->value_count);
+                                        IrType* type = value.value < variadic->value_count
+                                                           ? ir_type_from_id(&program->types, variadic->values[value.value].canonical_type) : 0;
+                                        BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 &&
+                                                                    type->is_signed == (argument != 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, call_count == 1);
                 }
             }
             scratch_end(lowered_temporary);
