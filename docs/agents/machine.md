@@ -472,6 +472,15 @@ fixture as well as compiling both architectures.
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- x86-64 hidden aggregate-result pointers satisfy the return type's natural
+  alignment for direct and indirect calls, including discarded results. Internal
+  SSA aggregate homes retain eight-byte alignment. Stronger result alignment,
+  including sixteen, uses checked private backing slack and ordinary MIR pointer
+  rounding; used results copy exact object bytes back after the call. The registered
+  `machine_test_x64_result_alignment` covers eight-aligned controls and
+  16/32/64/128-byte results in both frontend forms and all allocators. Its native
+  System V observer reads the raw hidden pointer and performs an aligned SSE
+  store independently of Buster's aggregate-store choices.
 - Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
   Callers copy exact value bytes after their shadow and stack-argument area.
   Copies meet both the sixteen-byte floor and the declared type alignment;
