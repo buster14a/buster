@@ -320,9 +320,20 @@ verified actor inventory.
 The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain both actors with `always` mode and no others. Audit that response at activation, after every
-ruleset change, and after any emergency recovery. Do not give the admission
-workflow ruleset-write credentials to expose this field.
+contain both actors with `always` mode and no others. When present,
+`current_user_can_bypass` may be `never`, `always` or `pull_requests_only` in
+this offline administrator audit; unknown values fail. The administrator
+must read back the response using an account covered by the reviewed actors
+(Repository admin role 5 or `davidgmbb`). The saved JSON reports the reader's
+capability but does not identify or authenticate the reader; `check-ruleset`
+validates its policy fields, not the provenance of a local file. Record the
+reader account alongside the deployment audit. The read-only admission path
+still rejects every returned caller capability other than `never`, even if
+the full reviewed actor inventory is visible.
+
+Audit that response at activation, after every ruleset change, and after any
+emergency recovery. Do not give the admission workflow ruleset-write credentials
+to expose this field.
 
 The first live group for #956 exposed the former bug: treating a hidden list as
 a standing bypass. The repair preserves trusted-base execution. Consequently,
