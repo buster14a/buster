@@ -26760,15 +26760,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         scratch_end(temporary);
     }
 
-    String8 failed_assertions[] = {
-        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"),
-        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"),
+    struct
+    {
+        String8 source;
+        CPreprocessDialect dialect;
+        u32 column;
+    } failed_assertions[] = {
+        {S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"), C_PREPROCESS_DIALECT_GNU17, 19},
+        {S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"), C_PREPROCESS_DIALECT_GNU17, 19},
+        {S8("struct S { int a; _Static_assert(0, \"must fail\"); int b; };\n"), C_PREPROCESS_DIALECT_C11, 19},
+        {S8("union U { int a; _Static_assert(0, \"must fail\"); char b[9]; };\n"), C_PREPROCESS_DIALECT_C11, 18},
+        {S8("struct S { int a; _Static_assert(0, \"must fail\"); int b; } a, b;\n"), C_PREPROCESS_DIALECT_C17, 19},
+        {S8("union U { int a; _Static_assert(0, \"must fail\"); char b[9]; } a, b;\n"), C_PREPROCESS_DIALECT_C17, 18},
+        {S8("struct S { int a; static_assert(0); int b; };\n"), C_PREPROCESS_DIALECT_C23, 19},
+        {S8("union U { int a; static_assert(0); char b[9]; };\n"), C_PREPROCESS_DIALECT_C23, 18},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(failed_assertions); case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, failed_assertions[case_index],
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        String8 source = failed_assertions[case_index].source;
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = failed_assertions[case_index].dialect});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, parse, target_native);
         u32 reported = 0;
@@ -26780,15 +26793,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
             if (diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED)
             {
                 reported += 1;
-                located = diagnostic.location.line == 1 && diagnostic.location.column == 19;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == failed_assertions[case_index].column;
             }
         }
-        BUSTER_TEST_RAW(arguments, reported == 1 && located, failed_assertions[case_index]);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, source);
         scratch_end(temporary);
     }
 
     {
-        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); };\nint n = sizeof(struct S);\n");
+        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); char c; };\n"
+                           "static_assert(sizeof(struct S) == 8 && __builtin_offsetof(struct S, c) == 4);\nint n = sizeof(struct S);\n");
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
@@ -26796,6 +26811,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
+        scratch_end(temporary);
+    }
+    // #1250 also lost the member following an assertion. Pin the reported
+    // x86-64 Linux layout in both the typed fold and canonical IR; native
+    // Windows bit-field allocation intentionally has a different answer.
+    Target layout_target = target_native;
+    layout_target.cpu_arch = CPU_ARCH_X86_64;
+    layout_target.os = OPERATING_SYSTEM_LINUX;
+    String8 layout_source = S8("struct I { unsigned b : 9; unsigned c : 7; char m; };\n"
+                              "struct O { struct I i; _Static_assert(sizeof(struct I) == 4 && __builtin_offsetof(struct I, m) == 2, \"I\"); int z; };\n"
+                              "struct S { _Static_assert(1, \"first\"); int a; _Static_assert(1, \"middle\"); int b; _Static_assert(1, \"last\"); };\n"
+                              "union U { int a; _Static_assert(1, \"middle\"); char b[9]; };\n"
+                              "_Static_assert(sizeof(struct O) == 8 && __builtin_offsetof(struct O, z) == 4, \"outer layout\");\n"
+                              "_Static_assert(sizeof(struct S) == 8 && __builtin_offsetof(struct S, b) == 4, \"struct layout\");\n"
+                              "_Static_assert(sizeof(union U) == 12 && __builtin_offsetof(union U, b) == 0, \"union layout\");\n"
+                              "struct O outer; struct S pair[2]; union U widest;\n"
+                              "int trailing_members(void) { struct S local[2]; local[1].b = 7; outer.z = local[1].b; widest.b[8] = 1; return outer.z + widest.b[8]; }\n");
+    struct
+    {
+        String8 tag;
+        u64 size;
+        u64 trailing_offset;
+    } layouts[] = {
+        {S8("O"), 8, 4},
+        {S8("S"), 8, 4},
+        {S8("U"), 12, 0},
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, layout_source,
+            (CPreprocessOptions){.target = layout_target, .data_layout = target_data_layout(layout_target), .dialect = C_PREPROCESS_DIALECT_C11});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("member-static-assert-layout.c"), preprocess, parse, layout_target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrProgram* program = lowered.program;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(layouts); case_index += 1)
+                {
+                    IrType* record = 0;
+                    for (u32 type_index = 0; type_index < program->types.count && !record; type_index += 1)
+                    {
+                        IrType* type = program->types.types + type_index;
+                        if (!type->is_volatile && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) &&
+                            string_equal(type->name, layouts[case_index].tag))
+                        {
+                            record = type;
+                        }
+                    }
+                    if (BUSTER_REQUIRE(arguments, record && record->layout.resolved && record->field_count == 2))
+                    {
+                        BUSTER_TEST(arguments, record->layout.size == layouts[case_index].size);
+                        BUSTER_TEST(arguments, record->fields[1].offset == layouts[case_index].trailing_offset);
+                    }
+                }
+            }
+        }
         scratch_end(temporary);
     }
     return result;
