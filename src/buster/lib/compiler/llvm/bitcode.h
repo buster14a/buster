@@ -49,6 +49,12 @@ struct LlvmBitcodeStats
     u32 block_count;
     u32 instruction_count;
     u64 binary_bytes;
+    // Constant-pool searches: all of them, and those made after the pool is
+    // locked (value numbering and emission). Collection hands each constant
+    // instruction's value id to value numbering, so locked searches do not
+    // grow with the number of constant instructions.
+    u64 constant_searches;
+    u64 locked_constant_searches;
 };
 
 typedef struct LlvmBitcodeArtifact LlvmBitcodeArtifact;

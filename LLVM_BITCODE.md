@@ -151,6 +151,23 @@ Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.
 
+## Integer wire validation
+
+`llvm_bitcode_tests` exhausts all 131,070 bit patterns at widths 1 through 16
+and checks zero, one, neighboring sign boundaries, all-ones and high-bit
+truncation at every width through 64. A private test-only boundary calls the
+production integer operand encoder without allocating or emitting a module
+per pattern. An independent inverse of LLVM's signed rotation checks the
+decoded bits; exact signed-minimum operands for i1/i8/i16/i32/i64 are
+`3`, `257`, `65537`, `4294967297`, and `1`. The oracle rejects the historical
+narrow-sign operand `1` at every width below 64 and accepts its i64 sentinel.
+
+The existing complete-module serialized-reader checks and separately compiled
+Clang consumer fixtures remain complementary: the scalar sweep does not test
+record framing or replace consumer execution. Consumer availability and native
+platform guards retain their existing policy. Run the registered module with
+`build/Release/ide test --module=llvm_bitcode_tests --verbose=1 --ci=1`.
+
 ## Stack scope validation
 
 `llvm_bitcode_tests` checks two saves, dynamic allocations and void restores

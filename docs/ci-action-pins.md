@@ -56,9 +56,8 @@ actions.
 
 ## Approved same-commit reusable workflow
 
-`./.github/workflows/throughput-real-source.yml` is the only approved local
-reference. It reuses the existing native workload qualification after both
-pinned apt profiles pass, without copying its build/admission commands into a
+`./.github/workflows/throughput-real-source.yml` reuses the existing native
+workload qualification after both pinned apt profiles pass, without copying its build/admission commands into a
 second harness. GitHub resolves this literal `./` workflow from the caller's
 same commit; there is no floating external branch, tag or downloaded action.
 The called workflow retains read-only contents permission and its existing
@@ -66,10 +65,24 @@ source identity, native oracle, admission and artifact checks. Direct PR runs
 remain opt-in; only the path-filtered apt qualification sets the new boolean
 input. See [pinned input qualification](ci-apt-inputs.md).
 
+`./.github/workflows/compiler-throughput.yml` is also approved for the
+same-commit `Compiler throughput requests` caller. It shares the reviewed PR
+measurement jobs while the caller owns the bounded manual/schedule queue.
+The called workflow uses a run-unique group for non-PR requests, preventing
+another default single-pending group from replacing a waiting request. It
+retains read-only contents permission and no inherited secrets. See
+[`tools/throughput/README.md`](../tools/throughput/README.md#hosted-workflow-requests).
+
 The checker does not accept arbitrary local actions, path traversal, local
 `@ref` suffixes, expressions or unreviewed remote references. The additional
 controls in `tests/ci_apt_test.py` exercise those rejection boundaries; the
 existing action-policy tests and independent actionlint remain required.
+
+The pinned actionlint predates GitHub's `concurrency.queue` syntax. Workflow
+lint ignores only its unexpected-`queue`-key diagnostic; the offline policy
+test confines `queue: max` to the reviewed request workflow and checks that it
+is paired with `cancel-in-progress: false`. All other actionlint diagnostics
+still fail CI.
 
 ## Updating an action
 

@@ -1,11 +1,27 @@
 # Canonical and machine validation boundaries
 
+The block-row family (instruction ownership, termination, result binding
+and reference range) is established at construction by the protocol in
+[canonical IR construction](canonical-ir-construction.md); the boundaries
+below remain its independent checks.
+
 This contract complements the [frontend guide](agents/frontend/foundations.md),
 [machine ownership inventory](machine-metadata-ownership.md), and
 [differential testing](differential-testing.md). The focused implementation is
 [GitHub #294](https://github.com/buster14a/buster/issues/294), not a replacement
 for machine metadata work (#45). Dense canonical finalization is described in
 [canonical CFG publication](canonical-cfg-publication.md).
+
+## Integer constant rows
+
+A `CONSTANT_INTEGER` row spells a signed number as `immediates[0]` plus
+`immediate_is_negative`; its value is that number reduced modulo 2^width
+(`ir_integer_constant_decode`). The validator requires the spelled number to
+lie in `[-2^(width-1), 2^width)` (`ir_integer_constant_canonical`), so a
+reader that materializes the magnitude unreduced -- the native emitters do --
+sees the same bits as one that reduces it. The C producer's single row
+emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
+a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
 
 ## A certificate describes one input
 
@@ -43,6 +59,19 @@ editing, reacquire any builder-node pointers, discard its certificate and supply
 when the pass-completion marker is already set. A failed result must not be
 consumed by code generation or retried with the stale input certificate.
 
+Every canonical consumer also calls preparation itself, so a direct caller that
+never prepared its module still gets a validated one. When the driver has just
+prepared the same unchanged module, that call would be a second whole-module
+scan, not a new boundary. The driver therefore hands its preparation to every
+consumer it selects: native code generation through
+`CodegenModuleOptions.assume_validated`, LLVM bitcode through
+`LlvmBitcodeOptions.validate_ir = false`, and the Wasm and eBPF emitters
+through `WasmOptions.assume_validated` and `EbpfOptions.assume_validated`.
+Each of these makes the consumer's own preparation certified, which is a no-op
+on a prepared module. A zero-initialized Wasm or eBPF options structure keeps
+the validating default for direct callers; `-fverify-codegen`, which makes the
+driver prepare uncertified, is refused for these non-native targets.
+
 `IrValidationResult.boundary` identifies the last preparation scan, on both
 success and failure: `CANONICAL_INPUT` or `LOCAL_PROMOTION_OUTPUT`. Raw verifier
 calls and certified preparation that performs no scan return `UNSPECIFIED`.
@@ -59,8 +88,8 @@ instruction/value rows and machine rows do not change size.
 
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
-| Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
-| Dense CFG publication / `ir_function_publish_cfg` and published-shape validation | Bounded instruction ownership; terminator-derived unique edges, including parameter-free edges; exact optional builder predecessor lists and incoming extents; dense parameter/argument slices; remapped instruction sources, value definitions and sparse extras | These structural checks do not replace canonical type/operation/provenance validation or grant a semantic certificate. They do not prove whole-function canonical dominance. |
+| Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; one definition per value (a row or one block parameter, never both); value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
+| Dense CFG publication / `ir_function_publish_cfg` and published-shape validation | Bounded instruction ownership; every tail a terminator and no terminator followed by a row (`ir_instruction_is_terminator`), for every producer including certified input; terminator-derived unique edges, including parameter-free edges; exact optional builder predecessor lists and incoming extents; dense parameter/argument slices; remapped instruction sources, value definitions and sparse extras | These structural checks do not replace canonical type/operation/provenance validation or grant a semantic certificate. They do not prove whole-function canonical dominance. |
 | Selected MIR / `machine_verify_function` | Side-table bounds; opcode and operand kinds; register classes and physical limits; fixed/tied constraints; block instruction coverage and terminators; parameter/edge-copy classes; definition counts/points and immutable-register dominance, including edge uses | Opcode-specific payload validation is not an independent proof of every emitted instruction's width/encoding. Legacy explicitly mutable registers retain their separate definition contract. Bounded edge spans alone are not a proof of complete CFG symmetry. |
 | Scheduled MIR / native code-generation verification path | With `verify_invariants`, reruns the same machine verifier on the reordered candidate, before replacing the accepted function or using its rebuilt placement | The selector's original certificate cannot certify reordered rows, remapped definition points or the new placement. This slice leaves the existing opt-in scheduled-MIR hook and its counters unchanged. |
 | Placement / native code generation | Existing valid-placement checks and strict `verify_invariants` failure handling | Structural IR verification does not prove ABI behavior or generated-program semantics. Use the existing independent compiler/runtime matrix. |

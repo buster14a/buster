@@ -1354,6 +1354,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_faults(UnitTestArguments* argu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_stream_destination(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_WINDOWS
+    // A character device is the requested sink: it is written in place,
+    // never refused or replaced by a staged file.
+    String8 sink = S8("/dev/null");
+    FileStats target = os_file_replacement_target_stats(sink);
+    BUSTER_TEST(arguments, target.valid && target.kind == OS_FILE_KIND_STREAM);
+    u8 bytes[] = {'s', 'i', 'n', 'k', 0, 0xff};
+    ByteSlice content = {bytes, sizeof(bytes)};
+    FilePublishResult published = file_publish_checked(sink, content, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+    BUSTER_TEST(arguments, published.status == FILE_PUBLISH_PUBLISHED && !published.error.v && !published.cleanup_error.v);
+    BUSTER_TEST(arguments, file_publish_executable(sink, content));
+    BUSTER_TEST(arguments, file_publish(sink, (ByteSlice){0}));
+    // The sliced publisher (the -c object path) writes every slice in place.
+    ByteSlice slices[] = {{bytes, 2}, {bytes, 0}, {bytes + 2, sizeof(bytes) - 2}};
+    FilePublishResult sliced = file_publish_slices_checked(sink, slices, BUSTER_ARRAY_LENGTH(slices), (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+    BUSTER_TEST(arguments, sliced.status == FILE_PUBLISH_PUBLISHED && !sliced.error.v && !sliced.cleanup_error.v);
+    struct stat stats;
+    BUSTER_TEST(arguments, stat((const char*)sink.pointer, &stats) == 0 && S_ISCHR(stats.st_mode));
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1363,6 +1390,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_contents);
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_faults);
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_concurrent_reader);
+    BUSTER_TEST_FIXTURE(arguments, file_test_publish_stream_destination);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_contents);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_aliases);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_faults);

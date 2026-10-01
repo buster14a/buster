@@ -1,0 +1,320 @@
+diff --git a/src/buster/lib/arena.c b/src/buster/lib/arena.c
+index 9ef7b54..c6a6c5c 100644
+--- a/src/buster/lib/arena.c
++++ b/src/buster/lib/arena.c
+@@ -572,6 +572,110 @@ ArenaBenchmarkCounters arena_benchmark_counters(void)
+     return arena_benchmark_kind_counters(ARENA_BENCHMARK_ARENA);
+ }
+ 
++// DISPOSABLE PROBE (never merge): log large allocation ranges for residency attribution.
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++typedef struct ProbeRange ProbeRange;
++struct ProbeRange { u64 address; u64 size; u32 line; char site[120]; };
++static ProbeRange* probe_ranges;
++static u64 probe_range_count;
++static u64 probe_range_capacity;
++static FILE* probe_file;
++static int probe_state;
++static void probe_initialize(void)
++{
++    if (!probe_state)
++    {
++        char const* path = getenv("BUSTER_PROBE_ALLOC");
++        probe_state = path ? 1 : 2;
++        if (path) { probe_file = fopen(path, "w"); }
++    }
++}
++typedef struct ProbeSmall ProbeSmall;
++struct ProbeSmall { u8 const* file; u8 const* function; u32 file_length; u32 function_length; u32 line; u64 calls; u64 bytes; u64 last_calls; u64 last_bytes; };
++static ProbeSmall probe_small[16384];
++Arena* buster_probe_tu_arena;
++static void probe_small_record(Arena* arena, u64 size, String8 file, String8 function, u32 line)
++{
++    if (arena != buster_probe_tu_arena || size >= 65536) { return; }
++    u64 hash = ((u64)file.pointer * 0x9E3779B97F4A7C15ull) ^ ((u64)line * 0xC2B2AE3D27D4EB4Full);
++    u64 slot = (hash >> 20) & 16383;
++    while (probe_small[slot].file && !(probe_small[slot].file == (u8 const*)file.pointer && probe_small[slot].line == line)) { slot = (slot + 1) & 16383; }
++    ProbeSmall* e = &probe_small[slot];
++    if (!e->file) { e->file = (u8 const*)file.pointer; e->file_length = (u32)file.length; e->function = (u8 const*)function.pointer; e->function_length = (u32)function.length; e->line = line; }
++    e->calls += 1; e->bytes += size;
++}
++static void probe_small_dump(char const* label)
++{
++    for (u64 i = 0; i < 16384; i += 1)
++    {
++        ProbeSmall* e = &probe_small[i];
++        if (e->file && e->bytes != e->last_bytes)
++        {
++            u64 slash = 0;
++            for (u64 k = 0; k < e->file_length; k += 1) { if (e->file[k] == '/') slash = k + 1; }
++            fprintf(probe_file, "S\t%s\t%.*s:%u:%.*s\t%lu\t%lu\n", label, (int)(e->file_length - slash), (char const*)e->file + slash, e->line,
++                    (int)e->function_length, (char const*)e->function, (unsigned long)(e->calls - e->last_calls), (unsigned long)(e->bytes - e->last_bytes));
++            e->last_calls = e->calls; e->last_bytes = e->bytes;
++        }
++    }
++    if (buster_probe_tu_arena) { fprintf(probe_file, "P\t%s\t%lu\n", label, (unsigned long)buster_probe_tu_arena->position); }
++}
++static void probe_record(void* address, u64 size, String8 file, String8 function, u32 line)
++{
++    probe_initialize();
++    if (probe_state == 1 && size >= 65536)
++    {
++        if (probe_range_count == probe_range_capacity)
++        {
++            probe_range_capacity = probe_range_capacity ? probe_range_capacity * 2 : 4096;
++            probe_ranges = realloc(probe_ranges, probe_range_capacity * sizeof(ProbeRange));
++        }
++        ProbeRange* r = &probe_ranges[probe_range_count++];
++        r->address = (u64)address; r->size = size; r->line = line;
++        u64 slash = 0;
++        for (u64 i = 0; i < file.length; i += 1) { if (file.pointer[i] == '/') slash = i + 1; }
++        snprintf(r->site, sizeof(r->site), "%.*s:%u:%.*s", (int)(file.length - slash), (char const*)file.pointer + slash, line,
++                 (int)function.length, (char const*)function.pointer);
++    }
++}
++void buster_probe_residency_snapshot(char const* label);
++void buster_probe_residency_snapshot(char const* label)
++{
++    probe_initialize();
++    if (probe_state != 1) { return; }
++    int fd = open("/proc/self/pagemap", O_RDONLY);
++    fprintf(probe_file, "SNAPSHOT\t%s\n", label);
++    probe_small_dump(label);
++    static u64 buffer[65536];
++    for (u64 i = 0; i < probe_range_count; i += 1)
++    {
++        ProbeRange* r = &probe_ranges[i];
++        u64 first = r->address / 4096, last = (r->address + r->size + 4095) / 4096;
++        u64 present = 0;
++        for (u64 page = first; page < last;)
++        {
++            u64 chunk = last - page; if (chunk > 65536) chunk = 65536;
++            ssize_t got = pread(fd, buffer, chunk * 8, (off_t)(page * 8));
++            if (got <= 0) break;
++            u64 n = (u64)got / 8;
++            for (u64 k = 0; k < n; k += 1) { present += (buffer[k] >> 63) & 1; }
++            page += n;
++        }
++        fprintf(probe_file, "R\t%s\t%lu\t0x%lx\t%lu\t%lu\n", label, (unsigned long)i, (unsigned long)r->address, (unsigned long)r->size,
++                (unsigned long)(present * 4096));
++    }
++    fprintf(probe_file, "RANGES\t%s\t%lu\n", label, (unsigned long)probe_range_count);
++    for (u64 i = 0; i < probe_range_count; i += 1)
++    {
++        fprintf(probe_file, "D\t%lu\t%s\n", (unsigned long)i, probe_ranges[i].site);
++    }
++    fflush(probe_file);
++    close(fd);
++}
++
+ void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroed, String8 file, String8 function, u32 line)
+ {
+     u64 start = arena->position;
+@@ -582,6 +686,8 @@ void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroe
+     u64 clear_end = BUSTER_MIN(dirty, arena->position);
+     u64 written = clear_end > begin ? clear_end - begin : 0;
+     arena_benchmark_event(ARENA_BENCHMARK_ARENA, file, function, line, size, begin - start, zeroed ? size : 0, written, true);
++    probe_record(result, size, file, function, line);
++    if (probe_state == 1) { probe_small_record(arena, size, file, function, line); }
+     return result;
+ }
+ 
+diff --git a/src/buster/lib/compiler/driver/driver.c b/src/buster/lib/compiler/driver/driver.c
+index 210d33e..b681eef 100644
+--- a/src/buster/lib/compiler/driver/driver.c
++++ b/src/buster/lib/compiler/driver/driver.c
+@@ -3510,6 +3510,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
+     return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length});
+ }
+ 
++void buster_probe_residency_snapshot(char const* label);
++extern Arena* buster_probe_tu_arena;
++void buster_probe_frontend_dump(FILE* file);
+ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
+                                                              CompilerDriverDiagnosticCollector* warnings)
+ {
+@@ -3551,6 +3554,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+     {
+         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
+     }
++    buster_probe_tu_arena = arena;
++    buster_probe_residency_snapshot("before_preprocess");
+     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
+                                                 (CPreprocessOptions){
+                                                     .macro_operations = invocation.macro_operations,
+@@ -3616,6 +3621,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+             goto end;
+         }
+     }
++    buster_probe_residency_snapshot("after_preprocess");
+     CParserResult syntax = c_parse_ast(arena, preprocess);
+     result.parser_diagnostic_count = syntax.diagnostic_count;
+     if (syntax.diagnostic_count)
+@@ -3644,6 +3650,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+         }
+         goto end;
+     }
++    buster_probe_residency_snapshot("after_parse");
+     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
+                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
+                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+@@ -3659,6 +3666,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+         }
+         goto end;
+     }
++    buster_probe_residency_snapshot("after_analyze");
++    buster_probe_frontend_dump(stderr);
+     IrModule* module = &lowered.program->modules[0];
+     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
+     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+@@ -3667,6 +3676,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
+                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
+     result.local_promotion = module->local_promotion;
++    buster_probe_residency_snapshot("after_prepare");
+     result.fast = module->fast;
+     if (validation.error != IR_VALIDATION_NONE)
+     {
+@@ -3762,6 +3772,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+         }
+     }
+     result.codegen_statistics = code.statistics;
++    buster_probe_residency_snapshot("after_codegen");
+     if (code.fallback_record_count)
+     {
+         result.fallback_records = arena_allocate(arena, CompilerDriverFallbackRecord, code.fallback_record_count);
+@@ -3872,6 +3883,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+     }
+     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
+     result.object_error = object.error;
++    buster_probe_residency_snapshot("after_object");
+     if (object.error != OBJECT_ERROR_NONE)
+     {
+         result.error = COMPILER_DRIVER_ERROR_OBJECT;
+@@ -3883,6 +3895,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+     result.object = object;
+     result.has_object = true;
+     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
++    buster_probe_residency_snapshot("after_emit");
+ end:
+     file_map_unmap(source_file);
+     return result;
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index f5c127b..4040cbc 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -4225,6 +4225,66 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
+     c_type_parse_frame_complete(machine, last, end, true);
+ }
+ 
++
++// DISPOSABLE PROBE (never merge): redundancy counters for derived-fact queries.
++#include <stdio.h>
++typedef struct ProbeKeyTable ProbeKeyTable;
++struct ProbeKeyTable { u64* keys; u32* counts; u64 capacity; u64 unique; u64 calls; u64 repeat_calls; u64 tokens; u64 repeat_tokens; };
++static ProbeKeyTable probe_tables[12];
++static char const* probe_table_names[12] = {"type_query_all", "type_query_top_nonmemo", "type_query_nested", "infer_array_count_core",
++                                           "initializer_expression_constraint", "type_query_memo_eligible", "type_query_memo_hit", "validate_initializer_shape", "type_query_relaxed_no_checked_bit", "infer_array_count_no_diagnostic_bit", "infer_array_count_range_only", "infer_array_count_range_element"};
++static void probe_key(u32 table_index, u64 a, u64 b, u64 c, u64 tokens)
++{
++    ProbeKeyTable* t = &probe_tables[table_index];
++    if (!t->keys) { t->capacity = (u64)1 << 23; t->keys = calloc(t->capacity, 8); t->counts = calloc(t->capacity, 4); }
++    u64 key = (a * 0x9E3779B97F4A7C15ull) ^ (b * 0xC2B2AE3D27D4EB4Full) ^ (c * 0x165667B19E3779F9ull) ^ 1;
++    u64 slot = (key >> 17) & (t->capacity - 1);
++    while (t->keys[slot] && t->keys[slot] != key) { slot = (slot + 1) & (t->capacity - 1); }
++    t->calls += 1; t->tokens += tokens;
++    if (!t->keys[slot]) { t->keys[slot] = key; t->unique += 1; }
++    else { t->repeat_calls += 1; t->repeat_tokens += tokens; }
++    t->counts[slot] += 1;
++}
++// Direction census on the key with the CHECKED bit removed. Bit 0: a checked
++// answer was computed before; bit 1: an unchecked one was. Split by where the
++// root query ran: 0 = no per-body memo (file scope), 1 = inside a memo window.
++typedef struct ProbeDirection ProbeDirection;
++struct ProbeDirection { u64* keys; u8* seen; u64 capacity; u64 calls[2]; u64 first[2]; u64 same_mode_repeat[2]; u64 checked_then_unchecked[2]; u64 unchecked_then_checked[2]; };
++static ProbeDirection probe_direction_table;
++static void probe_direction(u32 window, u64 a, u64 b, bool checked)
++{
++    ProbeDirection* t = &probe_direction_table;
++    if (!t->keys) { t->capacity = (u64)1 << 23; t->keys = calloc(t->capacity, 8); t->seen = calloc(t->capacity, 1); }
++    u64 key = (a * 0x9E3779B97F4A7C15ull) ^ (b * 0xC2B2AE3D27D4EB4Full) ^ ((u64)window * 0x165667B19E3779F9ull) ^ 1;
++    u64 slot = (key >> 17) & (t->capacity - 1);
++    while (t->keys[slot] && t->keys[slot] != key) { slot = (slot + 1) & (t->capacity - 1); }
++    u8 bit = checked ? 1 : 2;
++    t->calls[window] += 1;
++    if (!t->keys[slot]) { t->keys[slot] = key; t->first[window] += 1; }
++    else if (t->seen[slot] & bit) { t->same_mode_repeat[window] += 1; }
++    else if (checked) { t->unchecked_then_checked[window] += 1; }
++    else { t->checked_then_unchecked[window] += 1; }
++    t->seen[slot] |= bit;
++}
++void buster_probe_frontend_dump(FILE* file);
++void buster_probe_frontend_dump(FILE* file)
++{
++    for (u32 w = 0; w < 2; w += 1)
++    {
++        ProbeDirection* t = &probe_direction_table;
++        fprintf(file, "FRONTEND\tdirection_%s\tcalls=%lu\tfirst=%lu\tsame_mode_repeat=%lu\tchecked_then_unchecked=%lu\tunchecked_then_checked=%lu\n",
++                w ? "memo_window" : "no_memo", (unsigned long)t->calls[w], (unsigned long)t->first[w], (unsigned long)t->same_mode_repeat[w],
++                (unsigned long)t->checked_then_unchecked[w], (unsigned long)t->unchecked_then_checked[w]);
++    }
++    for (u32 i = 0; i < 12; i += 1)
++    {
++        ProbeKeyTable* t = &probe_tables[i];
++        u32 max = 0;
++        for (u64 k = 0; t->counts && k < t->capacity; k += 1) { if (t->counts[k] > max) max = t->counts[k]; }
++        fprintf(file, "FRONTEND\t%s\tcalls=%lu\tunique=%lu\trepeat_calls=%lu\ttokens=%lu\trepeat_tokens=%lu\tmax_same_key=%u\n", probe_table_names[i],
++                (unsigned long)t->calls, (unsigned long)t->unique, (unsigned long)t->repeat_calls, (unsigned long)t->tokens, (unsigned long)t->repeat_tokens, max);
++    }
++}
+ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+ {
+@@ -4237,10 +4297,17 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+         (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
+         (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
+     bool valid;
++    probe_key(0, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
++    probe_key(8, ((u64)start << 32) | end, ((u64)scope.value << 32) | (flags & ~(u32)C_PARSE_EXPRESSION_QUERY_CHECKED), 0, end - start);
++    if (machine->frame_count) probe_key(2, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
++    else if (!query) probe_key(1, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
++    else probe_key(5, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
++    if (!machine->frame_count) probe_direction(query != 0, ((u64)start << 32) | end, ((u64)scope.value << 32) | (flags & ~(u32)C_PARSE_EXPRESSION_QUERY_CHECKED), (flags & C_PARSE_EXPRESSION_QUERY_CHECKED) != 0);
+     if (query && query->end == end && query->scope.value == scope.value &&
+         (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+         (query->flags & flags) == flags && query->type.value < result->type_count)
+     {
++        probe_key(6, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
+         *type_out = query->type;
+         valid = true;
+     }
+@@ -6141,6 +6208,10 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+                                                                     CTypeId element_type, u32 start, u32 end, u64* count_out,
+                                                                     CTypeId aggregate_type, CParseInitializerDiagnostic* diagnostic)
+ {
++    probe_key(3, ((u64)start << 32) | end, ((u64)element_type.value << 32) | aggregate_type.value, diagnostic != 0, end - start);
++    probe_key(9, ((u64)start << 32) | end, ((u64)element_type.value << 32) | aggregate_type.value, 0, end - start);
++    probe_key(10, ((u64)start << 32) | end, 0, 0, end - start);
++    probe_key(11, ((u64)start << 32) | end, element_type.value, 0, end - start);
+     if (start >= end)
+     {
+         return false;
+@@ -19648,6 +19719,7 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
+ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachine* machine, CParseResult* result,
+     CPreprocessResult preprocess, CScopeId scope, CTypeId destination, u32 start, u32 end, CParseInitializerDiagnostic* diagnostic)
+ {
++    probe_key(4, ((u64)start << 32) | end, ((u64)scope.value << 32) | destination.value, 0, end - start);
+     while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+     {
+@@ -19674,6 +19746,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
+                                                                                  CPreprocessResult preprocess, CScopeId scope,
+                                                                                  CTypeId type, u32 start, u32 end)
+ {
++    probe_key(7, ((u64)start << 32) | end, ((u64)scope.value << 32) | type.value, 0, end - start);
+     CParseInitializerDiagnostic diagnostic = {0};
+     if (type.value < result->type_count && start < end &&
+         c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE))

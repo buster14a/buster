@@ -16,14 +16,15 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any
 
-MANIFEST_SCHEMA = "BUSTER_ANALYZER_DRIVER_PROVENANCE_V1"
-SELECTION_SCHEMA = "BUSTER_ANALYZER_COMPARISON_SELECTION_V2"
+MANIFEST_SCHEMA = "BUSTER_ANALYZER_DRIVER_PROVENANCE_V2"
+SELECTION_SCHEMA = "BUSTER_ANALYZER_COMPARISON_SELECTION_V3"
 ROOT_SOURCE = "build.c"
 POLICY_INPUTS = (".github/workflows/ci.yml", "tools/analyzer_reference.py")
 COMPILE_PROFILE = {
@@ -49,6 +50,13 @@ COMPILE_PROFILE = {
 HEX_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_EVENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
+# Only compiler/driver inputs, never credentials or unrelated runner metadata.
+CONTEXT_ENVIRONMENT = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+    "LIBRARY_PATH", "LD_LIBRARY_PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET",
+    "CCC_OVERRIDE_OPTIONS", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR",
+)
 
 
 class ProvenanceError(RuntimeError):
@@ -247,8 +255,54 @@ def closure_fingerprint(
     return sha256_bytes(payload)
 
 
+def driver_command(compiler: Path, dependency_file: Path, driver: Path) -> list[str]:
+    substitutions = {"<dependency-file>": str(dependency_file), "<driver-output>": str(driver)}
+    return [str(compiler), *(substitutions.get(value, value) for value in COMPILE_PROFILE["arguments"])]
+
+
+def compiler_identity() -> dict[str, str]:
+    compiler_name = shutil.which(COMPILE_PROFILE["compiler"])
+    if compiler_name is None:
+        raise ProvenanceError("Clang is unavailable for driver context")
+    compiler = Path(compiler_name).resolve(strict=True)
+    ensure_regular_file(compiler)
+    version = subprocess.run([str(compiler), "--version"], check=True, capture_output=True, timeout=30)
+    return {
+        "compiler": str(compiler),
+        "compiler_sha256": sha256_bytes(compiler.read_bytes()),
+        "compiler_version_sha256": sha256_bytes(version.stdout + b"\0" + version.stderr),
+    }
+
+
+def driver_context(root: Path, dependency_file: Path, driver: Path) -> dict[str, Any]:
+    """Bind one executable used in one root; never infer cross-root equivalence.
+
+    The bootstrap subcommand executes driver_command itself. Revalidation derives
+    this context again before the candidate campaign. Environment values are only
+    hashed; BUSTER_* covers the driver's repository-specific inputs.
+    """
+    identity = compiler_identity()
+    ensure_regular_file(driver)
+    if not os.access(driver, os.X_OK):
+        raise ProvenanceError("candidate driver is not executable")
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key in CONTEXT_ENVIRONMENT or key.startswith(("BUSTER_", "LC_"))
+    }
+    encoded = json.dumps(environment, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "root": str(root),
+        "driver": str(driver.absolute()),
+        "driver_sha256": sha256_bytes(driver.read_bytes()),
+        **identity,
+        "compile_command": driver_command(Path(identity["compiler"]), dependency_file.absolute(), driver.absolute()),
+        "environment_sha256": sha256_bytes(encoded),
+    }
+
+
 def build_manifest(
-    repository: Path, revision: str, root: Path, dependency_file: Path
+    repository: Path, revision: str, root: Path, dependency_file: Path,
+    driver: Path | None = None,
 ) -> dict[str, Any]:
     repository = repository.resolve(strict=True)
     root = root.resolve(strict=True)
@@ -333,6 +387,7 @@ def build_manifest(
         "issues": issues,
         "dependency_file_sha256": sha256_bytes(dependency_raw),
         "closure_sha256": closure_fingerprint(dependencies, policy_inputs),
+        "execution_context": driver_context(root, dependency_file, driver) if driver is not None else None,
         **manifest_payload(dependencies, policy_inputs),
     }
 
@@ -361,6 +416,7 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         "compile_profile",
         "dependencies",
         "policy_inputs",
+        "execution_context",
     }
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise ProvenanceError(f"manifest has unexpected fields: {path}")
@@ -383,6 +439,22 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         raise ProvenanceError(f"manifest dependency-file hash is malformed: {path}")
     if not HEX_OBJECT.fullmatch(str(manifest["revision"])) or not HEX_OBJECT.fullmatch(str(manifest["tree"])):
         raise ProvenanceError(f"manifest Git identities are malformed: {path}")
+    context = manifest["execution_context"]
+    if context is not None:
+        context_keys = {"root", "driver", "driver_sha256", "compiler", "compiler_sha256",
+                        "compiler_version_sha256", "compile_command", "environment_sha256"}
+        if not isinstance(context, dict) or set(context) != context_keys:
+            raise ProvenanceError(f"malformed driver execution context: {path}")
+        for key in ("root", "driver", "compiler"):
+            if not isinstance(context[key], str) or not Path(context[key]).is_absolute() or "\0" in context[key]:
+                raise ProvenanceError(f"invalid context path {key}: {path}")
+        for key in ("driver_sha256", "compiler_sha256", "compiler_version_sha256", "environment_sha256"):
+            if not HEX_SHA256.fullmatch(str(context[key])):
+                raise ProvenanceError(f"invalid context hash {key}: {path}")
+        if not isinstance(context["compile_command"], list) or not all(
+            isinstance(value, str) and "\0" not in value for value in context["compile_command"]
+        ):
+            raise ProvenanceError(f"invalid context compile command: {path}")
     return manifest, raw
 
 
@@ -392,6 +464,73 @@ def parse_bool(value: str) -> bool:
     if value == "false":
         return False
     raise ProvenanceError(f"expected true or false, got {value!r}")
+
+
+def same_revision_skip(event: str, requested: bool, candidate_commit: str, reference_commit: str) -> bool:
+    """Whether policy skips comparison without consulting any manifest."""
+    return not requested and candidate_commit == reference_commit and event in ("push", "workflow_dispatch")
+
+
+def same_driver_skip(
+    event: str, requested: bool, candidate_commit: str, reference_commit: str,
+    candidate: dict[str, Any], reference: dict[str, Any],
+) -> bool:
+    """Merge groups may omit an A/A arm only for one proven, shared driver.
+
+    Exact manifest equality binds the dependency bytes, policy and execution
+    context. No missing context or cross-revision/cross-root proof is admitted.
+    """
+    context = candidate["execution_context"]
+    command = context["compile_command"] if context is not None else []
+    canonical = False
+    if len(command) == len(COMPILE_PROFILE["arguments"]) + 1:
+        depfile = Path(command[COMPILE_PROFILE["arguments"].index("-MF") + 2])
+        canonical = depfile.is_absolute() and command == driver_command(
+            Path(context["compiler"]), depfile, Path(context["driver"])
+        )
+    known_policy = ([entry.get("path") for entry in candidate["policy_inputs"]] == sorted(POLICY_INPUTS)
+                    and all(entry.get("state") == "blob" for entry in candidate["policy_inputs"]))
+    known_root = any(entry.get("path") == ROOT_SOURCE for entry in candidate["dependencies"])
+    return (event == "merge_group" and not requested and candidate_commit == reference_commit
+            and candidate["complete"] and reference["complete"]
+            and known_policy and known_root and context is not None and canonical and candidate == reference)
+
+
+def validate_request(event: str, requested_text: str) -> bool:
+    if not SAFE_EVENT.fullmatch(event):
+        raise ProvenanceError(f"invalid event name {event!r}")
+    requested = parse_bool(requested_text)
+    if requested and event != "workflow_dispatch":
+        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
+    return requested
+
+
+def reference_materialization(
+    repository: Path,
+    event: str,
+    requested_text: str,
+    candidate_revision: str,
+    reference_revision: str,
+    candidate_path: Path | None = None,
+) -> bool:
+    """Whether CI must build the historical reference driver.
+
+    Push/dispatch skips need no manifest. A same-revision merge group requires
+    the complete candidate manifest and exact driver context. Other selections
+    need the reference tree, to compare or to prove closure equality.
+    """
+    repository = repository.resolve(strict=True)
+    requested = validate_request(event, requested_text)
+    candidate_commit, _ = resolve_revision(repository, candidate_revision)
+    reference_commit, _ = resolve_revision(repository, reference_revision)
+    skip = same_revision_skip(event, requested, candidate_commit, reference_commit)
+    if not skip and candidate_path is not None:
+        candidate, _ = load_manifest(candidate_path)
+        _, candidate_tree = resolve_revision(repository, candidate_commit)
+        if candidate["revision"] != candidate_commit or candidate["tree"] != candidate_tree:
+            raise ProvenanceError("candidate provenance does not match the selected commit")
+        skip = same_driver_skip(event, requested, candidate_commit, reference_commit, candidate, candidate)
+    return not skip
 
 
 def select_campaign(
@@ -404,11 +543,7 @@ def select_campaign(
     reference_path: Path,
 ) -> bytes:
     repository = repository.resolve(strict=True)
-    if not SAFE_EVENT.fullmatch(event):
-        raise ProvenanceError(f"invalid event name {event!r}")
-    requested = parse_bool(requested_text)
-    if requested and event != "workflow_dispatch":
-        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
+    requested = validate_request(event, requested_text)
     candidate_commit, candidate_tree = resolve_revision(repository, candidate_revision)
     reference_commit, reference_tree = resolve_revision(repository, reference_revision)
     candidate, candidate_raw = load_manifest(candidate_path)
@@ -420,11 +555,12 @@ def select_campaign(
 
     if requested:
         selection, reason = "compare", "requested"
+    elif same_revision_skip(event, requested, candidate_commit, reference_commit):
+        selection, reason = "skip", "same-revision"
+    elif same_driver_skip(event, requested, candidate_commit, reference_commit, candidate, reference):
+        selection, reason = "skip", "same-driver-merge-group"
     elif candidate_commit == reference_commit:
-        if event in ("push", "workflow_dispatch"):
-            selection, reason = "skip", "same-revision"
-        else:
-            selection, reason = "compare", "event-requires-comparison"
+        selection, reason = "compare", "event-requires-comparison"
     elif event == "pull_request":
         if not candidate["complete"] or not reference["complete"]:
             selection, reason = "compare", "provenance-uncertain"
@@ -514,7 +650,22 @@ def command_manifest(arguments: argparse.Namespace) -> None:
         arguments.revision,
         Path(arguments.root),
         Path(arguments.depfile),
+        Path(arguments.driver) if arguments.driver is not None and getattr(arguments, "bind_context", True) else None,
     )
+    write_manifest(Path(arguments.output), manifest)
+
+
+def command_bootstrap(arguments: argparse.Namespace) -> None:
+    root = Path(arguments.root).resolve(strict=True)
+    identity = compiler_identity()
+    compiler = Path(identity["compiler"])
+    dependency_file = Path(arguments.depfile).absolute()
+    driver = Path(arguments.driver).absolute()
+    subprocess.run(driver_command(compiler, dependency_file, driver), cwd=root, check=True)
+    manifest = build_manifest(Path(arguments.repository), arguments.revision, root, dependency_file,
+                              driver if arguments.bind_context else None)
+    if arguments.bind_context and any(manifest["execution_context"][key] != value for key, value in identity.items()):
+        raise ProvenanceError("Clang identity changed during driver compilation")
     write_manifest(Path(arguments.output), manifest)
 
 
@@ -529,6 +680,18 @@ def command_select(arguments: argparse.Namespace) -> None:
         Path(arguments.reference_manifest),
     )
     write_atomic(Path(arguments.output), record)
+
+
+def command_materialization(arguments: argparse.Namespace) -> None:
+    required = reference_materialization(
+        Path(arguments.repository),
+        arguments.event,
+        arguments.requested,
+        arguments.candidate_revision,
+        arguments.reference_revision,
+        Path(arguments.candidate_manifest) if arguments.candidate_manifest is not None else None,
+    )
+    print("true" if required else "false")
 
 
 def command_field(arguments: argparse.Namespace) -> None:
@@ -548,7 +711,14 @@ def parser() -> argparse.ArgumentParser:
     manifest.add_argument("--root", required=True)
     manifest.add_argument("--depfile", required=True)
     manifest.add_argument("--output", required=True)
+    manifest.add_argument("--driver", help="bind and revalidate the exact executable context")
     manifest.set_defaults(handler=command_manifest)
+
+    bootstrap = subparsers.add_parser("bootstrap", help="compile the driver with the recorded exact profile")
+    for option in ("repository", "revision", "root", "depfile", "driver", "output"):
+        bootstrap.add_argument("--" + option, required=True)
+    bootstrap.add_argument("--bind-context", action="store_true")
+    bootstrap.set_defaults(handler=command_bootstrap)
 
     select = subparsers.add_parser("select", help="select comparison or candidate-only analysis")
     select.add_argument("--repository", required=True)
@@ -560,6 +730,17 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("--reference-manifest", required=True)
     select.add_argument("--output", required=True)
     select.set_defaults(handler=command_select)
+
+    materialization = subparsers.add_parser(
+        "materialization", help="print whether the historical reference driver must be built"
+    )
+    materialization.add_argument("--repository", required=True)
+    materialization.add_argument("--event", required=True)
+    materialization.add_argument("--requested", required=True)
+    materialization.add_argument("--candidate-revision", required=True)
+    materialization.add_argument("--reference-revision", required=True)
+    materialization.add_argument("--candidate-manifest")
+    materialization.set_defaults(handler=command_materialization)
 
     field = subparsers.add_parser("field", help="read one validated selection-record field")
     field.add_argument("--record", required=True)
