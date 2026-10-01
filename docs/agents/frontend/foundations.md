@@ -918,6 +918,14 @@ without facts for identical bitcode and diagnostics.
   deferred assertions, once per token range however often the definition is
   parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
+  The same registered test pins GitHub #1250: false literal assertions in
+  structs and unions report once even when several declarators reparse the
+  definition, under C11/C17 and the C23 message-less spelling. True assertions
+  at the beginning, middle and end preserve every member. The issue's nested
+  bit-field record and the trailing struct/union members retain their
+  `sizeof`/`offsetof` answers and canonical-IR layout on x86-64 Linux in both
+  frontend forms; the named target keeps Windows bit-field ABI differences
+  out of that oracle.
 
 ## String literal memo
 
