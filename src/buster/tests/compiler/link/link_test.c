@@ -4321,7 +4321,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_elf_ldst(UnitTestArguments*
                         UINT32_C(0x52800000), UINT32_C(0xd65f03c0)};
                     ObjectSymbol symbols[] = {
                         {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .size = sizeof(words), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
-                        {.name = S8("ldst_data"), .section = sections[section_index], .value = 32, .size = 16, .kind = OBJECT_SYMBOL_DATA},
+                        {.name = S8("ldst_data"), .section = (u32)sections[section_index], .value = 32, .size = 16, .kind = OBJECT_SYMBOL_DATA},
                         {.name = S8("ldst_optional"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION,
                          .global = true, .weak = true, .hidden = !dynamic},
                     };
