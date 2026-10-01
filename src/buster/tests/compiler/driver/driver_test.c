@@ -4827,11 +4827,15 @@ struct CompilerDriverTestOperationTiming
     u64 duration_ns;
 };
 
+// Only the host observer, link and run block below times live operations;
+// the compile gangs record per-cell durations instead.
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL void compiler_driver_test_operation_end(CompilerDriverTestOperationTiming* timing, TimeDataType start)
 {
     timing->calls += 1;
     timing->duration_ns += timestamp_ns_between(start, timestamp_take());
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_test_operation_row(UnitTestArguments* arguments, String8 fixture, String8 operation,
                                                              CompilerDriverTestOperationTiming timing)
