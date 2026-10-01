@@ -275,3 +275,23 @@ WmEventList wm_poll_events(Arena* arena, WmHandle* windowing)
 
     return windowing->event_list;
 }
+
+bool wm_window_set_title(WmHandle* windowing, WmWindowHandle* window, String8 title)
+{
+    bool result = title.length <= 4096 && (!title.length || title.pointer) && wm_utf8_string_is_valid(title);
+    for (u64 index = 0; result && index < title.length; index += 1)
+    {
+        result = title.pointer[index] != 0;
+    }
+#if BUSTER_LINUX
+    if (result)
+    {
+        result = wm_x11_window_set_title(windowing, window, title);
+    }
+#else
+    BUSTER_UNUSED(windowing);
+    BUSTER_UNUSED(window);
+    result = false;
+#endif
+    return result;
+}

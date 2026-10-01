@@ -4267,7 +4267,7 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     int screen_id = 0;
     xcb_connection_t* connection = xcb_connect(0, &screen_id);
     BUSTER_LSAN_ENABLE();
-    if (connection)
+    if (connection && !xcb_connection_has_error(connection))
     {
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
@@ -4311,12 +4311,16 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     {
         result = &windowing_handle;
     }
+    else if (connection)
+    {
+        xcb_disconnect(connection);
+    }
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
 {
-    if (windowing->connection)
+    if (windowing && windowing->connection)
     {
         wm_x11_xdnd_reset(windowing);
         if (windowing->xim)
@@ -4342,6 +4346,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
         }
         wm_x11_xkb_deinitialize(windowing);
         xcb_disconnect(windowing->connection);
+        windowing->connection = 0;
         u64 atom_count = BUSTER_ARRAY_LENGTH(atom_names);
         for (u64 i = 0; i < atom_count; i += 1)
         {
@@ -4449,4 +4454,34 @@ bool wm_window_is_visible(WmHandle* windowing)
 {
     BUSTER_UNUSED(windowing);
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_window_set_title(WmHandle* windowing, WmWindowHandle* window, String8 title)
+{
+    bool result = windowing && window && window->owner == windowing && windowing->connection && window->handle &&
+                  !xcb_connection_has_error(windowing->connection);
+    if (result)
+    {
+        xcb_connection_t* connection = windowing->connection;
+        xcb_atom_t net_name = wm_x11_atom(X11_ATOM_NET_WM_NAME);
+        xcb_atom_t utf8 = wm_x11_atom(X11_ATOM_UTF8_STRING);
+        result = net_name != 0 && utf8 != 0;
+        if (result)
+        {
+            xcb_generic_error_t* error = xcb_request_check(connection,
+                xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, window->handle, XCB_ATOM_WM_NAME,
+                                            XCB_ATOM_STRING, 8, (u32)title.length, title.pointer));
+            result = error == 0 && !xcb_connection_has_error(connection);
+            free(error);
+            if (result)
+            {
+                error = xcb_request_check(connection,
+                    xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, window->handle, net_name, utf8,
+                                                8, (u32)title.length, title.pointer));
+                result = error == 0 && !xcb_connection_has_error(connection);
+                free(error);
+            }
+        }
+    }
+    return result;
 }

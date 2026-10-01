@@ -66,3 +66,25 @@ this component when tests and libc are enabled; mobile and tests-disabled graphs
 omit it. It covers the completed hit tree and reordered widget builds without
 adding UI dependencies to the compiler. The broad retained `ui_tests` suite is
 unregistered; these component checks do not establish device rendering support.
+
+## CPU raster image presentation
+
+The separately registered `rendering_raster` component borrows caller-owned
+RGBA8 source and canvas storage only for a draw/present call. It uses nearest
+sampling, all eight reported Exif orientations, and straight-alpha composition
+over a checkerboard. Canvas admission is capped at 4096 per axis and 64 MiB;
+rejected admission leaves the canvas unchanged. It applies no ICC/gamma
+conversion. Native presentation currently admits Linux XCB TrueColor visuals
+with 16-, 24- or 32-bit pixels; other native surfaces fail explicitly.
+
+`test_rendering_raster` checks independent headless orientation, alpha, pan,
+zoom and admission goldens. `test_rendering_raster_native` requires a real
+X server (Xvfb qualifies for this software backend), reads server pixels back,
+and exercises window events, resize and repeated shutdown. The separate
+unavailable-display invocation validates recoverable connection failure.
+Headless raster checks do not prove native transfer; XCB readback proves CPU
+presentation and native lifecycle, with no GPU-rendering claim. These targets
+do not add graphics dependencies to `ide`.
+
+XCB initialization rejects error-bearing connections before native setup.
+Shutdown consumes and clears the connection; repeated shutdown is safe.

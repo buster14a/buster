@@ -1,0 +1,197 @@
+// Actual Linux/XCB raster readback and wm lifecycle validation. These checks
+// require an admitted real X server (Xvfb is sufficient). Missing DISPLAY is a
+// separate failure-path invocation, never a native-rendering pass.
+// Synthetic pixels are first-party test data; no external assets are read.
+#include <buster/lib/system_headers.h>
+#include <buster/lib/os.h>
+#include <buster/lib/arena.h>
+#include <buster/lib/window.h>
+#include <buster/lib/rendering/raster_internal.h>
+#include <stdio.h>
+
+BUSTER_V_IMPL OsState os_state;
+BUSTER_GLOBAL_LOCAL ProgramState raster_native_program;
+BUSTER_V_IMPL ProgramState* program_state = &raster_native_program;
+BUSTER_GLOBAL_LOCAL u32 raster_native_assertions;
+BUSTER_GLOBAL_LOCAL u32 raster_native_failures;
+
+#if BUSTER_UNITY_BUILD
+#include <buster/lib/arena.c>
+#include <buster/lib/integer.c>
+#include <buster/lib/string.c>
+#include <buster/lib/os.c>
+#include <buster/lib/file.c>
+#include <buster/lib/hash.c>
+#include <buster/lib/time.c>
+#include <buster/lib/float.c>
+#include <buster/lib/window.c>
+#include <buster/lib/rendering_raster.c>
+#endif
+
+BUSTER_GLOBAL_LOCAL void raster_native_check(bool condition, char const* description)
+{
+    raster_native_assertions += 1;
+    if (!condition)
+    {
+        raster_native_failures += 1;
+        printf("FAIL: %s\n", description);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool raster_native_close_message(WmNativeSurface surface)
+{
+    xcb_connection_t* connection = (xcb_connection_t*)surface.display;
+    xcb_window_t window = (xcb_window_t)(uintptr_t)surface.window;
+    xcb_generic_error_t* error = 0;
+    xcb_intern_atom_reply_t* protocols = xcb_intern_atom_reply(connection, xcb_intern_atom(connection, 0, 12, "WM_PROTOCOLS"), &error);
+    bool result = protocols != 0 && error == 0;
+    free(error);
+    error = 0;
+    xcb_intern_atom_reply_t* close = xcb_intern_atom_reply(connection, xcb_intern_atom(connection, 0, 16, "WM_DELETE_WINDOW"), &error);
+    result = result && close != 0 && error == 0;
+    free(error);
+    error = 0;
+    if (result)
+    {
+        xcb_client_message_event_t message = {0};
+        message.response_type = XCB_CLIENT_MESSAGE;
+        message.format = 32;
+        message.window = window;
+        message.type = protocols->atom;
+        message.data.data32[0] = close->atom;
+        message.data.data32[1] = XCB_CURRENT_TIME;
+        error = xcb_request_check(connection, xcb_send_event_checked(connection, 0, window, XCB_EVENT_MASK_NO_EVENT, (char const*)&message));
+        result = error == 0 && !xcb_connection_has_error(connection);
+        free(error);
+    }
+    free(protocols);
+    free(close);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
+{
+    WmHandle* windowing = wm_initialize();
+    raster_native_check(windowing != 0, "real wm initialization");
+    if (windowing)
+    {
+        WmWindowHandle* window = wm_window_create(windowing, (WmWindowCreate){
+            .name = S8("Buster raster native validation"),
+            .size = {.width = 32, .height = 24},
+        });
+        raster_native_check(window != 0, "real wm window creation");
+        if (window)
+        {
+            WmNativeSurface surface = wm_window_get_native_surface(windowing, window);
+            raster_native_check(wm_window_set_title(windowing, window, S8("Buster raster metadata")), "checked native title update");
+            xcb_connection_t* title_connection = (xcb_connection_t*)surface.display;
+            xcb_get_property_reply_t* title_reply = xcb_get_property_reply(title_connection,
+                xcb_get_property(title_connection, 0, (xcb_window_t)(uintptr_t)surface.window, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 0, 64), 0);
+            raster_native_check(title_reply && xcb_get_property_value_length(title_reply) == 22 &&
+                                memcmp(xcb_get_property_value(title_reply), "Buster raster metadata", 22) == 0, "native title property readback");
+            free(title_reply);
+            raster_native_check(!wm_window_set_title(windowing, window, (String8){.pointer = "bad\0title", .length = 9}), "embedded NUL title refused");
+            RenderingRasterPresenter presenter = {0};
+            bool initialized = rendering_raster_initialize(&presenter, surface);
+            raster_native_check(initialized, "native visual admission and graphics context creation");
+            if (initialized)
+            {
+                u8 source_pixels[24] = {
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255,
+                    255, 255, 0, 255, 255, 0, 255, 128, 0, 255, 255, 0,
+                };
+                u8 canvas_pixels[48 * 40 * 4];
+                RenderingRasterSource source = {
+                    .pixels = {source_pixels, sizeof(source_pixels)}, .width = 3, .height = 2, .stride = 12, .orientation = 1,
+                };
+                RenderingRasterCanvas canvas = {
+                    .pixels = {canvas_pixels, sizeof(canvas_pixels)}, .width = 32, .height = 24, .stride = 32 * 4,
+                };
+                for (u32 orientation = 1; orientation <= 8; orientation += 1)
+                {
+                    source.orientation = orientation;
+                    RenderingRasterView view = {.x = 3.0, .y = 4.0, .zoom = 4.0};
+                    raster_native_check(rendering_raster_draw(canvas, source, view), "patterned orientation draw");
+                    raster_native_check(rendering_raster_present(&presenter, canvas), "real patterned image presentation");
+                    raster_native_check(rendering_raster_readback_matches_for_test(&presenter, canvas), "actual server pixels equal opaque canvas");
+                }
+
+                xcb_connection_t* connection = (xcb_connection_t*)surface.display;
+                u32 values[] = {48, 40};
+                xcb_generic_error_t* error = xcb_request_check(connection,
+                    xcb_configure_window_checked(connection, (xcb_window_t)(uintptr_t)surface.window, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values));
+                raster_native_check(error == 0, "native resize request");
+                free(error);
+                WmRect size = wm_window_get_framebuffer_rect(windowing, window);
+                raster_native_check(size.x1 == 48 && size.y1 == 40, "actual resized framebuffer query");
+                WmEventList events = wm_poll_events(arena, windowing);
+                bool resized = false;
+                for (WmEvent* event = events.first; event; event = event->next)
+                {
+                    resized = resized || (event->kind == WM_EVENT_WINDOW_RESIZE && event->window == window &&
+                                           event->position.width == 48 && event->position.height == 40);
+                }
+                raster_native_check(resized, "native resize event translation");
+                arena_reset_to_start(arena);
+                canvas.width = 48;
+                canvas.height = 40;
+                canvas.stride = 48 * 4;
+                RenderingRasterView panned = {.x = -2.0 - cycle, .y = 7.0, .zoom = 5.0};
+                raster_native_check(rendering_raster_draw(canvas, source, panned), "resized panned draw");
+                raster_native_check(rendering_raster_present(&presenter, canvas), "resized panned native presentation");
+                raster_native_check(rendering_raster_readback_matches_for_test(&presenter, canvas), "resized actual server pixels");
+
+                raster_native_check(raster_native_close_message(surface), "native close protocol sent");
+                events = wm_poll_events(arena, windowing);
+                bool closed = false;
+                for (WmEvent* event = events.first; event; event = event->next)
+                {
+                    closed = closed || (event->kind == WM_EVENT_WINDOW_CLOSE && event->window == window);
+                }
+                raster_native_check(closed, "native close event translation");
+                arena_reset_to_start(arena);
+                raster_native_check(rendering_raster_deinitialize(&presenter), "native graphics context release");
+                raster_native_check(rendering_raster_deinitialize(&presenter), "repeated presenter shutdown");
+            }
+        }
+        wm_deinitialize(windowing);
+        wm_deinitialize(windowing);
+        raster_native_check(true, "repeated wm shutdown returned");
+    }
+}
+
+int main(int argc, char* argv[])
+{
+    os_state.page_size = os_get_page_size();
+    os_state.allocation_granularity = os_state.page_size;
+    os_state.large_page_size = BUSTER_MB(2);
+    ThreadContext* context = thread_context_allocate();
+    thread_context_select(context);
+    Arena* arena = arena_create((ArenaCreation){0});
+    program_state->arena = arena;
+    bool failure_mode = argc == 2 && strcmp(argv[1], "--no-display") == 0;
+    if (failure_mode)
+    {
+        WmHandle* windowing = wm_initialize();
+        raster_native_check(windowing == 0, "unavailable XCB connection is rejected");
+        if (windowing)
+        {
+            wm_deinitialize(windowing);
+        }
+        wm_deinitialize(0);
+    }
+    else
+    {
+        for (u32 cycle = 0; cycle < 3; cycle += 1)
+        {
+            raster_native_cycle(arena, cycle);
+        }
+    }
+    printf("rendering_raster_native_tests: %u/%u assertions passed; mode=%s\n",
+           (unsigned)(raster_native_assertions - raster_native_failures), (unsigned)raster_native_assertions,
+           failure_mode ? "unavailable-display" : "actual-xcb-readback");
+    thread_context_release(context);
+    arena_destroy(arena, 1);
+    program_state->arena = 0;
+    return raster_native_failures != 0;
+}

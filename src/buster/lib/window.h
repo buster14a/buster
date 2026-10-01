@@ -318,6 +318,9 @@ struct SliceWmAppleFileUrlPath
 BUSTER_F_DECL WmHandle* wm_initialize(void);
 BUSTER_F_DECL void wm_deinitialize(WmHandle* windowing);
 BUSTER_F_DECL WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create);
+// Checked title update, currently supported by Linux/XCB only. Titles are
+// bounded UTF-8 without embedded NUL; unsupported backends return false.
+BUSTER_F_DECL bool wm_window_set_title(WmHandle* windowing, WmWindowHandle* window, String8 title);
 BUSTER_F_DECL WmRect wm_window_get_framebuffer_rect(WmHandle* windowing, WmWindowHandle* wm_window);
 BUSTER_F_DECL f32 wm_window_get_dpi(WmHandle* windowing, WmWindowHandle* wm_window);
 BUSTER_F_DECL WmEventList wm_poll_events(Arena* arena, WmHandle* windowing);

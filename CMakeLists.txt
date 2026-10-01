@@ -2421,3 +2421,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
     message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
+
+# Separate application/component graphs keep graphics out of the compiler.
+include(cmake/Raster.cmake)
