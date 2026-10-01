@@ -11788,6 +11788,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/driver_pass_through_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 
@@ -14551,6 +14552,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
@@ -15126,7 +15130,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-pthread"),
         S8("-L/sdk/lib"),
         S8("-l:libandroid.so"),
-        S8("-Wl,--gc-sections"),
         S8("-fsource-metrics=metrics.txt"),
         S8("-o"),
         S8("output.o"),
@@ -15166,7 +15169,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.library_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.library_paths[0], S8("/sdk/lib"));
     BUSTER_STRING_TEST(arguments, invocation.libraries[0], S8(":libandroid.so"));
-    BUSTER_TEST(arguments, invocation.linker_argument_count == 1);
+    BUSTER_TEST(arguments, invocation.linker_argument_count == 0);
     BUSTER_TEST(arguments, invocation.input_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
@@ -15347,7 +15350,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation uefi_linker_argument =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(uefi_linker_argument_command_line));
     BUSTER_TEST(arguments, uefi_linker_argument.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets"));
+    BUSTER_STRING_TEST(arguments, uefi_linker_argument.diagnostic, S8("raw linker arguments are not supported for UEFI targets: --gc-sections"));
     String8 unsupported_uefi_command_line[] = {
         S8("--target=wasm64-unknown-uefi"), S8("source.c"),
     };
