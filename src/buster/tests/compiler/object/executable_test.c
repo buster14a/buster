@@ -124,7 +124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_executable_sections(UnitTestArgum
                     BUSTER_TEST(arguments, object_test_mapping(state, (ProtectionFlags){.read = true, .write = true}));
                     BUSTER_TEST(arguments, *state == (index ? 0u : 41u));
                 }
-#if !BUSTER_SANITIZE
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE
                 u32 (*increment)(void) = 0;
                 memcpy(&increment, &executable.address, sizeof(increment));
                 BUSTER_TEST(arguments, increment() == (zero ? 1u : 42u));
@@ -150,7 +150,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_executable_sections(UnitTestArgum
                 BUSTER_TEST(arguments, object_test_mapping(entry_address, (ProtectionFlags){.read = true, .execute = true}));
                 BUSTER_TEST(arguments, object_test_mapping(entry_address - page_size, (ProtectionFlags){.read = true}));
                 BUSTER_TEST(arguments, object_test_mapping((void*)(uintptr_t)states[0], (ProtectionFlags){.read = true, .write = true}));
-#if !BUSTER_SANITIZE
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE
                 u32 (*increment)(void) = 0;
                 memcpy(&increment, &leading.address, sizeof(increment));
                 BUSTER_TEST(arguments, increment() == (zero ? 1u : 42u));
