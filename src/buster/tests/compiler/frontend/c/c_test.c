@@ -12026,7 +12026,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         }
         else
         {
-            expected_matching_plus_one[expected_stack_positions[--stack_count]] = token_index + 1;
+            u32 open = expected_stack_positions[--stack_count];
+            expected_matching_plus_one[open] = token_index + 1;
+            expected_matching_plus_one[token_index] = open + 1;
         }
     }
     mismatch_count += stack_count;
@@ -12053,6 +12055,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     }
     BUSTER_TEST(arguments, memcmp(indexed->matching_delimiters_plus_one, expected_matching_plus_one,
                                   sizeof(*expected_matching_plus_one) * token_count) == 0);
+
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        u32 match = expected_matching_plus_one[token_index] - 1;
+        u32 forward = match > token_index ? match : UINT32_MAX;
+        u32 reverse = match < token_index ? match : UINT32_MAX;
+        BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, token_index, 0, false) == forward);
+        BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, token_index, 0, true) == reverse);
+        if (reverse != UINT32_MAX)
+        {
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, token_index, reverse, true) == reverse);
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, token_index, reverse + 1, true) == UINT32_MAX);
+        }
+    }
+    BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, token_count, 0, false) == UINT32_MAX);
+    BUSTER_TEST(arguments, c_test_parse_delimiter_match(&parse, preprocess, UINT32_MAX, 0, true) == UINT32_MAX);
 
     // Run the same index through the scalar/reference shape fallback. The
     // production sidecar is present above; clearing only this private pointer
@@ -12160,6 +12178,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     BUSTER_TEST(arguments, uninterned_indexes[0].built && uninterned_indexes[1].built);
     BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[0]), expected_uninterned) == 0);
     BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[1]), expected_uninterned) == 0);
+    // Fixed rows exercise malformed streams without sending invalid C through
+    // the semantic machines. Inner pairs completed before a mismatch survive.
+    typedef struct CTestDelimiterEdges CTestDelimiterEdges;
+    struct CTestDelimiterEdges
+    {
+        String8 source;
+        u32 matching_plus_one[6];
+        u32 token_count;
+        u32 mismatch_count;
+        u32 prefix_tokens;
+    };
+    CTestDelimiterEdges const edge_cases[] = {
+        {.source = S8(""), .token_count = 0},
+        {.source = S8("()[]{}"), .matching_plus_one = {2, 1, 4, 3, 6, 5}, .token_count = 6},
+        {.source = S8("([{}])"), .matching_plus_one = {6, 5, 4, 3, 2, 1}, .token_count = 6},
+        {.source = S8("( ] )"), .token_count = 3, .mismatch_count = 2},
+        {.source = S8("([)]"), .token_count = 4, .mismatch_count = 2},
+        {.source = S8("({}) ["), .matching_plus_one = {4, 3, 2, 1}, .token_count = 5, .mismatch_count = 1},
+        {.source = S8("( ( ) ]"), .matching_plus_one = {0, 3, 2}, .token_count = 4, .mismatch_count = 1},
+        {.source = S8(") () ("), .matching_plus_one = {0, 3, 2}, .token_count = 4, .mismatch_count = 2},
+        {.source = S8("()"), .matching_plus_one = {2, 1}, .token_count = 2, .prefix_tokens = 63},
+        {.source = S8("()"), .matching_plus_one = {2, 1}, .token_count = 2, .prefix_tokens = 4095},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(edge_cases); case_index += 1)
+    {
+        CTestDelimiterEdges test = edge_cases[case_index];
+        TemporalArena edge_temporary = scratch_begin(&arguments->arena, 1);
+        u64 edge_length = (u64)test.prefix_tokens * 2 + test.source.length;
+        char8* edge_source = arena_allocate(edge_temporary.arena, char8, edge_length ? edge_length : 1);
+        for (u32 prefix = 0; prefix < test.prefix_tokens; prefix += 1)
+        {
+            edge_source[(u64)prefix * 2] = ';';
+            edge_source[(u64)prefix * 2 + 1] = ' ';
+        }
+        if (test.source.length)
+        {
+            memcpy(edge_source + (u64)test.prefix_tokens * 2, test.source.pointer, test.source.length);
+        }
+        CPreprocessResult edge_preprocess = c_preprocess(edge_temporary.arena,
+            (String8){.pointer = edge_source, .length = edge_length}, (CPreprocessOptions){0});
+        u32 spelled_tokens = test.prefix_tokens + test.token_count;
+        BUSTER_TEST(arguments, edge_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, edge_preprocess.token_count >= spelled_tokens &&
+                               edge_preprocess.token_count <= (u64)spelled_tokens + 1);
+        for (u32 path = 0; path < 2; path += 1)
+        {
+            u64 edge_mark = edge_temporary.arena->position;
+            u8* dirty = arena_allocate(edge_temporary.arena, u8, BUSTER_KB(64));
+            memset(dirty, 0xa5, BUSTER_KB(64));
+            arena_set_position(edge_temporary.arena, edge_mark);
+            CTokenPositionIndex edge_index = {0};
+            CParseResult edge_parse = {.arena = edge_temporary.arena, .position_index = &edge_index};
+            CTokenShape* edge_shapes = edge_preprocess.recovery ? edge_preprocess.recovery->token_shapes : 0;
+            if (path && edge_preprocess.recovery)
+            {
+                edge_preprocess.recovery->token_shapes = 0;
+            }
+            c_parse_position_index_ensure(&edge_parse, edge_preprocess);
+            if (edge_preprocess.recovery)
+            {
+                edge_preprocess.recovery->token_shapes = edge_shapes;
+            }
+            BUSTER_TEST(arguments, edge_index.built);
+            BUSTER_TEST(arguments, edge_index.delimiter_mismatch_count == test.mismatch_count);
+            for (u32 token = 0; token < edge_preprocess.token_count; token += 1)
+            {
+                u32 expected = 0;
+                if (token >= test.prefix_tokens && token - test.prefix_tokens < test.token_count)
+                {
+                    expected = test.matching_plus_one[token - test.prefix_tokens];
+                    if (expected) expected += test.prefix_tokens;
+                }
+                BUSTER_TEST(arguments, edge_index.matching_delimiters_plus_one[token] == expected);
+                u32 forward = expected > token + 1 ? expected - 1 : UINT32_MAX;
+                u32 reverse = expected && expected <= token ? expected - 1 : UINT32_MAX;
+                BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, token, 0, false) == forward);
+                BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, token, 0, true) == reverse);
+                if (reverse != UINT32_MAX)
+                {
+                    BUSTER_TEST(arguments,
+                        c_test_parse_delimiter_match(&edge_parse, edge_preprocess, token, reverse, true) == reverse);
+                    BUSTER_TEST(arguments,
+                        c_test_parse_delimiter_match(&edge_parse, edge_preprocess, token, reverse + 1, true) == UINT32_MAX);
+                }
+            }
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, spelled_tokens + 1, 0, false) == UINT32_MAX);
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, spelled_tokens + 1, 0, true) == UINT32_MAX);
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, UINT32_MAX, 0, false) == UINT32_MAX);
+            BUSTER_TEST(arguments, c_test_parse_delimiter_match(&edge_parse, edge_preprocess, UINT32_MAX, 0, true) == UINT32_MAX);
+        }
+        scratch_end(edge_temporary);
+    }
     return result;
 }
 

@@ -39,7 +39,7 @@
 //                                                 beside the final stream
 //   c_parse_token_class_compute,                  keyword and token
 //   c_parse_position_index_build                  classification, the
-//                                                 matching-delimiter index
+//                                                 bidirectional delimiter index
 //   c_parse_builtin_type_layout,                  target-dependent type
 //   c_record_layout_place,                        sizes/alignments, the one
 //   CParseLayoutAgenda ..                         member-placement authority
@@ -505,7 +505,9 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CTok
     }
     else
     {
-        index->matching_delimiters_plus_one[stack[--*stack_count].position] = token_index + 1;
+        u32 open = stack[--*stack_count].position;
+        index->matching_delimiters_plus_one[open] = token_index + 1;
+        index->matching_delimiters_plus_one[token_index] = open + 1;
     }
 }
 
@@ -694,15 +696,36 @@ BUSTER_C_SHARED void c_parse_position_index_ensure(CParseResult* result, CPrepro
 
 // Matching closer for the opening delimiter at open, or UINT32_MAX; see
 // CTokenPositionIndex.matching_delimiters_plus_one. The stored bias makes an
-// unmatched opener's zero decode to UINT32_MAX without a test of its own.
+// unmatched opener's zero decode to UINT32_MAX; direction rejects closer rows.
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter_indexed(CParseResult* result, CPreprocessResult preprocess, u32 open)
 {
     if (!result->position_index->built)
     {
         c_parse_position_index_build(result, preprocess);
     }
-    return open < preprocess.token_count ? result->position_index->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
+    u32 close = open < preprocess.token_count ? result->position_index->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
+    return close > open ? close : UINT32_MAX;
 }
+
+// Matching opener in [start, close), or UINT32_MAX. Direction rejects both
+// unmatched tokens and opener rows without classifying the token again.
+BUSTER_C_INTERNAL u32 c_parse_matching_opener_indexed(CParseResult* result, CPreprocessResult preprocess, u32 close, u32 start)
+{
+    if (!result->position_index->built)
+    {
+        c_parse_position_index_build(result, preprocess);
+    }
+    u32 open = close < preprocess.token_count ? result->position_index->matching_delimiters_plus_one[close] - 1 : UINT32_MAX;
+    return open >= start && open < close ? open : UINT32_MAX;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_delimiter_match(CParseResult* result, CPreprocessResult preprocess, u32 token, u32 start, bool reverse)
+{
+    return reverse ? c_parse_matching_opener_indexed(result, preprocess, token, start)
+                   : c_parse_matching_delimiter_indexed(result, preprocess, token);
+}
+#endif
 
 // First recorded position in [start, end), or UINT32_MAX. Positions are
 // stored ascending, so the lowest match is the same one the removed linear
@@ -23073,8 +23096,7 @@ BUSTER_C_INTERNAL bool c_parse_checked_expression_type(CTypeParseMachine* machin
     return valid;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
-                                                           u32 const* openers)
+BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 cursor = end;
     bool done = false;
@@ -23083,7 +23105,7 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
         CToken token = preprocess.tokens[cursor - 1];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
         {
-            u32 open = openers[cursor - 1 - start];
+            u32 open = c_parse_matching_opener_indexed(result, preprocess, cursor - 1, start);
             if (open < cursor && open >= start)
             {
                 // A control header ends before its unbraced body. In particular,
@@ -23119,7 +23141,6 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
             cursor -= 1;
         }
     }
-    BUSTER_UNUSED(result);
     return cursor;
 }
 
@@ -23182,7 +23203,7 @@ BUSTER_C_INTERNAL u32 c_parse_update_prefix_operand_end(CParseResult* result, CP
     return cursor;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end, u32 const* openers)
+BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
     u32 cursor = end;
     bool more = cursor > start;
@@ -23192,13 +23213,14 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPr
         bool subscript = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET);
         bool group = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         bool literal = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
-        if ((subscript || group || literal) && openers[cursor - 1 - start] >= start && openers[cursor - 1 - start] < cursor)
+        u32 open = (subscript || group || literal) ? c_parse_matching_opener_indexed(result, preprocess, cursor - 1, start) : UINT32_MAX;
+        if (open < cursor)
         {
-            cursor = openers[cursor - 1 - start];
+            cursor = open;
             more = cursor > start && (subscript || c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]));
             if (more && group && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
-                u32 cast_start = openers[cursor - 1 - start];
+                u32 cast_start = c_parse_matching_opener_indexed(result, preprocess, cursor - 1, start);
                 u32 type_end = cast_start + 1;
                 CTypeId cast = c_parse_machineless_base_type(result, preprocess, scope, type_end, cursor - 1, &type_end);
                 if (cast.value < result->type_count)
@@ -23232,12 +23254,12 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPr
 }
 
 BUSTER_C_INTERNAL bool c_parse_update_after_cast(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                   u32 start, u32 update, u32 const* openers)
+                                                   u32 start, u32 update)
 {
     bool cast = false;
     if (update > start && c_token_is_punctuator(&preprocess.tokens[update - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
     {
-        u32 open = openers[update - 1 - start];
+        u32 open = c_parse_matching_opener_indexed(result, preprocess, update - 1, start);
         if (open >= start && open + 1 < update - 1)
         {
             u32 cursor = open + 1;
@@ -23552,7 +23574,6 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 c_parse_lowering_constraint_consider(diagnostic, conversion_message, assignment_index, assignment_index + 1);
         }
     }
-    u32* openers = arena_allocate(machine->scratch_arena, u32, end - start);
     u8* declaration_tokens = arena_allocate(machine->scratch_arena, u8, end - start);
     memset(declaration_tokens, 0, end - start);
     for (u32 entity_index = first_local; entity_index < result->entity_count; entity_index = next_local[entity_index])
@@ -23572,20 +23593,6 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 }
                 depth += token.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN);
                 depth -= depth && token.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE);
-            }
-        }
-    }
-    memset(openers, 0xff, sizeof(*openers) * (end - start));
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
-            if (close < end)
-            {
-                openers[close - start] = index;
             }
         }
     }
@@ -23645,7 +23652,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
             CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
-            u32 operand_start = c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers);
+            u32 operand_start = c_parse_constraint_postfix_start(result, preprocess, scope, start, index);
             CTypeId base = C_TYPE_ID_INVALID;
             CTypeId subscript = C_TYPE_ID_INVALID;
             bool base_valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, index, &base);
@@ -23670,10 +23677,10 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         if (member || call)
         {
             CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
-            u32 operand_start = c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers);
+            u32 operand_start = c_parse_constraint_postfix_start(result, preprocess, scope, start, index);
             bool cast_group = false;
             u32 group_start = call && index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                  ? openers[index - 1 - start] : UINT32_MAX;
+                                  ? c_parse_matching_opener_indexed(result, preprocess, index - 1, start) : UINT32_MAX;
             if (call && group_start > start && group_start < index && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[group_start - 1],
                     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH))) continue;
             if (call && group_start >= start && group_start < index &&
@@ -23819,18 +23826,18 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         bool control_prefix = false;
         if (update && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
-            u32 open = openers[index - 1 - start];
+            u32 open = c_parse_matching_opener_indexed(result, preprocess, index - 1, start);
             control_prefix = open > start && open < index && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1],
                 C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) |
                 C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
         }
-        bool prefix = update && (control_prefix || c_parse_update_after_cast(result, preprocess, scope, start, index, openers) ||
+        bool prefix = update && (control_prefix || c_parse_update_after_cast(result, preprocess, scope, start, index) ||
                                  !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
                                  c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                                      C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO) |
                                      C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF)));
-        u32 operand_start = prefix ? index + 1 : update ? c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers)
-                                                      : c_parse_constraint_expression_start(result, preprocess, start, index, openers);
+        u32 operand_start = prefix ? index + 1 : update ? c_parse_constraint_postfix_start(result, preprocess, scope, start, index)
+                                                      : c_parse_constraint_expression_start(result, preprocess, start, index);
         u32 operand_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, index + 1, end) : index;
         CTypeId type_id = C_TYPE_ID_INVALID;
         u64 query_mark = machine->scratch_arena->position;
@@ -23905,7 +23912,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         u32 call_open = UINT32_MAX;
         if (assignment && operand_end > operand_start && c_token_is_punctuator(&preprocess.tokens[operand_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
-            call_open = openers[operand_end - 1 - start];
+            call_open = c_parse_matching_opener_indexed(result, preprocess, operand_end - 1, start);
             call_result = !c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_STAR) &&
                           call_open > operand_start && call_open < operand_end &&
                           c_parse_expression_token_ends_operand(preprocess.tokens[call_open - 1]);
@@ -24721,7 +24728,6 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
 {
     CParseInitializerDiagnostic diagnostic = {0};
     u64 mark = machine->scratch_arena->position;
-    u32* openers = 0;
     CParseCandidates sizeof_words = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SIZEOF, C_PARSE_POPULATION_NONE, start);
     // A parenthesized operand's updates are checked once, with the outermost
     // operand that contains them. A `sizeof` nested inside that operand still
@@ -24785,26 +24791,12 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         {
             CToken current = preprocess.tokens[update];
             if (!c_token_is_punctuator(&current, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&current, C_PUNCTUATOR_MINUS_MINUS)) continue;
-            if (!openers)
-            {
-                openers = arena_allocate(machine->scratch_arena, u32, end - start);
-                memset(openers, 0xff, sizeof(*openers) * (end - start));
-                for (u32 cursor = start; cursor < end; cursor += 1)
-                {
-                    CToken group = preprocess.tokens[cursor];
-                    if (group.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(group.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
-                    {
-                        u32 matching = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
-                        if (matching < end) openers[matching - start] = cursor;
-                    }
-                }
-            }
             CScopeId update_scope = c_parse_scope_for_token(result, scope, update);
-            bool prefix = update == operand_start || c_parse_update_after_cast(result, preprocess, update_scope, start, update, openers) ||
+            bool prefix = update == operand_start || c_parse_update_after_cast(result, preprocess, update_scope, start, update) ||
                           !c_parse_expression_token_ends_operand(preprocess.tokens[update - 1]) ||
                           c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[update - 1],
                               C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
-            u32 place_start = prefix ? update + 1 : c_parse_constraint_postfix_start(result, preprocess, update_scope, start, update, openers);
+            u32 place_start = prefix ? update + 1 : c_parse_constraint_postfix_start(result, preprocess, update_scope, start, update);
             u32 place_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, update + 1, operand_end) : update;
             CTypeId type = C_TYPE_ID_INVALID;
             u64 query_mark = machine->scratch_arena->position;
@@ -26220,17 +26212,6 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
         u64 mark = machine->scratch_arena->position;
         u8* labels = arena_allocate(machine->scratch_arena, u8, result->entity_count);
         memset(labels, 0, result->entity_count);
-        u32* openers = arena_allocate(machine->scratch_arena, u32, end - start);
-        memset(openers, 0xff, sizeof(*openers) * (end - start));
-        for (u32 index = start; index < end; index += 1)
-        {
-            CToken token = preprocess.tokens[index];
-            if (token.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
-            {
-                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
-                if (close < end) openers[close - start] = index;
-            }
-        }
         for (u32 index = start; index + 1 < end; index += 1)
         {
             if (skipped[index - start])
@@ -26275,7 +26256,7 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
             if (assignment)
             {
                 CEntityId destination = C_ENTITY_ID_INVALID;
-                u32 place = c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers);
+                u32 place = c_parse_constraint_postfix_start(result, preprocess, scope, start, index);
                 if (place < index && preprocess.tokens[place].kind == C_TOKEN_IDENTIFIER)
                 {
                     destination = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[place]);
