@@ -1,0 +1,4 @@
+tests/basic_c_switch_case_blocks.c
+tests/basic_c_nested_control_substatement.c
+tests/basic_c_goto_into_loop.c
+tests/basic_c_conditional_array_branch.c
