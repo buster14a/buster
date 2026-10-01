@@ -1,0 +1,117 @@
+name: Issue 2116 summary-write probe
+on:
+  push:
+    branches: [codex/2116-summary-write-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compile original and diagnostic harnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/issue-2116
+          clang --version
+          git rev-parse HEAD
+          test "$(git hash-object tools/throughput/tests.c)" = 95dc53ba95f7c3e681bb3e818d74ef04ad9da6be
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/original
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/throughput/tests.c')
+          text = path.read_text()
+          old = '''        /* Restrict only this child so buffered report writes fail at close. */
+                  struct rlimit limit;
+                  int ok = getrlimit(RLIMIT_FSIZE, &limit) == 0;
+                  if (ok)
+                  {
+                      limit.rlim_cur = 1;
+                      ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+                  }
+                  result = ok && tp_compare(argv[3]) == 2 ? 0 : 1;'''
+          # Dedent the YAML embedding's extra eight spaces on continuation lines.
+          old = old.replace('\n        ', '\n')
+          new = '''        struct rlimit saved = {0}, limit = {0};
+                  int got = getrlimit(RLIMIT_FSIZE, &saved);
+                  int get_error = got ? errno : 0;
+                  int signal_error = 0, limit_status = -2, limit_error = 0;
+                  int comparison = -2, comparison_error = 0, restored = -2, restore_error = 0;
+                  if (got == 0)
+                  {
+                      limit = saved;
+                      limit.rlim_cur = 1;
+                      if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR) signal_error = errno;
+                      if (!signal_error)
+                      {
+                          limit_status = setrlimit(RLIMIT_FSIZE, &limit);
+                          limit_error = limit_status ? errno : 0;
+                      }
+                      if (!signal_error && limit_status == 0)
+                      {
+                          errno = 0;
+                          comparison = tp_compare(argv[3]);
+                          comparison_error = errno;
+                      }
+                      restored = setrlimit(RLIMIT_FSIZE, &saved);
+                      restore_error = restored ? errno : 0;
+                  }
+                  clearerr(stdout);
+                  clearerr(stderr);
+                  fprintf(stderr, "SUMMARY_WRITE_PROBE get=%d get_errno=%d soft=%ju hard=%ju signal_errno=%d set=%d set_errno=%d compare=%d compare_errno=%d restore=%d restore_errno=%d\\n",
+                          got, get_error, (uintmax_t)saved.rlim_cur, (uintmax_t)saved.rlim_max,
+                          signal_error, limit_status, limit_error, comparison, comparison_error, restored, restore_error);
+                  result = got == 0 && !signal_error && limit_status == 0 && comparison == 2 && restored == 0 ? 0 : 1;'''
+          new = new.replace('\n        ', '\n')
+          if text.count(old) != 1:
+              raise SystemExit('child source mismatch')
+          text = text.replace(old, new)
+          old = '''        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+                  CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);
+                  test_summaries(directory, 0);'''.replace('\n        ', '\n')
+          new = '''        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+                  CHECK_CHILD_EXIT(child, 0, log);
+                  test_summaries(directory, 0);'''.replace('\n        ', '\n')
+          if text.count(old) != 1:
+              raise SystemExit('parent source mismatch')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- tools/throughput/tests.c > build/issue-2116/diagnostic.patch
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/diagnostic
+      - name: Record bounded original and instrumented attempts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in original diagnostic; do
+            for attempt in 1 2; do
+              root="$PWD/build/issue-2116/$mode-$attempt"
+              set +e
+              "build/issue-2116/$mode" "$root" > "build/issue-2116/$mode-$attempt.log" 2>&1
+              status=$?
+              set -e
+              printf 'PROBE_ATTEMPT mode=%s attempt=%s exit=%s\n' "$mode" "$attempt" "$status" | tee -a build/issue-2116/outcomes.txt
+              grep -E 'TEST failure|THROUGHPUT_INTEGRATION_TEST|SUMMARY_WRITE_PROBE' "build/issue-2116/$mode-$attempt.log" || true
+              if test -f "$root/summary-write-failure.log"; then
+                printf '\nCHILD_LOG mode=%s attempt=%s\n' "$mode" "$attempt"
+                cat "$root/summary-write-failure.log"
+                printf '\nEND_CHILD_LOG\n'
+              fi
+            done
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-2116-${{ matrix.os }}-${{ github.run_id }}
+          path: build/issue-2116
+          retention-days: 7
+          if-no-files-found: error
