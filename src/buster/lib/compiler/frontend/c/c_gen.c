@@ -50246,10 +50246,11 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CAr
 //
 // `requested_out`, when asked for, receives the largest alignment any of the
 // records *asks* for, before it is merged with the declared type's natural
-// alignment. Only the bit-field placement rule needs that raw number: GNU
-// `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
-// is below the declared type's own alignment, while every other reader of a
-// request only ever raises with it. Zero means no record resolved.
+// alignment. Packed members merge that raw number with their placement floor
+// after validating standard constraints against the declared type. GNU
+// `aligned(N)` also starts a bit-field at the next multiple of N bytes even
+// when N is below the declared type's own alignment. Zero means no record
+// resolved.
 BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
                                                              u32* alignment_out, u32* requested_out, String8* rejection_out)
 {
