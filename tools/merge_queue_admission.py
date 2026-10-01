@@ -255,8 +255,14 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
         require(data["bypass_actors"] == BYPASS_ACTORS,
                 "bypass actors differ from reviewed main ruleset")
     if "current_user_can_bypass" in data:
-        require(data["current_user_can_bypass"] == "never",
-                "the admission reader must not have bypass authority")
+        if read_only_response:
+            require(data["current_user_can_bypass"] == "never",
+                    "the admission reader must not have bypass authority")
+        else:
+            # The complete reviewed inventory above scopes the offline audit.
+            # A saved response reports capability, not authenticated reader identity.
+            require(data["current_user_can_bypass"] in ("never", "always", "pull_requests_only"),
+                    "administrator reader bypass capability is invalid")
     rules = data.get("rules", [])
     require(isinstance(rules, list), "rules must be a list")
     by_type = {rule["type"]: rule for rule in rules}

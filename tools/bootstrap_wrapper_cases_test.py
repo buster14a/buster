@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 import bootstrap_wrapper_cases as scheduler
+import bootstrap_absolute_paths_test
 
 
 class SchedulerTests(unittest.TestCase):
@@ -342,6 +343,11 @@ sys.exit(0 if summary['success'] else 1)
         self.assertIn("set -euo pipefail", wrappers)
         self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", wrappers)
         self.assertNotIn("continue-on-error", wrappers)
+
+
+def load_tests(loader, tests, pattern):
+    tests.addTests(loader.loadTestsFromModule(bootstrap_absolute_paths_test))
+    return tests
 
 
 if __name__ == "__main__":

@@ -1107,10 +1107,11 @@ static void test_workload_admission(char const* executable, char const* root)
     CHECK(tp_path(output, directory, "success"));
 #if defined(_WIN32)
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
-#elif defined(BUSTER_SANITIZE)
+#elif BUSTER_SANITIZE
     puts("THROUGHPUT_ADMISSION_STACK status=unsupported reason=sanitizer-instrumented");
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
 #else
+    puts("THROUGHPUT_ADMISSION_STACK status=selected mode=throughput-low-stack");
     TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
                                                 evidence, output, manifests, log);
 #endif

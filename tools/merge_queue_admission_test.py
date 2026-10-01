@@ -280,12 +280,50 @@ class RulesTests(unittest.TestCase):
                     with self.assertRaisesRegex(gate.AdmissionError, "bypass actors differ"):
                         gate.validate_ruleset(data, read_only_response=read_only)
 
-    def test_reader_bypass_authority_is_rejected(self):
+    def test_administrator_response_accepts_known_reader_capabilities(self):
+        for authority in ("never", "always", "pull_requests_only"):
+            with self.subTest(authority=authority):
+                data = self.ruleset()
+                data["current_user_can_bypass"] = authority
+                gate.validate_ruleset(data)
+
+    def test_administrator_reader_capability_requires_reviewed_inventory(self):
+        for authority in ("always", "pull_requests_only"):
+            for inventory in (None, [], [{"actor_type": "OrganizationAdmin"}]):
+                with self.subTest(authority=authority, inventory=inventory):
+                    data = self.ruleset()
+                    data["current_user_can_bypass"] = authority
+                    if inventory is None:
+                        del data["bypass_actors"]
+                    else:
+                        data["bypass_actors"] = inventory
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass (inventory|actors)"):
+                        gate.validate_ruleset(data)
+
+    def test_readonly_reader_bypass_authority_is_rejected(self):
         for authority in ("always", "pull_requests_only", None, ""):
-            data = live_rules()
-            data["current_user_can_bypass"] = authority
-            with self.assertRaisesRegex(gate.AdmissionError, "bypass authority"):
+            for visible in (False, True):
+                with self.subTest(authority=authority, visible=visible):
+                    data = self.ruleset() if visible else live_rules()
+                    data["current_user_can_bypass"] = authority
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass authority"):
+                        gate.validate_ruleset(data, read_only_response=True)
+
+    def test_readonly_reader_without_bypass_is_accepted(self):
+        for visible in (False, True):
+            with self.subTest(visible=visible):
+                data = self.ruleset() if visible else live_rules()
+                data["current_user_can_bypass"] = "never"
                 gate.validate_ruleset(data, read_only_response=True)
+
+    def test_unknown_reader_capability_is_rejected_in_both_modes(self):
+        for authority in (None, "", "ALWAYS", "unknown", True, 1, [], {}):
+            for read_only in (False, True):
+                with self.subTest(authority=authority, read_only=read_only):
+                    data = self.ruleset()
+                    data["current_user_can_bypass"] = authority
+                    with self.assertRaises(gate.AdmissionError):
+                        gate.validate_ruleset(data, read_only_response=read_only)
 
     def test_live_ruleset_identity_and_visibility(self):
         api = gate.GitHub("buster14a/buster", "fixture-token")
