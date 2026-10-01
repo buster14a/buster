@@ -157,7 +157,8 @@ gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body true --repo buster14a/bust
 ```
 
 `davidgmbb` dispatches the fixed workflow from protected `main` with full
-lowercase immutable commit IDs and a stable idempotency key; the job runs
+lowercase immutable commit IDs, a stable idempotency key and a `recipe` from
+the reviewed allowlist (default `validate-buster-v1`); the job runs
 without an approval step once `authorize` passes. Runs started by any other
 permitted requester, or re-run by anyone other than `davidgmbb`, are skipped
 before the self-hosted runner. The service

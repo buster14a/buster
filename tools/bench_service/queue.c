@@ -2,6 +2,7 @@
  * the CLI and its native tests; injected failures go through the real writer.
  */
 #include "queue.h"
+#include "zen5_calibration_profile.h"
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -24,14 +25,18 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "contract=docs/native-retirement-performance-contract.md\n"
     "contract-sha256=67fff9a8b53764792046ba1c1ec104a24cc6e525c4322a6206b218b188a431b0\n"
     "support-declaration=docs/native-retirement-support-v1.tsv\n"
-    "support-declaration-sha256=a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932\n"
+    "support-declaration-sha256=434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61\n"
     "binding-validator=tools/native_retirement_performance_binding.py\n"
-    "binding-validator-sha256=a089ba98da5cd851725e91abb08375449fbed5ccf32afa6a347439c152a476b5\n"
+    "binding-validator-sha256=699e3710115fd626ff45156b8a0e3b64eb4e4512ea7286444a331aefdd3b9e46\n"
     "binding-schema=tools/native_retirement_performance_schema.py\n"
     "binding-schema-sha256=e19a5cf1114997ddf4a71cf47f8da4125777b49441d1a48d012bab7f2bb8e6a3\n"
     "statistics=tools/throughput/retirement_stats.h\n"
     "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
+
+/* Served (#426): the systemd broker's version-2 recipe selector starts its
+ * outer unit and the thirteen typed stages of zen5_stage.h. */
+BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
 
 u32 bq_u32(u8 const* bytes)
 {
@@ -133,7 +138,8 @@ BqRecipe bq_recipe_from_name(String8 name)
                       string_equal(name, S8("fake-failure-v1")) ? BQ_RECIPE_FAKE_FAILURE :
                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
                       string_equal(name, S8("native-retirement-performance-v1")) ?
-                      BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_UNKNOWN;
+                      BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED :
+                      string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION : BQ_RECIPE_UNKNOWN;
     return result;
 }
 
@@ -151,6 +157,7 @@ String8 bq_recipe_name(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = S8("native-retirement-performance-v1");
+    else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION) result = S8("zen5-calibration-v1");
     return result;
 }
 
@@ -162,6 +169,8 @@ String8 bq_recipe_profile(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = (String8){(char8*)bq_native_retirement_blocked_profile,
                            sizeof(bq_native_retirement_blocked_profile) - 1};
+    else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
+        result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
     return result;
 }
 
@@ -169,9 +178,11 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 {
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
-    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" : "";
+    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
+                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
-                               recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+                               recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
+                               recipe == BQ_RECIPE_ZEN5_CALIBRATION);
     if (files) *files = (BqRecipeFiles){0};
     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
                       snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
@@ -197,13 +208,13 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER;
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 
@@ -235,6 +246,9 @@ bool bq_request_valid(BqRequest const* request)
     String8 candidate = bq_field(request, 4);
     bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
+              /* zen5-calibration-v1 measures one immutable source named twice. */
+              (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
+               (base.length == 40 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
 }

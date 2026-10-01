@@ -143,6 +143,14 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.assertIn("remain pending", self.watch())
         self.assertEqual(self.api.cancelled, [])
 
+    def test_skipped_buster_job_does_not_cancel_the_group(self):
+        # Merge-group run 36831519396: the main-push-only reuse job completes
+        # as skipped beside healthy shards and must not trigger fail-fast.
+        self.api.jobs.append({"name": "Main CI reuse decision", "status": "completed",
+                              "conclusion": "skipped"})
+        self.assertIn("remain pending", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
     def test_buster_success_does_not_end_watch_while_other_checks_run(self):
         self.api.runs[0].update(status="completed", conclusion="success")
         self.api.jobs[0].update(status="completed", conclusion="success")

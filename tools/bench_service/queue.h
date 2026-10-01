@@ -17,7 +17,12 @@
 #define BQ_SCHEMA 3u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
-#define BQ_JOB_CAP 64u
+/* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
+ * no slot index or count, and replay only rejects a file longer than
+ * BQ_EVENT_CAP full frames, so a journal written under the earlier 64-job cap
+ * replays unchanged and keeps its job ids. 512 holds a full #426 window 1 plus
+ * a 64-attempt window 2 several times over; events stay 16 per job. */
+#define BQ_JOB_CAP 512u
 #define BQ_EVENT_CAP (BQ_JOB_CAP * 16u)
 #define BQ_REQUEST_CAP 320u
 #define BQ_HEADER_SIZE 160u
@@ -70,7 +75,8 @@ typedef enum BqRecipe
     BQ_RECIPE_FAKE_SUCCESS,
     BQ_RECIPE_FAKE_FAILURE,
     BQ_RECIPE_VALIDATE_BUSTER,
-    BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED
+    BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
+    BQ_RECIPE_ZEN5_CALIBRATION
 } BqRecipe;
 
 typedef struct BqRecipeFiles
@@ -127,6 +133,9 @@ typedef struct BqState
     BqJob jobs[BQ_JOB_CAP];
     BqEvent events[BQ_EVENT_CAP];
 } BqState;
+/* BqQueue lives on callers' stacks and bq_append copies a tentative BqState,
+ * so a raised cap must keep both well inside an 8 MiB main-thread stack. */
+_Static_assert(sizeof(BqState) <= 1024u * 1024u, "BqState must stay stack-resident");
 
 /* Data-driven syscall fault points: no callbacks or alternative queue model.
  * CLI callers cannot configure them. A zeroed structure disables injection.
