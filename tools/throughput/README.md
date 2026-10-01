@@ -79,9 +79,9 @@ POSIX launch failures preserve the failing setup/exec stage and errno through
 a small close-on-exec error pipe. Child reporting uses no allocation or buffered
 stdio, and parent reads are nonblocking after the waited child exits. A missing
 executable, denied executable, invalid format or missing working directory now
-reports a launch error; a program that successfully starts and exits125 remains
+reports a launch error; a program that successfully starts and exits 125 remains
 a normal child result. The native self-test checks all four refusals, the valid
-exit125 control and repeated descriptor cleanup. This diagnoses a refusal; it
+exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
 does not explain an unreproduced transient OS error or retry the invocation.
 
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure

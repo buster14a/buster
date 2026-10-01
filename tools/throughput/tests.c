@@ -514,7 +514,7 @@ static unsigned test_open_descriptor_count(void)
 }
 
 /* The error channel must report preexec failure, survive repeated cleanup,
- * and remain empty when a successfully launched program itself exits125. */
+ * and remain empty when a successfully launched program itself exits 125. */
 static void test_launch_errors(char const* executable, char const* root)
 {
     char log[TP_PATH_CAP], denied_path[TP_PATH_CAP], format_path[TP_PATH_CAP];

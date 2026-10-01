@@ -39,7 +39,7 @@ typedef enum TpDiagnostic
     TP_DIAGNOSTICS
 } TpDiagnostic;
 
-/* Child-side failures are distinct from a program that legitimately exits125. */
+/* Child-side failures are distinct from a program that legitimately exits 125. */
 typedef enum TpLaunchStage
 {
     TP_LAUNCH_NONE,
@@ -301,7 +301,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     int ready[2] = {-1, -1}, launch[2] = {-1, -1};
     int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     /* The child reports one small packet before exec. CLOEXEC distinguishes
-     * a real exit125; nonblocking reads cannot inherit a descendant wait. */
+     * a real exit 125; nonblocking reads cannot inherit a descendant wait. */
     int ok = log >= 0 && pipe(ready) == 0 && pipe(launch) == 0 &&
              fcntl(launch[0], F_SETFL, O_NONBLOCK) == 0 &&
              fcntl(launch[1], F_SETFL, O_NONBLOCK) == 0 &&
