@@ -8736,13 +8736,63 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 if (test.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
                 {
                     BusterX86MetadataFormKey key = {0};
-                    bool key_valid = buster_x86_metadata_form_key(test.form_id, &key);
-                    BUSTER_TEST(arguments, key_valid);
-                    if (key_valid)
+                    BusterX86MetadataExactPlan plan = {0};
+                    bool plan_valid = buster_x86_metadata_form_key(test.form_id, &key) &&
+                                      buster_x86_metadata_exact_plan_for_key(key, &plan);
+                    BUSTER_TEST(arguments, plan_valid);
+                    if (plan_valid)
                     {
-                        BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
-                            key, test.operands, test.operand_count, (BusterX86MetadataPhysicalAttributes){0},
-                            immediate_features, BUSTER_ARRAY_LENGTH(immediate_features)));
+                        u8 checked_bytes[32] = {0};
+                        u8 fast_bytes[32] = {0};
+                        u8 machine_bytes[32] = {0};
+                        BusterX86MetadataRelocation checked_relocations[2] = {0};
+                        BusterX86MetadataRelocation fast_relocations[2] = {0};
+                        BusterX86MetadataRelocation machine_relocations[2] = {0};
+                        BusterX86MetadataExactQuery exact_query = {
+                            .key = key, .operands = test.operands, .operand_count = test.operand_count,
+                            .features = {.names = immediate_features, .count = BUSTER_ARRAY_LENGTH(immediate_features)},
+                            .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                            .output = checked_bytes, .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+                            .relocations = checked_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(checked_relocations),
+                        };
+                        BusterX86MetadataExactQuery fast_query = exact_query;
+                        fast_query.output = fast_bytes;
+                        fast_query.relocations = fast_relocations;
+                        BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query(exact_query);
+                        BusterX86MetadataEmitResult fast = buster_x86_metadata_emit_exact_prevalidated(plan, fast_query);
+                        bool exact_valid = checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                           fast.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && checked.relocation_count == 1 &&
+                                           fast.relocation_count == 1 && checked_relocations[0].kind == test.kind &&
+                                           fast_relocations[0].kind == test.kind && checked_relocations[0].width == test.width &&
+                                           fast_relocations[0].width == test.width && checked_relocations[0].offset == test.offset &&
+                                           fast_relocations[0].offset == test.offset && checked_relocations[0].addend == symbol32.addend &&
+                                           fast_relocations[0].addend == symbol32.addend &&
+                                           string_equal(checked_relocations[0].symbol, symbol32.symbol) &&
+                                           string_equal(fast_relocations[0].symbol, symbol32.symbol) &&
+                                           x86_64_metadata_test_bytes_equal(checked_bytes, checked.byte_count,
+                                                                             fast_bytes, fast.byte_count);
+                        BusterX86MetadataMachineExactToken token = {0};
+                        if (buster_x86_metadata_machine_exact_token_for_plan(
+                                plan, (BusterX86MetadataFeatureInput){.names = immediate_features,
+                                                                    .count = BUSTER_ARRAY_LENGTH(immediate_features)}, &token))
+                        {
+                            BusterX86MetadataEmitResult machine = buster_x86_metadata_emit_exact_machine(
+                                token, (BusterX86MetadataMachineExactQuery){
+                                           .operands = test.operands, .operand_count = test.operand_count,
+                                           .output = machine_bytes, .output_capacity = BUSTER_ARRAY_LENGTH(machine_bytes),
+                                           .relocations = machine_relocations,
+                                           .relocation_capacity = BUSTER_ARRAY_LENGTH(machine_relocations),
+                                       });
+                            exact_valid &= machine.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && machine.relocation_count == 1 &&
+                                           machine_relocations[0].kind == test.kind && machine_relocations[0].width == test.width &&
+                                           machine_relocations[0].offset == test.offset &&
+                                           machine_relocations[0].addend == symbol32.addend &&
+                                           string_equal(machine_relocations[0].symbol, symbol32.symbol) &&
+                                           x86_64_metadata_test_bytes_equal(checked_bytes, checked.byte_count,
+                                                                             machine_bytes, machine.byte_count);
+                        }
+                        BUSTER_TEST_RAW(arguments, exact_valid,
+                                        string_format(arguments->arena, S8("symbolic exact immediate form={u32}"), test.form_id));
                     }
                 }
             }
