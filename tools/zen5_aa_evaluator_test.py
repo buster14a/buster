@@ -7,13 +7,16 @@ zen5-calibration-v1 result layout; none is host evidence.
 from __future__ import annotations
 
 from copy import deepcopy
+from fractions import Fraction
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 from typing import Any, Callable
+from unittest import mock
 
 import zen5_aa_evaluator as evaluator
 from zen5_aa_noise import canonical_bytes, observation_reasons, sha256_bytes, write_json
@@ -108,16 +111,20 @@ def write_bundle(root: Path, role: str, job: str, attempt: str = "1", *, pmu: by
         "aa-decision": "not-evaluated", "bundle-sha256": sha256_bytes(index),
     }
     manifest.update(manifest_update or {})
-    (directory / f"{RECIPE}.manifest").write_text("".join(f"{key}={value}\n" for key, value in manifest.items()))
+    manifest_bytes = "".join(f"{key}={value}\n" for key, value in manifest.items()).encode()
+    (directory / f"{RECIPE}.manifest").write_bytes(manifest_bytes)
+    # The service authenticates the manifest bytes it bound and its compiled profile, never bundle claims.
     return {"role": role, "job_id": job, "attempt": attempt, "bundle": name,
-            "trusted": {"plan_sha256": plan_digest, "captures": digests}}
+            "trusted": {"manifest_sha256": sha256_bytes(manifest_bytes), "profile_sha256": PROFILE,
+                        "plan_sha256": plan_digest, "captures": digests}}
 
 
 def complete_protocol(pilots: list[dict[str, Any]]) -> dict[str, Any]:
     """A fully populated synthetic protocol; its values are test inputs, not reviewed limits."""
     protocol = evaluator.template_protocol()
     protocol["limits"] = {member: "10" for member in evaluator.MEMBERS}
-    protocol["stationarity"] = {"alpha": "0.05", "permutations": 1999, "seed": 426}
+    protocol["stationarity"]["seed"] = 426
+    protocol["confirmatory_jobs"] = {"first_job_id": "10", "last_job_id": "73"}
     protocol["applicability"] = {"revision": "b" * 40, "tree": "c" * 40,
                                  "source_identity_sha256": "f" * 64, "profile_sha256": PROFILE}
     protocol["pilot_attempts"] = [{"job_id": entry["job_id"], "attempt": entry["attempt"]} for entry in pilots]
@@ -126,8 +133,22 @@ def complete_protocol(pilots: list[dict[str, Any]]) -> dict[str, Any]:
     return protocol
 
 
-def ledger(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"schema": evaluator.LEDGER_SCHEMA, "version": 1, "attempts": entries}
+def window_of(entries: list[dict[str, Any]]) -> list[str]:
+    """The service's job list for the declared range: by default, exactly the confirmatory jobs."""
+    return list(dict.fromkeys(entry["job_id"] for entry in entries if entry["role"] == "confirmatory"))
+
+
+def ledger(entries: list[dict[str, Any]], window: list[str] | None = None) -> dict[str, Any]:
+    return {"schema": evaluator.LEDGER_SCHEMA, "version": 1,
+            "window_jobs": window_of(entries) if window is None else window, "attempts": entries}
+
+
+def fast(protocol: dict[str, Any]) -> dict[str, Any]:
+    """build_policy does not revalidate the protocol, so family-path unit cases may use fewer
+    permutations than the decided minimum, which evaluate() itself enforces."""
+    changed = deepcopy(protocol)
+    changed["stationarity"]["permutations"] = 1999
+    return changed
 
 
 def refused(protocol: Any, attempts: Any, root: Path, fragment: str) -> None:
@@ -155,9 +176,59 @@ def invalid_slot(captures: dict[str, Any], _: dict[str, Any]) -> None:
     capture["invalid_reasons"] = [f"observation 7: {reason}" for reason in observation["invalid_reasons"]]
 
 
+def flat_rss(captures: dict[str, Any], _: dict[str, Any]) -> None:
+    for observation in captures["immutable"]["observations"]:
+        observation["first_peak_rss_bytes"] = observation["second_peak_rss_bytes"] = 100_000_000
+
+
+def flat_rss_but_last(captures: dict[str, Any], record: dict[str, Any]) -> None:
+    flat_rss(captures, record)
+    for position in ("first", "second"):
+        captures["immutable"]["observations"][-1][f"{position}_peak_rss_bytes"] += 4096
+
+
+def check_constant_rule(root: Path, pmu: bytes) -> None:
+    """Through the real analyzers: zero variance is `constant` with serial effect 0; other undefined stays None."""
+    member = "immutable.peak_rss_bytes.serial_effect"
+    constant = single(root, pmu, "530", mutate=flat_rss)
+    assert constant["valid"], constant["invalid_reasons"]
+    assert constant["members"][member] == 0.0 and constant["constant_series"] == ["immutable.peak_rss_bytes"]
+    assert constant["members"]["immutable.wall_time_ns.serial_effect"] not in (None, 0.0)
+    undefined = single(root, pmu, "531", mutate=flat_rss_but_last)
+    assert undefined["valid"], undefined["invalid_reasons"]
+    assert undefined["members"][member] is None and undefined["constant_series"] == [], undefined["members"][member]
+    assert all(value is not None for key, value in undefined["members"].items() if key != member)
+
+
+def check_inventory_races(root: Path, pmu: bytes) -> None:
+    """A directory that cannot be listed, or an entry that vanishes mid-walk, is an invalid attempt, not exit 2."""
+    manifest, digest = load_manifest()
+    entry = write_bundle(root, "confirmatory", "540", pmu=pmu)
+    captures = str(root / entry["bundle"] / "zen5" / "captures")
+    real_scandir, real_lstat = os.scandir, os.lstat
+
+    def scandir(path: Any = ".") -> Any:
+        if str(path) == captures:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path)
+
+    def lstat(path: Any, *arguments: Any, **options: Any) -> Any:
+        if str(path).endswith("/zen5/pmu"):
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_lstat(path, *arguments, **options)
+
+    with mock.patch.object(os, "scandir", scandir):
+        record = evaluator.attempt_record(entry, root, manifest, digest)
+    assert not record["valid"] and any("cannot be inventoried" in reason for reason in record["invalid_reasons"])
+    with mock.patch.object(os, "lstat", lstat):
+        record = evaluator.attempt_record(entry, root, manifest, digest)
+    assert not record["valid"] and any("vanished" in reason for reason in record["invalid_reasons"]), record
+
+
 def check_invalid_bundles(root: Path, pmu: bytes) -> None:
     good = single(root, pmu, "500")
     assert good["valid"] and all(value is not None for value in good["members"].values()), good["invalid_reasons"]
+    assert good["constant_series"] == [], good["constant_series"]
     drifting = single(root, pmu, "501", wall_drift=200)
     assert drifting["valid"], drifting["invalid_reasons"]
     for control in evaluator.CONTROLS:
@@ -200,21 +271,51 @@ def check_invalid_bundles(root: Path, pmu: bytes) -> None:
     relabeled = write_bundle(root, "confirmatory", "513", pmu=pmu)
     relabeled["job_id"] = "514"
     expect(evaluator.attempt_record(relabeled, root, manifest, digest), "job/attempt differs from the ledger")
+    # Final-manifest authentication: forged profile, a failed attempt relabeled succeeded, budget overrun.
+    expect(single(root, pmu, "515", manifest_update={"profile-sha256": "8" * 64}),
+           "profile digest differs from the authenticated profile digest")
+    failed = write_bundle(root, "confirmatory", "516", pmu=pmu,
+                          manifest_update={"status": "failed", "stage": "captures", "process-result": "failed"})
+    path = root / failed["bundle"] / f"{RECIPE}.manifest"
+    path.write_bytes(path.read_bytes().replace(b"status=failed", b"status=succeeded").replace(
+        b"stage=captures", b"stage=complete").replace(b"process-result=failed", b"process-result=success"))
+    relabeled_record = evaluator.attempt_record(failed, root, manifest, digest)
+    expect(relabeled_record, "bytes differ from the service-authenticated manifest digest")
+    assert len(relabeled_record["invalid_reasons"]) == 1, relabeled_record["invalid_reasons"]
+    expect(single(root, pmu, "517", manifest_update={"elapsed-ns": str(2700 * 10**9 + 1)}),
+           "elapsed-ns 2700000000001 exceeds budget-seconds 2700")
+    assert single(root, pmu, "518", manifest_update={"elapsed-ns": str(2700 * 10**9)})["valid"]
+    expect(single(root, pmu, "519", manifest_update={"elapsed-ns": "-1"}), "not a decimal count")
 
 
 def check_refusals(root: Path, pilots: list[dict[str, Any]], confirmatory: list[dict[str, Any]]) -> None:
     protocol = complete_protocol(pilots)
+    refused(protocol, {key: value for key, value in ledger(confirmatory[:1]).items() if key != "window_jobs"}, root,
+            "window_jobs")
+    refused(protocol, ledger(confirmatory[:2], ["11", "10"]), root, "strictly increasing")
+    numeric = deepcopy(confirmatory[0])
+    numeric["trusted"]["manifest_sha256"] = int("1" * 64)
+    refused(protocol, ledger([numeric]), root, "service digests")
+    for key, value, fragment in (("alpha", "0.10", "stationarity.alpha"),
+                                 ("permutations", evaluator.MIN_PERMUTATIONS - 1, "stationarity.permutations"),
+                                 ("permutations", None, "stationarity.permutations")):
+        changed = deepcopy(protocol)
+        changed["stationarity"][key] = value
+        refused(changed, ledger(confirmatory[:1]), root, fragment)
+    changed = deepcopy(protocol)
+    changed["confirmatory_jobs"] = {"first_job_id": "73", "last_job_id": "10"}
+    refused(changed, ledger(confirmatory[:1]), root, "first <= last")
+    changed = deepcopy(protocol)
+    changed["applicability"]["profile_sha256"] = int("7" * 64)
+    refused(changed, ledger(confirmatory[:1]), root, "applicability must name")
     refused(protocol, ledger(confirmatory[:2][::-1]), root, "not after its predecessor")
     refused(protocol, ledger([confirmatory[0], {**pilots[0], "job_id": "900"}]), root, "pilot follows")
     refused(protocol, ledger([{**confirmatory[0], "role": "baseline"}]), root, "role must be pilot or confirmatory")
-    refused(protocol, {"schema": evaluator.LEDGER_SCHEMA, "version": 1, "attempts": []}, root, "nonempty")
+    refused(protocol, ledger([], []), root, "nonempty")
     for key, value, fragment in (("quantile", "0.95", "protocol quantile"), ("family_size", 40, "family_size"),
                                  ("confirmatory_attempts", 63, "confirmatory_attempts"),
                                  ("family_alpha", "0.10", "family_alpha")):
         refused({**protocol, key: value}, ledger(confirmatory[:1]), root, fragment)
-    changed = deepcopy(protocol)
-    changed["stationarity"]["permutations"] = 999
-    refused(changed, ledger(confirmatory[:1]), root, "cannot reach the family-corrected")
     changed = deepcopy(protocol)
     changed["current_job"]["pairs_per_round"] = 64
     refused(changed, ledger(confirmatory[:1]), root, "pairs_per_round=60")
@@ -232,14 +333,64 @@ def check_refusals(root: Path, pilots: list[dict[str, Any]], confirmatory: list[
     refused(changed, ledger(confirmatory[:1]), root, "0 < lower < 1 < upper")
 
 
+def reference_pvalues(values: list[float], permutations: int, seed: int) -> dict[str, str]:
+    """Unpacked per-member reference for the packed stationarity statistics."""
+    n = len(values)
+    weights = [2 * index - (n - 1) for index in range(n)]
+    centered = [rank - (n + 1) for rank in evaluator.doubled_ranks(values)]
+
+    def statistics_of(series: list[int]) -> tuple[int, int]:
+        return (abs(sum(w * v for w, v in zip(weights, series))),
+                abs(sum(a * b for a, b in zip(series, series[1:]))))
+
+    observed = statistics_of(centered)
+    exceed = [0, 0]
+    for order in evaluator.splitmix_orders(n, permutations, seed):
+        trend, serial = statistics_of([centered[index] for index in order])
+        exceed[0] += trend >= observed[0]
+        exceed[1] += serial >= observed[1]
+    if not any(centered):
+        exceed = [permutations, permutations]
+    return {test: f"{exceed[slot] + 1}/{permutations + 1}" for slot, test in enumerate(evaluator.STATIONARITY_TESTS)}
+
+
+def check_window(protocol: dict[str, Any], records: list[dict[str, Any]]) -> None:
+    """The confirmatory set must equal the service's complete job list for the declared range."""
+    window = window_of(records)
+
+    def invalid(changed: list[dict[str, Any]], jobs: list[str], fragment: str) -> None:
+        policy = evaluator.build_policy(protocol, jobs, changed)
+        assert policy["status"] == "invalid", (policy["status"], policy["reasons"])
+        assert any(fragment in reason for reason in policy["reasons"]), (fragment, policy["reasons"])
+
+    omitted = [record for record in records if record["job_id"] != "20"]
+    invalid(omitted, window, "service job 20 in the declared confirmatory range is missing from the ledger")
+    replaced = deepcopy(records)
+    position = next(index for index, record in enumerate(replaced) if record["job_id"] == "20")
+    replaced.insert(position + 1, dict(deepcopy(replaced[position]), attempt="2"))
+    replaced = [record for record in replaced if record["job_id"] != "21"]
+    invalid(replaced, [job for job in window if job != "21"], "job 20 has more than one attempt")
+    outside = deepcopy(records)
+    outside[-1]["job_id"] = "80"
+    invalid(outside, window_of(outside), "confirmatory job 80 is outside the declared confirmatory job range")
+    invalid(records, window + ["74"], "window job 74 is outside")
+    early = deepcopy(records)
+    early[0]["job_id"] = "10"
+    invalid(early, window, "pilot job 10 lies inside the declared confirmatory job range")
+    invalid(records, window[:-1], "confirmatory job 73 is not in the service's job list")
+
+
 def check_family(protocol: dict[str, Any], records: list[dict[str, Any]]) -> None:
     """Drift, serial dependence, limits, counts and scope on the retained records."""
+    protocol = fast(protocol)
 
-    def status(changed_protocol: dict[str, Any], changed: list[dict[str, Any]], fragment: str, expected: str) -> None:
-        policy = evaluator.build_policy(changed_protocol, changed)
+    def status(changed_protocol: dict[str, Any], changed: list[dict[str, Any]], fragment: str,
+               expected: str) -> dict[str, Any]:
+        policy = evaluator.build_policy(changed_protocol, window_of(changed), changed)
         assert policy["status"] == expected, (expected, policy["status"], policy["reasons"])
         assert policy["ab_authorized"] is False
         assert any(fragment in reason for reason in policy["reasons"]), (fragment, policy["reasons"])
+        return policy
 
     pilots = [record for record in records if record["role"] == "pilot"]
     confirmatory = [record for record in records if record["role"] == "confirmatory"]
@@ -251,12 +402,27 @@ def check_family(protocol: dict[str, Any], records: list[dict[str, Any]]) -> Non
     drifted = deepcopy(records)
     for index, record in enumerate(item for item in drifted if item["role"] == "confirmatory"):
         record["members"][member] = 0.001 * (index + 1)
-    status(protocol, drifted, f"{member}: across-attempt trend", "inconclusive")
+    family = status(protocol, drifted, f"{member}: across-attempt trend", "inconclusive")["family"]
+    # n = 64 is the minimum: rank 64, so the bound is exactly the sample maximum (not the runner-up).
+    assert family["members"][member]["rank"] == 64 and family["members"][member]["bound"] == 0.001 * 64, family
+    # Bonferroni over 2K = 84 checks at the decided 0.05.
+    assert family["stationarity_reject_at"] == str(Fraction(5, 100) / 84) == "1/1680"
+
+    exact = deepcopy(records)
+    for index, record in enumerate(item for item in exact if item["role"] == "confirmatory"):
+        record["members"][member] = 0.1 if index == 63 else 0.05
+    changed = deepcopy(protocol)
+    changed["limits"][member] = "0.1"
+    entry = evaluator.build_policy(changed, window_of(exact), exact)["family"]["members"][member]
+    assert entry["bound"] == 0.1 and "exceeds-limit" not in entry["verdict"], entry
+    changed["limits"][member] = "0.099999999999"
+    entry = evaluator.build_policy(changed, window_of(exact), exact)["family"]["members"][member]
+    assert "exceeds-limit" in entry["verdict"], entry
 
     serial = deepcopy(records)
     for index, record in enumerate(item for item in serial if item["role"] == "confirmatory"):
         record["members"][member] = 0.01 if (index // 8) % 2 == 0 else 0.02
-    policy = evaluator.build_policy(protocol, serial)
+    policy = evaluator.build_policy(protocol, window_of(serial), serial)
     assert policy["status"] == "inconclusive"
     assert any(f"{member}: across-attempt serial" in reason for reason in policy["reasons"]), policy["reasons"]
     assert not any(f"{member}: across-attempt trend" in reason for reason in policy["reasons"])
@@ -267,7 +433,7 @@ def check_family(protocol: dict[str, Any], records: list[dict[str, Any]]) -> Non
            "inconclusive")
 
     status(protocol, pilots + confirmatory[:10], "insufficient evidence: 10 of 64", "inconclusive")
-    short = evaluator.build_policy(protocol, pilots + confirmatory[:10])
+    short = evaluator.build_policy(protocol, window_of(confirmatory[:10]), pilots + confirmatory[:10])
     assert short["evidence"]["sufficient"] is False and short["family"] is None
     assert all(record["members"] is None for record in short["attempts"] if record["role"] == "confirmatory")
     extra = deepcopy(confirmatory[-1])
@@ -283,12 +449,19 @@ def check_family(protocol: dict[str, Any], records: list[dict[str, Any]]) -> Non
     changed["applicability"]["profile_sha256"] = "8" * 64
     status(changed, records, "profile_sha256 is outside the declared applicability", "unavailable")
     status(evaluator.template_protocol(), records, "protocol approval is unset", "unavailable")
-    withheld = evaluator.build_policy(evaluator.template_protocol(), records)
+    withheld = evaluator.build_policy(evaluator.template_protocol(), window_of(records), records)
     assert withheld["family"] is None and withheld["pilot_summary"][member]["count"] == len(pilots)
+    assert all(record["constant_series"] is None for record in withheld["attempts"] if record["role"] == "confirmatory")
 
     table = {member: [record["members"][member] for record in drifted if record["role"] == "confirmatory"]}
     assert evaluator.stationarity(table, 199, 7) == evaluator.stationarity(table, 199, 7)
     assert evaluator.doubled_ranks([3.0, 1.0, 3.0, 2.0]) == [7, 2, 7, 4]
+    small = {"ties": [3.0, 1.0, 3.0, 2.0, 5.0, 5.0, 0.5, 4.0, 1.0, 9.0, 2.0, 7.0],
+             "trend": [float(index) for index in range(12)], "flat": [2.0] * 12,
+             "alternating": [float(index % 2) for index in range(12)]}
+    packed = evaluator.stationarity(small, 499, 11)
+    assert packed == {name: reference_pvalues(values, 499, 11) for name, values in small.items()}, packed
+    assert packed["flat"] == {"trend": "500/500", "serial": "500/500"}
 
 
 def run_self_test() -> int:
@@ -301,6 +474,8 @@ def run_self_test() -> int:
         root = Path(temporary)
         pmu = synthetic_pmu()
         check_invalid_bundles(root, pmu)
+        check_constant_rule(root, pmu)
+        check_inventory_races(root, pmu)
         pilots = [write_bundle(root, "pilot", str(job), pmu=pmu) for job in (1, 2)]
         confirmatory = [write_bundle(root, "confirmatory", str(job), pmu=pmu) for job in range(10, 74)]
         check_refusals(root, pilots, confirmatory)
@@ -310,27 +485,34 @@ def run_self_test() -> int:
         assert unavailable["evidence"]["pilot_valid"] == 2 and not unavailable["evidence"]["sufficient"]
 
         protocol = complete_protocol(pilots)
-        policy = evaluator.evaluate(protocol, ledger(pilots + confirmatory), root)
-        assert policy["status"] == "eligible", policy["reasons"]
-        assert policy["family"]["rank"] == 64 and policy["evidence"]["sufficient"]
-        assert policy["current_job_aa"]["pairs_per_round"] == 60 and policy["current_job_aa"]["runtime_rows"] == "U=R"
-        check_family(protocol, [{key: value for key, value in record.items() if key != "index"}
-                                for record in policy["attempts"]])
-
         protocol_path, ledger_path = root / "protocol.json", root / "ledger.json"
         policy_path, report_path = root / "out" / "policy.json", root / "out" / "report.md"
         write_json(protocol_path, protocol)
         write_json(ledger_path, ledger(pilots + confirmatory))
         tool = Path(__file__).with_name("zen5_aa_evaluator.py")
+        inputs = ("--protocol", str(protocol_path), "--ledger", str(ledger_path))
+        command = [sys.executable, "-B", str(tool)]
 
         def invoke(*arguments: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run([sys.executable, "-B", str(tool), *arguments], text=True,
-                                  capture_output=True, check=False)
+            return subprocess.run([*command, *arguments], text=True, capture_output=True, check=False)
 
-        inputs = ("--protocol", str(protocol_path), "--ledger", str(ledger_path))
-        run = invoke("evaluate", *inputs, "--policy-output", str(policy_path), "--report-output", str(report_path))
+        # The separate-process evaluation (decided 100,000 permutations) runs beside the in-process one.
+        with subprocess.Popen([*command, "evaluate", *inputs, "--policy-output", str(policy_path),
+                               "--report-output", str(report_path)], text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE) as process:
+            policy = evaluator.evaluate(protocol, ledger(pilots + confirmatory), root)
+            stdout, stderr = process.communicate()
+        assert policy["status"] == "eligible", policy["reasons"]
+        assert policy["family"]["rank"] == 64 and policy["evidence"]["sufficient"]
+        assert policy["protocol"]["stationarity"]["permutations"] == 100_000
+        assert policy["current_job_aa"]["pairs_per_round"] == 60 and policy["current_job_aa"]["runtime_rows"] == "U=R"
+        assert "python" not in policy["evaluator"]
+        records = [{key: value for key, value in record.items() if key != "index"} for record in policy["attempts"]]
+        check_family(protocol, records)
+        check_window(fast(protocol), records)
+
         digest = sha256_bytes(policy_path.read_bytes())
-        assert run.returncode == 0 and run.stdout.strip() == f"eligible aa-policy-sha256={digest}", run
+        assert process.returncode == 0 and stdout.strip() == f"eligible aa-policy-sha256={digest}", (stdout, stderr)
         # A separate process reproduces the in-process document byte for byte.
         assert policy_path.read_bytes() == canonical_bytes(policy)
         report = report_path.read_text()

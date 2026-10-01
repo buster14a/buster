@@ -116,23 +116,72 @@ and no policy digest is pinned anywhere.
 There are two inputs and two digests:
 
 - **Protocol** (`buster-zen5-aa-protocol-v1`). The reviewer writes it from
-  exploratory pilots, then freezes and publishes it before the first
-  confirmatory attempt. `template` writes the unapproved skeleton. The decided
-  inputs are fixed, and each reviewer choice starts as `null`: the 42 practical
-  limits, the stationarity alpha, permutation count and seed, the applicability
-  identities, the pilot list, the current-job A/A equivalence band and the
-  approval. The evaluator records the protocol's SHA-256. Nothing offline can
-  prove that the protocol was published before window 2.
-- **Ledger** (`buster-zen5-aa-attempt-ledger-v1`). It lists every retained
-  attempt in execution order, so job/attempt tokens must strictly increase,
-  and pilots come first. Each entry has its role, its bundle directory and the
-  plan and capture digests that the authenticated service channel supplied.
-  Those digests are never copied from the bundle.
+  exploratory pilots, then freezes it and merges it on main before the
+  window-2 dispatch (decided on
+  [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921955897)).
+  `template` writes the unapproved skeleton. The decided inputs are fixed:
+  q, K, the family alpha, the count of at least 64 (at most 256) confirmatory
+  attempts, and the independence checks (alpha 0.05, Bonferroni over 84, at
+  least 100,000 permutations; decided on
+  [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921978144)).
+  Each reviewer choice starts as `null`: the 42 practical limits, the
+  permutation seed, the confirmatory job range, the applicability identities,
+  the pilot list, the current-job A/A equivalence band and the approval. The
+  evaluator records the protocol's SHA-256. Nothing offline can prove that the
+  protocol was published before window 2.
+- **Ledger** (`buster-zen5-aa-attempt-ledger-v1`). It must be the complete
+  attempt list the service reports, never a selection of kept bundles. It
+  lists every retained attempt in execution order, so job/attempt tokens must
+  strictly increase, and pilots come first. `window_jobs` lists every job id
+  the service reports inside the protocol's `confirmatory_jobs` range. Each
+  entry has its role, its bundle directory and a `trusted` block of digests
+  taken from the authenticated service channel, never from the bundle (see
+  below).
 - **Policy document** (`buster-zen5-aa-policy-v1`). The canonical JSON bytes
   are hashed, and that SHA-256 is the future `aa-policy-sha256=` value. The
   document embeds the protocol, the method, every attempt with its validity
-  reasons, the family result, and the evaluator source digests and Python
-  minor version.
+  reasons, the family result, and the evaluator source digests. It does not
+  record the interpreter version: the analyzers use `math.fsum` since #2110,
+  and the evaluator's own statistics are exact integers or fractions, so the
+  bytes replay under any supported Python 3 (checked with 3.11, 3.12 and 3.13).
+  The report shows the interpreter for information.
+
+Each ledger `trusted` block has four parts:
+
+- `manifest_sha256`: the SHA-256 of the final `zen5-calibration-v1.manifest`
+  bytes. The service binds it with `BQ_RESULT_BIND` (`bq_result_bind`) and
+  reports it as `manifest-sha256=` in the `gateway result JOB` receipt. The
+  `BQEXP001` export receipt carries it at offset 112. The evaluator requires the
+  bundle's manifest bytes to hash to it. Profile, status, stage, oracle, PMU,
+  budget and job/attempt lines therefore come from the service, not from the
+  bundle.
+- `profile_sha256`: the SHA-256 of the compiled recipe profile, at offset 608
+  of the `BQEXP001` export receipt. This is the same byte string that
+  `zen5_recipe.c` hashes into `profile-sha256=`, and the manifest line must
+  equal it.
+- `plan_sha256` and `captures`: these must equal the authenticated manifest's
+  `plan-sha256=` and `*-capture-sha256=` lines, and the bundle bytes must
+  match them.
+
+On current main the `zen5-calibration-v1` recipe is still held
+(`bq_recipe_blocked`). The worker does not yet bind a zen5 result, so no zen5
+attempt has these receipts yet. The ledger requires them anyway. An attempt
+without them, or with digests that differ from them, is `invalid`.
+
+The confirmatory set is fixed in advance by the protocol's
+`confirmatory_jobs` range (`first_job_id`..`last_job_id`). The service assigns
+job ids from its journal sequence, so ids are increasing but not consecutive.
+The reviewer sets the range when the protocol is merged, and window 2
+dispatches only its confirmatory attempts. `window_jobs` must be the
+service's complete list of jobs in that range: for example, every id in the
+range for which `gateway status JOB` returns a job (unassigned ids are
+refused). The confirmatory entries must be exactly those jobs, one attempt
+each. The set is `invalid` if a job in the range is missing from the ledger,
+if a job has a replaced (second) attempt, if a confirmatory attempt or listed
+job lies outside the range, or if a pilot lies inside it. The evaluator cannot
+query the service itself. Omitting an attempt therefore requires
+misreporting the service's list explicitly; it cannot happen by quietly
+dropping a bundle.
 
 ```sh
 python3 -B tools/zen5_aa_evaluator.py template --output protocol.json
@@ -144,10 +193,13 @@ python3 -B tools/zen5_aa_evaluator.py verify --protocol protocol.json \
 
 Each attempt is replayed from its exported result root:
 
-- the final manifest must show a succeeded, complete, `pmu-qualified`,
-  oracle-consistent attempt with `ab-authorized=false`;
+- the final manifest bytes must hash to the authenticated digest. The manifest
+  must show a succeeded, complete, `pmu-qualified`, oracle-consistent attempt
+  with `ab-authorized=false`, the authenticated profile digest, and
+  `elapsed-ns` no greater than `budget-seconds`;
 - the `BQ-BUNDLE-V1` index must list every file, with matching sizes and
-  digests, and no unlisted file;
+  digests. No file may be unlisted, and no directory may be unreadable
+  or change while it is inventoried;
 - `zen5_calibration_handoff.replay` runs against the authenticated digests;
 - every capture must have `ab_authorized` false and match the ledger's
   job/attempt;
@@ -156,16 +208,25 @@ Each attempt is replayed from its exported result root:
 
 A failed, incomplete or tampered attempt is kept as `invalid` with its reasons,
 and it contributes no values. Each valid attempt contributes the 42 members:
-7 checks for each metric and control, computed by the existing analyzers. An
-undefined value, such as the lag-one correlation of a constant series, stays
-unavailable and is never zero.
+7 checks for each metric and control, computed by the existing analyzers.
+
+Constant series follow the rule decided on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921955897).
+A zero-variance pair-center series, such as page-quantized peak RSS with equal
+centers, is listed in the attempt's `constant_series`. Its serial effect is
+exactly 0, because a constant series cannot be serially dependent. Its linear
+drift is already a defined 0. Every other undefined value stays unavailable
+and is never zero, for example a lag-one correlation where only one window is
+constant.
 
 The status follows #1188's precedence:
 
 - **`invalid`**: an invalid confirmatory attempt, more attempts than the fixed
-  count, or ledger pilots that differ from the protocol's list.
-- **`unavailable`**: an unset reviewer choice, or an attempt outside the
-  declared applicability.
+  count, a confirmatory set that differs from the service's job list for the
+  declared range, or ledger pilots that differ from the protocol's list.
+- **`unavailable`**: an unset reviewer choice, or a confirmatory attempt outside
+  the declared applicability. Applicability is checked on confirmatory
+  attempts only, because pilots are exploratory.
 - **`inconclusive`**: insufficient evidence (fewer attempts than the
   predeclared count), an unavailable or unbounded member, a bound above its
   limit, or across-attempt dependence.
@@ -178,12 +239,16 @@ the confirmatory set.
 
 For a complete set, each member's bound is the exact order statistic `T_(k)`,
 where k is the smallest value with `Pr[Binomial(n, 0.9) <= k-1] >= 1 - 0.05/42`.
-Rational arithmetic is used, and ties are kept. The proposed stationarity
-mechanism, which the reviewer approves separately, runs two seeded two-sided
-rank permutation tests on every member in execution order: a Spearman trend
-test and a lag-one serial test. Both use splitmix64 Fisher-Yates orders and
-Bonferroni over all 84 checks. There is no optional stopping and no outlier
-deletion.
+Rational arithmetic is used, and ties are kept. At n = 64 the bound is the
+sample maximum. A limit is compared exactly as a decimal, against the
+shortest round-trip form of the bound. Independence across attempts uses the
+decided mechanism. Two seeded two-sided rank permutation tests run on every
+member in execution order: a Spearman trend test and a lag-one serial test.
+Both use splitmix64 Fisher-Yates orders, at least 100,000 permutations, and
+family alpha 0.05 with Bonferroni over all 84 checks, so each test rejects at
+p <= 1/1680. If either test rejects, the family is inconclusive. Nothing is
+deleted or rerun. The statistics are packed into exact integer fields, and a
+100,000-permutation run takes about 8 s for 64 attempts.
 
 The exit status is 0 for `eligible`, 1 for `unavailable` or `inconclusive`,
 and 2 for `invalid` or a refused input. Every output says
@@ -192,10 +257,13 @@ check applies the band recorded here with #619's intervals.
 
 The synthetic suite, `python3 -B tools/zen5_aa_evaluator.py --self-test`, runs
 in the benchmark-service policy workflow. It covers invalid, tampered,
-incomplete and relabeled bundles, too few and too many attempts, drift within a
-capture and across attempts, serial dependence, unavailable members, pilot and
-applicability mismatches, and refused protocols. It also covers byte replay
-through the CLI. None of its bundles is host evidence.
+incomplete and relabeled bundles, as well as forged manifests, forged profiles
+and budget overruns. It covers omitted, replaced and out-of-range attempts,
+unreadable or changing bundle directories, too few and too many attempts,
+drift within a capture and across attempts, and serial dependence. It also
+covers constant and non-constant undefined series through the real analyzers,
+pilot and applicability mismatches, refused protocols, and byte replay through
+the CLI. None of its bundles is host evidence.
 
 The real producer is an explicitly authorized, separately admitted #880 service
 qualification phase. Its A/A work must be allowed before any A/B result exists;
