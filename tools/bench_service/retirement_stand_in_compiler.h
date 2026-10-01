@@ -16,7 +16,9 @@
  * the fixture's untimed contract names the timed batch target). They prove the
  * campaign's mechanics, never a compiler. Jobs select behaviours by the work
  * directory's path: job 85 fails every launch; jobs 86 and 87 sleep a second
- * in every A/A second-label launch, and job 86's also leave
+ * in every A/A second-label launch (job 87's A/A deadline seam refuses its
+ * first A/A launch, so its sleep runs only if that seam regresses), and job 86's
+ * also leave
  * BQ_RETIREMENT_STAND_IN_AA_MARKER in the work directory, so the fixture's
  * SIGTERM lands in the first of them instead of after a fixed delay; job 88's
  * second-label launches leave a detached (`setsid`) sleeper behind, its pid
