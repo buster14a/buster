@@ -17528,6 +17528,240 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestAr
     return result;
 }
 
+// Rank and representation disagree on LP64 and LLP64. Check the semantic
+// typedefs and the actual CALL operands, so a declared return type cannot hide
+// the result type chosen while lowering a nonconstant arithmetic expression.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#define K(e) _Generic((e), long: 1, long long: 2, unsigned long: 3, unsigned long long: 4, default: 0)\n"
+                        "typedef long AlignedLong __attribute__((aligned(16)));\n"
+                        "typedef __typeof__(1L + 1LL) signed_lr;\n"
+                        "typedef __typeof__(1LL + 1L) signed_rl;\n"
+                        "typedef __typeof__(1LL + 1UL) mixed_lr;\n"
+                        "typedef __typeof__(1UL + 1LL) mixed_rl;\n"
+                        "typedef __typeof__(1L + 1U) long_uint_lr;\n"
+                        "typedef __typeof__(1U + 1L) long_uint_rl;\n"
+                        "typedef __typeof__(1 ? 1L : 1LL) conditional_signed;\n"
+                        "typedef __typeof__(1 ? 1UL : 1LL) conditional_mixed;\n"
+                        "typedef __typeof__(1UL * 1LL) multiply;\n"
+                        "typedef __typeof__(1L - 1LL) subtract;\n"
+                        "typedef __typeof__((unsigned long)1LL + 1UL) cast_control;\n"
+                        "typedef __typeof__((AlignedLong)1 + 1LL) aligned_rank;\n"
+                        "typedef __typeof__((const long long)1 + 1UL) qualified_rank;\n"
+                        "typedef __typeof__((__int128)1 + 1ULL) wide_signed;\n"
+                        "typedef __typeof__((unsigned __int128)1 + 1LL) wide_unsigned;\n"
+                        "typedef __typeof__((unsigned short)1 + (signed char)1) small_control;\n"
+                        "enum { E = K(1L + 1LL), ER = K(1LL + 1L), M = K(1LL + 1UL), MR = K(1UL + 1LL), U = K(1L + 1U), UR = K(1U + 1L) };\n"
+                        "static int s = K(1L + 1LL), sr = K(1LL + 1L), m = K(1LL + 1UL), mr = K(1UL + 1LL);\n"
+                        "static char arr[K(1L + 1LL)], arr_reverse[K(1LL + 1L)];\n"
+                        "_Static_assert(E == 2 && ER == 2, \"signed rank\");\n"
+                        "_Static_assert(sizeof(long) == 8 ? M == 4 && MR == 4 && U == 1 && UR == 1 : M == 2 && MR == 2 && U == 3 && UR == 3, \"mixed rank\");\n"
+                        "extern void take_rank(int marker, ...);\n"
+                        "void rank_operands(long l, long long ll, unsigned long ul, unsigned int ui, int b, AlignedLong aligned, const long long qualified)\n"
+                        "{\n"
+                        "    take_rank(0, l + ll, ll + l, ll + ul, ul + ll, l + ui, ui + l, b ? l : ll, b ? ul : ll,\n"
+                        "              ul * ll, l - ll, (unsigned long)ll + ul, aligned + ll, qualified + ul,\n"
+                        "              (__int128)ll + (unsigned long long)ul, (unsigned __int128)ul + ll, (unsigned short)ui + (signed char)b);\n"
+                        "}\n");
+    Target targets[] = {target_native, target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[1].os = OPERATING_SYSTEM_LINUX;
+    targets[2].cpu_arch = CPU_ARCH_X86_64;
+    targets[2].os = OPERATING_SYSTEM_WINDOWS;
+    struct
+    {
+        String8 name;
+        CTypeKind lp64_kind;
+        CTypeKind llp64_kind;
+        String8 lp64_name;
+        String8 llp64_name;
+    } expected[] = {
+        {S8("signed_lr"), C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, S8("long long"), S8("long long")},
+        {S8("signed_rl"), C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, S8("long long"), S8("long long")},
+        {S8("mixed_lr"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_LONG_LONG, S8("unsigned long long"), S8("long long")},
+        {S8("mixed_rl"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_LONG_LONG, S8("unsigned long long"), S8("long long")},
+        {S8("long_uint_lr"), C_TYPE_LONG, C_TYPE_UNSIGNED_LONG, S8("long"), S8("unsigned long")},
+        {S8("long_uint_rl"), C_TYPE_LONG, C_TYPE_UNSIGNED_LONG, S8("long"), S8("unsigned long")},
+        {S8("conditional_signed"), C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, S8("long long"), S8("long long")},
+        {S8("conditional_mixed"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_LONG_LONG, S8("unsigned long long"), S8("long long")},
+        {S8("multiply"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_LONG_LONG, S8("unsigned long long"), S8("long long")},
+        {S8("subtract"), C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, S8("long long"), S8("long long")},
+        {S8("cast_control"), C_TYPE_UNSIGNED_LONG, C_TYPE_UNSIGNED_LONG, S8("unsigned long"), S8("unsigned long")},
+        {S8("aligned_rank"), C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, S8("long long"), S8("long long")},
+        {S8("qualified_rank"), C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_LONG_LONG, S8("unsigned long long"), S8("long long")},
+        {S8("wide_signed"), C_TYPE_INT128, C_TYPE_INT128, S8("__int128"), S8("__int128")},
+        {S8("wide_unsigned"), C_TYPE_UNSIGNED_INT128, C_TYPE_UNSIGNED_INT128, S8("unsigned __int128"), S8("unsigned __int128")},
+        {S8("small_control"), C_TYPE_INT, C_TYPE_INT, S8("int"), S8("int")},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            bool llp64 = target.os == OPERATING_SYSTEM_WINDOWS;
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            if (tokens.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            {
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(expected); name_index += 1)
+                {
+                    CType* type = 0;
+                    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+                    {
+                        CEntity* entity = parse.entities + entity_index;
+                        if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, expected[name_index].name))
+                        {
+                            type = c_type_from_id(&parse, entity->type);
+                        }
+                    }
+                    CTypeKind kind = llp64 ? expected[name_index].llp64_kind : expected[name_index].lp64_kind;
+                    BUSTER_TEST_RAW(arguments, type && type->kind == kind,
+                        string_format(temporary.arena, S8("integer conversion semantic type {S8}, target={u32} frontend={u32}"),
+                                      expected[name_index].name, target_index, frontend));
+                }
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("integer-conversion-rank.c"),
+                    tokens, parse, target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                    string_format(temporary.arena, S8("integer conversion lowering target={u32} frontend={u32}"), target_index, frontend));
+                BUSTER_TEST(arguments, lowered.program && lowered.program->module_count);
+                if (lowered.program && lowered.program->module_count)
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("rank_operands"));
+                    BUSTER_TEST(arguments, function != 0);
+                    u32 call_count = 0;
+                    if (function)
+                    {
+                        for (u32 row = 0; row < function->instruction_count; row += 1)
+                        {
+                            IrInstruction* call = function->instructions + row;
+                            if (call->opcode == IR_OPCODE_CALL)
+                            {
+                                call_count += 1;
+                                BUSTER_TEST(arguments, call->operand_count == BUSTER_ARRAY_LENGTH(expected) + 2);
+                                if (call->operand_count == BUSTER_ARRAY_LENGTH(expected) + 2)
+                                {
+                                    for (u32 argument = 0; argument < BUSTER_ARRAY_LENGTH(expected); argument += 1)
+                                    {
+                                        IrValueId value = call->operands[argument + 2];
+                                        BUSTER_TEST(arguments, value.value < function->value_count);
+                                        IrType* type = value.value < function->value_count
+                                                           ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
+                                        String8 name = llp64 ? expected[argument].llp64_name : expected[argument].lp64_name;
+                                        BUSTER_TEST_RAW(arguments, type && type->kind == IR_TYPE_INTEGER && string_equal(type->name, name),
+                                            string_format(temporary.arena, S8("integer conversion CALL operand {S8}, target={u32} frontend={u32}"),
+                                                          expected[argument].name, target_index, frontend));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, call_count == 1);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Inline fixtures keep the registered test independent of retirement
+    // inventory changes. The two original witnesses also run on the host ABI.
+    String8 runtime_source = buster_test_temporary_path(arguments->arena, S8("integer-conversion-rank"), S8(".c"));
+    String8 runtime_text = S8("#define K(e) _Generic((e), long: 1, long long: 2, unsigned long: 3, unsigned long long: 4, default: 0)\n"
+                              "#define IS_TYPE(e, t) _Generic((__typeof__(e) *)0, t *: 1, default: 0)\n"
+                              "typedef long AlignedLong __attribute__((aligned(16)));\n"
+                              "enum { E = K(1L + 1LL), ER = K(1LL + 1L), M = K(1LL + 1UL), MR = K(1UL + 1LL), U = K(1L + 1U), UR = K(1U + 1L) };\n"
+                              "static int s = K(1L + 1LL), sr = K(1LL + 1L), m = K(1LL + 1UL), mr = K(1UL + 1LL);\n"
+                              "static char arr[K(1L + 1LL)], arr_reverse[K(1LL + 1L)];\n"
+                              "int main(void)\n"
+                              "{\n"
+                              "    volatile long l = 1; volatile long long ll = 1; volatile unsigned long ul = 2; volatile unsigned int ui = 2;\n"
+                              "    AlignedLong aligned = 1; const long long qualified = 1; int b = 1; int result = 0;\n"
+                              "    long long signed_object = 1; __typeof__(1L + 1LL) *signed_pointer = &signed_object;\n"
+                              "    __auto_type signed_auto = l + ll; long long *signed_auto_pointer = &signed_auto;\n"
+                              "    result |= E != 2 || ER != 2 || s != 2 || sr != 2 || sizeof(arr) != 2 || sizeof(arr_reverse) != 2;\n"
+                              "    result |= K(l + ll) != 2 || K(ll + l) != 2 || K(b ? l : ll) != 2 || K(l - ll) != 2;\n"
+                              "    result |= *signed_pointer + *signed_auto_pointer != 3 || !IS_TYPE(aligned + ll, long long);\n"
+                              "#if __SIZEOF_LONG__ == 8\n"
+                              "    unsigned long long x = 1;\n"
+                              "    __typeof__(1LL + 1UL) *p = &x;\n"
+                              "    long long a = 1; unsigned long other = 2;\n"
+                              "    __auto_type y = a + other; unsigned long long *q = &y;\n"
+                              "    result |= *p + *q != 4;\n"
+                              "    result |= M != 4 || MR != 4 || m != 4 || mr != 4 || U != 1 || UR != 1;\n"
+                              "    result |= K(ll + ul) != 4 || K(ul + ll) != 4 || K(b ? ul : ll) != 4 || K(ul * ll) != 4;\n"
+                              "    result |= K(l + ui) != 1 || K(ui + l) != 1 || !IS_TYPE(qualified + ul, unsigned long long);\n"
+                              "#else\n"
+                              "    unsigned long x = 1; __typeof__(1L + 1U) *p = &x;\n"
+                              "    __auto_type y = l + ui; unsigned long *q = &y;\n"
+                              "    result |= *p + *q != 4;\n"
+                              "    result |= M != 2 || MR != 2 || m != 2 || mr != 2 || U != 3 || UR != 3;\n"
+                              "    result |= K(ll + ul) != 2 || K(ul + ll) != 2 || K(b ? ul : ll) != 2 || K(ul * ll) != 2;\n"
+                              "    result |= K(l + ui) != 3 || K(ui + l) != 3 || !IS_TYPE(qualified + ul, long long);\n"
+                              "#endif\n"
+                              "    result |= K((unsigned long)ll + ul) != 3 || !IS_TYPE((unsigned short)ui + (signed char)b, int);\n"
+                              "    result |= !IS_TYPE((__int128)ll + (unsigned long long)ul, __int128);\n"
+                              "    result |= !IS_TYPE((unsigned __int128)ul + ll, unsigned __int128);\n"
+                              "    return result;\n"
+                              "}\n");
+    BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
+    String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocator_modes); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("integer-conversion-rank-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], allocator_modes[allocator], frontends[frontend],
+                                         optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, runtime_source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("integer conversion rank {S8} {S8} {S8} {S8}: {S8}"),
+                                      dialects[dialect], allocator_modes[allocator], frontends[frontend], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("integer conversion rank runtime {S8} {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              dialects[dialect], allocator_modes[allocator], frontends[frontend], optimizations[optimization],
+                                              execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // `__typeof__` over a dereferenced conditional -- the shape musl's
 // <tgmath.h> selects a type with.  Every name below is a typedef rather than
 // an object because half of the answers are `void`, which is a legal typedef
@@ -29934,6 +30168,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);

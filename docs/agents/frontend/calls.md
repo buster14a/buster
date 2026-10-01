@@ -34,6 +34,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- **Usual integer arithmetic conversions choose rank before representation.**
+  The parse-side expression typer and canonical lowering both call
+  `c_semantic_integer_arithmetic_kind` after their context's integer
+  promotions. Equal signedness selects the higher rank; mixed signedness
+  selects the unsigned operand when its rank is at least the signed rank,
+  otherwise it selects the signed type only when the target's width can
+  represent every unsigned value, or the signed type's unsigned counterpart.
+  Thus LP64 `long + long long` is `long long` in either order, LP64
+  `long long + unsigned long` is `unsigned long long`, and LLP64
+  `long + unsigned int` is `unsigned long` (C17 6.3.1.1 and 6.3.1.8,
+  issue #1246). Canonical C scalar types carry an optional numeric
+  `integer_conversion_rank`; whole-record qualified and aligned copies
+  preserve it without frontend type IDs. Synthetic IR integer carriers
+  without source rank retain their representation rule. The registered
+  `c_test_integer_conversion_rank` checks semantic typedef identities and
+  raw nonconstant CALL operand types on Linux x86-64/AArch64 and Windows
+  LLP64 in both frontend modes, plus inline native GNU17/GNU23 fixtures over
+  all allocators and O0/O2. Enumerator, static initializer, array-bound and
+  runtime `_Generic` answers agree, and `typeof`/`__auto_type` pointer
+  witnesses preserve the resulting identity.
 - **A `typeof` operand is typed twice, by two engines, and both have to
   answer.** `c_ir_sizeof_operand_type_attempt` in `c_gen.c` types the operand
   of a `typeof` written in an *expression* -- a cast, a compound literal --

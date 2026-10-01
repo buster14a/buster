@@ -840,6 +840,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
                                                               .is_signed = is_signed,
                                                               .is_nullptr = kind == C_TYPE_NULLPTR,
                                                               .float_format = kind == C_TYPE_BFLOAT16 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE,
+                                                              .integer_conversion_rank = c_semantic_integer_rank(kind),
                                                           });
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
@@ -33316,66 +33317,66 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 {
     IrType* left = ir_type_from_id(&builder->program->types, left_type);
     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+    IrTypeId result;
     if (!left || !right)
     {
-        return IR_TYPE_ID_INVALID;
+        result = IR_TYPE_ID_INVALID;
     }
-    // One complex operand makes the result complex, over the usual arithmetic
-    // type of the two corresponding real types (C11 6.3.1.8p1).
-    if (left->is_complex || right->is_complex)
+    else if (left->is_complex || right->is_complex)
     {
-        return c_ir_complex_result_type(builder, left_type, right_type);
-    }
-    if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
-    {
-        left_type = builder->s32_type;
-        left = ir_type_from_id(&builder->program->types, left_type);
-    }
-    if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
-    {
-        right_type = builder->s32_type;
-        right = ir_type_from_id(&builder->program->types, right_type);
-    }
-    bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
-    bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
-    if (!left_arithmetic || !right_arithmetic)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
-    {
-        if (left->kind != IR_TYPE_FLOAT)
-        {
-            return right_type;
-        }
-        if (right->kind != IR_TYPE_FLOAT)
-        {
-            return left_type;
-        }
-        return c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
-    }
-    if (left_type.value == right_type.value)
-    {
-        return left_type;
-    }
-    if (left->is_signed == right->is_signed)
-    {
-        return right->bit_width > left->bit_width ? right_type : left_type;
-    }
-    IrTypeId signed_type = left->is_signed ? left_type : right_type;
-    IrTypeId unsigned_type = left->is_signed ? right_type : left_type;
-    IrType* signed_value = left->is_signed ? left : right;
-    IrType* unsigned_value = left->is_signed ? right : left;
-    IrTypeId result;
-    if (unsigned_value->bit_width >= signed_value->bit_width)
-    {
-        result = unsigned_type;
+        // C17 6.3.1.8 combines the corresponding real types first.
+        result = c_ir_complex_result_type(builder, left_type, right_type);
     }
     else
     {
-        result = signed_type;
+        if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
+        {
+            left_type = builder->s32_type;
+            left = ir_type_from_id(&builder->program->types, left_type);
+        }
+        if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
+        {
+            right_type = builder->s32_type;
+            right = ir_type_from_id(&builder->program->types, right_type);
+        }
+        bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
+        bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
+        if (!left_arithmetic || !right_arithmetic)
+        {
+            result = IR_TYPE_ID_INVALID;
+        }
+        else if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
+        {
+            result = left->kind != IR_TYPE_FLOAT ? right_type :
+                     right->kind != IR_TYPE_FLOAT ? left_type :
+                     c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
+        }
+        else if (left_type.value == right_type.value)
+        {
+            result = left_type;
+        }
+        else if (left->integer_conversion_rank && right->integer_conversion_rank)
+        {
+            CTypeKind left_kind = c_semantic_integer_kind(left->integer_conversion_rank, left->is_signed);
+            CTypeKind right_kind = c_semantic_integer_kind(right->integer_conversion_rank, right->is_signed);
+            CTypeKind common = c_semantic_integer_arithmetic_kind(builder->target, left_kind, right_kind);
+            result = c_ir_builder_scalar_type(builder, common);
+        }
+        else if (left->is_signed == right->is_signed)
+        {
+            // Synthetic IR integer carriers have no source rank. Keep their
+            // representation-only conversion rule independent of C identity.
+            result = right->bit_width > left->bit_width ? right_type : left_type;
+        }
+        else
+        {
+            IrTypeId signed_type = left->is_signed ? left_type : right_type;
+            IrTypeId unsigned_type = left->is_signed ? right_type : left_type;
+            IrType* signed_value = left->is_signed ? left : right;
+            IrType* unsigned_value = left->is_signed ? right : left;
+            result = unsigned_value->bit_width >= signed_value->bit_width ? unsigned_type : signed_type;
+        }
     }
-
     return result;
 }
 
