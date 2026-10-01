@@ -38,6 +38,15 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+The bound check uses the semantic typed constant folder. Its explicit task
+stack retains GNU's selected omitted-middle conditional value and its common
+branch type, and resolves null-derived member addresses from target layout offsets, evaluating each
+array index as a typed child so truncating casts and faults retain C semantics. Numeric pointer
+subtraction uses pointee units, so musl's portable null-based offsetof array
+bounds remain constant. Runtime pointer bases and indexes still produce VM
+types; a folder's unsupported shape is never accepted as a constant. The
+protected TYPE-mode constant query retains its separate refusal rules.
+
 `c_parse_tag_lookup` chooses the nearest visible spelling across the existing
 struct, union, and enum indexes. A conflicting kind reports `wrong kind of tag`;
 an inner tag body or standalone tag declaration can introduce a new identity.

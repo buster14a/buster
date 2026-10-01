@@ -5699,6 +5699,11 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 }
             }
             task->state = 1;
+            if (c_preprocess_dialect_is_gnu(preprocess.dialect) && task->colon == task->split + 1)
+            {
+                // The omitted arm has the condition's already computed type.
+                continue;
+            }
             if (task_count >= capacity)
             {
                 last = C_TYPE_ID_INVALID;
@@ -5848,8 +5853,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             // resolves two mismatched pointer operands by *spelling*: an
             // operand that is a null pointer constant yields the other one's
             // type, and only the ranges can say whether one is.
-            last = c_parse_conditional_expression_type(arena, preprocess, result, scope, left, right, task->split + 1, task->colon, task->colon + 1,
-                                                       task->end);
+            bool omitted = task->colon == task->split + 1;
+            last = c_parse_conditional_expression_type(arena, preprocess, result, scope, left, right,
+                                                       omitted ? task->start : task->split + 1, omitted ? task->split : task->colon,
+                                                       task->colon + 1, task->end);
             if (machine->validate_expression_constraints && !machine->expression_constraint.length && last.value >= result->type_count)
             {
                 machine->expression_constraint = S8("conditional expression has incompatible branch types");
@@ -21772,7 +21779,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
 // a wide count is never narrowed to the shifted type before the range check.
 // Integer arithmetic is c_integer_constant_binary's, shared with
 // preprocessing and lowering; only the floating operators remain here.
-BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, Target target, CToken token, CParseConstant left, CParseConstant right,
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                          CParseResult* result, Target target, CToken token, CParseConstant left, CParseConstant right,
                                                           CConstantEvaluationMode mode)
 {
     CParseConstant value = {.valid = left.valid && right.valid, .type = C_TYPE_ID_INVALID, .faulted = left.faulted || right.faulted};
@@ -21784,6 +21792,27 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
         value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
         value.integer = precedence == 4 ? c_parse_constant_truth(left) || c_parse_constant_truth(right)
                                        : c_parse_constant_truth(left) && c_parse_constant_truth(right);
+    }
+    else if (mode == C_CONSTANT_EVALUATION_NORMAL && token.punctuator == C_PUNCTUATOR_MINUS &&
+             left.type.value < result->type_count && right.type.value < result->type_count &&
+             result->types[left.type.value].kind == C_TYPE_POINTER && result->types[right.type.value].kind == C_TYPE_POINTER)
+    {
+        // Numeric constant pointers arise from null-based member addresses.
+        // Pointer subtraction uses element units, including after a char cast.
+        CTypeId element = result->types[left.type.value].element_type;
+        u64 size = 0;
+        u32 alignment = 0;
+        value.valid &= c_parse_types_compatible(arena, result, preprocess, c_parse_unqualified_type(result, element),
+                                                c_parse_unqualified_type(result, result->types[right.type.value].element_type)) &&
+                       c_parse_type_layout(machine, arena, preprocess, result, element, &size, &alignment) && size != 0;
+        value.type = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(target) ? C_TYPE_LONG_LONG : C_TYPE_LONG);
+        bool negative = left.integer < right.integer;
+        u64 magnitude = negative ? right.integer - left.integer : left.integer - right.integer;
+        if (value.valid)
+        {
+            value.valid = magnitude % size == 0;
+            value.integer = negative ? 0 - magnitude / size : magnitude / size;
+        }
     }
     else
     {
@@ -21998,6 +22027,47 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
         }
     }
     value.valid &= cursor + 1 == end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    return value;
+}
+
+// The base pointer and each index are children on the constant task stack.
+// This walk adds target member offsets until the next index needs a child;
+// no symbolic object address is admitted as an integer constant.
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_member_address(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                                  CParseResult* result, CParseConstant value, u32* cursor_out, u32 end)
+{
+    value.valid &= value.type.value < result->type_count && result->types[value.type.value].kind == C_TYPE_POINTER;
+    CTypeId type = value.valid ? result->types[value.type.value].element_type : C_TYPE_ID_INVALID;
+    u32 cursor = *cursor_out;
+    while (value.valid && cursor < end)
+    {
+        CToken token = preprocess.tokens[cursor];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            u64 offset = 0;
+            value.valid = c_parse_constant_member_offset(machine, arena, preprocess, result, type, token.symbol,
+                                                         c_token_spelling(preprocess.spelling_base, token), &type, &offset);
+            value.integer += offset;
+            cursor += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+        {
+            cursor += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            break;
+        }
+        else
+        {
+            value.valid = false;
+        }
+    }
+    *cursor_out = cursor;
+    if (value.valid)
+    {
+        value.type = c_parse_add_type(result, (CType){.kind = C_TYPE_POINTER, .element_type = type});
+    }
     return value;
 }
 
@@ -22281,6 +22351,31 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     continue;
                 }
             }
+            if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL &&
+                c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
+            {
+                u32 operand_start = begin + 1;
+                u32 operand_end = limit;
+                while (operand_start + 1 < operand_end &&
+                       c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                       c_parse_matching_delimiter_indexed(result, preprocess, operand_start) == operand_end - 1)
+                {
+                    operand_start += 1;
+                    operand_end -= 1;
+                }
+                u32 close = operand_start < operand_end &&
+                            c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                                ? c_parse_matching_delimiter_indexed(result, preprocess, operand_start) : operand_end;
+                if (close < operand_end && operand_end - close > 2 &&
+                    c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_ARROW))
+                {
+                    task->state = 6;
+                    task->split = close + 2;
+                    task->colon = operand_end;
+                    tasks[count++] = (CParseConstantTask){.start = operand_start, .end = close + 1, .cast_type = C_TYPE_ID_INVALID};
+                    continue;
+                }
+            }
             if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
                 c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) || c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION))
             {
@@ -22345,13 +22440,19 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 count -= 1;
                 continue;
             }
+            // GNU's omitted middle operand is the already evaluated left
+            // value. Keep it on this task instead of scheduling an empty range.
+            if (c_preprocess_dialect_is_gnu(preprocess.dialect) && task->colon == task->split + 1 && child_start == child_end)
+            {
+                continue;
+            }
             tasks[count++] = (CParseConstantTask){.start = child_start, .end = child_end, .cast_type = C_TYPE_ID_INVALID};
         }
         else
         {
             if (task->state == 2)
             {
-                last = c_parse_constant_binary(result, preprocess.target, preprocess.tokens[task->split], task->left, last,
+                last = c_parse_constant_binary(machine, arena, preprocess, result, preprocess.target, preprocess.tokens[task->split], task->left, last,
                                                machine->constant_evaluation_mode);
             }
             else if (task->state == 3)
@@ -22405,6 +22506,41 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         last.integer_high = computed.bits.high;
                     }
                     last = c_parse_constant_convert(result, preprocess.target, last, last.type);
+                }
+            }
+            else if (task->state == 6 || task->state == 7)
+            {
+                if (task->state == 7)
+                {
+                    CParseConstant index = last;
+                    last = task->left;
+                    u64 size = 0;
+                    u32 alignment = 0;
+                    last.valid &= index.valid && !index.is_float && index.type.value < result->type_count &&
+                                  c_parse_expression_integer_kind(c_parse_expression_value_kind(result, index.type)) &&
+                                  c_parse_type_layout(machine, arena, preprocess, result, task->cast_type, &size, &alignment);
+                    if (last.valid)
+                    {
+                        last.integer += index.integer * size;
+                        last.type = c_parse_add_type(result, (CType){.kind = C_TYPE_POINTER, .element_type = task->cast_type});
+                    }
+                }
+                last = c_parse_constant_member_address(machine, arena, preprocess, result, last, &task->split, task->colon);
+                if (last.valid && task->split < task->colon)
+                {
+                    u32 cursor = task->split;
+                    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                    CTypeId type = result->types[last.type.value].element_type;
+                    last.valid = type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY && close < task->colon;
+                    if (last.valid)
+                    {
+                        task->left = last;
+                        task->cast_type = result->types[type.value].element_type;
+                        task->split = close + 1;
+                        task->state = 7;
+                        tasks[count++] = (CParseConstantTask){.start = cursor + 1, .end = close, .cast_type = C_TYPE_ID_INVALID};
+                        continue;
+                    }
                 }
             }
             else
