@@ -220,6 +220,9 @@ def validate_capture(value: Any) -> tuple[list[str], list[str]]:
         problems.append("A/A capture must not contain a performance verdict")
     if value.get("ordinary_ci_guard_unchanged") is not True:
         problems.append("ordinary CI guard must remain unchanged")
+    # A calibration capture never authorizes an A/B decision (#426).
+    if "ab_authorized" in value and value.get("ab_authorized") is not False:
+        problems.append("ab_authorized must be false")
 
     repository = value.get("repository")
     if not isinstance(repository, dict):

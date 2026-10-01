@@ -40,11 +40,11 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
-    "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
+    "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
     "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
-    "retirement=blocked export=1 "
+    "export=1 "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"
 #else

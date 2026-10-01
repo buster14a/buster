@@ -164,6 +164,14 @@ def run_self_test() -> int:
     problems, _ = validate_capture(stopped)
     assert any("exactly 120 slots" in problem for problem in problems)
 
+    authorized = synthetic_capture()
+    authorized["ab_authorized"] = True
+    problems, _ = validate_capture(authorized)
+    assert "ab_authorized must be false" in problems
+    authorized["ab_authorized"] = False
+    problems, invalid = validate_capture(authorized)
+    assert not problems and not invalid
+
     print("zen5_aa_noise self-test passed")
     return 0
 

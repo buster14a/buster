@@ -34,10 +34,8 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
 
-/* Held (#426): a real executable profile whose stages the systemd broker
- * cannot start yet. It is neither admitted nor served, so every submission,
- * gateway, materialization, worker-unit and export path refuses it; the
- * capabilities text is unchanged (it has no room for another name). */
+/* Served (#426): the systemd broker's version-2 recipe selector starts its
+ * outer unit and the thirteen typed stages of zen5_stage.h. */
 BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
 
 u32 bq_u32(u8 const* bytes)
@@ -210,19 +208,19 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER;
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
     return result;
 }
 
 bool bq_recipe_blocked(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
     return result;
 }
 
@@ -248,6 +246,9 @@ bool bq_request_valid(BqRequest const* request)
     String8 candidate = bq_field(request, 4);
     bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
+              /* zen5-calibration-v1 measures one immutable source named twice. */
+              (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
+               (base.length == 40 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
 }
