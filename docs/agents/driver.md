@@ -355,6 +355,39 @@ are included and timing never gates correctness. `state_bytes` is the name
 arena's used prefix (including superseded growth tables) before destruction,
 not physical RSS or the per-archive scratch peak.
 
+Archive input uses `object_archive_read_link`, a borrowed descriptor reader,
+while `object_archive_read` remains the eager public API. The driver retains
+archive mappings through extraction and releases them on every invocation exit;
+fully admitted objects own their payload and names in the result arena. Descriptor
+capacity follows the actual member-header count rather than archive payload bytes.
+
+GNU/COFF first linker-member and GNU64 indexes, plus BSD/Darwin32/64 ranlib
+indexes, provide definition metadata without reading object payloads. BSD
+extended metadata names are classified after decoding; Mach-O index names lose
+exactly the same leading underscore as the full reader. Unindexed ELF, COFF and
+Mach-O members read only symbol/name metadata. An unrelated foreign-target or
+unsupported-relocation member therefore cannot reject a link. A selected member
+runs the ordinary complete object reader before its object or undefined references
+enter extraction state; refusals name its archive member and actual/requested
+targets. The ordered provider worklist keeps the same member-order, duplicate,
+weak-reference and repeated-archive rules. Provider heads are cleared by their
+original indexed names before scratch release, even if admission replaces a
+descriptor's symbol table.
+
+Selection metadata does not extend the object reader's section or symbol
+vocabulary. An index can request a definition in a section the full reader
+cannot retain; selecting that member still reaches the existing admission or
+unresolved-symbol diagnostic. That unsupported-definition limitation remains
+at the full-reader boundary rather than silently publishing a descriptor as a
+linked object.
+
+`compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
+GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
+no-selected-member archives, a required incompatible member, duplicate providers,
+weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+control verifies that an irrelevant same-target unsupported relocation is deferred
+and its selected member still fails.
+
 An undefined weak ELF reference does not select a static archive member.
 It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive

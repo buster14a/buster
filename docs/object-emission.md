@@ -128,3 +128,24 @@ necessary. Moving them onto a plan is a staged follow-up.
 Independent readers and linkers (GNU `readelf`, `llvm-readelf`,
 `llvm-objdump`, `ld -r`, `ld.lld -r`, and full GNU ld/LLD links) are exercised
 by the evidence script recorded with the introducing audit.
+
+## In-memory executable sections
+
+`object_link_executable` relocates an object inside one temporary writable,
+nonexecutable reservation, then publishes it only after final protection and
+instruction-cache flushing succeed. Each nonempty section occupies its own
+page-rounded span: text becomes RX, mutable data and zero-fill become RW, and
+readonly/unwind/initializer/debug sections become R. No final page is both
+writable and executable. Section alignments greater than a host page remain
+absolute address constraints; padding stays readonly.
+
+`ObjectExecutable.address` names the first nonempty text section. Its
+`allocation_address` and `allocation_size` name the complete reservation,
+including any alignment prefix, and `object_release_executable` releases that
+reservation. Failed layout, relocation, protection or cache flushing publishes
+neither address. This helper does not register unwind tables or run constructors,
+and thread-local relocations still require an external runtime and are refused.
+
+The registered `object_test_executable_sections` checks data and BSS through
+PC-relative and absolute references on x86-64/AArch64, repeated updates,
+over-page alignment and Linux, Windows and macOS mapping permission queries.
