@@ -1,0 +1,3 @@
+# Byte-exact hosted evidence; retain the CRLF bytes in the original archives.
+windows-arm64-comparison.json -text
+windows-x64-comparison.json -text

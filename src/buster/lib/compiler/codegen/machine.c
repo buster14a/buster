@@ -13,6 +13,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 
@@ -1265,7 +1266,7 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 #undef MACHINE_X64_REGISTRY_ROW
 };
 
-BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 7u);
+BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 8u);
 BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
 // Canonical x86 authority records.  These rows name only the metadata module
@@ -1307,6 +1308,11 @@ BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
         .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
         .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls_local_dynamic"),
     },
 };
 

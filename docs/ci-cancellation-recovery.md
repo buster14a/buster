@@ -131,7 +131,8 @@ required-workflow completion. Each pass uses job-scoped `actions: write` and
 merge-group run identities, and the corresponding GitHub Actions check runs.
 It also reads Buster CI jobs so a failed shard need not wait for `CI complete`.
 The first completed non-success required check or Buster CI job invalidates the
-group. The watcher then requests cancellation of every active Actions run with
+group. A Buster CI job that completes as skipped, such as the main-push-only
+`Main CI reuse decision`, is not a failure; `CI complete` still requires every shard. The watcher then requests cancellation of every active Actions run with
 the same merge-group head SHA and `merge_group` event. Optional check failures
 do not trigger cancellation; completed or different-head runs are never targeted.
 It keeps watching after Buster CI succeeds and stops only when every required

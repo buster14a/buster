@@ -115,7 +115,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_null_device_output(U
     BUSTER_TEST(arguments, os_file_delete(output));
 #endif
 #endif
-    // A failed link write names the artifact it could not publish.
+    // A failed link write names the artifact it could not publish and the
+    // system error that refused the replacement (issue #2089: a Windows
+    // "file write" failure otherwise hid ERROR_ACCESS_DENIED).
     String8 link_command[] = {actions[3], S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), output};
     OsFileTestStep failure = {OS_FILE_TEST_REPLACE, OS_FILE_TEST_ERROR, 12345};
     os_file_test_begin(output, &failure, 1);
@@ -123,7 +125,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_null_device_output(U
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
     BUSTER_TEST(arguments, os_file_test_end() == 1);
     BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK);
+    BUSTER_TEST(arguments, linked.native_link.error == LINK_ERROR_FILE_WRITE && linked.native_link.write_error.v == 12345);
     BUSTER_TEST_RAW(arguments, string_first_sequence(linked.diagnostic, output) < linked.diagnostic.length, linked.diagnostic);
+    String8 system_error = string_format(arguments->arena, S8(" ({EOs})"), (OsError){12345});
+    BUSTER_TEST_RAW(arguments, string_ends_with_sequence(linked.diagnostic, system_error), linked.diagnostic);
     BUSTER_TEST(arguments, os_file_delete(input));
     return result;
 }

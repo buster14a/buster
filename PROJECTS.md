@@ -23,7 +23,8 @@ An entry establishes where to look, not a blanket support or test-pass claim.
 |---|---|---|---|
 | `foundation` | Memory, strings, numeric/byte helpers and SIMD | [Shared library sources](src/buster/lib/) | [Foundation capabilities](docs/projects/foundation.md). Shared primitives used by compiler/runtime code; not a separately packaged SDK. |
 | `platform` | OS, files and process services | [os.h](src/buster/lib/os.h), [file.h](src/buster/lib/file.h), [entry_point.h](src/buster/lib/entry_point.h) | [Platform capabilities](docs/projects/platform.md). Runtime and tool consumers; platform-specific contracts remain explicit. |
-| `graphics-ui` | Rendering, windows, fonts and UI construction | [Shared library sources](src/buster/lib/) | [Graphics/UI boundaries](docs/projects/graphics-ui.md). Retained modules, plus specific test/lifecycle consumers; no current graphical product is implied. |
+| `graphics-ui` | Rendering, windows, font decoding and UI construction | [Shared library sources](src/buster/lib/) | [Graphics/UI boundaries](docs/projects/graphics-ui.md). Retained modules, plus specific test/lifecycle consumers; no current graphical product is implied. |
+| `media` | Bounded raster-image recognition, probing and decoding | [image.h](src/buster/lib/image.h) and [image codecs](src/buster/lib/image/) | [Image-reader contract](docs/projects/media.md). Dependency-free, in-memory decoding with an explicit supported-format boundary; no graphical product or filesystem API is implied. |
 
 ## Development infrastructure
 

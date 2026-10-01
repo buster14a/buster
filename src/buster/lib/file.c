@@ -1,6 +1,7 @@
 // File content ownership and transfer policy: file_write_checked preserves
 // transfer/close failures; file_publish_checked atomically replaces complete
-// in-memory artifacts; file_read owns padded arena and normalized APK asset
+// in-memory artifacts, and file_publish_slices_checked does the same for an
+// artifact held as ordered slices; file_read owns padded arena and normalized APK asset
 // reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
 // streams into a staging file beside its destination and publishes it with
 // os_file_replace. The staging path and publication boundary are kept together
@@ -108,7 +109,35 @@ BUSTER_GLOBAL_LOCAL void file_publish_record(FilePublishResult* result, OsError 
     }
 }
 
-FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+// A stream destination's in-place write: file_write_checked for an artifact
+// held as ordered slices. It stops at the first failed or short transfer.
+BUSTER_GLOBAL_LOCAL OsFileTransferResult file_write_slices_checked(String8 path, ByteSlice const* slices, u64 slice_count, OpenPermissions permissions)
+{
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, permissions);
+    OsFileTransferResult result = {.error = opened.error};
+    if (opened.file)
+    {
+        bool complete = true;
+        for (u64 index = 0; index < slice_count && complete && !result.error.v; index += 1)
+        {
+            OsFileTransferResult written = os_file_write_checked(opened.file, slices[index]);
+            result.error = written.error;
+            result.transferred += written.transferred;
+            complete = written.transferred == slices[index].length;
+        }
+        OsError close_error = os_file_close_checked(opened.file);
+        if (!result.error.v)
+        {
+            result.error = close_error;
+        }
+    }
+    return result;
+}
+
+// The artifact is the concatenation of `slices`, written in order into one
+// staging file, so a writer can hand over bytes it already owns in place
+// instead of first copying them into one contiguous image.
+FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* slices, u64 slice_count, OpenPermissions permissions)
 {
     FilePublishResult result = {0};
     FileStats target = os_file_replacement_target_stats(path);
@@ -118,12 +147,17 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     if (target.valid && target.kind == OS_FILE_KIND_STREAM)
     {
         // A device or FIFO such as /dev/null is the requested sink itself;
-        // there is nothing to replace, so write it in place.
-        OsFileTransferResult written = file_write_checked(path, content, permissions);
+        // there is nothing to replace, so write the slices to it in place.
+        u64 length = 0;
+        for (u64 index = 0; index < slice_count; index += 1)
+        {
+            length += slices[index].length;
+        }
+        OsFileTransferResult written = file_write_slices_checked(path, slices, slice_count, permissions);
         result.error = written.error;
         if (!result.error.v)
         {
-            result.status = written.transferred == content.length ? FILE_PUBLISH_PUBLISHED : FILE_PUBLISH_FAILED;
+            result.status = written.transferred == length ? FILE_PUBLISH_PUBLISHED : FILE_PUBLISH_FAILED;
         }
     }
     else if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
@@ -167,11 +201,11 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
             result.error = os_file_set_permissions(staging.file, final_permissions);
         }
 #endif
-        if (!result.error.v)
+        for (u64 index = 0; index < slice_count && !result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING; index += 1)
         {
-            OsFileTransferResult written = os_file_write_checked(staging.file, content);
+            OsFileTransferResult written = os_file_write_checked(staging.file, slices[index]);
             result.error = written.error;
-            if (!result.error.v && written.transferred != content.length)
+            if (!result.error.v && written.transferred != slices[index].length)
             {
                 result.status = FILE_PUBLISH_INVALID_STAGING;
             }
@@ -196,6 +230,17 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     }
     scratch_end(scratch);
     return result;
+}
+
+FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+{
+    return file_publish_slices_checked(path, &content, 1, permissions);
+}
+
+bool file_publish_slices(String8 path, ByteSlice const* slices, u64 slice_count)
+{
+    FilePublishResult result = file_publish_slices_checked(path, slices, slice_count, (OpenPermissions){.read = 1, .write = 1});
+    return result.status == FILE_PUBLISH_PUBLISHED;
 }
 
 bool file_publish(String8 path, ByteSlice content)
@@ -297,35 +342,33 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #elif BUSTER_LINUX || BUSTER_MACOS
     {
-        u64 path_buffer_size;
-        BUSTER_VALIDATE(u64_add_checked(path.length, 1, &path_buffer_size));
-        char* path_buffer = (char*)arena_allocate_bytes(arena, path_buffer_size, 1);
-        memcpy(path_buffer, path.pointer, path.length);
-        path_buffer[path.length] = 0;
-
-        int file_descriptor = open(path_buffer, O_RDONLY, 0);
-        if (file_descriptor >= 0)
+        String8Z path_z = {0};
+        if (string8z_copy_arena(arena, path, &path_z))
         {
-            struct stat file_stats = {0};
-            if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
+            int file_descriptor = open(path_z.pointer, O_RDONLY, 0);
+            if (file_descriptor >= 0)
             {
-                void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
-                if (mapped != MAP_FAILED)
+                struct stat file_stats = {0};
+                if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
                 {
-                    result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
-                    result.mapped_pointer = mapped;
-                    result.mapped_size = (u64)file_stats.st_size;
-                    result.identity = (FileIdentity){
-                        .device = (u64)file_stats.st_dev,
-                        .index = (u64)file_stats.st_ino,
-                        .valid = true,
-                    };
+                    void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+                    if (mapped != MAP_FAILED)
+                    {
+                        result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
+                        result.mapped_pointer = mapped;
+                        result.mapped_size = (u64)file_stats.st_size;
+                        result.identity = (FileIdentity){
+                            .device = (u64)file_stats.st_dev,
+                            .index = (u64)file_stats.st_ino,
+                            .valid = true,
+                        };
 #if BUSTER_INCLUDE_TESTS
-                    file_map_test_state.mapped += 1;
+                        file_map_test_state.mapped += 1;
 #endif
+                    }
                 }
+                close(file_descriptor);
             }
-            close(file_descriptor);
         }
     }
 #endif
@@ -387,10 +430,12 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     // skipped rather than returned around.
     bool asset_resolved = false;
     // The app has no test files on disk; relative paths resolve to APK assets.
-    if (buster_android_asset_manager && path.length && path.pointer[0] != '/')
+    if (buster_android_asset_manager && path.pointer && path.length && path.pointer[0] != '/')
     {
         String8 asset_path = file_android_asset_path(arena, path);
-        AAsset* asset = asset_path.length ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path.pointer, AASSET_MODE_BUFFER) : 0;
+        String8Z asset_path_z = {0};
+        bool asset_path_valid = asset_path.length && string8z_copy_arena(arena, asset_path, &asset_path_z);
+        AAsset* asset = asset_path_valid ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path_z.pointer, AASSET_MODE_BUFFER) : 0;
         if (asset)
         {
             u64 file_size = (u64)AAsset_getLength64(asset);
@@ -418,7 +463,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
 
 #if BUSTER_IOS
     // Resolve relative paths against the app bundle's Resources directory.
-    if (path.length && path.pointer[0] != '/')
+    if (path.pointer && path.length && path.pointer[0] != '/')
     {
         const char* resource_path = buster_ios_bundle_resource_path();
         if (resource_path)

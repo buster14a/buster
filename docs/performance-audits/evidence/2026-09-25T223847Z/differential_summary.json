@@ -1,0 +1,53 @@
+{
+ "row_streams": {
+  "invocations_per_compiler": 2744,
+  "sources": 392,
+  "modes": [
+   "-g -c",
+   "-g0 -c",
+   "-g -fno-frontend-ssa -c",
+   "-g -target aarch64-unknown-linux-gnu -c",
+   "-g -target x86_64-pc-windows-msvc -c",
+   "-g -fregister-allocator=none -c",
+   "-g -fregister-allocator=quality -c"
+  ],
+  "objects_compared": 2516,
+  "failing_both": 228,
+  "mismatches": 0,
+  "mismatch_list": []
+ },
+ "rejected_copy_variant": {
+  "invocations_per_compiler": 2744,
+  "sources": 392,
+  "modes": [
+   "-g -c",
+   "-g0 -c",
+   "-g -fno-frontend-ssa -c",
+   "-g -target aarch64-unknown-linux-gnu -c",
+   "-g -target x86_64-pc-windows-msvc -c",
+   "-g -fregister-allocator=none -c",
+   "-g -fregister-allocator=quality -c"
+  ],
+  "objects_compared": 2516,
+  "failing_both": 228,
+  "mismatches": 0,
+  "mismatch_list": []
+ },
+ "rejected_copy_variant_poisoned": {
+  "invocations_per_compiler": 2744,
+  "sources": 392,
+  "modes": [
+   "-g -c",
+   "-g0 -c",
+   "-g -fno-frontend-ssa -c",
+   "-g -target aarch64-unknown-linux-gnu -c",
+   "-g -target x86_64-pc-windows-msvc -c",
+   "-g -fregister-allocator=none -c",
+   "-g -fregister-allocator=quality -c"
+  ],
+  "objects_compared": 2516,
+  "failing_both": 228,
+  "mismatches": 0,
+  "mismatch_list": []
+ }
+}
