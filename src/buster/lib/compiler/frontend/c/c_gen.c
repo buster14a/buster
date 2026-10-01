@@ -11,6 +11,8 @@
 // (c_ir_build_delimiter_index).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
+// c_ir_assignment_expression_place_frame_push forms assignment destinations
+// after their calls complete, retaining the computed place for result storage.
 // c_ir_record_local_place publishes canonical owner/place identities for
 // named and temporary locals; final SSA compaction remaps those identities.
 // Every row reaches its block through ir.h's block-row protocol: the funnel
@@ -14057,6 +14059,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS,
     C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE,
+    C_IR_LOWER_STAGE_EXPRESSION_ASSIGNMENT_CALLS,
     C_IR_LOWER_STAGE_EXPRESSION_PLACE,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE,
@@ -33543,6 +33546,48 @@ BUSTER_C_INTERNAL bool c_ir_expression_task_push(CIntegerIrBuilder* builder, CIr
     return true;
 }
 
+// Assignment expressions form a place only after calls in that operand have
+// completed. Preserve the existing parenthesized-place recovery path.
+BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    u32 start = frame->as.expression.start;
+    u32 assignment = frame->as.expression.pending_assignment;
+    // Most assignment operands can be lowered directly by the place
+    // machine.  A dereference whose pointer is itself parenthesized,
+    // such as `*(&local) = value`, is a value expression that the
+    // place machine intentionally does not parse.  Lower that small
+    // shape through the expression path and recover its final load's
+    // operand in EXPRESSION_PLACE (the same recovery used for
+    // parenthesized member assignments above).
+    bool parenthesized_place =
+        start < assignment &&
+        (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+         (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
+          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+    // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
+    // pointer while forming the place. The place machine parses an
+    // identifier and its field/subscript suffixes, not an update, so
+    // route this shape through the expression path too and recover the
+    // place from the load it ends with, exactly as above.
+    if (!parenthesized_place && start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
+    {
+        for (u32 index = start + 1; index < assignment; index += 1)
+        {
+            if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_PLUS_PLUS) ||
+                c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_MINUS_MINUS))
+            {
+                parenthesized_place = true;
+                break;
+            }
+        }
+    }
+    bool pushed = parenthesized_place
+                      ? c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                                     .as.expression = {.start = start, .end = assignment}})
+                      : c_ir_lower_place_frame_push(builder, start, assignment);
+    return pushed;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -33589,6 +33634,20 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         unwind = true;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_ASSIGNMENT_CALLS)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_PLACE;
+        if (!c_ir_assignment_expression_place_frame_push(builder, frame))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_PLACE)
     {
@@ -34201,45 +34260,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         {
             frame->as.expression.pending_assignment = assignment;
             frame->as.expression.pending_operation = assignment_operation;
-            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_PLACE;
-            // Most assignment operands can be lowered directly by the place
-            // machine.  A dereference whose pointer is itself parenthesized,
-            // such as `*(&local) = value`, is a value expression that the
-            // place machine intentionally does not parse.  Lower that small
-            // shape through the expression path and recover its final load's
-            // operand in EXPRESSION_PLACE (the same recovery used for
-            // parenthesized member assignments above).
-            bool parenthesized_place =
-                start < assignment &&
-                (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                 (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
-                  c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
-            // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
-            // pointer while forming the place. The place machine parses an
-            // identifier and its field/subscript suffixes, not an update, so
-            // route this shape through the expression path too and recover the
-            // place from the load it ends with, exactly as above.
-            if (!parenthesized_place && start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
-            {
-                for (u32 index = start + 1; index < assignment; index += 1)
-                {
-                    if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_PLUS_PLUS) ||
-                        c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_MINUS_MINUS))
-                    {
-                        parenthesized_place = true;
-                        break;
-                    }
-                }
-            }
-            if (!(parenthesized_place ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                                         .as.expression =
-                                                                             {
-                                                                                 .start = start,
-                                                                                 .end = assignment,
-                                                                             },
-                                                                     })
-                                      : c_ir_lower_place_frame_push(builder, start, assignment)))
+            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_ASSIGNMENT_CALLS;
+            if (!c_ir_prepare_calls_frame_push(builder, start, assignment))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }

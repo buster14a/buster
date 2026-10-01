@@ -242,6 +242,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Signed results sign-extend from that width; narrow declared types normalize
   at 32 bits before converting back. Boolean results use truth conversion.
   The computed value supplies the result without a second volatile load.
+  Assignment-expression destination calls are prepared before place lowering;
+  the retained place carries their result into the store exactly once. The
+  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
+  returned value is 1 and whose destination call must run once.
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
   forms and all four allocators, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
