@@ -388,6 +388,7 @@ static inline int tp_retirement_budget_input_parse(char const* text, size_t size
         parsed.runtime_process_ns = values[13];
         parsed.metrics_header_bytes = values[14];
         parsed.metrics_input_bytes = values[15];
+        parsed.aa_attestation_ns_per_mib = values[16];
     }
     *budget = ok ? parsed : (TpRetirementCampaignBudget){0};
     return ok;
@@ -535,12 +536,13 @@ static inline int tp_retirement_budget_report(FILE* output, char const digest[65
                           "\nfixed-ns=%" PRIu64 "\ncompiler-ns=%" PRIu64 "\ncompiler-object-ns=%" PRIu64
                           "\ncompiler-singleton-ns=%" PRIu64 "\nruntime-ns=%" PRIu64 "\nuntimed-ns=%" PRIu64
                           "\nuntimed-object-ns=%" PRIu64 "\nuntimed-singleton-ns=%" PRIu64 "\ncompiler-batches=%" PRIu64
-                          "\nruntime-processes=%" PRIu64 "\nuntimed-batches=%" PRIu64 "\n",
+                          "\nruntime-processes=%" PRIu64 "\nuntimed-batches=%" PRIu64 "\naa-attestation-ns=%" PRIu64
+                          "\naa-attestation-bytes=%" PRIu64 "\n",
                           digest, result->fits, result->required_ns, result->remaining_ns, result->fixed_ns,
                           result->compiler_ns, result->compiler_object_ns, result->compiler_singleton_ns,
                           result->runtime_ns, result->untimed_ns, result->untimed_object_ns,
                           result->untimed_singleton_ns, result->compiler_batches, result->runtime_processes,
-                          result->untimed_batches);
+                          result->untimed_batches, result->aa_attestation_ns, result->aa_attestation_bytes);
     return written > 0;
 }
 

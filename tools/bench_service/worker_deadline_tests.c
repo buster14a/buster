@@ -311,11 +311,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_group_reaping(void)
     }
 }
 
-/* The scalar head of a canonical tp-retirement-campaign-budget-v2 record, in
+/* The scalar head of a canonical tp-retirement-campaign-budget-v3 record, in
  * bq_worker_budget_keys order: a 2 h 24 min 0.5 s ceiling, then every fixed
  * phase (38.8 s in all, settling and export counted per collection stage).
  * The service unit does not link the throughput encoder, so the fixture
- * spells the canonical text: these lines, the three remaining scalars and
+ * spells the canonical text: these lines, the four remaining scalars and
  * both bound tables, exactly as tp_retirement_budget_encode lays them out. */
 typedef struct BqTestWorkerBudget
 {
@@ -337,9 +337,11 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_retirement_record(BqTestWorkerBudget con
 {
     int length = snprintf(record, BQ_WORKER_BUDGET_BYTES, "%s\nderivation=%s\n", BQ_WORKER_BUDGET_SCHEMA,
         "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))"
-        "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));"
+        "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u))"
+        "+ceil(R*P*(330*sum_g(n_g)+266*O)*attest/2^20);"
         "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;"
-        "untimed:separate tables measured on the slowest untimed target");
+        "untimed:separate tables measured on the slowest untimed target;"
+        "attest:measured AA_MEASURED re-read ns per MiB of A/A sample shard,O the timed object groups");
     u64 used = length > 0 && length < (int)BQ_WORKER_BUDGET_BYTES ? (u64)length : BQ_WORKER_BUDGET_BYTES;
     for (u32 index = 0; used < BQ_WORKER_BUDGET_BYTES && index < BUSTER_ARRAY_LENGTH(bq_worker_budget_keys);
          index += 1)
@@ -353,6 +355,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_retirement_record(BqTestWorkerBudget con
     {
         length = snprintf(record + used, BQ_WORKER_BUDGET_BYTES - used, "%s",
                           "runtime-process-ns=50000000\nmetrics-header-bytes=4096\nmetrics-input-bytes=16384\n"
+                          "aa-attestation-ns-per-mib=8000000\n"
                           "batch=1:40000000\nbatch=1024:2000000000\nsingleton=link:45000000\n"
                           "singleton=self-host-stage1:900000000\nuntimed-batch=1:50000000\n"
                           "untimed-batch=1024:2500000000\nuntimed-singleton=link:60000000\n"
@@ -478,7 +481,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
     /* Even correctly pinned: another schema, a leading zero or a reordered
      * scalar is not the canonical record this worker reads. */
     char const* const substitutions[][2] = {
-        {"schema=tp-retirement-campaign-budget-v2", "schema=tp-retirement-campaign-budget-v1"},
+        {"schema=tp-retirement-campaign-budget-v3", "schema=tp-retirement-campaign-budget-v2"},
         {"reservation-ns=1000000000", "reservation-ns=01000000000"},
         {"reservation-ns=1000000000\nmaterialization-ns=2000000000",
          "materialization-ns=2000000000\nreservation-ns=1000000000"}};

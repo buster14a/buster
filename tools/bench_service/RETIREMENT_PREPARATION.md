@@ -1250,8 +1250,9 @@ and forks a producer.
 **Admission.** `bq_worker_unit_pinned` admits the retirement recipe only when
 `bq_retirement_profile_complete` accepts the profile. That requires every
 integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
-reference-policy, nine census, required-checks, row-plan, campaign-budget and
-untimed-commands digests), lane D's frozen campaign values
+reference-policy, nine census, required-checks, row-plan, campaign-budget,
+untimed-commands, adapter, binding-context and, since #426 plan step 6, the
+A/A policy's `aa-policy-sha256=` digests), lane D's frozen campaign values
 (`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
 `campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
 status line, which must be exactly
@@ -1416,6 +1417,20 @@ were decided by OPUS-CLOUD on #36.
    An unreadable or unowned file refuses with `BQ_CONFIGURATION_MISMATCH`.
    The installed blocked profile pins no policy, so it refuses here (and the
    recipe never reaches this step anyway).
+
+   **The pin is required before any campaign.** `aa-policy-sha256=` is one of
+   the worker-unit pins (`bq_retirement_worker_unit_pins`,
+   `BQ_RETIREMENT_PROFILE_PINS` 22). So `bq_retirement_profile_complete`, and
+   with it `bq_retirement_compiled_servable` and every coordinator gate,
+   refuses an admitted profile that lacks the line, repeats it or spells
+   another digest. That happens at `serve`, at submission and before
+   reservation, never at A/A. The installed `.blocked` profile is unchanged:
+   still `status=blocked`, still no policy pin, and still servable as
+   blocked. The preparation fixture's complete profile pins its test policy
+   digest, which its receipt stand-in also names.
+   `bq_test_retirement_aa_pin_required` covers the refusals, the pass and
+   the unchanged blocked profile. The policy file and its real digest come
+   in the final commit after window 2.
 2. **The band.** The band applies to the current job's A/A rows as #1188
    specifies. The rows are lane D's finished A/A spool
    (`bq_retirement_aa_ratios`): the ratio of the candidate slot to the
@@ -2131,6 +2146,52 @@ Tests:
   poisoned failed job at CLEANING without its failure record reconciles
   `BQ_CORRUPT` and is left unchanged.
   `bq_test_export` checks the export refusal on a bound, finished result.
+
+## The AA_MEASURED re-read in the campaign budget (#426 plan step 6, #1021)
+
+The coordinator's AA_MEASURED attestation
+(`bq_retirement_coordinator_aa_attest`) reads every A/A sample shard and
+hashes it once with SHA-256 between A/A and A/B. That is between-stage
+work proportional to the A/A shard bytes, so the reviewed campaign budget
+counts it. Budget schema v3 (`tp-retirement-campaign-budget-v3`) adds the
+scalar `aa-attestation-ns-per-mib` and the derivation term
+`ceil(R * P * (330 * sum_g(n_g) + 266 * O) * attest / 2^20)`
+(`tp_retirement_budget_attestation`):
+
+- **Bytes.** Every A/A sample line is at most a row record
+  (`TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX`, 330) or a batch record
+  (`TP_RETIREMENT_BATCH_RECORD_BYTES_MAX`, 266), with `R * P` lines per unit.
+  The timed rows are at most the timed groups' inputs `n_g` (an object group
+  counts its controls too), and there is one batch unit per object group
+  `O`.
+- **Rate.** `attest` is a measured upper bound in nanoseconds per MiB read
+  and hashed.
+
+No existing bound changed; the term only adds. `preflight` reports
+`aa-attestation-ns=` and `aa-attestation-bytes=`. The capacity report
+(`retirement_capacity.py`) shows the worst-case bytes as
+`reviewed_budget.aa_attestation_bytes`. The coordinator's runtime check
+(`bq_worker_retirement_runtime`) reads only the fixed-phase scalars, so the
+term is a count-scaled addition to the derivation, not a fixed phase. The
+#511 validator parses v3 (`CAMPAIGN_BUDGET_*`).
+
+Measured in the cloud container (Intel Xeon @ 2.10 GHz, 4 vCPUs, warm page
+cache, the service's SHA-256), which is not the 9700X:
+
+| Input | Bytes | Time | Rate |
+|---|---|---|---|
+| The fixture campaign's A/A shards (job 82) | 905,757 | 4.17 to 6.43 ms | at most 7.44 ms/MiB |
+| Eight worst-case row shards (131,072 lines of 330 bytes each) | 346,030,080 | 1.65 to 1.71 s | at most 5.19 ms/MiB |
+
+The test fixtures therefore use 8 ms/MiB. The production value is a 9700X
+measurement (#422) like every other bound.
+
+At 8 ms/MiB, the budget totals change as follows:
+
+| Counts | Re-read bytes | Required before | Required after |
+|---|---|---|---|
+| Realistic A1 counts, 254 pairs (`retirement_campaign_test.h`) | 1,145,733,040 | 75,250.360 s | 75,259.101249390 s (+8.741 s, +0.012%) |
+| The tool's tiny campaign | 190,320 | 62.8 s | 62.801452027 s |
 
 ## Generating the campaign authorities (#881)
 

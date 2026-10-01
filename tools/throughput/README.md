@@ -912,10 +912,12 @@ one entry per batch.
 
 (M4) Amendment A1 replaces the fixed one-hour worker budget with a reviewed
 budget bound into the admitted service recipe. `retirement_budget.h` holds the
-record (schema v2): the reviewed whole-job ceiling, the authenticated
+record (schema v3): the reviewed whole-job ceiling, the authenticated
 fixed-phase bounds, compiler-process bounds keyed by group kind and artifact
-stage, a measured bound per runtime process, and the reviewed metrics bound (a
-header plus a per-input bound). The timed table holds object batch classes
+stage, a measured bound per runtime process, the reviewed metrics bound (a
+header plus a per-input bound) and (v3, #426 plan step 6 / #1021)
+`aa-attestation-ns-per-mib`, a measured upper bound on the coordinator's
+AA_MEASURED re-read per MiB of A/A sample shard. The timed table holds object batch classes
 (ascending input counts with nondecreasing bounds) and one bound per
 singleton stage (`link`, `self-host-stage1`; the table has room for later
 stages, whose slots stay zero until a named stage, and so a new schema and
@@ -927,7 +929,8 @@ and its SHA-256 is the recipe profile's `campaign-budget-sha256=` pin; a strict
 decoder admits only the canonical bytes. `tp_retirement_budget_preflight`
 derives
 `fixed + stages * (settling + export) + sum over groups of stages * 2 * (W + R * P) * timed(kind, stage, inputs)
-+ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * untimed(kind, stage, inputs)` and
++ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * untimed(kind, stage, inputs)
++ ceil(R * P * (330 * sum of timed inputs + 266 * object groups) * attest / 2^20)` and
 rejects, before timing, a job the reviewed ceiling cannot hold, a group larger
 than every class, a kind/stage pair without a bound, a missing bound or
 overflow. `tp_retirement_campaign_freeze` takes the budget, each timed group's
@@ -962,7 +965,7 @@ service retirement-records budget-preflight INSTALLED PROFILE DECLARATION BUDGET
 ```
 
 The reviewed input starts with `schema=tp-retirement-campaign-budget-input-v1`.
-It then gives each of the 16 scalar keys exactly once, in any order, and the
+It then gives each of the 17 scalar keys exactly once, in any order, and the
 table lines: `batch=<max_inputs>:<ns>` classes in ascending order,
 `singleton=link:<ns>`, `singleton=self-host-stage1:<ns>`, and the same lines
 prefixed with `untimed-`. Blank lines and `#` comments may appear anywhere
@@ -1020,15 +1023,17 @@ The tool chooses no value. The production bounds still need these inputs:
 
 - **9700X measurements (#422):** every `*-ns` phase bound, both tables'
   batch classes and singleton bounds (the untimed table measured on the
-  slowest untimed target), and `runtime-process-ns`. Each includes launcher
-  and collector work.
+  slowest untimed target), `runtime-process-ns` and
+  `aa-attestation-ns-per-mib`. Each includes launcher and collector work.
 - **Reviewed policy values:** `reviewed-ns` (the whole-job ceiling),
   `metrics-header-bytes`, `metrics-input-bytes`, and the pair count.
 
 The `bench_throughput` self-test (`retirement_budget_tool_test.h`) covers
 every rule with fixture values only, each case isolating its rule and
-asserting its diagnostic. That includes the ceiling floor boundary: 62.8 s
-required with `reviewed-ns` 62.999999999 s is refused. The preparation
+asserting its diagnostic. That includes the ceiling floor boundary:
+62.801452027 s required (62.8 s plus the tiny campaign's 1.45 ms re-read) with
+`reviewed-ns` 62.999999999 s is refused, and the re-read term alone refusing
+a 63 s ceiling at 1.2 s/MiB. The preparation
 fixture covers the service entry.
 
 (A1) Untimed code-artifact batches: `retirement_untimed.h` runs, per untimed

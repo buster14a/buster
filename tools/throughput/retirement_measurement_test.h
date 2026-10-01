@@ -376,7 +376,7 @@ static TpRetirementCampaignBudget test_retirement_budget(void)
         .aa_qualification_ns = 600000000, .aa_receipt_sealing_ns = 700000000,
         .sample_export_per_stage_ns = 800000000, .final_statistics_ns = 900000000,
         .final_sealing_ns = 1000000000, .cleanup_ns = 20000000000, .runtime_process_ns = 50000000,
-        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384,
+        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384, .aa_attestation_ns_per_mib = 8000000,
         .timed = {3, {{1, 40000000}, {4, 60000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}},
                   {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 45000000, [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 900000000}},
         .untimed = {3, {{1, 50000000}, {4, 80000000}, {TP_RETIREMENT_BATCH_INPUTS, 2500000000}},

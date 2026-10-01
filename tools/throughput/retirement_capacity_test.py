@@ -163,6 +163,8 @@ class CapacityModelTests(unittest.TestCase):
                           "singleton/self-host-stage1": per_group})
         self.assertEqual(counts["untimed_batches_by_kind_and_stage"],
                          {"object/object": 880 * 4, "singleton/link": 11 * 4})
+        self.assertEqual(counts["aa_attestation_bytes"],
+                         2 * 254 * (330 * sum(group["inputs"] for group in groups) + 266 * 80))
         self.assertFalse(counts["singletons_costed_as_one_input_batches"])
         self.assertTrue(counts["untimed_bounds_are_the_slowest_untimed_target"])
         for bad in ({"kind": "singleton", "inputs": 1, "members": 1},

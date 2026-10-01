@@ -287,6 +287,7 @@ class InvocationEvidenceTests(unittest.TestCase):
         values["reviewed-ns"] = 36000000000000
         values["metrics-header-bytes"] = cls.METRICS_HEADER_BYTES if header is None else header
         values["metrics-input-bytes"] = cls.METRICS_INPUT_BYTES if per_input is None else per_input
+        values["aa-attestation-ns-per-mib"] = 8000000
         lines = [f"schema={binding.CAMPAIGN_BUDGET_SCHEMA}",
                  f"derivation={binding.CAMPAIGN_BUDGET_DERIVATION}"]
         lines += [f"{key}={values[key]}" for key in binding.CAMPAIGN_BUDGET_SCALARS]

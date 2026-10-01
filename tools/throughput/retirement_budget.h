@@ -6,7 +6,11 @@
  * artifact stage (object batches by input count; link and self-host
  * singletons by stage, never as a one-input batch), separate untimed bounds
  * measured on the slowest untimed target, a measured upper bound per runtime
- * process, and the reviewed metrics-artifact byte bound per input. Its
+ * process, the reviewed metrics-artifact byte bound per input, and (v3, #426
+ * plan step 6 / #1021) a measured upper bound on the coordinator's
+ * AA_MEASURED re-read per MiB of A/A sample shard: that re-read (every A/A
+ * sample shard read and SHA-256 hashed between A/A and A/B) costs the
+ * worst-case shard bytes the frozen counts allow, times that rate. Its
  * canonical text encoding names the
  * derivation formula, so the recipe/profile pin (`campaign-budget-sha256=`)
  * binds inputs and derivation together; the blocked profile carries no pin.
@@ -17,13 +21,13 @@
  * Map: TpRetirementCampaignBudget, tp_retirement_budget_valid,
  * tp_retirement_budget_group_ns, tp_retirement_budget_metrics_bytes,
  * tp_retirement_budget_encode/_decode/_digest, TpRetirementBudgetCounts,
- * tp_retirement_budget_preflight.
+ * tp_retirement_budget_attestation, tp_retirement_budget_preflight.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_BUDGET_H
 #define BUSTER_THROUGHPUT_RETIREMENT_BUDGET_H
 #include "retirement_samples.h"
 
-#define TP_RETIREMENT_BUDGET_SCHEMA "tp-retirement-campaign-budget-v2"
+#define TP_RETIREMENT_BUDGET_SCHEMA "tp-retirement-campaign-budget-v3"
 /* The derivation the pinned record commits to, per collection stage s (A/A,
  * A/B), per_unit = 2 * (warmups + rounds * pairs):
  * fixed + stages * (settling + export) + sum over timed groups of
@@ -33,12 +37,26 @@
  * whose max_inputs >= n; a link or self-host singleton costs its stage's own
  * bound, never a one-input batch. The untimed tables are separate bounds, each
  * measured as the maximum over every untimed target (the slowest target), and
- * never the native timed bounds. */
+ * never the native timed bounds. (v3) The A/A attestation adds
+ * ceil(R * P * (330 * sum_g(n_g) + 266 * O) * attest / 2^20): every A/A
+ * sample line is at most TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX (a row record;
+ * the timed rows are at most the timed groups' inputs) or
+ * TP_RETIREMENT_BATCH_RECORD_BYTES_MAX (a batch record, one per object group
+ * O), R * P lines per unit, each byte read and hashed once at `attest`
+ * nanoseconds per MiB. */
 #define TP_RETIREMENT_BUDGET_DERIVATION \
     "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))" \
-    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));" \
+    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u))" \
+    "+ceil(R*P*(330*sum_g(n_g)+266*O)*attest/2^20);" \
     "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;" \
-    "untimed:separate tables measured on the slowest untimed target"
+    "untimed:separate tables measured on the slowest untimed target;" \
+    "attest:measured AA_MEASURED re-read ns per MiB of A/A sample shard,O the timed object groups"
+/* The A/A attestation term's per-line bounds and unit (v3). */
+#define TP_RETIREMENT_BUDGET_ATTEST_ROW_BYTES 330u
+#define TP_RETIREMENT_BUDGET_ATTEST_BATCH_BYTES 266u
+#define TP_RETIREMENT_BUDGET_ATTEST_MIB (UINT64_C(1) << 20)
+BUSTER_CT_CHECK(TP_RETIREMENT_BUDGET_ATTEST_ROW_BYTES == TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX);
+BUSTER_CT_CHECK(TP_RETIREMENT_BUDGET_ATTEST_BATCH_BYTES == TP_RETIREMENT_BATCH_RECORD_BYTES_MAX);
 #define TP_RETIREMENT_BUDGET_STAGES 2u
 #define TP_RETIREMENT_BUDGET_CLASSES 16u
 #define TP_RETIREMENT_BUDGET_BYTES 4096u
@@ -87,6 +105,9 @@ typedef struct TpRetirementCampaignBudget
     uint64_t final_statistics_ns, final_sealing_ns, cleanup_ns;
     uint64_t runtime_process_ns;
     uint64_t metrics_header_bytes, metrics_input_bytes;
+    /* (v3) The measured upper bound of the AA_MEASURED re-read, in ns per MiB
+     * of A/A sample shard read and hashed. */
+    uint64_t aa_attestation_ns_per_mib;
     TpRetirementBudgetTable timed, untimed;
 } TpRetirementCampaignBudget;
 
@@ -132,7 +153,7 @@ static inline int tp_retirement_budget_valid(TpRetirementCampaignBudget const* b
         budget->settling_per_stage_ns && budget->aa_qualification_ns && budget->aa_receipt_sealing_ns &&
         budget->sample_export_per_stage_ns && budget->final_statistics_ns && budget->final_sealing_ns &&
         budget->cleanup_ns && budget->runtime_process_ns && budget->metrics_header_bytes &&
-        budget->metrics_input_bytes &&
+        budget->metrics_input_bytes && budget->aa_attestation_ns_per_mib &&
         budget->metrics_input_bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES - budget->metrics_header_bytes &&
         budget->metrics_header_bytes < TP_RETIREMENT_METRICS_ARTIFACT_BYTES &&
         tp_retirement_budget_table_valid(&budget->timed) && tp_retirement_budget_table_valid(&budget->untimed);
@@ -181,8 +202,8 @@ static char const* const tp_retirement_budget_keys[] = {
     "reviewed-ns", "reservation-ns", "materialization-ns", "baseline-build-ns", "candidate-build-ns",
     "correctness-ns", "settling-per-stage-ns", "aa-qualification-ns", "aa-receipt-sealing-ns",
     "sample-export-per-stage-ns", "final-statistics-ns", "final-sealing-ns", "cleanup-ns",
-    "runtime-process-ns", "metrics-header-bytes", "metrics-input-bytes"};
-#define TP_RETIREMENT_BUDGET_SCALARS 16u
+    "runtime-process-ns", "metrics-header-bytes", "metrics-input-bytes", "aa-attestation-ns-per-mib"};
+#define TP_RETIREMENT_BUDGET_SCALARS 17u
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(tp_retirement_budget_keys) == TP_RETIREMENT_BUDGET_SCALARS);
 
 static inline void tp_retirement_budget_scalars(TpRetirementCampaignBudget const* budget,
@@ -193,7 +214,7 @@ static inline void tp_retirement_budget_scalars(TpRetirementCampaignBudget const
         budget->correctness_ns, budget->settling_per_stage_ns, budget->aa_qualification_ns,
         budget->aa_receipt_sealing_ns, budget->sample_export_per_stage_ns, budget->final_statistics_ns,
         budget->final_sealing_ns, budget->cleanup_ns, budget->runtime_process_ns,
-        budget->metrics_header_bytes, budget->metrics_input_bytes};
+        budget->metrics_header_bytes, budget->metrics_input_bytes, budget->aa_attestation_ns_per_mib};
     memcpy(values, source, sizeof(source));
 }
 
@@ -356,6 +377,7 @@ static inline int tp_retirement_budget_decode(char const* bytes, size_t size, Tp
         decoded.runtime_process_ns = values[13];
         decoded.metrics_header_bytes = values[14];
         decoded.metrics_input_bytes = values[15];
+        decoded.aa_attestation_ns_per_mib = values[16];
     }
     char canonical[TP_RETIREMENT_BUDGET_BYTES];
     size_t canonical_size = ok ? tp_retirement_budget_encode(&decoded, canonical, sizeof(canonical)) : 0;
@@ -384,10 +406,12 @@ typedef struct TpRetirementBudgetCounts
 } TpRetirementBudgetCounts;
 
 /* compiler_ns splits into object batches and stage singletons; so does
- * untimed_ns. */
+ * untimed_ns. aa_attestation_ns is the (v3) re-read term over its worst-case
+ * aa_attestation_bytes. */
 typedef struct TpRetirementBudgetPreflight
 {
     uint64_t fixed_ns, compiler_ns, runtime_ns, untimed_ns, required_ns, remaining_ns;
+    uint64_t aa_attestation_bytes, aa_attestation_ns;
     uint64_t compiler_object_ns, compiler_singleton_ns, untimed_object_ns, untimed_singleton_ns;
     uint64_t compiler_batches, runtime_processes, untimed_batches;
     int fits;
@@ -409,6 +433,32 @@ static inline int tp_retirement_budget_groups_ns(TpRetirementCampaignBudget cons
             tp_retirement_budget_mul(bound, repeats, &cost) && tp_retirement_budget_add(*sum, cost, sum) &&
             tp_retirement_budget_add(*processes, repeats, processes);
     }
+    return ok;
+}
+
+/* (v3) The A/A attestation term: the worst-case bytes of the A/A stage's
+ * sample shards the frozen counts allow, R * P * (330 * sum of the timed
+ * groups' inputs + 266 * object groups), and their re-read time at the
+ * reviewed ns-per-MiB rate, rounded up. */
+static inline int tp_retirement_budget_attestation(TpRetirementCampaignBudget const* budget,
+    TpRetirementBudgetCounts const* counts, uint64_t* bytes, uint64_t* ns)
+{
+    uint64_t inputs = 0, objects = 0, lines = 0, row_bytes = 0, batch_bytes = 0, total = 0, scaled = 0;
+    int ok = counts->timed.count <= TP_RETIREMENT_MAX_CELLS && (!counts->timed.count || counts->timed.inputs) &&
+        (!counts->timed.count || counts->timed.kinds);
+    for (unsigned g = 0; ok && g < counts->timed.count; ++g)
+    {
+        ok = tp_retirement_budget_add(inputs, counts->timed.inputs[g], &inputs);
+        objects += counts->timed.kinds[g] == TP_RETIREMENT_GROUP_OBJECT;
+    }
+    ok = ok && tp_retirement_budget_mul(TP_RETIREMENT_ROUNDS, counts->pairs, &lines) &&
+        tp_retirement_budget_mul(inputs, TP_RETIREMENT_BUDGET_ATTEST_ROW_BYTES, &row_bytes) &&
+        tp_retirement_budget_mul(objects, TP_RETIREMENT_BUDGET_ATTEST_BATCH_BYTES, &batch_bytes) &&
+        tp_retirement_budget_add(row_bytes, batch_bytes, &total) && tp_retirement_budget_mul(total, lines, &total) &&
+        tp_retirement_budget_mul(total, budget->aa_attestation_ns_per_mib, &scaled) &&
+        tp_retirement_budget_add(scaled, TP_RETIREMENT_BUDGET_ATTEST_MIB - 1u, &scaled);
+    *bytes = ok ? total : 0;
+    *ns = ok ? scaled / TP_RETIREMENT_BUDGET_ATTEST_MIB : 0;
     return ok;
 }
 
@@ -447,10 +497,12 @@ static inline int tp_retirement_budget_preflight(TpRetirementCampaignBudget cons
         tp_retirement_budget_mul(result.runtime_processes, budget->runtime_process_ns, &result.runtime_ns) &&
         tp_retirement_budget_groups_ns(budget, 1, &counts->untimed, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
             &result.untimed_object_ns, &result.untimed_singleton_ns, &result.untimed_batches) &&
-        tp_retirement_budget_add(result.untimed_object_ns, result.untimed_singleton_ns, &result.untimed_ns);
+        tp_retirement_budget_add(result.untimed_object_ns, result.untimed_singleton_ns, &result.untimed_ns) &&
+        tp_retirement_budget_attestation(budget, counts, &result.aa_attestation_bytes, &result.aa_attestation_ns);
     ok = ok && tp_retirement_budget_add(result.fixed_ns, result.compiler_ns, &result.required_ns) &&
         tp_retirement_budget_add(result.required_ns, result.runtime_ns, &result.required_ns) &&
         tp_retirement_budget_add(result.required_ns, result.untimed_ns, &result.required_ns) &&
+        tp_retirement_budget_add(result.required_ns, result.aa_attestation_ns, &result.required_ns) &&
         result.required_ns <= budget->reviewed_ns;
     if (ok)
     {

@@ -341,17 +341,21 @@ ADAPTER_SERIES_LEAF_FORMAT = "retirement-statistics-series-{:04d}.txt"
 # (tools/throughput/retirement_budget.h canonical text) and its SHA-256, the
 # recipe-profile pin `campaign-budget-sha256=`.  Every object group's
 # metrics_bytes_max must be header + inputs * per-input from that record.
-CAMPAIGN_BUDGET_SCHEMA = "tp-retirement-campaign-budget-v2"
+# (#426 plan step 6, #1021) v3 adds the coordinator's AA_MEASURED re-read of
+# the A/A sample shards: aa-attestation-ns-per-mib over their worst-case bytes.
+CAMPAIGN_BUDGET_SCHEMA = "tp-retirement-campaign-budget-v3"
 CAMPAIGN_BUDGET_DERIVATION = (
     "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))"
-    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));"
+    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u))"
+    "+ceil(R*P*(330*sum_g(n_g)+266*O)*attest/2^20);"
     "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;"
-    "untimed:separate tables measured on the slowest untimed target")
+    "untimed:separate tables measured on the slowest untimed target;"
+    "attest:measured AA_MEASURED re-read ns per MiB of A/A sample shard,O the timed object groups")
 CAMPAIGN_BUDGET_SCALARS = (
     "reviewed-ns", "reservation-ns", "materialization-ns", "baseline-build-ns", "candidate-build-ns",
     "correctness-ns", "settling-per-stage-ns", "aa-qualification-ns", "aa-receipt-sealing-ns",
     "sample-export-per-stage-ns", "final-statistics-ns", "final-sealing-ns", "cleanup-ns",
-    "runtime-process-ns", "metrics-header-bytes", "metrics-input-bytes")
+    "runtime-process-ns", "metrics-header-bytes", "metrics-input-bytes", "aa-attestation-ns-per-mib")
 CAMPAIGN_BUDGET_STAGES = ("link", "self-host-stage1")
 CAMPAIGN_BUDGET_CLASS_CAP = 16
 # A budget class holds at most the producer's TP_RETIREMENT_BATCH_INPUTS inputs.

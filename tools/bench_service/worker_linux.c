@@ -141,8 +141,9 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_execution_deadline(u64 start, u64 runtime_use
  * derivation line, then these scalar keys first and in this order, each
  * `key=<decimal ns>` without leading zeros. Index 0 is the reviewed whole-job
  * ceiling; the rest are the record's fixed-phase bounds, two of them per
- * collection stage. */
-#define BQ_WORKER_BUDGET_SCHEMA "schema=tp-retirement-campaign-budget-v2"
+ * collection stage. The later scalars (v3: the A/A attestation rate) are
+ * count-scaled terms, not fixed phases, so they are not read here. */
+#define BQ_WORKER_BUDGET_SCHEMA "schema=tp-retirement-campaign-budget-v3"
 #define BQ_WORKER_BUDGET_BYTES 4096u
 #define BQ_WORKER_BUDGET_STAGES 2u
 BUSTER_GLOBAL_LOCAL char const* const bq_worker_budget_keys[] = {
