@@ -601,6 +601,25 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm object-address alignment
+
+`compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
+wasm32 and Memory64, validates canonical IR and compares repeated module bytes.
+An opaque Node import observes actual linear-memory addresses and checks ordinary
+eight-byte objects, extended 64-byte objects, mixed locals and aggregate copies.
+Odd runtime allocation sizes stay live across nested calls; the next allocation
+must start at the independently rounded original caller end.
+
+Direct canonical controls raise only each LOCAL place's alignment above its
+unchanged byte-aligned array type. A deliberately non-64-aligned stack base
+exercises exact-limit success, padding-plus-frame exhaustion and base-padding
+exhaustion. The same instance must recover its exact entry pointer after every
+normal return and deliberate trap. Each pointer-width/frontend run completes
+84 engine checks, records the consumed module SHA-256 and checks the artifact
+against the original returned bytes after execution. The source and oracle are
+generated inline, leaving the frozen support inventory unchanged. Existing
+stack-reservation and memory-hint regressions remain required.
+
 ## Node-backed Wasm oracle deadlines
 
 `compiler_driver_test_wasm_integers` runs the frozen integer oracle and the

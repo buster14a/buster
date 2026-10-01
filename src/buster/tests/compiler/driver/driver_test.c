@@ -10,6 +10,7 @@
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
+// compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -10599,6 +10600,270 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
     return result;
 }
 
+// Actual addresses cross an opaque import boundary. Canonical place-only
+// alignment controls and exact padding extents cannot be folded by the frontend.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_stack_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "volatile unsigned char wasm_alignment_data = 7;\n"
+        "extern int observe_alignment(void*, unsigned, unsigned);\n"
+        "int wasm_alignment_plain(void)\n"
+        "{\n"
+        "    unsigned char object[1];\n"
+        "    return observe_alignment(object, 1, 0);\n"
+        "}\n"
+        "int wasm_alignment_wide(void)\n"
+        "{\n"
+        "    _Alignas(64) volatile unsigned char object[64];\n"
+        "    object[0] = 7;\n"
+        "    object[63] = 11;\n"
+        "    return observe_alignment((void*)object, 64, 1) + (object[0] != 7) + (object[63] != 11);\n"
+        "}\n"
+        "int wasm_alignment_ordinary(void)\n"
+        "{\n"
+        "    volatile unsigned long long object = 123;\n"
+        "    return observe_alignment((void*)&object, 8, 2) + (object != 123);\n"
+        "}\n"
+        "int wasm_alignment_live(unsigned n)\n"
+        "{\n"
+        "    volatile unsigned char* first = (volatile unsigned char*)__builtin_alloca(n);\n"
+        "    first[0] = 3;\n"
+        "    first[n - 1] = 5;\n"
+        "    int bad = observe_alignment((void*)first, 16, 3);\n"
+        "    bad += wasm_alignment_wide() + wasm_alignment_ordinary();\n"
+        "    volatile unsigned char* second = (volatile unsigned char*)__builtin_alloca(1);\n"
+        "    second[0] = 9;\n"
+        "    bad += observe_alignment((void*)second, 16, 4);\n"
+        "    return bad + (first[0] != (n == 1 ? 5 : 3)) + (first[n - 1] != 5) + (second[0] != 9);\n"
+        "}\n"
+        "int wasm_alignment_nested(unsigned n)\n"
+        "{\n"
+        "    volatile unsigned char* outer = (volatile unsigned char*)__builtin_alloca(n);\n"
+        "    outer[0] = 17;\n"
+        "    outer[n - 1] = 19;\n"
+        "    int bad = wasm_alignment_live(n + 2);\n"
+        "    return bad + (outer[0] != (n == 1 ? 19 : 17)) + (outer[n - 1] != 19);\n"
+        "}\n"
+        "struct AlignmentPair { int first; int second; };\n"
+        "int wasm_alignment_copy(void)\n"
+        "{\n"
+        "    _Alignas(64) struct AlignmentPair object = {23, 29};\n"
+        "    struct AlignmentPair copy = object;\n"
+        "    object.first = 31;\n"
+        "    return observe_alignment(&object, 64, 5) + (copy.first != 23) + (copy.second != 29) + (object.first != 31);\n"
+        "}\n"
+        "int wasm_alignment_canonical(void)\n"
+        "{\n"
+        "    unsigned char object[1];\n"
+        "    return observe_alignment(object, 64, 6);\n"
+        "}\n"
+        "int wasm_alignment_exact(void)\n"
+        "{\n"
+        "    unsigned char object[65488];\n"
+        "    object[0] = 37;\n"
+        "    object[65487] = 41;\n"
+        "    return observe_alignment(object, 64, 7) + (object[0] != 37) + (object[65487] != 41);\n"
+        "}\n"
+        "int wasm_alignment_padding_trap(void)\n"
+        "{\n"
+        "    unsigned char object[65536];\n"
+        "    return observe_alignment(object, 64, 8);\n"
+        "}\n"
+        "int wasm_alignment_base_trap(void)\n"
+        "{\n"
+        "    unsigned char object[1];\n"
+        "    return observe_alignment(object, 262144, 9);\n"
+        "}\n");
+    String8 script = S8(
+        "'use strict';\n"
+        "const fs = require('node:fs');\n"
+        "const crypto = require('node:crypto');\n"
+        "const assert = require('node:assert/strict');\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "const width = Number(process.argv[3]);\n"
+        "const base = BigInt(process.argv[4]);\n"
+        "const limit = BigInt(process.argv[5]);\n"
+        "const digest = crypto.createHash('sha256').update(bytes).digest('hex');\n"
+        "assert.equal(digest, process.argv[6], 'original compiler module consumed');\n"
+        "assert.equal(base & 63n, 16n, 'padding boundary fixture');\n"
+        "assert.equal(limit - base, 65536n, 'unchanged shadow-stack reserve');\n"
+        "assert(WebAssembly.validate(bytes), 'valid alignment module');\n"
+        "let guest;\n"
+        "let observations = 0;\n"
+        "let first = 0n;\n"
+        "let size = 0n;\n"
+        "let live = false;\n"
+        "const aligned = (value, alignment) => (value + alignment - 1n) & ~(alignment - 1n);\n"
+        "function observe_alignment(raw, alignment, tag) {\n"
+        "    assert.equal(typeof raw, width === 8 ? 'bigint' : 'number', 'pointer width');\n"
+        "    const address = BigInt(raw);\n"
+        "    assert.equal(address % BigInt(alignment), 0n, 'actual object alignment, tag=' + tag);\n"
+        "    assert(address >= base && address < limit, 'live object in stack');\n"
+        "    if (tag === 0) assert.equal(address, base, 'exact entry SP restored');\n"
+        "    if (tag === 2 && live) assert.equal(address, aligned(first + size, 16n), 'callee restored exact live caller end');\n"
+        "    if (tag === 3) { first = address; live = true; }\n"
+        "    if (tag === 4) {\n"
+        "        assert.equal(address, aligned(first + size, 16n), 'live caller alloca end restored');\n"
+        "        live = false;\n"
+        "    }\n"
+        "    if (tag === 7) assert.equal(address + 65488n, limit, 'padding plus frame reaches exact limit');\n"
+        "    observations += 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "const wasmModule = new WebAssembly.Module(bytes);\n"
+        "guest = new WebAssembly.Instance(wasmModule, {env: {observe_alignment}}).exports;\n"
+        "let checks = 0;\n"
+        "function check(call) { assert.equal(call(), 0); checks += 1; }\n"
+        "for (let repeat = 0; repeat < 3; repeat += 1) {\n"
+        "    check(() => guest.wasm_alignment_plain());\n"
+        "    check(() => guest.wasm_alignment_wide());\n"
+        "    check(() => guest.wasm_alignment_plain());\n"
+        "    check(() => guest.wasm_alignment_ordinary());\n"
+        "    check(() => guest.wasm_alignment_copy());\n"
+        "    check(() => guest.wasm_alignment_canonical());\n"
+        "    check(() => guest.wasm_alignment_plain());\n"
+        "    for (const n of [1, 3, 17, 33, 65]) {\n"
+        "        size = BigInt(n);\n"
+        "        check(() => guest.wasm_alignment_live(n));\n"
+        "        size = BigInt(n + 2);\n"
+        "        check(() => guest.wasm_alignment_nested(n));\n"
+        "        check(() => guest.wasm_alignment_plain());\n"
+        "    }\n"
+        "    check(() => guest.wasm_alignment_exact());\n"
+        "    check(() => guest.wasm_alignment_plain());\n"
+        "    for (const name of ['wasm_alignment_padding_trap', 'wasm_alignment_base_trap']) {\n"
+        "        const before = observations;\n"
+        "        assert.throws(() => guest[name](), error =>\n"
+        "            error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message),\n"
+        "            'deliberate checked padding trap');\n"
+        "        assert.equal(observations, before, 'trap precedes object use');\n"
+        "        checks += 1;\n"
+        "        check(() => guest.wasm_alignment_plain());\n"
+        "    }\n"
+        "}\n"
+        "assert.equal(checks, 84);\n"
+        "assert(observations > checks);\n"
+        "console.log('WASM_STACK_ALIGNMENT sha256=' + digest + ' pointer_bytes=' + width + ' checks=' + checks);\n"
+        "console.log('84/84 Wasm stack alignment engine checks passed');\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    String8 canonical_names[] = {
+        S8("wasm_alignment_canonical"), S8("wasm_alignment_exact"),
+        S8("wasm_alignment_padding_trap"), S8("wasm_alignment_base_trap"),
+    };
+    u32 canonical_alignments[] = {64, 64, 64, 262144};
+    u64 canonical_sizes[] = {1, 65488, 65536, 1};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(arena, S8("wasm-stack-alignment.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            bool ready = BUSTER_REQUIRE(arguments, !preprocess.error_count && lowered.program && !lowered.diagnostic_count);
+            if (ready)
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                // Mutate only the LOCAL place guarantee, leaving each array's
+                // byte-aligned type unchanged; validate before emission.
+                for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(canonical_names); variant += 1)
+                {
+                    IrFunction* function = 0;
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        if (string_equal(module->functions[index].name, canonical_names[variant])) function = module->functions + index;
+                    }
+                    bool found = BUSTER_REQUIRE(arguments, function != 0);
+                    ready &= found;
+                    u32 local_count = 0;
+                    for (u32 row = 0; found && row < function->instruction_count; row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + row;
+                        if (instruction->opcode == IR_OPCODE_LOCAL)
+                        {
+                            local_count += 1;
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            bool layout = type && type->kind == IR_TYPE_ARRAY && type->layout.resolved &&
+                                          type->layout.size == canonical_sizes[variant] && type->layout.alignment == 1 &&
+                                          instruction->result.value < function->value_count;
+                            BUSTER_TEST(arguments, layout);
+                            ready &= layout;
+                            if (layout) function->values[instruction->result.value].alignment = canonical_alignments[variant];
+                        }
+                    }
+                    BUSTER_TEST(arguments, local_count == 1);
+                    ready &= local_count == 1;
+                }
+                if (ready)
+                {
+                    IrValidationResult validation = ir_prepare_canonical_module(program, module, false);
+                    ready = BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE);
+                }
+                if (ready)
+                {
+                    // Core wasm32 exercises the same emitter as WASI without a
+                    // startup adapter or host-environment import dependency.
+                    WasmOptions options = WASM64_OPTIONS_DEFAULT;
+                    options.pointer_size = target_index == 0 ? 4 : 8;
+                    WasmArtifact first = wasm_emit(arena, program, module, 1, options);
+                    WasmArtifact second = wasm_emit(arena, program, module, 1, options);
+                    BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+                    if (first.success && second.success)
+                    {
+                        BUSTER_TEST(arguments, first.bytes.length && first.bytes.length == second.bytes.length &&
+                                               memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                        BUSTER_TEST(arguments, first.stats.stack_lower_bound % 64 == 16 &&
+                                               first.stats.stack_upper_bound - first.stats.stack_lower_bound == 65536);
+                        String8 output = buster_test_temporary_path(arena, S8("buster-wasm-stack-alignment"), S8(".wasm"));
+                        String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-stack-alignment"), S8(".cjs"));
+                        bool written = file_write(output, first.bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+                        BUSTER_TEST(arguments, written);
+                        String8 node = executable_resolve_in_path(arena, S8("node"));
+                        if (written && node.length)
+                        {
+                            Sha256 hash;
+                            char8 hash_bytes[SHA256_HEX_CAPACITY];
+                            sha256_init(&hash);
+                            sha256_add(&hash, first.bytes.pointer, first.bytes.length);
+                            sha256_finish_hex(&hash, hash_bytes);
+                            String8 command[] = {node, script_path, output,
+                                string_format(arena, S8("{u32}"), (u32)options.pointer_size),
+                                string_format(arena, S8("{u64}"), first.stats.stack_lower_bound),
+                                string_format(arena, S8("{u64}"), first.stats.stack_upper_bound),
+                                (String8){hash_bytes, 64}};
+                            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                                arguments, arena, S8("stack-alignment"),
+                                string_format(arena, S8("pointer-{u32}-frontend-{u32}"), (u32)options.pointer_size, frontend),
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                S8("84/84 Wasm stack alignment engine checks passed"),
+                                compiler_driver_test_wasm_node_deadline_microseconds());
+                            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+                            ByteSlice consumed = file_read(arena, output, (FileReadOptions){0});
+                            BUSTER_TEST(arguments, consumed.length == first.bytes.length && consumed.pointer &&
+                                                   memory_compare(consumed.pointer, first.bytes.pointer, consumed.length));
+                        }
+                        else if (!node.length)
+                        {
+                            arguments->show(arguments, S8("Wasm stack alignment engine execution skipped: Node is not installed\n"));
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
 #if BUSTER_LINK_LIBC && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_host_command(Arena* arena, SliceString8 options)
@@ -15690,6 +15955,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_stack_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
