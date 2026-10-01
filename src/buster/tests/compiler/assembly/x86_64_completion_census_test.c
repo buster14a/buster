@@ -2811,10 +2811,28 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // maps to the sse2 feature. The AT&T share is the larger one because the
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5631 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3959 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5635 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3955 &&
                              source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
+    // Metadata-owned shift layout makes these four APX NF double-shift
+    // forms byte-exact in Intel syntax. The complete 11,013-row before/after
+    // comparison changes only these rejected-to-exact rows; AT&T construction
+    // still rejects their control modifier and keeps its prior classification.
+    static BusterX86MetadataFormKey const source_shift_nf_forms[] = {
+        {2601, UINT64_C(11372758627080917054)}, {2605, UINT64_C(5145249395621821010)},
+        {2709, UINT64_C(9780253166265449462)}, {2713, UINT64_C(15946028782474670389)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(source_shift_nf_forms); index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[source_shift_nf_forms[index].form_id];
+        BUSTER_TEST(arguments, record.stable_hash == source_shift_nf_forms[index].stable_hash &&
+                                 record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 record.intel_byte_count == 7 && record.intel_relocation_count == 0 &&
+                                 record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
+    }
     // #280 changes exactly this census row: VMOVNTDQA zmm0, dword ptr
     // [rax] is an invalid explicit tuple, not permission to emit another
     // width. Pin its key and rejection; every formerly exact Intel/AT&T
@@ -2854,8 +2872,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6665 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3264 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6669 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3260 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);
