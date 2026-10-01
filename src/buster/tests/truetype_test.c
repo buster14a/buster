@@ -1,9 +1,10 @@
-// Headless TrueType kerning and bitmap admission tests. truetype_tests uses
-// synthetic cmap/kern tables and bounded contours, so platforms check identical
-// bytes. The parameter sweep also runs in sanitizer and fuzz-enabled CI trees.
+// Headless TrueType bitmap admission tests. truetype_tests uses a bounded,
+// synthetic one-contour glyph, so every platform checks identical bytes.
+// The parameter sweep also runs in CI's sanitizer and fuzz-enabled trees.
 #include <buster/tests/truetype_test.h>
 
 #if BUSTER_INCLUDE_TESTS
+// truetype_test_kerning covers subtable composition using synthetic cmap/kern bytes.
 #include <buster/lib/truetype_internal.h>
 
 BUSTER_GLOBAL_LOCAL void truetype_test_u16(u8* bytes, u32 offset, s32 value)
@@ -151,7 +152,7 @@ BUSTER_GLOBAL_LOCAL u64 truetype_test_bitmap_hash(TTF_Bitmap bitmap)
 
 UnitTestResult truetype_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = truetype_test_kerning(arguments);
+    UnitTestResult result = {0};
     // Long loca entries [0,34], then a rectangle with bounds (-2,-3)-(6,5).
     // Four on-curve points use signed 16-bit x/y deltas without instructions.
     u8 bytes[] = {
@@ -391,6 +392,9 @@ UnitTestResult truetype_tests(UnitTestArguments* arguments)
         arena_set_position(arena, position);
     }
     BUSTER_TEST(arguments, sweep_valid);
+    UnitTestResult kerning_result = truetype_test_kerning(arguments);
+    result.test_count += kerning_result.test_count;
+    result.succeeded_test_count += kerning_result.succeeded_test_count;
     return result;
 }
 #endif
