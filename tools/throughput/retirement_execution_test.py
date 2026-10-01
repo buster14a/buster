@@ -685,7 +685,8 @@ class NativeExecutionTests(unittest.TestCase):
                  ("\nsingleton=link:45000000\nsingleton=self-host-stage1:900000000",
                   "\nsingleton=self-host-stage1:900000000\nsingleton=link:45000000"),
                  ("derivation=fixed", "derivation=other"),
-                 ("schema=tp-retirement-campaign-budget-v2", "schema=tp-retirement-campaign-budget-v1"))
+                 ("aa-attestation-ns-per-mib=8000000\n", ""),
+                 ("schema=tp-retirement-campaign-budget-v3", "schema=tp-retirement-campaign-budget-v2"))
         for old, new in edits:
             with self.subTest(old=old):
                 self.assertIn(old, record)

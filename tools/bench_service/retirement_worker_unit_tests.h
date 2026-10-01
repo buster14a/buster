@@ -1278,7 +1278,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_composition(BqPrepOracleFixture* fi
                                      BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN, pin);
     free(bytes);
     size_t used = strlen(pins);
-    int appended = ok ? snprintf(pins + used, capacity - used, "adapter-sha256=%s\n%s", adapter, pin) : -1;
+    /* The A/A policy pin a complete profile needs (#426 plan step 6): the
+     * fixture's test digest, which its receipt stand-in also names; no policy
+     * is installed, since the fixture build admits through the stand-in. */
+    int appended = ok ? snprintf(pins + used, capacity - used, "adapter-sha256=%s\n%saa-policy-sha256="
+                                 BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "\n", adapter, pin) : -1;
     ok = ok && appended > 0 && (size_t)appended < capacity - used;
     return ok;
 }

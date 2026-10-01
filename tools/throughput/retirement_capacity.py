@@ -506,6 +506,12 @@ def budget_counts(groups, runtime_rows, pairs, untimed, source):
             counts[key] = counts.get(key, 0) + repeats
         return dict(sorted(counts.items()))
 
+    # (v3) The coordinator's AA_MEASURED re-read: every A/A sample line, at
+    # most the row or batch record bound, rounds * pairs per unit over the
+    # timed groups' inputs and object groups (the derivation's 330/266 term).
+    objects = sum(1 for group in groups if group["kind"] == "object")
+    aa_bytes = source["rounds"] * pairs * (source["sample_record_bytes_max"] * sum(group["inputs"] for group in groups)
+                                           + source["batch_record_bytes_max"] * objects)
     large = sum(1 for group in groups if group["kind"] == "object" and group["inputs"] > 4)
     small = sum(1 for group in groups if group["kind"] == "object") - large
     illustrative_ns = per_group * (large * CONTRACT_ESTIMATE_LARGE_BATCH_NS
@@ -517,6 +523,7 @@ def budget_counts(groups, runtime_rows, pairs, untimed, source):
         "runtime_processes_both_stages": per_group * runtime_rows,
         "untimed_batches": source["untimed_batches_per_group"] * len(untimed),
         "untimed_batches_by_kind_and_stage": by_key(untimed, source["untimed_batches_per_group"]),
+        "aa_attestation_bytes": aa_bytes,
         "singletons_costed_as_one_input_batches": False,
         "untimed_bounds_are_the_slowest_untimed_target": True,
         "illustrative_object_batch_hours_at_contract_estimates": round(illustrative_ns / 3.6e12, 2),

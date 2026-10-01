@@ -170,7 +170,8 @@ static void test_retirement_campaign_budget(void)
         &changed.settling_per_stage_ns, &changed.aa_qualification_ns, &changed.aa_receipt_sealing_ns,
         &changed.sample_export_per_stage_ns, &changed.final_statistics_ns, &changed.final_sealing_ns,
         &changed.cleanup_ns, &changed.runtime_process_ns, &changed.metrics_header_bytes,
-        &changed.metrics_input_bytes, &changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK],
+        &changed.metrics_input_bytes, &changed.aa_attestation_ns_per_mib,
+        &changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK],
         &changed.timed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_SELF_HOST],
         &changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_LINK],
         &changed.untimed.singleton_ns[TP_RETIREMENT_BUDGET_STAGE_SELF_HOST]};
@@ -234,13 +235,21 @@ static void test_retirement_campaign_budget(void)
     uint64_t runtime = UINT64_C(2040) * 2 * 50000000;
     uint64_t untimed_object = 4 * UINT64_C(176) * (UINT64_C(2500000000) + 80000000 + 3 * UINT64_C(50000000));
     uint64_t untimed_singleton = 4 * UINT64_C(11) * 60000000;
-    uint64_t required_ns = fixed + compiler_object + compiler_singleton + runtime + untimed_object + untimed_singleton;
+    /* (v3) The AA_MEASURED re-read: 2 * 254 lines per unit over 6770 timed
+     * inputs (16 * (416 + 4 + 1 + 1 + 1) + 2) at 330 bytes and 80 object
+     * groups at 266, read at 8 ms/MiB and rounded up. */
+    uint64_t aa_bytes = UINT64_C(508) * (UINT64_C(330) * 6770 + UINT64_C(266) * 80);
+    uint64_t aa_ns = (aa_bytes * UINT64_C(8000000) + (UINT64_C(1) << 20) - 1) >> 20;
+    CHECK(aa_bytes == UINT64_C(1145733040) && aa_ns == UINT64_C(8741249390));
+    uint64_t required_ns = fixed + compiler_object + compiler_singleton + runtime + untimed_object + untimed_singleton +
+        aa_ns;
     CHECK(tp_retirement_budget_preflight(&a1_budget, &counts, &preflight) && preflight.fits &&
           preflight.fixed_ns == fixed && preflight.compiler_object_ns == compiler_object &&
           preflight.compiler_singleton_ns == compiler_singleton &&
           preflight.compiler_ns == compiler_object + compiler_singleton && preflight.runtime_ns == runtime &&
           preflight.untimed_object_ns == untimed_object && preflight.untimed_singleton_ns == untimed_singleton &&
-          preflight.untimed_ns == untimed_object + untimed_singleton && preflight.required_ns == required_ns &&
+          preflight.untimed_ns == untimed_object + untimed_singleton && preflight.aa_attestation_bytes == aa_bytes &&
+          preflight.aa_attestation_ns == aa_ns && preflight.required_ns == required_ns &&
           preflight.remaining_ns == a1_budget.reviewed_ns - required_ns &&
           preflight.compiler_batches == UINT64_C(82) * 2040 && preflight.runtime_processes == UINT64_C(4080) &&
           preflight.untimed_batches == UINT64_C(3564));

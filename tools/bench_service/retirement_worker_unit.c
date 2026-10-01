@@ -88,15 +88,19 @@ typedef struct BqRetirementWorkerUnitSeams
 
 /* Every digest pin a retirement job needs through MEASURED: the ready
  * record's inputs, the reviewed campaign budget and the untimed-command
- * contract (retirement_worker_campaign.c), and the composer's adapter and the
- * #511 binding context (retirement_worker_compose.c). */
+ * contract (retirement_worker_campaign.c), the composer's adapter and the
+ * #511 binding context (retirement_worker_compose.c), and (#426 plan step 6)
+ * the A/A policy the production admission requires
+ * (retirement_aa_admission.c), so an admitted profile without it, or with it
+ * twice, is refused at the completeness gate before any campaign starts. */
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "contract-sha256=", "support-declaration-sha256=", "inventory-sha256=", "toolchain-manifest-sha256=",
     "build-driver-sha256=", "reference-template-sha256=", "reference-inventory-sha256=",
     "validator-source-applicability-sha256=", "census-inputs-sha256=", "census-rows-sha256=",
     "census-manifest-sha256=", "validator-report-sha256=", "validator-applicability-sha256=",
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
-    "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256="};
+    "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256=",
+    "aa-policy-sha256="};
 
 /* The only admitting status line (queue.h); the compiled profile says
  * status=blocked. */

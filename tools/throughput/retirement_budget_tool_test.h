@@ -25,6 +25,9 @@ static char const* const test_budget_input_lines[] = {
     "cleanup-ns=1000000000",
     "runtime-process-ns=50000000",
     "metrics-header-bytes=4096",
+    "# AA_MEASURED re-read: 8 ms/MiB covers the container measurement of",
+    "# bq_retirement_coordinator_aa_attest (7.44 ms/MiB worst, fixture shards)",
+    "aa-attestation-ns-per-mib=8000000",
     "batch=4:100000000",
     "untimed-batch=4:150000000",
     "batch=1024:2000000000",
@@ -43,7 +46,7 @@ static TpRetirementCampaignBudget test_budget_expected(void)
         .aa_qualification_ns = 1000000000, .aa_receipt_sealing_ns = 1000000000,
         .sample_export_per_stage_ns = 1000000000, .final_statistics_ns = 1000000000,
         .final_sealing_ns = 1000000000, .cleanup_ns = 1000000000, .runtime_process_ns = 50000000,
-        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384,
+        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384, .aa_attestation_ns_per_mib = 8000000,
         .timed = {2, {{4, 100000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}},
                   {[TP_RETIREMENT_BUDGET_STAGE_LINK] = 90000000, [TP_RETIREMENT_BUDGET_STAGE_SELF_HOST] = 900000000}},
         .untimed = {2, {{4, 150000000}, {TP_RETIREMENT_BATCH_INPUTS, 3000000000}},
@@ -93,7 +96,8 @@ static char const test_budget_counts[] = "schema=" TP_RETIREMENT_BUDGET_COUNTS_S
     "pairs=60\nruntime-rows=2\ntimed-groups=3\ntimed=object 416\ntimed=link 1\ntimed=self-host-stage1 1\n"
     "untimed-groups=2\nuntimed=object 3\nuntimed=link 1\n";
 /* One four-input object group, nothing else: fixed 14 s plus 488 batches of
- * 0.1 s, so the derivation requires exactly 62.8 s. */
+ * 0.1 s, 62.8 s, plus (v3) its AA_MEASURED re-read, 120 * (4 * 330 + 266) =
+ * 190,320 bytes at 8 ms/MiB, 1,452,027 ns: 62,801,452,027 ns in all. */
 static char const test_budget_tiny[] = "schema=" TP_RETIREMENT_BUDGET_COUNTS_SCHEMA "\n" TEST_BUDGET_DIGESTS
     "pairs=60\nruntime-rows=0\ntimed-groups=1\ntimed=object 4\nuntimed-groups=0\n";
 
@@ -203,18 +207,20 @@ static void test_retirement_budget_tool(char const* root)
              digest, result.required_ns, result.remaining_ns);
     CHECK(!strncmp(again, line, strlen(line)) && strstr(again, "\nuntimed-batches=8\n"));
 
-    /* The ceiling floor: the derivation needs 62.8 s; 62.999999999 s floors
-     * to the enforced 62 s and refuses, 63 s holds it with 0.2 s left. */
+    /* The ceiling floor: the derivation needs 62.801452027 s; 62.999999999 s
+     * floors to the enforced 62 s and refuses, 63 s holds it with 0.198547973 s
+     * left. */
     CHECK(test_budget_input(budget_root, "floor", "reviewed-ns=", "reviewed-ns=62999999999", NULL) &&
           test_budget_run(budget_root, "encode", "floor", "tiny", again, sizeof(again), &again_size, diagnostic) == 2 &&
-          again_size == 0 && strstr(diagnostic, "requires 62800000000 ns, above the enforced whole-second ceiling "
+          again_size == 0 && strstr(diagnostic, "requires 62801452027 ns, above the enforced whole-second ceiling "
                                                 "62000000000 ns"));
     CHECK(test_budget_input(budget_root, "floor", "reviewed-ns=", "reviewed-ns=63000000000", NULL) &&
           test_budget_run(budget_root, "encode", "floor", "tiny", text, sizeof(text), &size, diagnostic) == 0 &&
           test_text(budget_root, "floor-budget", text) &&
           test_budget_run(budget_root, "preflight", "floor-budget", "tiny", again, sizeof(again), &again_size,
                           diagnostic) == 0 &&
-          strstr(again, "\nrequired-ns=62800000000\nremaining-ns=200000000\n"));
+          strstr(again, "\nrequired-ns=62801452027\nremaining-ns=198547973\n") &&
+          strstr(again, "\naa-attestation-ns=1452027\naa-attestation-bytes=190320\n"));
 
     /* Every rule refuses with nothing on stdout and its own diagnostic; each
      * case breaks only the rule it names (covering tables, fitting ceilings). */
@@ -236,6 +242,14 @@ static void test_retirement_budget_tool(char const* root)
         {{{"reviewed-ns=", "reviewed-ns=60500000000"}, {"cleanup-ns=", "cleanup-ns=47200000000"}}, NULL, test_budget_tiny,
          "the fixed phases (60200000000 ns) exceed the enforced whole-second ceiling (60000000000 ns)"},
         {{{"reviewed-ns=", "reviewed-ns=200000000000"}}, NULL, NULL, "the derivation requires"},
+        /* (v3) The AA_MEASURED re-read is required, nonzero, and counted:
+         * at 1.2 s/MiB the tiny campaign's 190,320 bytes cost 0.218 s, more
+         * than the 0.199 s the 63 s ceiling leaves. */
+        {{{"aa-attestation-ns-per-mib=", NULL}}, NULL, NULL, "missing aa-attestation-ns-per-mib"},
+        {{{"aa-attestation-ns-per-mib=", "aa-attestation-ns-per-mib=0"}}, NULL, NULL,
+         "aa-attestation-ns-per-mib must be nonzero"},
+        {{{"reviewed-ns=", "reviewed-ns=63000000000"}, {"aa-attestation-ns-per-mib=",
+          "aa-attestation-ns-per-mib=1200000000"}}, NULL, test_budget_tiny, "the derivation requires 63017803956 ns"},
         {{{"cleanup-ns=", NULL}}, NULL, NULL, "missing cleanup-ns"},
         {{{NULL, NULL}}, "cleanup-ns=1000000000", NULL, "cleanup-ns repeated"},
         {{{"cleanup-ns=", "cleanup-ns=0"}}, NULL, NULL, "cleanup-ns must be nonzero"},
