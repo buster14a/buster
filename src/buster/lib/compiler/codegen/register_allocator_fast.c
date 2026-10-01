@@ -2130,7 +2130,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_touches(MachineFunction const* functio
     if (access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE)
     {
         bool direct_store = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_STACK_SLOT;
-        u8 operand = direct_store || pointer_store ? 0u : 1u;
+        u8 operand = (u8)(direct_store || pointer_store ? 0u : 1u);
         touches[count++] = (MachineFastSlotTouch){.slot = access.stack_slot, .offset = access.offset, .size = access.size,
                                                   .operand = operand, .writes = (u8)(direct_store || pointer_store)};
     }
