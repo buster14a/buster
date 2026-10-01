@@ -1,0 +1,43 @@
+name: CI research source snapshot
+on:
+  push:
+    branches: [codex/2119-ci-source-snapshot]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Export immutable source anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin d7c9d5f825b8fbd5778f0e064236ae4996d04277 7397d1bfc890391163f8953a35d3699d098548de 6eb73e977c32699d8828ca73b05ded20262aec28
+          mkdir -p "$RUNNER_TEMP/ci-source"
+          git archive --format=tar.gz d7c9d5f825b8fbd5778f0e064236ae4996d04277 > "$RUNNER_TEMP/ci-source/main.tar.gz"
+          git archive --format=tar.gz 7397d1bfc890391163f8953a35d3699d098548de > "$RUNNER_TEMP/ci-source/partitions.tar.gz"
+          git archive --format=tar.gz 6eb73e977c32699d8828ca73b05ded20262aec28 > "$RUNNER_TEMP/ci-source/base.tar.gz"
+          sha256sum "$RUNNER_TEMP/ci-source/"*.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-source-main
+          path: ${{ runner.temp }}/ci-source/main.tar.gz
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-source-partitions
+          path: ${{ runner.temp }}/ci-source/partitions.tar.gz
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-source-base
+          path: ${{ runner.temp }}/ci-source/base.tar.gz
+          compression-level: 0
+          retention-days: 1
