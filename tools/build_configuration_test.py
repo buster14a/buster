@@ -165,7 +165,7 @@ class BuildProcessDirectoryTests(unittest.TestCase):
         cls.executable = cls.work / ("fixture.exe" if os.name == "nt" else "fixture")
         command = [CLANG, "-Isrc", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
                    "-fwrapv", "-fno-strict-aliasing", "-funsigned-char",
-                   "tests/build_process_directory_regression.c", "-o", str(cls.executable)]
+                   "tools/build_process_directory_fixture.c", "-o", str(cls.executable)]
         if os.name == "nt":
             command += ["-Wno-microsoft-enum-forward-reference", "-lws2_32"]
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=90)
