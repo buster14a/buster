@@ -5938,13 +5938,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_result_alignment(UnitTestArg
                             memcpy(bytes + observer_offset, observer, sizeof(observer));
                             IrFunction* foreign = machine_test_ir_function_find(module, S8("observe"));
                             bool patched = foreign != 0 && generated.relocation_count == 2;
+                            u32 last_relocation_kind = UINT32_MAX;
                             for (u32 index = 0; patched && index < generated.relocation_count; index += 1)
                             {
                                 CodegenModuleRelocation* relocation = generated.relocations + index;
+                                last_relocation_kind = relocation->kind;
                                 s64 displacement = (s64)observer_offset - ((s64)relocation->offset + 4);
                                 patched = codegen_module_relocation_valid(relocation) &&
                                     relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
-                                    relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 &&
+                                    (relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 ||
+                                     relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PLT32) &&
                                     relocation->symbol.value == foreign->symbol.value && !relocation->addend && !relocation->label_address &&
                                     relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4 &&
                                     displacement >= INT32_MIN && displacement <= INT32_MAX;
@@ -5954,7 +5957,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_result_alignment(UnitTestArg
                                     memcpy(bytes + relocation->offset, &encoded, sizeof(encoded));
                                 }
                             }
-                            BUSTER_TEST(arguments, patched);
+                            // ELF imports use PLT32, whose rel32 patch field
+                            // addresses this local observer exactly as PC32 does.
+                            BUSTER_TEST_RAW(arguments, patched, string_format(temporary.arena,
+                                S8("result alignment relocation: system={u32} alignment={u32} mode={u32} frontend={u32} count={u32} last_kind={u32}"),
+                                system, alignment, mode, memory, generated.relocation_count, last_relocation_kind));
                             if (patched)
                             {
                                 CodegenExecutable executable = codegen_make_executable((CodegenFunction){

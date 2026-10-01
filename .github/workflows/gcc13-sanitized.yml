@@ -9,6 +9,10 @@ on:
     paths:
       - '.github/workflows/gcc13-sanitized.yml'
       - 'docs/gcc13-sanitized-acceptance.md'
+      - 'src/buster/lib/string.c'
+      - 'src/buster/lib/string.h'
+      - 'src/buster/tests/string_test.c'
+      - 'src/buster/tests/string_test.h'
 
 permissions:
   contents: read
@@ -20,6 +24,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  string_release:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: GCC 13 Release string_tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact candidate
+        id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build and run GCC 13 Release string fixtures
+        id: strings
+        shell: bash
+        env:
+          BUSTER_GCC: /usr/bin/gcc-13
+          BUSTER_TEST_JOBS: '1'
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/gcc13-release-string-tests.log") 2>&1
+          if [[ ! -x /usr/bin/gcc-13 ]]; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes gcc-13
+          fi
+          /usr/bin/gcc-13 --version
+          test "$(/usr/bin/gcc-13 -dumpfullversion -dumpversion | cut -d. -f1)" = 13
+          clang --version
+          git rev-parse HEAD
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --build-directory build-gcc13-string --cc gcc --no-sanitize --no-fuzz --ci --linker DEFAULT -- \
+            -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "$driver" build --build-directory build-gcc13-string --config Release -t ide -- -j4
+          build-gcc13-string/Release/ide test --module=string_tests --verbose=1 --ci=1
+
+      - name: Release string fixture result and reproduction
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ubuntu-24.04
+          BUSTER_CI_REQUIRED: strings
+          BUSTER_CI_REPRO: See the Release string fixtures section in docs/gcc13-sanitized-acceptance.md.
+        run: python3 tools/ci_summary.py
+
+      - name: Retain Release string fixture evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gcc13-release-strings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/
+          if-no-files-found: error
+          retention-days: 14
+
   acceptance:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&

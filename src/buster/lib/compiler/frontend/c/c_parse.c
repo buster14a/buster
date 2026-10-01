@@ -4559,13 +4559,13 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
 BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
 {
     kind = c_parse_expression_promoted_kind(kind);
-    if (bit_field_width && kind == C_TYPE_UNSIGNED_INT)
+    if (bit_field_width && c_parse_expression_integer_kind(kind))
     {
         u64 int_size = 0;
         u32 int_alignment = 0;
-        if (c_parse_builtin_type_layout(target, C_TYPE_INT, &int_size, &int_alignment) && bit_field_width < int_size * 8)
+        if (c_parse_builtin_type_layout(target, C_TYPE_INT, &int_size, &int_alignment) && bit_field_width <= int_size * 8)
         {
-            kind = C_TYPE_INT;
+            kind = bit_field_width < int_size * 8 || c_parse_expression_signed_kind(kind) ? C_TYPE_INT : C_TYPE_UNSIGNED_INT;
         }
     }
     return kind;
