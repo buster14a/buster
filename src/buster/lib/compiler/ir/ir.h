@@ -982,6 +982,78 @@ struct IrInstructionOwnership
     IrInstructionId instruction;
 };
 
+// Block-row construction protocol (docs/canonical-ir-construction.md). One
+// family of canonical invariants -- every row sits in exactly one block chain,
+// no row follows a terminator, every block ends in one, and a result value is
+// defined by the one row that names it -- is established by the operations
+// below instead of being discovered afterwards by a whole-module scan. A block
+// is OPEN until a terminator row is committed to it and CLOSED from then on;
+// IrBlock.terminated records that state and producers never write it. A
+// refused operation changes nothing, so a producer turns the refusal into a
+// structured diagnostic instead of committing an invalid row.
+// ir_validate_canonical_module remains the independent oracle for this family,
+// and ir_function_publish_cfg rechecks termination for every producer.
+
+// The rows that close a block. The protocol, CFG publication and the canonical
+// validator share this one predicate.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool ir_instruction_is_terminator(IrInstruction const* instruction)
+{
+    u8 opcode = instruction->opcode;
+    return opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF || opcode == IR_OPCODE_SWITCH || opcode == IR_OPCODE_INDIRECT_BRANCH ||
+           opcode == IR_OPCODE_RETURN || opcode == IR_OPCODE_UNREACHABLE || (opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
+}
+
+typedef enum IrCommitRefusal
+{
+    IR_COMMIT_ACCEPTED,
+    // The block id names no block of the function, or there is no arena.
+    IR_COMMIT_REFUSED_BLOCK,
+    // The block already ends in a terminator.
+    IR_COMMIT_REFUSED_CLOSED,
+    // A nonzero operand, target or immediate count without its storage.
+    IR_COMMIT_REFUSED_STORAGE,
+    // An operand names a value the function does not hold yet.
+    IR_COMMIT_REFUSED_OPERAND,
+    // A target names a block the function does not hold yet.
+    IR_COMMIT_REFUSED_TARGET,
+    // The result names no value, a value a row already defines, or a value of
+    // another type than the row.
+    IR_COMMIT_REFUSED_RESULT,
+    // Insertion only: a terminator row, or a position after a terminator.
+    IR_COMMIT_REFUSED_POSITION,
+    IR_COMMIT_REFUSAL_COUNT,
+} IrCommitRefusal;
+
+BUSTER_F_DECL String8 ir_commit_refusal_name(IrCommitRefusal refusal);
+// Appends `instruction` as the tail of the open `block`, binds its result's
+// definition to the new row, and closes the block when the row is a
+// terminator. An accepted row reopens a published CFG first, like every
+// builder append; a refused one leaves it published. The capacity fast path
+// for a fresh, unpublished function is ir_block_commit_trusted in ir_append.h.
+BUSTER_F_DECL IrInstructionId ir_block_append_instruction(Arena* arena, IrFunction* function, IrBlockId block, IrInstruction instruction,
+                                                          IrSourceRange canonical_source, IrCommitRefusal* refusal_out);
+// Links a new non-terminator row after `after` in `block`, or first when
+// `after` is INVALID; a closed block accepts it ahead of its terminator. The
+// caller owns the obligation that `after` belongs to `block` -- it is the
+// position the builder recorded while `block` was current.
+BUSTER_F_DECL IrInstructionId ir_block_insert_instruction_after(Arena* arena, IrFunction* function, IrBlockId block, IrInstructionId after,
+                                                                IrInstruction instruction, IrSourceRange canonical_source,
+                                                                IrCommitRefusal* refusal_out);
+// Removes the function's newest row when it is the tail of `block` and
+// `previous` is its predecessor in the chain (INVALID when it is the only
+// row), unbinding its result. The block must be open, or closed by exactly
+// that row as an UNREACHABLE: it has no edge, so retracting it reopens the
+// block and no other terminator can be retracted. False, with nothing
+// changed, otherwise.
+BUSTER_F_DECL bool ir_block_retract_tail(IrFunction* function, IrBlockId block, IrInstructionId previous);
+// Removes every row after `keep` in the open `block` when those rows are
+// exactly the function's newest rows and none is a terminator, unbinding their
+// results. False, with nothing changed, otherwise.
+BUSTER_F_DECL bool ir_block_truncate_after(IrFunction* function, IrBlockId block, IrInstructionId keep);
+// Explicit finalization: the first block that is still open, or INVALID when
+// every block is closed. O(blocks); reads only IrBlock.terminated.
+BUSTER_F_DECL IrBlockId ir_function_first_open_block(IrFunction const* function);
+
 BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
 BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
 BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
@@ -1061,9 +1133,8 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // Writes the owning block of every instruction into `owners`, which the
 // caller sizes to function->instruction_count, and returns the first
 // ownership violation. One O(instructions + blocks) pass: the array doubles
-// as the visited set that bounds every chain walk, so consumers past
-// validation - register allocation and the emitters - reuse it instead of
-// re-deriving block membership or guarding their walks with a counter.
+// as the visited set that bounds every chain walk. The canonical validator is
+// its consumer; backends read published spans instead of owner arrays.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 // Requires canonical validation (or a producer/pass contract) for instruction
@@ -1105,3 +1176,159 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
 BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
+
+// Fixed-width two's-complement integer semantics (ir_integer.c): the one
+// implementation of compile-time integer arithmetic that preprocessing,
+// integer constant expressions, lowering's constant folds, the canonical FAST
+// folder and every CONSTANT_INTEGER decoder share. A value is 1..128 bits
+// held zero-extended in two limbs; an operation is a canonical IR operation,
+// which fixes its signedness; a result is the bits the operation defines
+// modulo 2^width plus every rule the exact result broke. Callers own what a
+// fault means in their phase and the diagnostic it deserves.
+typedef struct IrInteger IrInteger;
+struct IrInteger
+{
+    u64 low;
+    u64 high;
+};
+
+typedef enum IrIntegerFault
+{
+    IR_INTEGER_FAULT_NONE = 0,
+    // The exact result is outside [-2^(width-1), 2^(width-1)); `bits` is it
+    // reduced modulo 2^width.
+    IR_INTEGER_FAULT_SIGNED_OVERFLOW = 1 << 0,
+    // The exact result is outside [0, 2^width); `bits` is it reduced modulo
+    // 2^width, which unsigned arithmetic defines.
+    IR_INTEGER_FAULT_UNSIGNED_WRAP = 1 << 1,
+    // `bits` is zero and means nothing.
+    IR_INTEGER_FAULT_DIVIDE_BY_ZERO = 1 << 2,
+    // A shift count, read unsigned at its own width, not below the shifted
+    // width (a negative C count reads as such a count); `bits` means nothing.
+    IR_INTEGER_FAULT_SHIFT_COUNT = 1 << 3,
+    // A left shift of a value whose sign bit is set.
+    IR_INTEGER_FAULT_NEGATIVE_SHIFTED = 1 << 4,
+    // A leading/trailing-zero count of zero; `bits` holds the width.
+    IR_INTEGER_FAULT_ZERO_COUNT = 1 << 5,
+    // Not an integer operation, or a width outside 1..128.
+    IR_INTEGER_FAULT_UNSUPPORTED = 1 << 6,
+} IrIntegerFault;
+
+typedef struct IrIntegerResult IrIntegerResult;
+struct IrIntegerResult
+{
+    IrInteger bits;
+    u8 faults;
+};
+
+BUSTER_F_DECL IrInteger ir_integer_mask(IrInteger value, u32 width);
+BUSTER_F_DECL IrInteger ir_integer_sign_extend(IrInteger value, u32 from_width, u32 to_width);
+BUSTER_F_DECL IrInteger ir_integer_from_u64(u64 value, u32 width);
+BUSTER_F_DECL IrInteger ir_integer_from_s64(s64 value, u32 width);
+BUSTER_F_DECL bool ir_integer_sign_bit(IrInteger value, u32 width);
+BUSTER_F_DECL bool ir_integer_is_zero(IrInteger value);
+BUSTER_F_DECL bool ir_integer_equal(IrInteger left, IrInteger right);
+BUSTER_F_DECL bool ir_integer_unsigned_less(IrInteger left, IrInteger right);
+BUSTER_F_DECL bool ir_integer_signed_less(IrInteger left, IrInteger right, u32 width);
+// The value read as signed at `width`, when it fits an s64.
+BUSTER_F_DECL bool ir_integer_to_s64(IrInteger value, u32 width, s64* result_out);
+BUSTER_F_DECL IrIntegerResult ir_integer_unary(IrUnaryOperation operation, IrInteger operand, u32 width);
+// `width` is both operands' width, except a shift count, which is read at
+// `right_width`. Comparisons and boolean operations produce 0 or 1.
+BUSTER_F_DECL IrIntegerResult ir_integer_binary(IrBinaryOperation operation, IrInteger left, IrInteger right, u32 width, u32 right_width);
+BUSTER_F_DECL bool ir_integer_binary_is_comparison(IrBinaryOperation operation);
+// An integer conversion. UNSIGNED_WRAP marks a change of the value's unsigned
+// reading, SIGNED_OVERFLOW a change of its signed reading.
+BUSTER_F_DECL IrIntegerResult ir_integer_convert(IrConversionOperation operation, IrInteger operand, u32 source_width, u32 target_width);
+// 1 for BOOLEAN, the bit width for INTEGER and ENUM, 0 for anything else.
+BUSTER_F_DECL u32 ir_integer_type_width(IrType const* type);
+// The canonical meaning of a sign-and-magnitude spelling (CONSTANT_INTEGER
+// rows, INTEGER global initializers): the signed number reduced modulo
+// 2^width.
+BUSTER_F_DECL IrInteger ir_integer_from_magnitude(IrInteger magnitude, bool negative, u32 width);
+// The value a CONSTANT_INTEGER row means at `width`: its signed
+// magnitude reduced modulo 2^width. The only decoder of that spelling.
+BUSTER_F_DECL bool ir_integer_constant_decode(IrInstruction const* row, u32 width, IrInteger* value_out);
+// Whether the row's signed value lies in [-2^(width-1), 2^width), so a reader
+// that does not reduce it sees the same number as one that does.
+BUSTER_F_DECL bool ir_integer_constant_canonical(IrInstruction const* row, u32 width);
+
+// Diagnostic-build (BUSTER_BENCH_ALLOCATIONS) census of compile-time
+// semantic work, emitted as `ir_semantics.*` source metrics beside
+// `ir_construction.*`. Cumulative calling-thread counts, never timings; the
+// ordinary build compiles every recording site to nothing.
+typedef enum IrSemanticEvaluator
+{
+    IR_SEMANTIC_EVALUATOR_PREPROCESSOR,
+    IR_SEMANTIC_EVALUATOR_PARSE_LEGACY,
+    IR_SEMANTIC_EVALUATOR_PARSE_TYPED,
+    IR_SEMANTIC_EVALUATOR_LOWERING_CONSTANT,
+    IR_SEMANTIC_EVALUATOR_LOWERING_BOUND,
+    IR_SEMANTIC_EVALUATOR_COUNT,
+} IrSemanticEvaluator;
+
+#if BUSTER_BENCH_ALLOCATIONS
+#define IR_SEMANTIC_COUNTERS(X) \
+    X(PREPROCESSOR_EVALUATIONS, preprocessor_evaluations) \
+    X(PARSE_LEGACY_EVALUATIONS, parse_legacy_evaluations) \
+    X(PARSE_TYPED_EVALUATIONS, parse_typed_evaluations) \
+    X(LOWERING_CONSTANT_EVALUATIONS, lowering_constant_evaluations) \
+    X(LOWERING_BOUND_EVALUATIONS, lowering_bound_evaluations) \
+    X(RANGE_EVALUATIONS, range_evaluations) \
+    X(DISTINCT_RANGES, distinct_ranges) \
+    X(REPEATED_RANGE_EVALUATIONS, repeated_range_evaluations) \
+    X(REPEATED_BY_ANOTHER_EVALUATOR, repeated_by_another_evaluator) \
+    X(REPEATED_PREPROCESSOR, repeated_preprocessor) \
+    X(REPEATED_PARSE_LEGACY, repeated_parse_legacy) \
+    X(REPEATED_PARSE_TYPED, repeated_parse_typed) \
+    X(REPEATED_LOWERING_CONSTANT, repeated_lowering_constant) \
+    X(REPEATED_LOWERING_BOUND, repeated_lowering_bound) \
+    X(FIRST_SEEN_BY_PARSE_AGAIN_IN_LOWERING, first_seen_by_parse_again_in_lowering) \
+    X(RANGE_CENSUS_SATURATED, range_census_saturated) \
+    X(PREPROCESSOR_NODES, preprocessor_nodes) \
+    X(PARSE_TYPED_NODES, parse_typed_nodes) \
+    X(LOWERING_CONSTANT_NODES, lowering_constant_nodes) \
+    X(VALUE_QUERY_EVALUATIONS, value_query_evaluations) \
+    X(VALUE_QUERY_NODES, value_query_nodes) \
+    X(PARSE_CONVERSIONS, parse_conversions) \
+    X(LOWERING_CONVERSIONS, lowering_conversions) \
+    X(TARGET_SCALAR_QUERIES, target_scalar_queries) \
+    X(LAYOUT_QUERIES, layout_queries) \
+    X(FAST_FOLD_ATTEMPTS, fast_fold_attempts) \
+    X(FAST_FOLD_ACCEPTED, fast_fold_accepted) \
+    X(FAST_FOLD_REJECTED, fast_fold_rejected) \
+    X(KERNEL_UNARY, kernel_unary) \
+    X(KERNEL_BINARY, kernel_binary) \
+    X(KERNEL_CONVERSIONS, kernel_conversions) \
+    X(KERNEL_CONSTANT_DECODES, kernel_constant_decodes) \
+    X(KERNEL_OVERFLOW_CHECKS, kernel_overflow_checks) \
+    X(KERNEL_FAULTS, kernel_faults) \
+    X(NONCANONICAL_CONSTANTS, noncanonical_constants)
+
+typedef enum IrSemanticCounter
+{
+#define IR_SEMANTIC_ENUM(id, name) IR_SEMANTIC_##id,
+    IR_SEMANTIC_COUNTERS(IR_SEMANTIC_ENUM)
+#undef IR_SEMANTIC_ENUM
+    IR_SEMANTIC_COUNT,
+} IrSemanticCounter;
+
+typedef struct IrSemanticCounters IrSemanticCounters;
+struct IrSemanticCounters
+{
+    u64 values[IR_SEMANTIC_COUNT];
+    bool overflowed;
+};
+
+BUSTER_F_DECL void ir_semantic_record(IrSemanticCounter counter, u64 amount);
+// One top-level evaluation of source range [start, end) of the token array at
+// `base`; a range any evaluator saw before counts as repeated work.
+BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);
+BUSTER_F_DECL IrSemanticCounters ir_semantic_counters(void);
+BUSTER_F_DECL String8 ir_semantic_counter_name(IrSemanticCounter counter);
+#define IR_SEMANTIC_RECORD(counter, amount) ir_semantic_record(IR_SEMANTIC_##counter, (u64)(amount))
+#define IR_SEMANTIC_RANGE(evaluator, base, start, end) ir_semantic_census_range(IR_SEMANTIC_EVALUATOR_##evaluator, (base), (start), (end))
+#else
+#define IR_SEMANTIC_RECORD(counter, amount) ((void)0)
+#define IR_SEMANTIC_RANGE(evaluator, base, start, end) ((void)0)
+#endif

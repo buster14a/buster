@@ -165,6 +165,17 @@ typedef enum ObjectRelocationKind
     // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
     // instruction begins four bytes before its relocated field.
     OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
+    // Local dynamic, which only foreign -fPIC objects carry: R_X86_64_TLSLD
+    // is a rip-relative field naming the module's DTPMOD64 pair -- one per
+    // image, whatever symbol it is written against -- and always opens
+    // `lea rdi, [rip + x@tlsld]` followed by a call to __tls_get_addr, direct
+    // (PC32/PLT32) or through its GOT slot (GOTPCREL*).  R_X86_64_DTPOFF32
+    // and DTPOFF64 are a variable's offset inside the module's thread-local
+    // block, added to the address that call returns; DTPOFF64 appears only in
+    // debug information.
+    OBJECT_RELOCATION_X86_64_TLSLD,
+    OBJECT_RELOCATION_X86_64_DTPOFF32,
+    OBJECT_RELOCATION_X86_64_DTPOFF64,
     // R_AARCH64_ADR_GOT_PAGE and R_AARCH64_LD64_GOT_LO12_NC: an ADRP of the
     // page holding the symbol's GOT slot and the 64-bit LDR of that slot.
     // LLVM reaches every extern-weak symbol this way, even under -fno-pic.
@@ -172,6 +183,9 @@ typedef enum ObjectRelocationKind
     // resolves the pair by relaxation to ADRP/ADD of the symbol itself.
     OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21,
     OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
+    // ELF data differences: S + A - P over a full 64-bit field.
+    OBJECT_RELOCATION_X86_64_PC64,
+    OBJECT_RELOCATION_AARCH64_PREL64,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -180,6 +194,9 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
+// The bytes a relocation of this kind patches: eight for the 64-bit data
+// forms, four for every other field this model carries.
+BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
 // The four AArch64 ELF page-address kinds object_aarch64_elf_page_relocate
 // accepts: the direct ADRP/ADD pair and the GOT ADRP/LDR pair.
