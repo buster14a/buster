@@ -1846,11 +1846,13 @@ function(executable_add name is_buster_program main_file)
         endif()
     endif()
 
-    if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
+    # The sealed production profile is trained on ide. Other executables have
+    # different unity call graphs and cannot consume its control-flow hashes.
+    if ("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
         set(BUSTER_PGO_GENERATE_FLAG "-fprofile-generate=${BUSTER_PGO_GENERATE}")
         target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
         target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
-    elseif(NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    elseif("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_USE}" STREQUAL "")
         set(BUSTER_PGO_USE_FLAG "-fprofile-use=${BUSTER_PGO_USE}")
         target_compile_options(${name} PRIVATE
             "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_USE_FLAG}>"
