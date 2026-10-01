@@ -44,8 +44,9 @@ decoding.
 
 Exif orientation, when present in a supported source, is reported as metadata
 and leaves the decoded sample grid unchanged. Callers that need display order use
-`image_apply_orientation`; orientations 5 through 8 exchange output width and
-height. The helper produces a new image and does not mutate its source.
+`image_apply_orientation`, or sample the reported orientation at presentation;
+orientations 5 through 8 exchange display width and height. The copy helper
+produces a new image and does not mutate its source.
 
 Source channel count, maximum stored channel precision, color model, alpha
 presence, frame/image summary, orientation and the presence of recognized color
@@ -183,3 +184,13 @@ capability. Shared bounded-parser primitives are tracked in
 animation-frame/timeline APIs, multi-image selection, color transforms and
 decoders for the recognized-only families remain separate capability additions;
 signature recognition is not a commitment to ship those features together.
+
+## Native application consumer
+
+The separately registered [image browser](image-browser.md) opens files and
+flat directories, loads immutable bounded source copies on a persistent worker,
+and presents decoded RGBA through the XCB CPU raster component. It uses lower
+application byte/work caps and samples reported orientation without allocating
+an oriented copy. The decoder remains an in-memory component; filesystem,
+supersession, result ownership and native lifecycle policy belong to the app.
+This consumer does not add unused media/UI modules to the headless compiler.

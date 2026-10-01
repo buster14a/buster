@@ -246,3 +246,14 @@ can make a mapping unavailable to test that real fallback. Registered tests
 also model stale stat sizes for growth/truncation deterministically, check
 prefix errors/interruption/EOF/stat/close failure and allocation rollback, and
 exercise actual compiler source and object input diagnostics.
+
+## Linux image-browser consumer
+
+The opt-in [native image browser](../projects/image-browser.md) consumes
+`window` and `rendering_raster` on Linux x86-64/XCB CPU presentation. The existing
+`WINDOW` module options link `xcb`, `xcb-imdkit`, `xcb-util`, `xcb-keysyms`,
+`xcb-xkb`, `xkbcommon-x11` and `xkbcommon`; the new target adds no native
+library dependency. Its own loader uses existing OS threads, one-lane dispatch
+and Linux libc synchronization/filesystem calls where no current generic API
+fits. It adds no UI/font/Vulkan module to the compiler. Native Xvfb pixel
+readback is software-XCB evidence, not GPU or other-platform product support.
