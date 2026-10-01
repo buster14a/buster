@@ -1,0 +1,31 @@
+name: Validate main-push concurrency fix
+on:
+  push:
+    branches: [codex/2159-validate-main-push-concurrency]
+permissions:
+  contents: read
+concurrency:
+  group: validate-main-push-concurrency-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e787f648a3eeb08d717ba1f4382a170905944087
+          persist-credentials: false
+      - name: Record the exact candidate
+        run: git rev-parse HEAD HEAD^{tree}
+      - name: Validate concurrency, bounded queues, failure aggregation and action policy
+        run: |
+          python3 -B tests/ci_tools_test.py -v
+          python3 -B tools/compiler_throughput_workflow_test.py -v
+          python3 -B tests/action_pins_test.py -v
+          python3 -B tools/check_action_pins.py
+      - name: Validate all workflows with the existing reviewed queue exception
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml
