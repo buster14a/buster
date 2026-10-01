@@ -5,7 +5,7 @@ if (BUSTER_BUILD_IMAGE_BROWSER)
     endif()
     buster_register_module(image_browser_state "${CMAKE_SOURCE_DIR}/src/buster/apps/image_browser/image_browser_state.c")
     buster_register_module(image_browser_linux "${CMAKE_SOURCE_DIR}/src/buster/apps/image_browser/image_browser_linux.c")
-    set(BUSTER_IMAGE_BROWSER_MODULES os entry_point arena integer string file hash time float target image window rendering_raster image_browser_state image_browser_linux)
+    set(BUSTER_IMAGE_BROWSER_MODULES os entry_point arena integer string file hash time float target x86_64 image window rendering_raster image_browser_state image_browser_linux)
     executable_add(image_browser OFF src/buster/apps/image_browser/image_browser.c
         MODULES ${BUSTER_IMAGE_BROWSER_MODULES})
     target_link_libraries(image_browser PRIVATE m xcb)

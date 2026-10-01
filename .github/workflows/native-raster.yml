@@ -105,6 +105,12 @@ jobs:
             tests/image-browser/*.ppm
             LICENSES/README.md
             LICENSES/xcb-xproto-LICENSE.txt
+      - name: Production application graph without test instrumentation
+        if: ${{ matrix.cc == 'clang' && matrix.config == 'Release' }}
+        run: |
+          "$RUNNER_TEMP/buster-raster-build" generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_BUILD_IMAGE_BROWSER=ON -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/buster-raster-build" build --config Release -t image_browser
+          build/Release/image_browser --help
       - name: Source-size and whitespace checks
         run: |
           "$RUNNER_TEMP/buster-raster-build" source_size --write-baseline

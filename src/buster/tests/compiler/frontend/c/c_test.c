@@ -23503,6 +23503,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Clang 18.1.3's Itanium and Microsoft record builders supply the oracle:
+    // pragma ceilings cap merged member alignment outside the Microsoft ABI.
+    // Enum-sized probe arrays independently carry the parse-time folds into IR.
+    String8 triples[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+                         S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+    {
+        Target target = target_parse_triple(triples[target_index]).target;
+        bool microsoft = target.os == OPERATING_SYSTEM_WINDOWS;
+        bool aapcs = target.cpu_arch == CPU_ARCH_AARCH64 && !microsoft;
+        for (u32 ceiling = 1; ceiling <= 4; ceiling *= 2)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena, S8(
+                "#define PROBE(T, F) enum {{ T##_size = sizeof(struct T), T##_alignment = _Alignof(struct T), "
+                "T##_offset = __builtin_offsetof(struct T, F) }}; struct T T##_object; "
+                "char T##_size_probe[T##_size]; char T##_alignment_probe[T##_alignment]; char T##_offset_probe[T##_offset];\n"
+                "typedef int aligned_int __attribute__((aligned(8)));\n"
+                "struct __attribute__((packed)) attribute_only {{ char c; int value __attribute__((aligned(8))); }};\n"
+                "PROBE(attribute_only, value)\n"
+                "struct member_attribute_only {{ char c; int value __attribute__((packed, aligned(8))); }};\n"
+                "PROBE(member_attribute_only, value)\n"
+                "struct __attribute__((packed)) attribute_low {{ char c; int value __attribute__((aligned(2))); }}; PROBE(attribute_low, value)\n"
+                "#pragma pack(push, {u32})\n"
+                "struct member_gnu {{ char c; int value __attribute__((aligned(8))); }}; PROBE(member_gnu, value)\n"
+                "struct member_standard {{ char c; _Alignas(8) int value; }}; PROBE(member_standard, value)\n"
+                "struct __attribute__((packed)) combined {{ char c; int value __attribute__((aligned(8))); }}; PROBE(combined, value)\n"
+                "struct inner {{ _Alignas(16) int value; }};\n"
+                "struct nested {{ char c; _Alignas(32) struct inner value; }}; PROBE(nested, value)\n"
+                "struct alias_member {{ char c; aligned_int value; }}; PROBE(alias_member, value)\n"
+                "struct aggregate {{ char c; int value; }} __attribute__((aligned(8))); PROBE(aggregate, value)\n"
+                "struct bit_high {{ unsigned first : 3; unsigned value : 3 __attribute__((aligned(8))); char tail; }}; PROBE(bit_high, tail)\n"
+                "struct bit_low {{ unsigned first : 3; unsigned value : 3 __attribute__((aligned(2))); char tail; }}; PROBE(bit_low, tail)\n"
+                "struct __attribute__((packed)) bit_packed {{ unsigned value : 3; char tail; }}; PROBE(bit_packed, tail)\n"
+                "struct bit_zero {{ unsigned first : 3; unsigned : 0 __attribute__((aligned(8))); char tail; }}; PROBE(bit_zero, tail)\n"
+                "#pragma pack(pop)\n"), ceiling);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("pragma-explicit-alignment.c"), target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+            {
+                u64 capped_size = ceiling + 4;
+                u64 high_size = microsoft ? ceiling == 1 ? 5 : ceiling == 2 ? 6 : 8 : ceiling == 4 ? 4 : 2;
+                u64 low_size = microsoft ? high_size : ceiling == 1 ? 2 : 4;
+                u64 zero_size = microsoft || aapcs ? 16 : ceiling == 1 ? 9 : ceiling == 2 ? 10 : 12;
+                struct
+                {
+                    String8 name;
+                    u64 size;
+                    u32 alignment;
+                    u64 offset;
+                    u64 second_field_bit;
+                    u32 field_count;
+                    bool check_bit;
+                } rows[] = {
+                    {S8("attribute_only"), 16, 8, 8, 0, 2, false},
+                    {S8("member_attribute_only"), 16, 8, 8, 0, 2, false},
+                    {S8("attribute_low"), 6, 2, 2, 0, 2, false},
+                    {S8("member_gnu"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
+                    {S8("member_standard"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
+                    {S8("combined"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
+                    {S8("nested"), microsoft ? 64 : capped_size, microsoft ? 32 : ceiling, microsoft ? 32 : ceiling, 0, 2, false},
+                    {S8("aggregate"), 8, 8, ceiling, 0, 2, false},
+                    {S8("bit_high"), high_size, ceiling, microsoft ? 4 : 1, 3, 3, true},
+                    {S8("bit_low"), low_size, ceiling, microsoft ? 4 : ceiling == 1 ? 1 : 3, microsoft || ceiling == 1 ? 3 : 16, 3, true},
+                    {S8("bit_packed"), microsoft ? 5 : ceiling == 4 ? 4 : 2, microsoft ? 1 : ceiling, microsoft ? 4 : 1, 0, 2, false},
+                    {S8("bit_zero"), zero_size, microsoft || aapcs ? 8 : ceiling, 8, 0, 3, false},
+                    {S8("alias_member"), capped_size, ceiling, ceiling, 0, 2, false},
+                };
+                u32 row_count = (u32)BUSTER_ARRAY_LENGTH(rows) - (microsoft ? 1u : 0u);
+                for (u32 row = 0; row < row_count; row += 1)
+                {
+                    String8 name = string_format(temporary.arena, S8("{S8}_object"), rows[row].name);
+                    IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, name);
+                    IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                    if (BUSTER_REQUIRE(arguments, type != 0 && type->field_count == rows[row].field_count))
+                    {
+                        BUSTER_TEST(arguments, type->layout.size == rows[row].size);
+                        BUSTER_TEST(arguments, type->layout.alignment == rows[row].alignment);
+                        BUSTER_TEST(arguments, type->fields[type->field_count - 1].offset == rows[row].offset);
+                        if (rows[row].check_bit)
+                        {
+                            BUSTER_TEST(arguments, type->fields[1].offset * 8 + type->fields[1].bit_offset == rows[row].second_field_bit);
+                        }
+                    }
+                    String8 suffixes[] = {S8("size"), S8("alignment"), S8("offset")};
+                    u64 folded[] = {rows[row].size, rows[row].alignment, rows[row].offset};
+                    for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(suffixes); probe += 1)
+                    {
+                        String8 probe_name = string_format(temporary.arena, S8("{S8}_{S8}_probe"), rows[row].name, suffixes[probe]);
+                        IrGlobal* probe_global = c_test_find_ir_global(lowered.program->modules, lowered.program, probe_name);
+                        IrType* probe_type = probe_global ? ir_type_from_id(&lowered.program->types, probe_global->type) : 0;
+                        if (BUSTER_REQUIRE(arguments, probe_type != 0))
+                        {
+                            BUSTER_TEST(arguments, probe_type->layout.size == folded[probe]);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+        String8 invalid_sources[] = {
+            S8("#pragma pack(push, 1)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n"),
+            S8("#pragma pack(push, 2)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n"),
+            S8("struct __attribute__((packed)) rejected { char c; _Alignas(2) int value; };\n"),
+            S8("struct rejected { char c; _Alignas(2) int value __attribute__((packed)); };\n"),
+        };
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_sources); invalid_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, invalid_sources[invalid_index], S8("packed-under-alignment.c"), target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
+            {
+                BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+            }
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -30623,6 +30755,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
+    BUSTER_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);

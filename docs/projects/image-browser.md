@@ -30,7 +30,7 @@ Xvfb/xauth are hosted validation tools, not application libraries. See the
 [platform guide](../agents/platform.md). From a checkout containing the target:
 
 ```sh
-./build.sh generate --cc clang --config Release --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_BUILD_IMAGE_BROWSER=ON
+./build.sh generate --cc clang --config Release --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_BUILD_IMAGE_BROWSER=ON -DBUSTER_INCLUDE_TESTS=OFF
 ./build.sh build --config Release -t image_browser
 build/Release/image_browser /absolute/path/to/images
 ```
@@ -100,7 +100,8 @@ wall-clock cancellation guarantee; a stalled regular-file read can delay join.
 | Catalog | 4096 entries, 1 MiB path bytes, paths up to 4095 bytes, 32,768 scanned records; overflow is an error |
 | Zoom | 1/64× to 64× |
 
-These are owned-buffer limits, not an exact process RSS promise: thread stacks,
+The listed buffers sum to about 289 MiB at their simultaneous maxima, plus
+arena overhead. They are owned-buffer limits, not an exact process RSS promise: thread stacks,
 OS/XCB/XKB/XIM allocations and X-server storage are separate. Each arena has
 small explicit overhead. The existing OS worker reserves an 8 MiB stack and
 creates two default scratch arenas (256 MiB virtual reservation each, initially
@@ -129,7 +130,9 @@ checks recoverable unavailable-display failure.
 `tests/image-browser` directory and `--smoke`: it loads and presents both files,
 checks decoded pixels/metadata and server readback, sends native XCB key,
 wheel, drag and close events, requires the resulting generation/viewport
-transitions, and shuts down the persistent loader. Smoke is available only in test builds.
+transitions, and shuts down the persistent loader. Smoke is available only in test builds (`BUSTER_INCLUDE_TESTS=ON`).
+The hosted Release/unity lane separately compiles the production graph with
+that option `OFF` and checks its CLI.
 The smoke's native protocol events exercise the actual event loop. Physical
 desktop interaction remains an unexecuted graphical gate. A headless success is not native rendering evidence. Run the native gates under
 an X server; for this CPU backend, `xvfb-run -a ./build.sh build --config Release

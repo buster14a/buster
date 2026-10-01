@@ -5978,6 +5978,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_vector(UnitTestArguments* 
     return result;
 }
 
+// The foreign observer below reads the actual hidden pointer before any
+// compiler can infer its alignment. Its aligned store executes only after
+// that independent check, so a broken caller reports a residue safely.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_result_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 alignments[] = {8, 16, 32, 64, 128};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_UEFI};
+    String8 names[] = {S8("used"), S8("unused"), S8("indirect"), S8("unused_indirect")};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = systems[system]};
+        for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(alignments); probe += 1)
+        {
+            u32 alignment = alignments[probe];
+            u32 byte_size = alignment == 8 ? 24 : BUSTER_MAX(alignment, 32u);
+            for (u32 memory = 0; memory < 2; memory += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = string_format(temporary.arena,
+                    S8("typedef struct R {{ _Alignas({u32}) unsigned long long words[{u32}]; }} R;\n"
+                       "R observe(unsigned long long *);\n"
+                       "unsigned long long used(unsigned long long *p) {{ R r = observe(p); return r.words[{u32}]; }}\n"
+                       "unsigned long long unused(unsigned long long *p) {{ (void)observe(p); return 123; }}\n"
+                       "unsigned long long indirect(R (*f)(unsigned long long *), unsigned long long *p) {{ R r = f(p); return r.words[{u32}]; }}\n"
+                       "unsigned long long unused_indirect(R (*f)(unsigned long long *), unsigned long long *p) {{ (void)f(p); return 123; }}\n"),
+                    alignment, byte_size / 8, byte_size / 8 - 1, byte_size / 8 - 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("x64-result-alignment.c"), source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    IrModule* module = program->modules;
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                    {
+                        IrFunction* function = machine_test_ir_function_find(module, names[name]);
+                        BUSTER_TEST(arguments, function != 0);
+                        if (function)
+                        {
+                            MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                            BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                            if (selected.supported && BUSTER_REQUIRE(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE))
+                            {
+                                u32 buffers = 0;
+                                u32 masks = 0;
+                                for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                                {
+                                    MachineInstruction* instruction = selected.function.instructions + row;
+                                    if (instruction->opcode == MACHINE_X64_LEA_FRAME && instruction->payload == alignment - 1)
+                                    {
+                                        u32 slot = machine_ref_payload(instruction->operands[1]);
+                                        if (selected.function.stack_slot_sizes[slot] == byte_size + alignment - 1)
+                                        {
+                                            buffers += 1;
+                                            BUSTER_TEST(arguments, selected.function.stack_slot_alignments[slot] == 8);
+                                        }
+                                    }
+                                    if (instruction->opcode == MACHINE_X64_MOV_RI &&
+                                        selected.function.immediates[machine_ref_payload(instruction->operands[1])] == 0ull - alignment)
+                                    {
+                                        masks += 1;
+                                    }
+                                }
+                                BUSTER_TEST_RAW(arguments, alignment > 8 ? buffers != 0 && masks != 0 : buffers == 0 && masks == 0,
+                                    string_format(temporary.arena, S8("{S8} alignment={u32} frontend={u32}"), names[name], alignment, memory));
+                            }
+                        }
+                    }
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                        BUSTER_TEST(arguments, generated.statistics.function_count == 4 && generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (system < 2 && generated.error == CODEGEN_ERROR_NONE)
+                        {
+                            // Independent SysV oracle: RDI is the hidden result,
+                            // RSI points to the observed residue. PXOR/MOVAPS
+                            // write the first sixteen bytes; the eight-aligned
+                            // control uses MOVUPS. MOV writes the tail.
+                            u8 observer[] = {0x48, 0x89, 0xf8, 0x83, 0xe0, (u8)(alignment - 1),
+                                0x48, 0x89, 0x06, 0x66, 0x0f, 0xef, 0xc0, 0x85, 0xc0, 0x75, 0x03, 0x0f, (u8)(alignment == 8 ? 0x11 : 0x29), 0x07,
+                                0x48, 0xc7, 0x47, (u8)(byte_size - 8), 0x7b, 0x00, 0x00, 0x00, 0x48, 0x89, 0xf8, 0xc3};
+                            u64 observer_offset = generated.code.length;
+                            u8* bytes = arena_allocate(temporary.arena, u8, generated.code.length + sizeof(observer));
+                            memcpy(bytes, generated.code.pointer, generated.code.length);
+                            memcpy(bytes + observer_offset, observer, sizeof(observer));
+                            IrFunction* foreign = machine_test_ir_function_find(module, S8("observe"));
+                            bool patched = foreign != 0 && generated.relocation_count == 2;
+                            u32 last_relocation_kind = UINT32_MAX;
+                            for (u32 index = 0; patched && index < generated.relocation_count; index += 1)
+                            {
+                                CodegenModuleRelocation* relocation = generated.relocations + index;
+                                last_relocation_kind = relocation->kind;
+                                s64 displacement = (s64)observer_offset - ((s64)relocation->offset + 4);
+                                patched = codegen_module_relocation_valid(relocation) &&
+                                    relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
+                                    (relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 ||
+                                     relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PLT32) &&
+                                    relocation->symbol.value == foreign->symbol.value && !relocation->addend && !relocation->label_address &&
+                                    relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4 &&
+                                    displacement >= INT32_MIN && displacement <= INT32_MAX;
+                                if (patched)
+                                {
+                                    s32 encoded = (s32)displacement;
+                                    memcpy(bytes + relocation->offset, &encoded, sizeof(encoded));
+                                }
+                            }
+                            // ELF imports use PLT32, whose rel32 patch field
+                            // addresses this local observer exactly as PC32 does.
+                            BUSTER_TEST_RAW(arguments, patched, string_format(temporary.arena,
+                                S8("result alignment relocation: system={u32} alignment={u32} mode={u32} frontend={u32} count={u32} last_kind={u32}"),
+                                system, alignment, mode, memory, generated.relocation_count, last_relocation_kind));
+                            if (patched)
+                            {
+                                CodegenExecutable executable = codegen_make_executable((CodegenFunction){
+                                    .code = {.pointer = bytes, .length = observer_offset + sizeof(observer)}});
+                                BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                                if (executable.address)
+                                {
+                                    void* observer_address = (u8*)executable.address + observer_offset;
+                                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                                    {
+                                        u32 offset = machine_test_module_offset(&generated, module, names[name]);
+                                        BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                        if (offset != UINT32_MAX)
+                                        {
+                                            void* address = (u8*)executable.address + offset;
+                                            u64 residue = UINT64_MAX;
+                                            u64 actual;
+                                            if (name < 2)
+                                            {
+                                                typedef u64 Call(u64*);
+                                                Call* call;
+                                                memcpy(&call, &address, sizeof(call));
+                                                actual = call(&residue);
+                                            }
+                                            else
+                                            {
+                                                typedef u64 Dispatch(void*, u64*);
+                                                Dispatch* call;
+                                                memcpy(&call, &address, sizeof(call));
+                                                actual = call(observer_address, &residue);
+                                            }
+                                            BUSTER_TEST_RAW(arguments, residue == 0 && actual == 123,
+                                                string_format(temporary.arena,
+                                                    S8("{S8} alignment={u32} mode={u32} frontend={u32} residue={u64} actual={u64}"),
+                                                    names[name], alignment, mode, memory, residue, actual));
+                                        }
+                                    }
+                                }
+                                codegen_release_executable(executable);
+                            }
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7825,6 +7990,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_win64_aligned);
     BUSTER_TEST_FIXTURE(arguments, machine_test_win64_vector);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_result_alignment);
     BUSTER_TEST_FIXTURE(arguments, machine_test_native_aggregate);
     BUSTER_TEST_FIXTURE(arguments, machine_test_f80);
     BUSTER_TEST_FIXTURE(arguments, machine_test_native_variadic);
