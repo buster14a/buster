@@ -329,14 +329,29 @@ Any append/sync uncertainty poisons that handle: close/reopen and reconcile or
 retry, never roll it back in memory and continue appending.
 
 Limits are fixed across journal schemas 1 and 2: eight unfinished jobs
-(including active and cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
+(including active and cleaning), 512 lifetime submissions, 8,192 journal events, 320-byte request
 payloads, 564-byte maximum journal frames and 536-byte control requests/ordinary replies.
 The authenticated export operation has a separate fixed reply cap; see [EXPORT.md](EXPORT.md). Normal
 job transitions use fewer than 16 events each. There is no compaction, rotation,
-expiry or tombstone eviction. Once all 64 lifetime slots are used, new keys fail
+expiry or tombstone eviction. Once all 512 lifetime slots are used, new keys fail
 closed even if every job has finished; existing identical retries still work.
 A migration/retention scheme is a subsequent slice, not silent deletion of
 accepted identities.
+
+The lifetime cap was 64 submissions and 1,024 events until #2114 raised it so
+that a #426 window 2 of at least 64 confirmatory `zen5-calibration-v1`
+attempts fits in the same queue state after window 1 and any earlier jobs. No
+durable format records the cap: frames carry no slot index or count, job ids
+remain journal sequences, and replay only rejects a journal longer than
+`BQ_EVENT_CAP` maximum frames. A journal written by the 64-job build therefore
+replays unchanged, keeps its ids, and admits new submissions up to the new cap;
+the status reply's `job_count` and the capabilities text report the raised
+value. The new cap applies only after the installed service is rebuilt and
+reinstalled from a revision that contains it. `BqState` is about 664 KiB, is
+stack-resident in `BqQueue` and copied once per tentative append; a compile-time
+check keeps it at or under 1 MiB. Replay remains a bounded linear scan with a
+quadratic key comparison over at most 512 jobs. The cap is not a disk quota:
+retained results and exports still follow their own per-job bounds.
 
 ## Journal wire format and recovery
 
@@ -823,7 +838,7 @@ status/result response at the top-level error field.
 | --- | --- |
 | Durable bounded single-writer journal | `bq_open`, `bq_append`, `bq_replay`; competing handles, real short writes, sync/ack faults |
 | Bounded framing, sequence, checksums | Canonical encoding; every partial final-frame prefix; header/payload corruption; duplicate sequence; oversized lengths; checksum-valid illegal transitions |
-| Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion |
+| Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion, including a 64-job old-cap journal reopened and extended by a full window |
 | Explicit active ownership | Persisted fake reservation token; stale-token rejection; one-active through cancellation/cleaning; restart at every phase |
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
 | Bounded CLI/control operations | Same dispatcher for CLI, pipe and authenticated socket frames; truncation/version/length/numeric validation; bounded journal-event pagination |
