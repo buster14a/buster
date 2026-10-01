@@ -110,7 +110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_executable_sections(UnitTestArgum
             ObjectExecutable executable = object_link_executable(&object);
             if (BUSTER_REQUIRE(arguments, executable.error == OBJECT_ERROR_NONE && executable.address && executable.allocation_address))
             {
-                u8* text_address = executable.address;
+                u8* text_address = (u8*)executable.address;
                 u64 addresses[2] = {0};
                 memcpy(addresses, text_address + page_size, sizeof(addresses));
                 BUSTER_TEST(arguments, is_aligned((u64)(uintptr_t)text_address, page_size * 2));
@@ -142,7 +142,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_executable_sections(UnitTestArgum
             ObjectExecutable leading = object_link_executable(&object);
             if (BUSTER_REQUIRE(arguments, leading.error == OBJECT_ERROR_NONE && leading.address && leading.allocation_address))
             {
-                u8* entry_address = leading.address;
+                u8* entry_address = (u8*)leading.address;
                 u64 states[2] = {0};
                 memcpy(states, entry_address - page_size, sizeof(states));
                 BUSTER_TEST(arguments, states[0] == (u64)(uintptr_t)(entry_address - page_size * 2));
