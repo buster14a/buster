@@ -23,6 +23,20 @@ sees the same bits as one that reduces it. The C producer's single row
 emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
 a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
 
+## Scalar binary operation families
+
+Scalar arithmetic and numeric comparisons require the operation's family to
+match the operands: integer operations take integer values, and floating
+operations take floating values. Arithmetic preserves that canonical type;
+comparisons produce Boolean results. Matching operand and result type IDs
+alone does not make a cross-family operation valid. Boolean, pointer and
+vector operations retain their separate rules.
+
+`ir_test_canonical_binary_families` calls the complete canonical validator for
+all 33 scalar arithmetic/comparison operations with matching and wrong-family
+operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
+wrong-family case and preserves Boolean, pointer and vector controls.
+
 ## A certificate describes one input
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's
