@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from zen5_aa_noise import (
@@ -16,7 +17,9 @@ from zen5_aa_noise import (
     derived_labels,
     derived_paths,
     expected_schedule,
+    lag_one_correlation,
     observation_reasons,
+    relative_drift_per_pair,
     schedule_sha256,
     sha256_bytes,
     validate_capture,
@@ -107,7 +110,32 @@ def synthetic_capture(*, invalid: bool = False) -> dict[str, Any]:
     return capture
 
 
+# Naive left-to-right float sum() (Python <= 3.11) and compensated sum()
+# (Python >= 3.12) disagree in the last bits on this vector; math.fsum pins one
+# correctly rounded result on every interpreter (issue #2110).
+SUMMATION_VECTOR = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] * 3
+SUMMATION_CORRELATION_HEX = "0x1.2d96cb65b2d96p-1"
+SUMMATION_DRIFT_HEX = "0x1.480b63f378742p-6"
+
+
+def naive_sum(values: Any) -> float:
+    total = 0.0
+    for value in values:
+        total += value
+    return total
+
+
 def run_self_test() -> int:
+    correlation = lag_one_correlation(SUMMATION_VECTOR)
+    drift = relative_drift_per_pair(SUMMATION_VECTOR)
+    assert correlation is not None and correlation.hex() == SUMMATION_CORRELATION_HEX, correlation
+    assert drift is not None and drift.hex() == SUMMATION_DRIFT_HEX, drift
+    # The vector must keep distinguishing naive from correctly rounded sums.
+    x_mean = (len(SUMMATION_VECTOR) - 1) * 0.5
+    y_mean = math.fsum(SUMMATION_VECTOR) / len(SUMMATION_VECTOR)
+    terms = [(index - x_mean) * (value - y_mean) for index, value in enumerate(SUMMATION_VECTOR)]
+    assert naive_sum(terms) != math.fsum(terms)
+
     assert len(expected_schedule()) == TOTAL_PAIRS
     assert len({(slot["round"], slot["block"]) for slot in expected_schedule()}) == ROUNDS * BLOCKS_PER_ROUND
     capture = synthetic_capture()
@@ -135,6 +163,14 @@ def run_self_test() -> int:
     stopped["observations"].pop()
     problems, _ = validate_capture(stopped)
     assert any("exactly 120 slots" in problem for problem in problems)
+
+    authorized = synthetic_capture()
+    authorized["ab_authorized"] = True
+    problems, _ = validate_capture(authorized)
+    assert "ab_authorized must be false" in problems
+    authorized["ab_authorized"] = False
+    problems, invalid = validate_capture(authorized)
+    assert not problems and not invalid
 
     print("zen5_aa_noise self-test passed")
     return 0

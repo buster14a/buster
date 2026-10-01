@@ -528,8 +528,9 @@ Exact within-block slot coloring is not part of the same-layout experiment.
 choices are committed, row-local writes can be grouped, but extra gather/rewrite
 passes can cost more than the existing four-byte store. Preserve allocation edit
 order, especially main edits before retroactive edits at equal points. Copy
-subjects are physical registers and rematerialization subjects are immediate IDs;
-neither can index the spill-home marking array. [Source][S6]
+subjects are physical registers and immediate rematerialization subjects are
+immediate IDs; neither can index the spill-home marking array. A frame-address
+rematerialization names its virtual register but writes no home. [Source][S6]
 
 Parallel-copy resolution is not sequential renaming. Classifying ready copies
 in a mask can be batched, but sources must be obtained from the pre-copy state;

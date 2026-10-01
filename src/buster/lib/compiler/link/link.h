@@ -167,6 +167,11 @@ struct NativeExecutableLinkResult
     ByteSlice pdb;
     String8 pdb_path;
     String8 symbol;
+    // The operating-system error behind LINK_ERROR_FILE_WRITE, so a refused
+    // publication (for example a Windows image still held after it ran) is
+    // named instead of reported only as a failed write. Zero when the writer
+    // refused the destination without a system error.
+    OsError write_error;
     LinkError error;
 };
 

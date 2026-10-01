@@ -45,6 +45,18 @@ static u8 const x86_tls_add_oracle[16][7] = {
     {0x49, 0x81, 0xc7, 0xfc, 0xff, 0xff, 0xff},
 };
 
+// Local dynamic as GCC and Clang emit it at -O2 -fPIC (and GCC with -fno-plt),
+// and the local-exec replacement GNU ld writes over each (issue 1711).
+static u8 const x86_tls_ld_oracle[12] = {
+    0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00,
+};
+static u8 const x86_tls_ld_indirect_oracle[13] = {
+    0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0xff, 0x15, 0x00, 0x00, 0x00, 0x00,
+};
+static u8 const x86_tls_ld_le_oracle[13] = {
+    0x66, 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+};
+
 BUSTER_GLOBAL_LOCAL bool x86_tls_test_value(u8 const* bytes, u32 size, s32 value)
 {
     u32 offset = size - 4;
@@ -163,6 +175,57 @@ UnitTestResult x86_64_tls_tests(UnitTestArguments* arguments)
                 memcpy(bytes + 3, &value, sizeof(value));
                 BUSTER_TEST(arguments, buster_x86_metadata_relax_tls(bytes, 7, BUSTER_X86_METADATA_TLS_INITIAL_EXEC, value));
                 BUSTER_TEST(arguments, memcmp(bytes, x86_tls_add_oracle[reg], 3) == 0 && x86_tls_test_value(bytes, 7, value));
+            }
+        }
+    }
+    // General dynamic from a -fno-plt object calls through the GOT slot in
+    // the same sixteen bytes and relaxes to the same local-exec pair.
+    static u8 const x86_tls_gd_indirect_oracle[16] = {
+        0x66, 0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x66, 0x48, 0xff, 0x15, 0x00, 0x00, 0x00, 0x00,
+    };
+    u8 gd_indirect[16];
+    memcpy(gd_indirect, x86_tls_gd_indirect_oracle, sizeof(gd_indirect));
+    BUSTER_TEST(arguments, buster_x86_metadata_relax_tls(gd_indirect, sizeof(gd_indirect), BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC, -4));
+    BUSTER_TEST(arguments, memcmp(gd_indirect, x86_tls_le_oracle, sizeof(gd_indirect)) == 0);
+    BUSTER_TEST(arguments, buster_x86_metadata_relax_tls_local_dynamic(0, UINT32_MAX) == 0);
+    // Both envelopes at every capacity: the direct one needs twelve bytes,
+    // the indirect one thirteen, and a short capacity leaves the bytes alone.
+    for (u32 indirect = 0; indirect < 2; indirect += 1)
+    {
+        u8 const* input = indirect ? x86_tls_ld_indirect_oracle : x86_tls_ld_oracle;
+        u32 size = indirect ? 13u : 12u;
+        for (u32 capacity = 0; capacity <= 16; capacity += 1)
+        {
+            u8 actual[16];
+            u8 expected[16];
+            memset(actual, 0xa5, sizeof(actual));
+            memcpy(actual, input, size);
+            memcpy(expected, actual, sizeof(actual));
+            u32 relaxed = buster_x86_metadata_relax_tls_local_dynamic(actual, capacity);
+            BUSTER_TEST(arguments, relaxed == (capacity >= size ? size : 0));
+            if (capacity >= size) memcpy(expected, x86_tls_ld_le_oracle + (13 - size), size);
+            BUSTER_TEST(arguments, memcmp(actual, expected, sizeof(actual)) == 0);
+        }
+        // Every value at every byte: only the two relocation fields are free,
+        // and the indirect call's second opcode byte is what tells it apart.
+        for (u32 position = 0; position < size; position += 1)
+        {
+            for (u32 value = 0; value < 256; value += 1)
+            {
+                u8 bytes[13];
+                u8 before[13];
+                memcpy(bytes, input, size);
+                bytes[position] = (u8)value;
+                memcpy(before, bytes, size);
+                bool field = (position >= 3 && position < 7) || position >= size - 4;
+                bool valid = field || value == input[position];
+                // A direct call opcode where the indirect one began is the
+                // twelve-byte envelope, whatever the byte after it.
+                u32 matched = valid ? size : indirect && position == 7 && value == x86_tls_ld_oracle[7] ? 12u : 0u;
+                if (matched) memcpy(before, x86_tls_ld_le_oracle + (13 - matched), matched);
+                u32 relaxed = buster_x86_metadata_relax_tls_local_dynamic(bytes, size);
+                BUSTER_TEST(arguments, relaxed == matched);
+                BUSTER_TEST(arguments, memcmp(bytes, before, size) == 0);
             }
         }
     }

@@ -1,0 +1,687 @@
+branch	sha	action	reason	date	prs	subject
+agent/inspect-190-195	7432a44761af209a27359fb80080bf3a992fc71d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	chore: export main checkout for local issue implementation
+agent/issue-508-census-closure	f5ffa781183d5219bfb02bde69f8d7aec9967e32	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: export issue 508 source for isolated repair
+agent/issue-562-gcc13-sanitized-acceptance	5e3d839edaa9407f68e3a981fa5cde0ba3beb409	delete	ancestor of main	2026-09-17	-	Merge pull request #734 from buster14a/fix/722-post-tag-specifiers
+agent/tackle-190-195-control	7ed1678d1bf8df9aae34deebf86d2a021088a8b4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	chore: validate and publish issue 195 fix
+ai_x86_64_long_double_float16	bfc864879a32dc30f2cda77381b113a15bbf4e9d	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: fix issue 1731 patch application
+archive/1014-before-7126668c-20260925	cce86bd108fb402fd8eac86bd1532f87facadb06	delete	triaged OBSOLETE	2026-09-23	-	codegen: finish orphan state and stale direct-emitter prose
+archive/2026-04-pre-forgejo	3db4c250d6a1df534c29a0e89a8966de571a70c7	delete	triaged OBSOLETE	2026-03-23	-	Some random bits
+archive/36-direct-reference-20260912	3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e	delete	triaged SUPERSEDED	2026-09-12	-	Archive reproducible direct reference tree for issue 36; restore VLA regression
+archive/issue-1137-unexecuted-packet	e631a6fca987ca6b380b00224154cc423357522d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	archive: preserve issue 1137 unexecuted packet
+astra/1028-cache-validity-744a948f	8738b27fd39806ce27bcb124eef37b49d1b57259	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment(1028): run isolated hosted semantic cache controls
+astra/1028-semantic-facts-2e942e80	784b2bd20ef6e6d1d95c742f5ed94839282f588d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment(1028): preserve raw evidence as immutable Git blobs
+astra/1100-source-map-lifetime	62c235c42176b0f48450b207ddb174734434090a	delete	ancestor of main	2026-09-24	1110	frontend: preserve unchanged source-map key publication (#1100)
+astra/1100-source-map-lifetime-refresh-20260925	d80cf05c0f7b97965de4cd1693c9b10fb3a39a5c	delete	triaged SUPERSEDED	2026-09-25	-	frontend: preserve unchanged source-map key publication (#1100)
+astra/1166-mobile-checkout-guard	a33d39c4df45d55715433218f28bab018f8fa2f6	delete	ancestor of main	2026-09-24	1169	ci(mobile): require checkout before loading local upload action
+astra/1166-mobile-checkout-validation	fb474a98c78ba6312ce37c28083bcde4ef50be17	delete	merging into main changes nothing	2026-09-24	-	chore(ci): remove completed #1166 temporary validation workflow
+astra/125-region-census-20260924	d71effcb62b19e78d645e27e88e3c0f2596ad47c	delete	triaged OBSOLETE	2026-09-24	-	test: run matched #125 heap, dense and sparse-scan measurements
+astra/125-region-sparse-20260924	0ebcef6b33510e7eedfc01fad94266642ae4214e	delete	triaged SUPERSEDED	2026-09-24	-	Merge pull request #1118 from buster14a/review/125-region-boundary-tests-20260924-344eb1cc
+astra/20260909-a04-transport	4c553fe3b86ae687129860fc5c1f341598ff1578	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: replay retained A04 aggregate diagnostics on frozen main
+astra/20260909-sequential-transport	9cc06d0e9fd22918a34f7a3069e74846a0cd1b83	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: finalize the scoped preprocessing change and validate registered regressions
+astra/408-worker-admission-ci-15b1981	bce2df42177258c1a53fa53280fc152f5eda6477	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	session: stage remote native worker admission controls for #408
+astra/437-durable-fake-queue-20260913	f8d98e11367a4aeb24f8aa1da0e06393f160c46d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	chore: prove closed-handle regression and validate owned queue candidate across hosts
+astra/437-handle-regression-candidate-20260913	004b37f45abac67af751428bcec5b94d92300bcb	delete	triaged SUPERSEDED	2026-09-13	-	bench service: invalidate closed handles before idempotent fast paths
+astra/51-fusion-20260924-evidence	15c40363d32523bb4a07ef96725cbb16e540a6d8	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	chore: run matched scalar fusion, simpler competitor, and allocation experiments
+astra/51-fusion-20260924-transport	321ca969c8ecfbf71c835fe3e597e87ce4a4eb32	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	chore: publish isolated #51 candidate and run hosted differentials
+astra/51-fusion-final-20260924	5fd9a813220d5b83b8530e5f23ad99bf03156b51	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	chore: construct final test placement directly from hashed source
+astra/51-fusion-transport-20260924	317c04dcb025cc1e3034dfa17579058fb574393c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment: stage verified fusion patch chunk 4
+astra/53-arena-ownership-evidence-20260925	370d6d00944bd038304e4a0567f841a06166c42f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	test: correct isolated probe application state and source ID comparison
+astra/60-interner-scaling-20260925-e84c	6264e3598ffe29186c9ff987ff41378f930878c9	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(#60): extend bounded lexical census to forty largest tracked source headers
+astra/a02-20260909-transport	881bd4ad661e4b69ca260619cbc7f0407debaa29	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: correct truncated patch transport tail without changing reviewed source
+astra/a03-20260909-ci-inspection	605f15adac524318c81ee5b3868f023748fed2dc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: reproduce minimized volatile operation then validate A03 follow-up source
+astra/a03-20260909-transport	30177257ea0876de5aa5c9dd88d0ff7d641addcd	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	test: use the 16-bit machine opcode API type in issue 99 coverage
+astra/a07-280-inspection	3138d13821195d40a48d1ffac4ab4b68e89a57e5	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: allow reviewed disjoint TU prewarm documentation at exact PR head
+astra/a08-capability-evidence-20260909	aad1f5b7c498ec3ca142143fac27115304daf783	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: validate and transfer isolated A08 candidate source objects
+astra/a09-memory-transport-20260909	a919486c38efb8674014b8c024a5cad5e8897d76	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: isolate A09 allocation accounting with same-host frozen-input probes
+astra/a14-66-fixture-ci	d29f18ae9b702a1235bfd090faa1cac7a2110bcb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: publish the isolated PIC linker dependency after live overlap checks
+astra/a14-apk-validation-20260909	3dcc7200730241aa8a53f6a46c8eb2a4b3069432	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: reproduce and validate A14 Android asset graph (#387)
+astra/frontend-map-lifetime-transport-20260924	c79b6500745bd1601a24a0594b9022cb217cd74c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	ci: freeze identical own-source inputs for allocation replay
+astra/frontend-map-lifetime-transport-20260925	26ef67724d14ce8d73db9e3b2c5c233c686ce737	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	ci: validate #1100 on current main with updated fixture context
+astra/gcc13-byte-store-integration-20260912	13d236973ba8f4c1bab2abb0a5ea78e88b738b90	delete	triaged SUPERSEDED	2026-09-13	-	validation: compose PR 547 pinned fixtures with PR 558 byte-store repair
+astra/gcc13-byte-store-validation-20260912	0b27d7b7dfbb73be23c0bb85ea1c979fe28b9cc3	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	ci: validate byte-store repair with registered payload cases and pinned fixture prerequisites
+astra/issue292-transport-20260912	e41cc645325e147a35e6653b6c2b17f51ced13bc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	ci: retain failed gates and independent measurements for PR 555 head
+astra/issue36-atomic-publication	bc876a355c69f1db0eace1f7445a8c38db5c77d4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	ci: register atomic contention and separate portable aggregate controls
+astra/z01-248-transport	81666eae5e879d5ac8848484b485cfee3b579509	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: separate evidence publication from the unchanged failing audit gate
+astra/z02-ci-stage-ef99ec72	9e7344fdcc101116bebb9b04210cd2439cbeb73d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: mint the Z02 evidence record without rebuilding or updating refs
+astra/z05-literals-20260910-transport	f9f62f48dc37b567a74c20ec843e75d136c71477	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: separate unchanged audit failures from fixed-SHA compiler validation
+astra/z06-20260910-transport	a9870c13abf21f8f44b0dc131d5631cc3e4f4462	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: run pinned Z06 native paired experiment and separate allocation probes
+astra/z07-semantic-queries-transport	1084c2c53d989cdcef18ab283bc573014d7e81ce	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: isolate Z07 fixture diagnostics and reproduce baseline storage work
+astra/z08-ir-inspection-20260909	3e02bcd314c40524739703ceb8551924276378eb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: validate exact Z08 source with ordinary and allocation-probe compilers
+astra/z09-pass-census-transport-20260909	09a5258940c686da845fdde5e55f5facc3067c68	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: retain reviewed compatible census and guide overlaps
+astra/z10-transport-20260909	87ef8341260d3f0a24b5754fca0b0b829e223589	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: measure the pinned Z10 AArch64 selector with the native harness
+astra/z12-130-transport-20260910	869fed472be87d3840fd43dd1b2dc5541c296ba5	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: prepare atomic Z12 audit tree without moving the source branch
+astra/z13-125-transport	038fb3d6c2b54036e2c03899c67b258b0b85e7f0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: run unchanged self-host gates on the published QUALITY census SHA
+astra/z15-encoding-transport-20260910	d2d784d700ae54478be06edb6828416de666666b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: census consecutive production encoding shapes without timed instrumentation
+astra/z16-116-investigation	ddd3aff3944a3b8d8a1f3aa51ff65a0153f5c600	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: measure unchanged Z16 baseline via native assembly-output harness
+astra/z17-source-evidence-20260909	ff57ec4554c06a13c8540da318f9fd6cb6d8b91b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-09	-	ci: independently retain Z17 final-head gates and constructor reference evidence
+audit/2026-09-06-publication	fe34ccd5d9262e4a63c6c8fe60aa5c66ed6cce28	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-06	-	audit: preserve the relative-map fix already present on main
+audit/2026-09-07-correctness-source	733d386a32c11641374a6b07cd8f3354584a5865	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: stage uncovered LLVM switch fix independently of active PRs
+audit/789-fast-live-range-worklist-20260918	9ce76c32cd8a0e897aab951e7ca826451b8bb032	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: dispatch issue 789 Zen 5 audit
+audit/790-baseline	d874ccdac8b53a75fc0094359e10a782efc68c8d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: capture #790 baseline on Zen 5
+audit/790-byte-identity	64e31bbe20d3150d368969800f3c5f2044b3632f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: compare #790 debug objects against immutable base
+audit/790-debug-location-local-index	2d0d196c038fa0afdc19590c4379093f414e2136	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: trigger Zen 5 audit for #790
+audit/891-cohort-35477228257	35de6597b4f3c5eb6f7eb4a1d052fd497bfd440c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: collect issue 891 cohort logs
+audit/916-differential-policy-fix	1e168a4ccb125d788a624484764b66536b7b20ce	delete	head of merged PR	2026-09-20	916	ci: classify broad native-runner degradation
+audit/916-workflow-tools	87a3c5bf38dafc86d5e966368ef3cb70ed85bada	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: validate PR 916 differential policy repair on ARM
+audit/allocation-transport-20260907	7b0e23ea24cc3233a91a67386122f85fdb6b1f7b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: transport validated allocation work onto reviewed main
+audit/canonical-ir-source-9834a42	bc69d63cf5c7db607bd3729a365ea89c9b6c5f0a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: transfer tested canonical complex implementation without duplicating product CI
+audit/correctness-20260907-source	3e3ad7a835593d3f0be30bcf43b6850d2b775124	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: publish tree-verified independent backend correctness fixes
+audit/fast-ra-source-9834a42	27ecdf9d7d3a82b0d4f7caa2fcb87795ca32278c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: use repository-supported ARM runner for source publication
+audit/issue447-ssa-live-slot-index-20260918	0b0630c324906ef99364383af0f2699280bd7fce	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: qualify issue 447 on dedicated Zen 5
+audit/lexer-parser-source-20260907	c940f4af06ec90c4daec48a4affbc01c35643c09	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: preserve exact patch bytes in guarded publisher
+audit/m7-atomic-rmw-diagnostic-bb96b5d0	f48b0d502552bf06455a268045305067fedf24d6	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	audit: replay atomic mutations on integrated PR head
+audit/mission9-first-error-bb96b5d0	e42cdedf431a8b7d13d78701a952e46c7db3b6f9	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	audit: distinguish first-error CLI text from complete diagnostic records
+audit/parameter-matrix-238-14ebc9aa	14ebc9aab9fd8f6cb12043db28a63c120a399a5c	keep	USEFUL unlanded work (issue 238)	2026-09-08	-	test: exercise parameter alignment across optimization presets
+audit/pipeline-correctness-ebfdd117	a8107f8ea147a1e2991cac7685072c13fb70442a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: prepare both verified fixes independently on updated main
+audit/pr-932-admission-1d64654d-22734af9	babfc3064f9fd781be216ab76e9aecb013df2d54	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: run isolated read-only exact-base admission audit for PR 932
+audit/pr834-worklist-20260918	5681b12b471f6ebd66e4b986834001377bcba361	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: run PR 834 A/B through authorized Zen 5 workflow
+audit/prepared-canonical-entry-layout	f7811aaad977a5d69af13cb160e567d14862ac20	delete	triaged SUPERSEDED	2026-09-08	-	codegen: honor declared canonical entry blocks in native and eBPF layout
+audit/prepared-canonical-entry-layout-main88	e4bad175a2236c28cc2643f3ff5b3db429b94a59	delete	triaged SUPERSEDED	2026-09-08	-	codegen: honor declared canonical entry blocks in native and eBPF layout
+audit/prepared-parameter-local-alignment	e7782d42c78519334b9c5c40a58fe680c16dd41d	delete	triaged SUPERSEDED	2026-09-08	-	c: preserve natural alignment of by-value parameter locals
+audit/publish-parser-frames-20260907	513c7e6a48000c6439210804baaebcc1cfd241f0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: publish measured parser-frame conversion without overwriting active work
+audit/staged-263-20260907	44eececdee0bb6616a94dd7e32cb29e8a0d77165	delete	triaged SUPERSEDED	2026-09-07	-	fix: preserve canonical switch target order in LLVM bitcode
+audit/ub-combined-candidate	43f78c7ce1622653376b0c1eced3ba1b7a85556a	delete	triaged SUPERSEDED	2026-09-07	-	codegen: avoid null zero-length executable data copies
+audit/ub-source-20260907	bdc5c9f8826ce5f81d1cd3cd088c86ec1922715b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	audit: stop redundant platform builds on source-transport scratch branch
+automation/1732-rebase-current-base	56ed2eaf5fab6374b41166a5439d1de2655259c6	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: rebase issue 1732 onto current parent
+automation/824-rebase-4b2041c4	b63665a5c44c42878215a9ea73170ee20af1cd6c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: resolve known PR 824 binding conflicts
+automation/898-lua-staging-objects-f3e9dca	c4f5e44fa84ee637e0d22f2a008460ea2c771414	delete	merging into main changes nothing	2026-09-21	-	chore: remove completed one-shot PR 898 object-staging workflow
+automation/issue-667-validation	3c08c58355b0f0f647d121784e3d2fb7a7502095	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: prepare and validate the isolated issue 667 cleanup
+automation/issue-747-support-refresh	4cce5d6292c63ce4d146cb1a669acdfee21215bb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: refresh native retirement support identities
+automation/pr522-rebase-work	6a8ff51b2df00c7d3e2fad67f67ba5785a20674c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	chore: publish hash-checked PR 522 source reconciliation
+automation/pr522-source-be93ed30	be93ed3047044b099872ced1679ad8b795c9ce94	delete	triaged OBSOLETE	2026-09-21	-	codegen: reconcile MIR-only cutover with landed prerequisites and current main
+automation/pr568-review-comments	cd66a39e49c86c1acf7a126ec672817b3cff505f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: export exact PR 568 review source
+automation/pr568-review-fix-20260917-001	50f11144e223381bf0f63bcee122f9b22742ec83	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: configure PR 568 merge identity before reconciliation
+automation/pr749-merge-ready-20260917	a6613ef20125a4c537fc174db705ea43476e95bf	delete	ancestor of main	2026-09-17	-	Merge pull request #645 from buster14a/codex/569-canonical-landing-20260914
+automation/pr821-source-snapshot-20260919	c911d437f4e1429549f84c3932b0de069e6e00da	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: publish PR 821 without workflow token update
+backup/pr-821-pre-final-rebase-2528b4c	2528b4c060c22a4973de445efa222acb641158a0	delete	triaged SUPERSEDED	2026-09-19	-	ci: remove PR 821 rebind workflow
+backup/pr-821-pre-rebase-3087d5ac	3087d5ac49032224ddb4990f92f78ff30a5edd2c	delete	triaged SUPERSEDED	2026-09-19	840	ci: validate final #84 tree
+backup/pr645-before-ci-repair-4daf140-20260916	4daf1400ffc1593977bac968e60ee92939231646	delete	triaged SUPERSEDED	2026-09-17	-	ci: validate rebased PR645 through pull-request workflows
+backup/pr645-before-rebase-e6ed9e0a-20260916	e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b	delete	triaged SUPERSEDED	2026-09-17	-	ci: refresh native retirement target header identity
+backup/pr650-before-rebase-cbb1af5403ce	cbb1af5403cedb6f621815e83e4916a936556c49	delete	triaged SUPERSEDED	2026-09-15	-	c: touch only the live limbs of ext80 bignum values
+backup/pr687-before-rebase-ff597418	ff59741884ef4220094cd1fbb2175b86ef8b4a81	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: keep the iOS signing policy test outside frozen compiler fixtures
+backup/pr749-before-ci-repair-519fbe7-20260917	519fbe7365e89b85878995138525e452254e601c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: repair PR 749 frozen-support validation
+backup/pr749-green-df31-20260917	df31b1b218d26afc52db72856c2858e1b91f2fbe	delete	merging into main changes nothing	2026-09-17	-	ci: rebase Zig compiler-id fix and remove repair scaffolding
+backup/pr876-before-rebase-fcc21c3-20260919	fcc21c3b38c6c86e62ab8e9ab41c44fceaa58b5b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: clarify 876 validation path
+bench/707-zig-configure-acceptance	8d816f50a1a266d1a4898acb4d2d2a9a2f0e58bf	delete	ancestor of main	2026-09-19	844	Merge pull request #841 from buster14a/codex/512-fixed-smoke-gateway
+bench/compiler-throughput-suite	ebe65ff5d98c10c6980ced059dbda5d23c575788	delete	merging into main changes nothing	2026-09-07	-	chore: remove unlanded benchmark workflow; validated implementation delivered as patch
+bootstrap/1790-support-digest	8eafbc5bf0189f571eb3c33577d0b4e260a482af	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: bootstrap #1790 support declaration identity
+chatgpt/707-reconcile-main-f5ed	fd68e3c9effd70ce105a8d8fcf95dd81a78ea835	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	Merge current main into #718 reconciliation tree
+ci/280-gnu-clang-oracle	1b98021f34f4c26b196a0a1e8c7e4c7da7ab7dcf	delete	triaged SUPERSEDED	2026-09-19	-	ci: validate issue 280 GNU and Clang byte oracles
+ci/796-codeview-link-validation	9400f80746dcaee5b0a1730fcda6f53fdd4bfc99	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	ci: run section-symbol CodeView experiment
+ci/920-resource-child-dispatch-20260920	94454904cc0273e640aa904aa4f350242f37fbaa	delete	merging into main changes nothing	2026-09-21	-	ci: remove completed PR 920 repair helper
+ci/920-resource-child-result-20260920	282e3eeb717d0d482738bd21875e969c5a0bca65	delete	ancestor of main	2026-09-21	920	test: dispatch resource-failure children before compiler prewarm
+ci/actions-audit-observations-20260907	4025e70ef29921188327ef3cd4888c898c2e86d1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: collect read-only audit evidence on an isolated observation branch
+ci/unix-native-shards-20260910	93937bced34a6179542aff111a0b160ae7ac935e	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-10	-	ci: require explicit timing layouts and account for all native shards
+claude/2010-sync-trusted-main-into-candidate	9130b7f962471dd9e128d465d509ff5b16f54d23	keep	open PR head or base	2026-09-30	2011	Integrate pull request #2011 with native-retirement binding
+claude/adoring-hamilton-f7rvpr	36e4ee43a4d46beed7cdb1f02fd4c4a0d957678d	keep	open PR head or base	2026-09-30	1293	Merge remote-tracking branch 'origin/main' into claude/adoring-hamilton-f7rvpr
+claude/amazing-dijkstra-ozpi5l-census-combined	2a9383be379c5290065e4730655cf3b06801dac0	delete	merging into main changes nothing	2026-09-26	-	Merge commit '36262ac' into HEAD
+claude/amazing-dijkstra-ozpi5l-scaling-census	1d82ab51c44e6bafacbb08deb3b7202a4343c152	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-26	-	census: one line per input for fixture sweeps; pin reloc-compaction d884182
+claude/amazing-galileo-80rf9y	d0e85723293e161fc91ca602ed84de8a2f2b1380	keep	open PR head or base	2026-09-30	1622	Keep main's integration-owned native-retirement generated state
+claude/avx512-zen5-compiler-perf-8efb1e	8c3b9944ff0ecee0c25d89b312ca005729f51abb	delete	triaged SUPERSEDED	2026-09-06	-	build: resolve Clang native AVX10 conflicts without disabling AVX-512
+claude/brave-feynman-1g8df5	7d70ae1dd0b60fdbaedbc014132ba72289606cde	keep	USEFUL unlanded work (issue 1598)	2026-09-27	-	build: register tree checks once for CMake and both matrix schedulers (#1598)
+claude/buster-compiler-lifetime-jslgwu-a-preprocess-seal	08d3938a2b617c607a69f48c49a2a5aa84bf70c1	keep	open PR head or base	2026-09-30	1545	Merge origin/main into the preprocessing-seal branch
+claude/buster-compiler-lifetime-jslgwu-b-semantic-queries	9a83a18853bb83ffd95c47139106ce98d42ce8a0	keep	committed since 2026-09-28; may be active	2026-09-30	-	Merge pull request #1547 from buster14a/claude/buster-compiler-lifetime-jslgwu
+claude/buster-efficiency-campaign-5a6k5g	52b8ff1d01ab260064a8297fe09692582fb0c127	keep	open PR head or base	2026-09-29	1537	Merge origin/main into claude/buster-efficiency-campaign-5a6k5g
+claude/buster-efficiency-campaign-5a6k5g-ledger	c4e9c4170d499f9315dcbf63ae8598450f592c45	keep	open PR head or base	2026-09-30	1531	Merge remote-tracking branch 'origin/main' into claude/buster-efficiency-campaign-5a6k5g-ledger
+claude/buster-efficiency-campaign-5a6k5g-literal-queries	1262f189c7716b4403347cd7669a27324aaa752e	keep	open PR head or base	2026-09-30	1985	c: give the literal-query test machine its snapshot rows
+claude/buster-efficiency-campaign-5a6k5g-research	eb10cd1e64b85f86550954962a7b463aa1a7ffd8	delete	triaged OBSOLETE	2026-09-27	-	research: keep measurement subjects reachable
+claude/buster-efficiency-campaign-5a6k5g-snapshots	5ea1afcec237a7f8d6df58cc492e94009eb37fe3	delete	ancestor of main	2026-09-30	1533	Merge branch 'main' into claude/buster-efficiency-campaign-5a6k5g-snapshots
+claude/buster-lazy-diagnostics-pv68z3	8d560361ffc7f28744acaa54a5541670014aaf3c	keep	open PR head or base	2026-09-30	1524	Merge pull request #1528 from buster14a/claude/buster-lazy-diagnostics-pv68z3-debug
+claude/buster-semantics-unification-03gwys	e6b93212430548d4be2a0c9ae0a7c2ac56ada0ab	keep	open PR head or base	2026-09-30	1529	source-size: re-acknowledge the integer semantics kernel after merging main
+claude/clever-noether-xyqyt7	b94e2f4720c18ad2578f5222389c752275386a66	keep	committed since 2026-09-28; may be active	2026-09-29	1869	ci: stop merge-group workflow-tool steps overdue past their budget (#1866)
+claude/determined-johnson-n1tzjh	a9b6abf38ed34245e9fc4873f50008398cb8094a	keep	open PR head or base	2026-09-30	2007	ci: activate reconciler as the only merge-group admission producer (#1807, #1811)
+claude/eloquent-dijkstra-4dnltv	6c74d39ce3ae0772372ab008771b141b9f42c1a9	keep	committed since 2026-09-28; may be active	2026-09-29	-	Merge pull request #1773 from buster14a/claude/dreamy-sagan-3isur6
+claude/epic-carson-bp7tsz	9856f7232e31bad517cac9a9d90206dfbbcbfdb2	delete	ancestor of main	2026-09-30	-	Merge pull request #1086 from buster14a/codex/1007-support-bootstrap-20260924
+claude/fervent-cray-zlsgsj	21b63665303c04a2e11cefd620dd317fc1645bf5	keep	open PR head or base	2026-09-30	1461	Merge pull request #1465 from buster14a/claude/fervent-cray-zlsgsj-integer-facts
+claude/fervent-cray-zlsgsj-census-run	2f8f3277c0ba4622dea8c2c457225c225d856cc1	delete	triaged OBSOLETE	2026-09-26	-	ci: measure one pinned stage-1 input in the disposable census run
+claude/fervent-cray-zlsgsj-integer-facts	e43df10539126f1b476015fb3872037d655f7174	keep	committed since 2026-09-28; may be active	2026-09-30	1465	Merge claude/fervent-cray-zlsgsj (origin/main 0726698) into claude/fervent-cray-zlsgsj-integer-facts
+claude/fervent-cray-zlsgsj-string-counts	5f15bfac6319d62ad01b5b0fbda9b473ca882773	keep	committed since 2026-09-28; may be active	2026-09-30	-	Merge pull request #1464 from buster14a/claude/fervent-cray-zlsgsj-string-decode-once
+claude/fervent-ride-wfx1yl	b300da56cb64576e038474dd7a69c5cf05e44440	keep	open PR head or base	2026-09-30	1453	Merge origin/main (dd150e8) into claude/fervent-ride-wfx1yl
+claude/festive-bardeen-xdb5cy	cb5b1f714385f2c090832bc1be036e2fe0634c20	keep	open PR head or base	2026-09-30	1784	tests: run the #1704 alignof-object case from the driver test
+claude/funny-heisenberg-ldyeyv	8e3d8f0599b2cf77ca3fcd2584e823fd92064927	keep	committed since 2026-09-28; may be active	2026-09-30	1656	Merge origin/main into claude/funny-heisenberg-ldyeyv
+claude/great-rubin-r9qorh	bcc4964863808c98a0378de054146d0b9863aaf9	keep	open PR head or base	2026-09-30	1778	link: guard the PIC writer's thread-local probe on the input-error path
+claude/hopeful-babbage-1wvjn8	27a3446a7305d8f53b51e8f7e4d49c225d4138fc	keep	open PR head or base	2026-09-30	1776	Merge origin/main into claude/hopeful-babbage-1wvjn8
+claude/hopeful-bardeen-y44j61	7a2f2a77fc696a59eabcf42605236d24e3c156ef	keep	USEFUL unlanded work (issue 1602,1601)	2026-09-27	-	ir: decline FAST per function, not per module (#1602)
+claude/intelligent-fermat-xsi815	efbd3dff0712ee47c04bcf431e16866cd26b03c9	keep	open PR head or base	2026-09-30	1278	Merge origin/main into claude/intelligent-fermat-xsi815
+claude/issue-571-gcc13-sanitized-validation	3dcf261aaeb94b6044f3e46b38bd51b31e97d71b	delete	ancestor of main	2026-09-17	-	Merge pull request #751 from buster14a/fix/656-hardening
+claude/issue108-baseline-repro	db732991a23cb5742b7cc0a0221e406db329b176	delete	triaged SUPERSEDED	2026-09-13	-	test(file): reproduce file_copy alias and partial-publication defects
+claude/keen-volta-hnc1ij	b4ca91251c0725d1460e302f0cf94f2c7bba0406	keep	open PR head or base	2026-09-30	1474	docs: refresh the source-size baseline after merging main
+claude/kind-galileo-4kdacr	ebfa159ce3124a5cd4cd714364c17130bf2c70eb	keep	open PR head or base	2026-09-30	1720	Merge pull request #1800 from buster14a/fix/1732-sysv-named-f80-varargs
+claude/modest-thompson-xhn1br	2d2e917dcb5e8b08de6b49cf2dda48001b085a11	delete	ancestor of main	2026-09-29	1810	Merge main into claude/modest-thompson-xhn1br (keep #1907 rebind design)
+claude/nice-gates-e8d16i	87bf097874b97ebbc50be9cb5bda75283b74e6df	keep	open PR head or base	2026-09-30	1329	docs: refresh the source-size baseline after merging main
+claude/nifty-bardeen-8s4arb	100ff11c2b6897ecfa607df9b64db515908bb117	keep	open PR head or base	2026-09-30	1779	link: guard the PIC writer's thread-local probe on the input-error path
+claude/pensive-newton-i2xujq	b44661df62525ae6696e92e21e28fd4f21c60637	keep	committed since 2026-09-28; may be active	2026-09-30	-	bench_service: pin job 87's deadline inside A/A (#2001)
+claude/practical-allen-tabyz5	18827c403eb6595c4c5bffe0dace2cc588f5adf0	keep	open PR head or base	2026-09-26	1406	docs: audit the preparation locality interaction (A, B, A+B)
+claude/semantic-identity-buster-ipt2zn-type-self-identity	906e973d7104cd1f20d15a8f4b88502eca0cdc81	delete	ancestor of main	2026-09-29	1523	Merge remote-tracking branch 'origin/main' into pr1523
+claude/sleepy-mayer-9iltti	c297e11a9341bc75ba59e9d8a22d5312dace22ad	keep	open PR head or base	2026-09-30	1459	Merge main 6fbbf7e into claude/sleepy-mayer-9iltti
+claude/stoic-clarke-j0gj55	f3b3f5813bf64ee6ed7435a690dcedbd67c61304	keep	open PR head or base	2026-09-26	1373	docs: record builtin-kind target facts audit
+claude/tender-franklin-soqrft	15fd786f0733e4725d697fd84577b0eed21560ea	keep	open PR head or base	2026-09-30	1331	Merge remote-tracking branch 'origin/main' into claude/tender-franklin-soqrft
+claude/wonderful-mendel-xxflz7	8fa03ae3a1b87c2653fe5b7a048fd05701aafa27	keep	open PR head or base	2026-09-30	1303	Merge remote-tracking branch 'origin/main' into claude/wonderful-mendel-xxflz7
+claude/wonderful-turing-wxn069	89ad29dfb8d56eaed9a25c608b7053aa1276b715	keep	open PR head or base	2026-09-30	1317	Merge remote-tracking branch 'origin/main' into claude/wonderful-turing-wxn069
+claude/zen-wozniak-u0zrxp	55ff93e093a64224934f3a2cab733223b74ced50	keep	this cleanup PR	2026-09-30	-	tools: add lease-checked deletion of archived branches
+claude/zen-wozniak-u0zrxp-probe	9856f7232e31bad517cac9a9d90206dfbbcbfdb2	delete	ancestor of main	2026-09-30	-	Merge pull request #1086 from buster14a/codex/1007-support-bootstrap-20260924
+codex/1007-f80-width-policy-20260924	0cdcd53bee623b033660361cb245475f730089cf	keep	open PR head or base	2026-09-30	1088	Merge origin/main and apply #1007 f80 support policy on the #1086 bootstrap
+codex/1020-independent-oracle-20260925	ad1b73442a8546b2a7178e21d4bbe33fc1345b60	delete	triaged OBSOLETE	2026-09-25	1274	bench: seal complete oracle population after reference runs
+codex/1021-lifecycle-runner-20260925	71fd09b12d0765d496c83f30f2349c1e7bb5bdfe	delete	triaged OBSOLETE	2026-09-25	1221	bench: keep phase deadline helper inline across Clang test units
+codex/1022-campaign-capacity-20260925	7f5fa3171dc8d8f2f1a9e21de9037ccd7d27b3d9	delete	triaged OBSOLETE	2026-09-25	1222	bench: keep campaign preflight inline across Clang test units
+codex/1022-serialized-shard-bound-20260927	d99494d2ce97f5b036556942d4e622baf6c407fc	delete	triaged OBSOLETE	2026-09-27	1611	Test retirement transcript and sample serialized size bounds
+codex/1023-authority-copy-20260925	65e296e83bdf60c8f8a485eb5d6d96e36b0ca0c8	delete	triaged OBSOLETE	2026-09-25	1228	bench: durably copy retirement receipt authority for queue handoff
+codex/1024-f-capacity-20260925	d15405736a6b3077d2dff45c3c3da99284be6ff9	delete	triaged OBSOLETE	2026-09-25	1227	bench: validate retirement export inventory and six-copy capacity (#1024)
+codex/1041-restore-lost-722	b8c8c02c603adf6e35ffc6649f46673c0890c9eb	delete	ancestor of main	2026-09-24	1081	c: align token census comment with static query
+codex/1043-volatile-split-bit-fields	31e1a737c5ed263cf2701947e449fd20991e541a	delete	ancestor of main	2026-09-24	1084	Test local-promotion variants for volatile bit-fields
+codex/1089-literal-limit-policy	42361479c1733070851c147256aad1ad14982067	delete	triaged SUPERSEDED	2026-09-24	-	fix(c): share cached and semantic integer literal limits (#1089)
+codex/1122-rebind-queued-predecessor	838ba931ddb553aa7b5f16ec3c38ffdfb3412ab3	delete	head of closed unmerged PR; scratch/evidence only	2026-09-24	1145	Integrate pull request #1145 with native-retirement binding
+codex/1131-vla-sizeof-evaluation	6b1c25e0ab9fdd6a6aa7b6e4bd8d65f01f0cf703	delete	triaged SUPERSEDED	2026-09-24	-	c: evaluate VLA sizeof operands while retaining saved suffix sizes
+codex/1137-compound-conversions	89c8d2745bde7edc9f9087ed127e13b082f549f4	delete	ancestor of main	2026-09-24	1139	Merge current main into compound-assignment conversion fix
+codex/1137-compound-validation	d179c230f83791bf9d8186b3f03160c78d8500b5	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment: validate refined compound arithmetic assertions on final source
+codex/1137-fixture-refinement	b2ac816d1568324418607571da2895b2eafb4365	delete	ancestor of main	2026-09-24	-	test: distinguish Boolean normalization from compound arithmetic (#1137)
+codex/1141-msvc-reference-deadline	f9c5b2f462474a8f5979ad3836e604e148d5c986	delete	ancestor of main	2026-09-24	1160	ci(windows-arm64): diagnose MSVC reference timeouts
+codex/1162-adopted-source-packet-20260926	b7a3a892665c11496323b421180819612841f5a0	delete	ancestor of main	2026-09-26	1434	test(bench): bind adopted service and retain complete hosted provenance
+codex/1162-broker-entry-gate-20260927	580e5b6f50d41be132fb863a5c61b93133facf5b	delete	ancestor of main	2026-09-27	1621	Require the strict read-only root mount at broker entry
+codex/1162-broker-observer-bounded-20260926	6e039d51df03fe99673608795fbde0cc4194172e	delete	ancestor of main	2026-09-26	1495	test: distinguish systemd preexec cgroup transition from broker mismatch
+codex/1162-cgroup-root-boundary-20260926	26abb5da63da0fb6bdb9c2ff6b30b612eaebba85	delete	ancestor of main	2026-09-26	1435	test(bench): stop hosted ancestry check at guest cgroup root
+codex/1162-entry-account-binding-20260927	ecc71cd13978041e260852453db00e068e0a7aaa	delete	ancestor of main	2026-09-27	1634	Reject ambiguous inline NSS comments before broker entry
+codex/1162-entry-systemd-tests-20260927	1e077093c53f0dddbbf58a3f0b6584289419ff65	delete	ancestor of main	2026-09-27	1631	Measure cap and mount mutations before gate entry
+codex/1162-exact-systemd-slice-20260925	6fb532215f9402424093be375f86eacf523c90e9	keep	referenced by a workflow on main	2026-09-29	-	ci: pin the #1162 exact-systemd slice to 12e6dfe8 (#881 lane C, with #1942)
+codex/1162-frozen-tree-evidence-20260926	6d06dfa7c765c61f78e6a4e61286d57745117b0d	delete	ancestor of main	2026-09-26	1485	test(bench): reconcile frozen-tree source receipts with independent stage inventory
+codex/1162-frozen-tree-evidence-resume-20260926	e4b0241367b9187cf735b798ea3721fd09e69017	delete	ancestor of main	2026-09-26	1496	test(bench): finish frozen-tree offline evidence reconciliation
+codex/1162-hosted-systemd-preflight-20260925	05d7aaf111033ac547f9113c0934eac736889fd4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	ci: start system bus and verify delegated cgroup teardown in preflight
+codex/1162-live-discovery-20260926	0bb94b6953c36b1e5a292473d1f70f9254025d0b	delete	ancestor of main	2026-09-26	1426	WIP bench: observe the execed outer recipe driver and retain discovery failures
+codex/1162-live-probe-evidence-20260926	0c1a0c3867045870c40f1451c4c82c2665d1482a	delete	ancestor of main	2026-09-25	1379	test(bench-service): preserve upload access to private live-probe evidence
+codex/1162-manager-denial-20260926	a97ee914243ee28a4fc5c67ad06719b6ac375d39	delete	ancestor of main	2026-09-26	1441	test(bench): add bounded pre-service manager denial probe for #1162
+codex/1162-manager-denial-fixture-fix-20260926	a32733898167df8f81f6ae9ba3771407cd71bbbd	delete	ancestor of main	2026-09-26	1446	test: assert runner-owned manager executable rejection
+codex/1162-manager-denial-noexec-fixture-20260926	4350cf4e7d4c8dcab0623d0f3236560e404f3649	delete	ancestor of main	2026-09-26	1456	test: run manager probe fixtures outside noexec /tmp
+codex/1162-manager-denial-parser-fix-20260926	54522785f6190127cd53e53ff71e055778c47a19	delete	ancestor of main	2026-09-26	1466	test: accept exact systemd denial status hint
+codex/1162-readiness-sequence	644b72271d1df619b7a8ebb8b05485239c80dbb3	delete	ancestor of main	2026-09-24	1167	docs(bench): separate SGID pre-merge admission from live smoke qualification
+codex/1162-recovery-20260926-2025	82a5617f5879d1b79bd15c27b39858d5bebd55e7	delete	ancestor of main	2026-09-26	1494	Integrate reviewed pre-peer metadata observer/consumer into recovery (refs #1511 #36 #880 #881)
+codex/1162-register-validator-inputs-20260926	9acadb0ce6af12ace9dadf14f3f5903baecd6a3d	delete	ancestor of main	2026-09-26	1449	ci: register all exact-systemd validator inputs
+codex/1162-stage-observer-20260926	55ba53a35de8ef18f1c9e2fc246a6c4de45af54e	delete	ancestor of main	2026-09-26	1430	WIP bench: capture bounded live stages and pre-throughput frozen inventories
+codex/1162-stage-proof-components-20260926	321a764ce6831623fdda630aabf3d283be3ed2a7	delete	ancestor of main	2026-09-26	1480	test: retain distinct stage capture and timing outcomes
+codex/1162-terminal-proof-20260926	059f05c64aad47c24ffceddb0c7dc8f7a69fda37	delete	ancestor of main	2026-09-26	1425	WIP bench: verify exact terminal systemd evidence before slice acceptance
+codex/1162-transient-capabilities-20260926	5ce49c24695a32f7efdd4ac152e49540a70d6344	delete	ancestor of main	2026-09-26	1429	WIP bench: require empty capabilities before resuming fixed transient workers
+codex/1162-workspace-evidence-20260926	4c5247dde35928a37e98fb52542003bb9e2a7ac1	delete	ancestor of main	2026-09-26	1436	test(bench): observe bounded live workspace metadata
+codex/1162-workspace-manager-integration-20260926	6304ac631e58deedcb9aebbdf2b21383c015366c	delete	ancestor of main	2026-09-26	1444	ci: integrate phase-correct workspace and manager-denial observations
+codex/1162-workspace-observer-integration-20260926	264396b13be6c4ce94de75dd85d1199ef7ff20f9	delete	ancestor of main	2026-09-26	1437	ci: wire exact-systemd workspace observer into hosted validation
+codex/1162-workspace-observer-phase-fix-20260926	ea92cdce27ed24c42e161ee80878944c42edf297	delete	ancestor of main	2026-09-26	1443	ci: model candidate staging lifecycle in workspace observer
+codex/1177-terminal-retention-validation	2ba2a595ccd55d354c68534075f943fedf53be01	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	bench: enforce outer result retention and reject missing failure metadata
+codex/1183-broker-boundary-validation	1689416f295de6572caf6295e0d806f0ea70681a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	test: execute #1183 service and identity red/green validation
+codex/1183-probe-fidelity-validation	80d22f35d5a29b2069692f1c5d0df97c7127a610	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	ci: validate issue 1183 probe on disposable hosted fixture
+codex/1189-historical-replay	4cefe4c83274b9894eb9ba3b15883a6eff5b774c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	test: replay #1189 against immutable historical PR candidate
+codex/1190-ordinary-throughput	6dcbe2772c472bded3d8108cffcad7306272c011	keep	open PR head or base	2026-09-25	1216	docs: use binary units for source tree size
+codex/1192-queue-retention	dc684759013a6d10791ba2fd6cc7bf8874e25b86	keep	open PR head or base	2026-09-25	1212	ci: freeze same-repository PR benchmark request metadata
+codex/1205-v1-compat-policy	0ed7286af5d86d94e9667276ac142acc4f93421d	keep	open PR head or base	2026-09-25	1214	docs(test): specify v1 fallback telemetry cutover policy (#1205)
+codex/1209-minimum-regression	604663050eb05c392a0432e97ce2aee6c81dd622	delete	triaged SUPERSEDED	2026-09-25	-	test: pin automatic subaggregate leaf-to-whole override (#1209)
+codex/1209-split-regression-literal	5d7101f285396778557ef3ea3a91c0dc6650acba	delete	triaged SUPERSEDED	2026-09-25	-	test(c): split aggregate fixture under host literal limit (#1209)
+codex/124-encoding-lab-20260924-a	e913682cf378cb5735f4361c0c1bc8c22051147c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment(#124): compare matched unchanged, hoisted and distinct-key prewarm builds
+codex/124-gpr-prewarm-candidate-20260924-a	e1cd8979d7e240ceebe97a6e7ffa4dbda08d3cd8	keep	USEFUL unlanded work (issue 124,1295)	2026-09-24	-	experiment(#124): candidate GPR prewarm comparison
+codex/124-gpr-prewarm-hoist-20260924-a	e2998065920c88303f697e17be3229c77aa36cf3	delete	triaged OBSOLETE	2026-09-24	-	experiment(#124): hoist GPR prewarm comparison
+codex/1241-place-construction-20260925-astra-probes	529d17831e6047a7c6f5fa4591f6bd1c91e5a7cc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	ci: reproduce #1241 on an exact pinned hosted compiler
+codex/1247-constant-facts-validation	903b5f9c37c91230b4755245d34d0600ac5d8c6f	keep	committed since 2026-09-28; may be active	2026-09-30	-	test: keep experimental non-unity sanitizer build free of stale declarations
+codex/1247-protected-type-constants	69b047d501d75f90270366bcc9e7c1cc49963296	keep	open PR head or base	2026-09-30	1991	c: extract protected enum constants through completed qualified tags
+codex/1247-type-constant-validation	d75b26174d44fce9ed139e16129551d2d685eb3c	keep	committed since 2026-09-28; may be active	2026-09-30	-	test: validate completed enum aliases and stable wide signed magnitudes
+codex/125-allocation-checker-probe	6b2fb7beb85d636f22377fd573734664e3d136bc	keep	committed since 2026-09-28; may be active	2026-09-30	-	research: preserve allocation-checker proof boundary and hosted evidence
+codex/1297-labeled-scaling-research	4b7ac9538aa5228ad60068f8daed7db3d453ba68	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(#1297): reuse census binaries for native-clock postflight
+codex/1438-ifetch-census	e6bb0462d448b9710e5c49e8f6c03c9e88fff295	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(#1438): record diagnostic outlining census, code growth and no-go
+codex/1515-volatile-process-state-20260927	d498a67d3e65c8cc51dce77b74a970ab4a50e6fd	delete	ancestor of main	2026-09-27	1540	WIP: preserve live process identity across scheduling-state changes (refs #1515 #36 #880 #881)
+codex/1516-spelling-scan-research-8f67	1196f7ea797fa5831ae5efd371b17482399b0e71	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(1516): NUL-terminate the diagnostic capture path
+codex/1517-code-layout-research	430fd8c1296a421394c812c1cef47635e5614e7a	keep	open PR head or base	2026-09-30	1974	research(#1517): bound x86 code-layout compaction and retain hosted evidence
+codex/1646-static-assert-message	fb6d2e137bc5d71f212e2f0fcffbed12478c262f	keep	committed since 2026-09-28; may be active	2026-09-29	-	chore: publish issue 1646 validation failure
+codex/1725-source-diagnostics	ae975cc276df89d5fd3718cea99c3cb1f1c7fe59	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: permit partial hunk-format changes
+codex/1749-intel-resource-observation	16a8b4aee200c01e50b5ae9aab53bfce651a51e7	delete	ancestor of main	2026-09-29	1814	ci: parse macOS memory-pressure output from hosted runner
+codex/1808-main-ci-reuse	7c084efeccef51c49553efed4dfac5be065f2a42	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: verify exact merge-queue execution before reusing main jobs
+codex/1811-integrated-rollout	a795c1486bb0d95a3a870e3be2de4d45be9f63d9	keep	committed since 2026-09-28; may be active	2026-09-29	1822	ci: integrate rebased native activation and fail-fast watcher
+codex/1811-native-activation	e2d6cb5d34e3284ed83b538d37c6b9dcf2c77081	keep	committed since 2026-09-28; may be active	2026-09-30	1818	Merge origin/main into codex/1811-native-activation
+codex/1826-isolated-test-partitions	0431d3a22215aa97d6fddeabe8cdbe9db637eb91	keep	open PR head or base	2026-09-30	2005	build(ci): acknowledge diagnostic evidence source growth
+codex/1832-pdf-writer	a63f8704d3ea8fa3f23314279e506e2edb3dad46	delete	ancestor of main	2026-09-29	-	Merge pull request #1797 from buster14a/docs/1733-reference-mode-pr
+codex/1834-image-reader	47adadd742a0a60a0fbdf61f2e420a95d35bbcb7	keep	open PR head or base	2026-09-30	1874	docs: re-acknowledge image reader source growth after main merge
+codex/1866-bound-stalled-merge-group-steps	8abea30244c56f51bf0ed7dd07a8d15d9fd03bd8	keep	committed since 2026-09-28; may be active	2026-09-29	1867	ci: independently cancel stalled merge-group workflow-tool steps (#1866)
+codex/1885-native-frame-batching	0c8b84e2f5d9ffb19ccb6dd19813d086527a6529	keep	open PR head or base	2026-09-29	1892	test(driver): qualify bounded frame batches and cleanup [full-cohort]
+codex/1909-memo-layout-research	153d026d635533061647e921e5c836ec35042906	keep	open PR head or base	2026-09-30	1972	research(c): preserve memo layout census and bounded hot/cold findings
+codex/1926-hot-replacement-probe	b6bc250d9705f158c332a4881a19988aa78bf500	keep	committed since 2026-09-28; may be active	2026-09-30	-	research: demonstrate controlled host module replacement (#1926)
+codex/1941-cuik-comparison-evidence	38a134d49a90f9c5d669ad0562b97fba254b3e1e	keep	committed since 2026-09-28; may be active	2026-09-30	-	docs: retain pinned Buster/Cuik comparison and reproducible evidence (#1941)
+codex/1948-claude-c-compiler-comparison	d044412afa395deef9092221d2596e7f40f02704	keep	committed since 2026-09-28; may be active	2026-09-30	-	docs: archive pinned Buster vs Claude C Compiler comparison (#1948)
+codex/1952-bounded-partial-redraw	edee720e7ec8fd8b9145f8a9756bbd43934f128e	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(rendering): compare bounded command and tile redraw reference models (#1952)
+codex/299-wasm32-wasip1	d4c00a8400f14eb72f88d06df0aa013198ed8f6f	delete	ancestor of main	2026-09-25	1210	Integrate pull request #1210 with native-retirement binding
+codex/310-wasm64-function-table-20260925	b19e44bcaf679fc6344f8f6babc2104f47289ffc	keep	open PR head or base	2026-09-30	1196	Keep main's integration-owned native-retirement generated state
+codex/333-validation	9f6e12e8fbfd118547d7712dc94bd213897292b4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: retire completed isolated issue 333 validation workflow
+codex/36-correctness-integration-20260915	ff81e86760a6ec2b2211e6e88d22db1cf768f697	delete	triaged SUPERSEDED	2026-09-15	-	ci: rebind census closure after main integration
+codex/36-cutover-integration-20260915	4a916cc99d01a719dfc9829069ce6e56b6817107	delete	triaged OBSOLETE	2026-09-15	-	Merge correctness acceptance into native cutover
+codex/36-performance-after-correctness-20260915	bcd8f5cf13b379aee0a797b4c45ecc238164b243	delete	triaged SUPERSEDED	2026-09-15	-	bench: bind merged support declaration identity
+codex/36-service-dispatch-20260915	e5122213da9bb8437d0e57cb2f5e692de15a18fb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	bench: require exact typed response shapes
+codex/36-verification-integration	b6b0383660760b6551b27c19cd235fe71e107127	delete	merging into main changes nothing	2026-09-12	-	Preserve issue 36 verification integration; evidence branch, not a landing PR
+codex/409-timing-baseline	c9879553afa56a62d9fbdf93640fc70073f3b22b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	test: validate the unpacked #409 timing control
+codex/413-apple-clang-codegenprepare	7c51eb0fc30056556ba26a0aada6ceb2673ce3bf	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: measure Apple Clang unity compile candidate for #413
+codex/426-offline-eligibility-20260925	68dc0f84259131b4d6a5341d3bfe7db484db32ed	keep	open PR head or base	2026-09-25	1188	bench: reject malformed calibration phase inputs
+codex/47-effort-policy-probe	379033be8836ed903afc00270008f1d15741526d	keep	committed since 2026-09-28; may be active	2026-09-30	-	docs(research): bind retained historical QUALITY rejections
+codex/49-phase-order-census	7328206c83a390fc95c7545fccbe12b19488fcb2	keep	open PR head or base	2026-09-30	1973	research: record main recheck and retire temporary phase-order workflows
+codex/509-final-candidate-acceptance	b00e7d7f469ec3ae98bb57cf4305202dbe32c5ad	delete	triaged SUPERSEDED	2026-09-14	569	ci: repair final native acceptance evidence
+codex/512-install-verify-9700x-boundary	5bf0c0377eeaf21b85ad8182d1b390e3d76e5bcb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	docs: describe the installed privileged boundary
+codex/512-retirement-recipe-admission	49a321e9d0140f65cae3d744814dd20f469e9e54	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: remove issue 512 publication helper
+codex/512-retirement-recipe-admission-pr	66a88ad24088df5515f549a38aece1776d63a56e	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	bench: make retirement recipe admission fail closed
+codex/513-f-exact-native-candidate	8b6f428aad63841d63f51b3b984db1b692f4e64a	delete	head of closed unmerged PR; scratch/evidence only	2026-09-19	850	ci: cover all exact-candidate verifier modules
+codex/513-mir-only-native	a65c3f3963ab2237eeed1f4d03f94336e756c75f	keep	open PR head or base	2026-09-25	522	Align differential MIR telemetry with none allocator alias
+codex/513-reconcile-probe	a1958d31316442c67e9a3caf7509e8f8728483a9	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: install bootstrap compiler for issue 513 validation
+codex/513-reconciled-candidate	e4e4c533c0769520e879d23ffbbb1eea9805d918	delete	triaged OBSOLETE	2026-09-17	-	compiler: retire the direct native canonical backend
+codex/514-direct-deletion-stack	d05668810fdec28c400f42121ed078109bdf0384	keep	open PR head or base	2026-09-25	1014	codegen: sync direct-native deletion with verified MIR cutover
+codex/522-a-mir-padded-vectors	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/522-b-mir-frame-vectors	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/522-c-mir-x87-parity	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/522-d-unreachable-local-provenance	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/522-e-stage-object-provenance	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/522-f-exact-retirement-candidate	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/53-determinism-perturbation-20260930	3dc8d58d854829fe54c50d4a3223d06181a191f9	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(#53): run isolated correctness probe on a hosted branch-only runner
+codex/536-baseline-evidence	2c464c10e0eb57475e91e4272b10e3137b94e8bb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	docs: capture issue 536 baseline replay
+codex/568-615-performance-reconcile-20260914	d77f195d70a1b8b8568457e11bc95ea252f46cf0	delete	triaged SUPERSEDED	2026-09-15	-	bench: reconcile reviewed retirement performance contract
+codex/569-census-native-acceptance-recovery	498d319c7286c0a273a137e6bc5770cc12769308	delete	triaged SUPERSEDED	2026-09-14	635	ci: recover native retirement acceptance on current main
+codex/569-dependency-recovery2-20260914	2dbf2cd71de99a90fac0b5af1eb9a0933c2066ec	delete	triaged SUPERSEDED	2026-09-15	-	ci: preserve reviewed authenticated retirement dependencies
+codex/569-frontend-atomic-recovery2-20260914	759bd3915165c5c514c335f7a13d20aeef49faa6	delete	triaged SUPERSEDED	2026-09-15	-	c: preserve reviewed wide atomic frontend recovery
+codex/569-integration-recovery2-20260914	81c7f7b389839c7a95a1df049180d1147afdc6e0	delete	triaged SUPERSEDED	2026-09-14	-	compiler: integrate reviewed #569 recovery on current main
+codex/569-schema-applicability-v2-20260914	64507711e024d4801fc3739a6587aff74a550383	delete	triaged SUPERSEDED	2026-09-14	-	fix(census): authenticate production acceptance schema
+codex/641-fix-frozen-ci-tools-contract	dc6df3d74517843e68072b05aca9fd15908d9acc	delete	head of closed unmerged PR; scratch/evidence only	2026-09-16	700	ci: refresh frozen CI tools identity for PR #641
+codex/642-pre-rebase-a9bc4764-20260916	a9bc47640374a0584a8429c3c0c8f979d6f8bd2c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	Merge main into iOS boot-recovery branch
+codex/664-fix-transport-20260917a	8fce7559977ff2ccd11c8b8ce3496d6633e94b63	delete	triaged SUPERSEDED	2026-09-17	-	chore: transport checked issue 664 CI fixes
+codex/68-strict-clang-audit	a6613ef20125a4c537fc174db705ea43476e95bf	delete	ancestor of main	2026-09-17	-	Merge pull request #645 from buster14a/codex/569-canonical-landing-20260914
+codex/685-android-summary-validation	641d68af56e4abee3532567819d567cf80c82e32	delete	merging into main changes nothing	2026-09-17	-	ci: retire temporary #685 validation workflow and patch transport
+codex/693-wchar-fix-main	cee93293d7f1678ff5b9b32315232f4611abaa06	delete	triaged SUPERSEDED	2026-09-16	696	compiler: align target wchar types
+codex/70-a64-diagnostics	3d3ef0ba476d8ec18e46a17b9decaa63cf06eae3	delete	triaged OBSOLETE	2026-09-12	-	assembly: encode AArch64 register move alias
+codex/70-encoder-diagnostics	0d266e70bb398980b68b66a671b138827fe14edc	delete	triaged OBSOLETE	2026-09-12	-	debug: locate overflow transition
+codex/70-x86-source-diagnostics	8257e78fd5ebb574e7753481400565ad85a7d3c9	delete	triaged OBSOLETE	2026-09-12	-	debug: trace x86 metadata selection failures
+codex/716-ubsan-runtime-diagnostic	43a2299211a239c6eeaff5d4b5813e2acdce0c7d	delete	ancestor of main	2026-09-17	-	Merge pull request #705 from buster14a/codex/668-wide-hex-overflow
+codex/75-preserve-variadic-al	01589059b62ae983c3fa79a86ca96750391aa4ee	keep	USEFUL unlanded work (issue 75)	2026-09-17	-	compiler: preserve variadic AL for indirect calls
+codex/79-validation-payload-20260918	f21b2676cfa75e8b8f7320553ee28037e707d368	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	chore: stage issue 79 validation payload 6/6
+codex/791-fast-admission-facts	875fb4c501d65b38977225f97fb54a8d59a4dea9	delete	triaged OBSOLETE	2026-09-19	-	c: confine the trusted append alias to lowering implementation
+codex/791-ir-known-facts-20260918	6e32a4e2319c84e0534568624f296b5375cef0a0	delete	triaged SUPERSEDED	2026-09-19	842	ci: refresh retirement dependency bindings
+codex/791-promotion-local-discovery	d87d0e053c57e91142f19e75ed003566614c82ff	delete	triaged OBSOLETE	2026-09-21	856	ir: integrate current main and defer promotion maps until eligibility
+codex/807-ci-fix-staging-20260918	3b0b9837f6dc3be07d96e5d5fdb9c110fca3786c	delete	ancestor of main	2026-09-19	-	ci: stage archived support digest repair
+codex/807-ci-fix-staging2-20260918	331e46f6d74c4013b690bbf5e42176b7c6fd86a6	delete	ancestor of main	2026-09-19	-	ci: refresh archived support contract digest
+codex/807-ci-fix-staging3-20260918	2dc95bd314daece53d14930f565fc468d38421c9	delete	ancestor of main	2026-09-19	-	ci: use hosted bootstrap for repair validation
+codex/807-ci-fix-staging4-20260918	a90649c13ae61cc3f6a04def55bec280acb94806	delete	ancestor of main	2026-09-19	807	ci: refresh retirement support bindings
+codex/83-failure-atomicity-20260930	04b9c1d10aeaf23df227c4d0a7de44de847060bd	keep	committed since 2026-09-28; may be active	2026-09-30	-	research(#83): run branch-only hosted failure-atomicity experiment
+codex/845-849-source-snapshot-20260919	fc94986f26c1dff8701f2e1c332d4de5b9de6152	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: publish issue 845 shadowing fix
+codex/845-padded-vector-mir	6bd975e1d3e5f7f8893d8dc64a666bf9eafa2962	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: export issue 845 source snapshot
+codex/847-retirement-harness	43be6532ff82ff8240d2812d184f634dbb104c14	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	chore: retain shared frame helper in issue 847
+codex/848-unreachable-local	6fb95dd961b636d088346ed1ff28870a1d6559ef	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: record issue 848 validation failure
+codex/848-unreachable-local-20260919	8a505315e9f93aee57965b379325ab1cb48c80e7	delete	triaged SUPERSEDED	2026-09-19	-	c: materialize skipped automatic locals at labeled reentry (#848)
+codex/856-candidate-validation-20260920	014414adf72d982bf3a86f3b6f7675f318b5df7b	delete	triaged OBSOLETE	2026-09-21	-	ci: retain merge parents for exact PR 856 diff validation
+codex/856-readiness-validation-20260920	234b8d73e05f7798c86ecab57b591598016ab537	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: validate current-main baseline for PR 856 scratch revision
+codex/857-readiness-worker-20260920	a47c4c64b9945b9d7ce7748e6cdf039d6536c39e	delete	merging into main changes nothing	2026-09-21	-	ci: remove completed temporary PR 857 preparation workflow
+codex/857-ready-tests-20260920	0fc93762806fe2a9a2c749034d363b1c15e03fc8	delete	merging into main changes nothing	2026-09-21	857	test(ir): retain publication regressions without rejected optimization
+codex/880-account-receipt-regression	4f5903cb770be20412661d6e7e6f2590f9e705d7	delete	merging into main changes nothing	2026-09-27	-	test: cover broker account receipt rebind and recovery cases
+codex/880-broker-account-policy	d7e6cd85361616cb4f33042227da134e6db62ece	delete	ancestor of main	2026-09-27	1542	bench: reject root-mapped broker account identities
+codex/880-broker-group-test-registration	8c9b7e083459d70a2a645a85d09368a5dbfd8546	delete	ancestor of main	2026-09-27	1550	WIP ci(bench): execute broker group fixture on hosted Clang
+codex/880-broker-supplementary-roles	b2dbfabb30f36bb12cd650047d0ffa3658e401b1	delete	ancestor of main	2026-09-27	1549	test: exercise broker supplementary group gate at request entry
+codex/880-credential-gate-integration-20260927	4026e1923653ce813c88c6c900f497c3311b00eb	delete	ancestor of main	2026-09-27	1595	test(bench): model groupmod primary-GID rebinding in fixture
+codex/880-d2-probe	51fdacb379e668d5fb5d7852a874a35ae3d02acf	keep	committed since 2026-09-28; may be active	2026-09-28	-	ci(scratch): run the btrfs D2 reproduction against the #1739 fix commit
+codex/880-effective-credential-gate-prototype	8be799117189926990387b4e490d6dd092a15957	delete	ancestor of main	2026-09-27	1588	bench: gate transient payload on effective numeric credentials
+codex/880-evidence-a23-data	475e8dd056b2321572fbd99a5bac936b88444963	keep	committed since 2026-09-28; may be active	2026-09-28	-	Attempt 23 artifact 10936436787 (run 36333252424), sha256 26fe71e92f3a5a451fc78db008032a8bc0cb22d097024220863ff14605eaddbe
+codex/880-evidence-a24-data	6827d11b69c226e45fd12262d89c8a3d683a97c6	keep	committed since 2026-09-28; may be active	2026-09-28	-	Attempt 24 artifact 10950445985 (run 36373171892), sha256 a2a3515fa995d83266d992b04d0484174646d9f3f00dcd7cb4a5c63722095466
+codex/880-evidence-a25-data	6b2a1f639aaf00ecd38041156fb48454c864d668	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact issue1162-exact-systemd-slice from run 36384928144
+codex/880-evidence-a26-data	5e1eeffffd08bcb856fc128efd6da492e0759f1e	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact issue1162-exact-systemd-slice from run 36422396564
+codex/880-evidence-a27-data	4593875ef87cdf7b41a4e63d5c37f0e98d7c84e3	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact issue1162-exact-systemd-slice from run 36426296582
+codex/880-evidence-a28-data	a99a8b56503235bcef437fbdc70777adccedebd3	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact issue1162-exact-systemd-slice from run 36446551202
+codex/880-evidence-a29-data	84906c832d90cd915d410c8078f7d3b74c4c8803	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact issue1162-exact-systemd-slice from run 36449564460
+codex/880-evidence-a32-data	42e54288cf6a6b77f8916c921e1500347a8347c8	keep	committed since 2026-09-28; may be active	2026-09-29	-	artifact issue1162-exact-systemd-slice from run 36635011178
+codex/880-evidence-a33-data	08adfa399565daec21a1fe7fba7763a7b2ac2c17	keep	committed since 2026-09-28; may be active	2026-09-29	-	artifact issue1162-exact-systemd-slice from run 36639769624
+codex/880-evidence-bqeg-36374014500	feea2efc29caa8ad7f9b552cb20aaa154946516a	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact broker-entry-gate-systemd-36374014500-1 from run 36374014500
+codex/880-evidence-krepro2-data	5ac9893377a5aa20c1849fbd13e845142933ae66	keep	committed since 2026-09-28; may be active	2026-09-29	-	artifact bq880-p-repro from run 36639823560
+codex/880-evidence-pdisp-data	91c6838624ad34c3755d480bbea4c0fee7d6216f	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact bq880-p-repro from run 36446299293
+codex/880-evidence-pfixed-data	047479ebcbaf9830af6a24d73bbebe26a46bc517	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact bq880-p-repro from run 36437436491
+codex/880-evidence-prepro-data	bb843806effa70e419bc9c75d6562c9794ffb9a9	keep	committed since 2026-09-28; may be active	2026-09-28	-	artifact bq880-p-repro from run 36435557794
+codex/880-evidence-readback	cf36299847a087e15d6350cef5cae480fe7fc0d8	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: read back the #881 lane C K repro artifact (run 36639823560)
+codex/880-full-validator-handoff-20260927	f6c337a040398ec5cec5b3872de549cac2fe5f3c	delete	ancestor of main	2026-09-27	1596,1608	fix(ci): preserve exact broker lifecycle witnesses across races
+codex/880-inherited-sgid-sandbox	fd1e80c36fb7fa4cecf7912f0ff8ad4722742ad6	delete	ancestor of main	2026-09-26	1159,1482	bench: integrate frozen-tree receipts and private broker diagnostics
+codex/880-p-repro	75e40d5f35f7bc8b86478d388393019b41fcf5d4	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: K repro round 3: keeper fdinfo continuity witness, non-root stage probe
+codex/880-reviewer-identity-20260927	8883b796ff5e1f15ff906ac7eb4634e1176c5736	delete	ancestor of main	2026-09-27	1548	WIP bench: preserve independent 9700X reviewer identity
+codex/881-923-source-export	1e6d490d68abd825ab80b28d29243e49f7ff16fb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: export exact issue 881 worktree
+codex/881-a1-binding	2cb77d0694d494f228d770b0ac1b293944e887a0	keep	committed since 2026-09-28; may be active	2026-09-29	1829	Merge remote-tracking branch 'origin/codex/881-contract-batched-host' into codex/881-a1-binding
+codex/881-a1-campaign	2ab78fbc23b52e1839ec9972c3604262e34ac68f	keep	committed since 2026-09-28; may be active	2026-09-29	1868	Skip the budget-bound replay off Linux, where no budget record is produced
+codex/881-a1-fold	f16dc164fb5a8ef6f5e1d8be2de528958d164810	keep	open PR head or base	2026-09-30	923	Fold #1994: production binding-context and required-checks generators (#881 P6b+c)
+codex/881-a1-fold-next	f16dc164fb5a8ef6f5e1d8be2de528958d164810	keep	committed since 2026-09-28; may be active	2026-09-30	923	Fold #1994: production binding-context and required-checks generators (#881 P6b+c)
+codex/881-adapter-shards	ecd6ee7fda630a3e032d5c766b8be4f6cf59bf15	keep	committed since 2026-09-28; may be active	2026-09-29	1889	Acknowledge the adapter-input sharding's source-size growth
+codex/881-broker-retirement-stages	ccbe87b5e518ca459a12381e7bd70bfbbb8363f0	keep	open PR head or base	2026-09-29	-	Keep the matched-build fexecve calls behind the Linux guard
+codex/881-c-systemd-fixes	a1723c26a3c37110bdb7598f4c5491da1e79fa04	keep	committed since 2026-09-28; may be active	2026-09-29	1942	test: cover every refusal of the descriptor-based lease recheck
+codex/881-ci-llvm-release-retry	ab3f587132f4b408e2cac3572a269493e2aad008	delete	ancestor of main	2026-09-30	1969	ci_llvm: retry the LLVM release listing like the archive download
+codex/881-context-evidence	bc51ef02f9c036894bd480f2c86ad25dcafa5945	keep	open PR head or base	2026-09-30	1998	retirement: publish evidence under lane F's replay layout (#881 P4)
+codex/881-context-generators	71087cf16869dbf44be2b3acdb53dd6bd004dc72	keep	committed since 2026-09-28; may be active	2026-09-30	1994	bench-service: check receipt contents and hold evidence bytes in the context generators (#881)
+codex/881-current-main-export	c0acc2cdc4f891b7f427bb176472a29f2b530af1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: export exact issue 881 main worktree
+codex/881-lane-f-writer	f01f2d9cbef7024537512fb88e6c2a6508d3a600	keep	open PR head or base	2026-09-30	1995	bench-service: isolate lane F's validator subprocess user site
+codex/881-native-invocation-evidence	f16dc164fb5a8ef6f5e1d8be2de528958d164810	keep	open PR head or base	2026-09-30	923	Fold #1994: production binding-context and required-checks generators (#881 P6b+c)
+codex/881-oracle-producer-20260927	2bc52e53f4621daf5a59be2433e766b843bb303b	delete	triaged SUPERSEDED	2026-09-27	1584	bench: bound reference log capture without limiting workload files
+codex/881-per-input-metrics	178b92000ab86739a598fdf1156fb59c892e8991	keep	committed since 2026-09-28; may be active	2026-09-29	1823	Integrate pull request #1823 with native-retirement binding
+codex/881-queue-seam	2e5cdd2b507d0eea1d0e06114476714aa37e74cb	keep	committed since 2026-09-28; may be active	2026-09-30	1993	bench_service: fail closed on an admitted but incomplete profile (#881 P1)
+codex/881-record-generators	6c3b886b02e57c5cfae8b4b496e907933a3c631b	keep	open PR head or base	2026-09-30	2006	Refresh the source-size baseline for the record generators
+codex/881-recovery-l2	b3b32406c4e5d779ef1681cd1cea573326d67945	keep	open PR head or base	2026-09-30	1996	bench-service: describe the L2 hold, its guards and the closed operator path
+codex/881-runtime-identity	d5f7e754806836bb207ffcfdf2d6b2c272444e6a	keep	committed since 2026-09-28; may be active	2026-09-30	-	throughput: record a runtime launch's program as its executable
+codex/881-service-posix-compat-20260927	c7f53aaa1ac6627503c6f6ac1a8f3a4306b56b7e	delete	triaged SUPERSEDED	2026-09-27	1620	Preserve existing POSIX feature profile in service adapters
+codex/881-unit-builds	b4f79b731c1c43972c3589d8828d72e618b22d15	keep	open PR head or base	2026-09-28	1777	Run the matched trusted builds from the worker unit (#1020, #881)
+codex/881-validator-eligibility-integration-20260925	b8d5bbd047865646a2f16e38f607adabf4d87582	delete	triaged SUPERSEDED	2026-09-25	1220	bench: reimport A provenance and close staged validator projection semantics
+codex/881-worker-unit-campaign	3971a0573fe82a98ef5332dddd77217b25fd74de	keep	open PR head or base	2026-09-30	1962	Refresh the source-size baseline after merging codex/881-a1-fold e68e4edf8
+codex/881-worker-unit-compose	c477584246c0ef3425b3f44801ee79bf02c95bfe	keep	open PR head or base	2026-09-30	1964	Refresh the source-size baseline after merging the a1 fold (eff1bf07f)
+codex/881-worker-unit-coordinator	75804561ef5b6d3f0bc8dd0257c196b8d8e785cd	keep	committed since 2026-09-28; may be active	2026-09-30	1961	Regenerate the source-size baseline after merging da562516f
+codex/882-precutover-prep	f7a00cc9654a279f779487257c65c35baad626bb	keep	open PR head or base	2026-09-25	1194	docs: record explicit 522 writer and conflict handoff
+codex/892-tree-phase-evidence	8eb522a5298783234024c212449a22c30460b36e	delete	head of closed unmerged PR; scratch/evidence only	2026-09-20	946	ci: export current main source for issue 892
+codex/892-tree-phase-evidence-native	b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9	delete	ancestor of main	2026-09-20	-	Merge pull request #810 from buster14a/codex/83-atomic-artifact-publication-20260918
+codex/901-source-workbench	e5fabab541253740cf011255f24c425ba7ec5c7c	delete	triaged SUPERSEDED	2026-09-21	-	ci: retire temporary issue 901 source workbench files
+codex/913-wine-validation	54175fdcc3497bd3b11f9745dd293f513450afc1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: verify final issue 913 source with Wine on isolated branch
+codex/923-exact-source-snapshot	ea49afe045444918121d441431d07f6520ad90ae	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	bench: bind retirement cursor completion to bounded transcript shards
+codex/926-ci-repair	fa7c3da815438375ead240997202f529faf8d02a	delete	merging into main changes nothing	2026-09-21	-	ci: remove completed PR 926 repair transport workflow
+codex/926-oracle-repair-1	b0bf04f899743f3a55bdfa3090604d8bfd44ce03	delete	ancestor of main	2026-09-21	926	test(c): account for Clang N3029 oracle behavior without changing Buster dialects
+codex/929-performance-eligibility	f09ea4859875c7836e2a61b64242d2ede09d0d2d	delete	ancestor of main	2026-09-21	-	Merge pull request #926 from buster14a/codex/900-dialect-enumerator-types
+codex/929-retirement-performance-eligibility	35a77b0ea0ceb9869f87ec65f99c5b300e1687ac	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: retain issue 929 validation diagnostic
+codex/974-llvm-scalar-variadics	50273b5fbd4b540dd6b5e18772a184d8323f06a5	delete	ancestor of main	2026-09-24	998	test(llvm): retain the correct output argument in repeat emission
+codex/98-os-string-boundaries	6d64bef810832b7bcb5af2fff8633871691568f4	keep	open PR head or base	2026-09-30	986	Merge origin/main into codex/98-os-string-boundaries
+codex/a08-spirv-passthrough-evidence	60a8612c77002d4b5960419f5c4c469a3dafa7ef	delete	ancestor of main	2026-09-23	1013	test: infer SPIR-V passthrough input
+codex/architecture-boundary-scout-20260925-astra-ade6	bc3cf73ca1732e350c0eaa9d54aa56a56dde2c1c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: publish preparation ownership diagnosis, controlled experiments and migration decision
+codex/astra-pr-fixture-diagnostics	8c67b8d8ff501681cf1ffa7b1ddca821c5421131	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-10	-	ci: capture unresolved links, SIMD mask values, and literal width diagnostics
+codex/branch-recovery-oldest100-20260925	e30c6a78e6186a1d91de8cb9af486885d7cf069c	delete	ancestor of main	2026-09-25	1219	docs: record branch recovery provenance, useful residuals, and unperformed deletion
+codex/c-growth-discovery-2e942e80-astra	e4cec8571bc770c50b0183795b8e70cdf4774a0c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	diagnostic(c): execute independent-dimension and scalar-counterfactual controls
+codex/campaign-cloud-helpers	b79c15cc4cd5d9ba44ab57de2f406e1e6fc5cb72	keep	committed since 2026-09-28; may be active	2026-09-30	-	pin_to: always write INTEGRATED_REVIEW; refuse a changed build.c blob without a review
+codex/choose-expr-evaluation-20260924-astra	b5b66643a724c3e8d9a9175ccdc0daf9e326f0ce	delete	ancestor of main	2026-09-25	1101	Merge current main and retain selective choose-expression test
+codex/choose-expr-transport-20260924-astra	68d11d245a050c90a33d6b98b25ef9f89b90c621	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	test: publish isolated choose fix and verify failure-first on hosted runner
+codex/compound-conversion-probe-20260924-astra	46a2a5853333d684c2e8e08f80c17ee38573d48f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment: run compound conversions on standard hosted runner
+codex/gcc13-metadata-validation-20260912	05a91c6d0fa02c97b6ad343c47f4a1095c2f370c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	ci: validate masked register-bit narrowing on GCC 13
+codex/gcc13-test-widths-evidence-20260912	0e1d1a436367631aa6475c17c73130b932faf0de	delete	triaged SUPERSEDED	2026-09-13	-	test(machine): explicitly narrow masked callee-saved register bit
+codex/handoff-36-437-service-20260914	4dfc4e3268ae21d3382c479e9c710d083d17766a	delete	triaged SUPERSEDED	2026-09-14	-	checkpoint: preserve codex/handoff-36-437-service-20260914
+codex/handoff-36-568-contract-20260914	2a861b9b72276698098c478044ed9ae0eab4786e	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	checkpoint: preserve codex/handoff-36-568-contract-20260914
+codex/handoff-36-cutover-20260914	6b1604981e9efe6972194843cea635f622a912e1	delete	triaged OBSOLETE	2026-09-14	-	checkpoint: preserve #36 MIR cutover recovery
+codex/host-bootstrap-audit-ade6ac4b-9f7a	879f259a86689f9afbad9b028d3cfff779f93cbd	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: execute bounded full-compiler and bootstrap half-literal matrix
+codex/integration37-45-before-main-dae74aa6	b903076c7ec4283b5a1570bf7b804d236fbaa6a2	delete	triaged SUPERSEDED	2026-09-11	-	docs: retain canonical optimization production-profile evidence
+codex/issue-1000-unsigned-char	ece6b42cab93448a3a559d9e13e81e4a38704365	keep	open PR head or base	2026-09-30	1008	Merge branch 'main' into codex/issue-1000-unsigned-char
+codex/issue-1037-external-pie-calls	8225ba46973fa570439e4cd7d66c0ed6cb94d817	delete	ancestor of main	2026-09-24	1113	Predeclare assembly labels before x86-64 ELF calls
+codex/issue-1039-assignment-conversions	cfd71d69b1427b04e284d81eeb1e4349fa260741	delete	ancestor of main	2026-09-24	1094	Preserve null void pointer sentinels for function pointers
+codex/issue-1042-unknown-type	018c7205404c37fb0593cd6a81a749f5ec4b724c	delete	ancestor of main	2026-09-24	1096	c: avoid unknown type diagnostics in attributes
+codex/issue-114	c87d79f02caff94d6fde406bd6d148466c4c4088	delete	triaged SUPERSEDED	2026-09-19	-	ci: export issue 114 branch for local review
+codex/issue-118-file-open-policy-5004a068	64dbdd7797e11d63de8dea7e16da71b97517ad64	keep	open PR head or base	2026-09-30	985	driver: migrate response-file open to the split file access API
+codex/issue-1655-source-snapshot	d55de14a92e281b0af710b492e375de41f52f3af	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: snapshot current main for issue 1655 isolation
+codex/issue-1655-staged-1	310c4668f1c067c7aff92d5f126656256e066cc7	delete	ancestor of main	2026-09-28	-	test: identify crashed parallel lane gangs (#1655)
+codex/issue-409-upload-artifact-v7-bootstrap	ad2e4383101f0f9f257a4c984af31e4574aaaab2	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: export issue 409 base workflow
+codex/issue-649-transport	8db147c574b46bdc622e61c7f73e6280e7a1aed6	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: publish the verified issue 649 patch on a clean branch
+codex/issue-651-workbench	0a76ab6db4800afc9bf92ffe447618089e09ac5a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: rebase #651 and repair Android fixture lookup
+codex/issue-668-transport	fa2f01fe1c0f5362e9b5bd304d859e75f413f578	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: publish only the verified issue 668 source patch to a clean branch
+codex/issue-67-x86-metadata-memory	71868bf263e05d7cf583b723ec585fce2b8100f2	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: avoid nested heredoc delimiter collision
+codex/issue-672-binary16-codegen	10e4bc8779355a9061cc264db1eee27f2c6c41cd	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	transport: replace truncated issue 672 implementation chunk 00
+codex/issue-672-float16-codegen	5c4a39ab727d4cfc155aecea82d9d7f01c480a22	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: snapshot current main for issue 672
+codex/issue-672-float16-codegen-20260917	f9984a4f276dd3b51a4cf65e0062fec52fe978b3	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	ci: snapshot current source for issue 672
+codex/issue-672-float16-codegen-20260918	fcf0e457e4668255c16b68c010dcd87bfb4959b4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	transport: repair issue 672 audit delta part 03
+codex/issue-72-aarch64-binary128	a198733790691bc53e06aab0888b3cd9f86af7e7	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: export issue 72 working tree
+codex/issue-72-current-source	9c44dec1243391d42c708e42723026b6334667e8	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: export current issue 72 source tree
+codex/issue-729-workbench	1e8a06160d484132e34033ad4fd3e10e84a441d4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	chore: validate scoped issue 729 CI repair
+codex/issue-73-contract-refresh	912c8ee91c18dc58bcc25b6cd85d3922a6f6ffb8	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: fix workflow repair generator syntax
+codex/issue-73-manifest-refresh	008f757a3720ff7bae455510d01026a440f16663	delete	ancestor of main	2026-09-17	-	ci: refresh merged native retirement identities
+codex/issue-73-refresh	0a5fe2698f9e2452fb2472a92fe5cef48dc277c0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: publish tested issue 73 implementation
+codex/issue-75-diagnose-20260917	24263a6ab21aa29c7da197ad7527447738deddb5	delete	ancestor of main	2026-09-17	-	Merge pull request #772 from buster14a/codex/509-final-acceptance-replay-20260917
+codex/issue-881-native-retirement-recipe	e74b7ecdedbf08a6a4b936c298f92e9780e25967	delete	head of closed unmerged PR; scratch/evidence only	2026-09-20	910	ci: export issue 881 source on pull request
+codex/issue105-publish	528da41b1dfbb9422a2efd595d28358ae3bf4096	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	Publish the reviewed issue 105 metrics patch to its pinned implementation branch
+codex/issue145-checked-publication-20260912	222c130d40fbf55b8dbaae5539d3089fc05bf07a	delete	merging into main changes nothing	2026-09-11	-	ci: remove completed issue 145 staging patch
+codex/issue447-direct-ssa-linear-20260918	38201b79157a0304866f22fd32e0641b91b8854a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: inspect direct SSA source for issue 447
+codex/issue447-exact-census-audit-20260918	1af35556e5243302b4fdc426bf7e5e54e6b42c01	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: compare issue 447 counters on identical source
+codex/issue447-ssa-scratch	80b687b9d6573d61f5818cf0c0d9b388c7e94ca7	delete	triaged OBSOLETE	2026-09-11	-	experiment: isolate SSA census overhead
+codex/issue70-authoring	a0b09b61a3e76cbec191911526e081d84b83937d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	chore: temporary pinned source workspace for issue 70
+codex/issue70-integration-base-c46a775	f7d88dbddf11e1ba3416b2a6314b52f191b41a8f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	integration-only: restore complete PR 457 source tree
+codex/issue70-publish-empty-asm	e58a30e6dec08fee20d7c78714c05a612c67a96d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	ci: prepare issue 70 source-only branch from the supplied patch
+codex/issue76-cpython-validation	89925bab99017f505cdf8937eb502062e0861214	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-13	-	ci: validate issue 76 after current-main integration
+codex/issue766-cpython-diagnostic	07e4d418e504ff67a44494ddbbea9a293cd9d95e	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: diagnose current CPython BLAKE2 blocker
+codex/issue766-cpython-validation	37396111c689b71d7917e494c30a47cc70be5213	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: validate issue 766 against pinned CPython
+codex/issue766-cpython-validation-v2	1473bb594ba7a7f46a1349424f5e1a4cc77f6e34	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: validate rebased issue 766 CPython unit
+codex/issue766-vector-cast-investigation	7d441a6370a921d20566ead02dce9a831e3c92ab	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: inspect exact vector cast helper and operation path
+codex/issue835-explicit-vector-reinterpret	378da656cd930fb0fe36bef677d5995f744bd4e0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	chore: stage issue 835 focused patch
+codex/oracle-half-exact-ade6ac4b-20260925	ffa0c68f592187ac1245ba02df6e224cb1d1f108	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	ci: pass half excess precision through Clang cc1 and retain reduced controls
+codex/pr645-bind-support-declaration-20260917	68813d7fac248164128cf9ee0db7775a8e54b46a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	test(native-retirement): bind current support declaration
+codex/pr645-rebase-helper-20260916	2633bc6772218110249483cec2ba09fc03148d58	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	chore: remove completed isolated PR645 rebase helper workflow
+codex/pr645-rebased-validated-20260916	64b19fcf55430bedefcb29bb4b375df0aacbb5a7	delete	triaged SUPERSEDED	2026-09-16	-	ci: reconcile retirement evidence after PR645 rebase
+codex/pr687-integration-source	8637c640a1090de0b1cc9236312caba5b08c25f0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: preserve exact PR 687 and main histories for integration repair
+codex/pr687-rebase-20260916	8b854d69587f4d69f7df469ba61605275216bad1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: publish the verified PR 687 rebase with an exact-head lease and validate it
+codex/pr687-repair-tools	4929e98e4cb18cd964a94fda57a40b997a740ff9	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: collect pinned bootstrap and LLVM reference sources for PR 687 repair
+codex/pr687-review-snapshot	e9cdd85b331b2f27c3f869e3e050c4d95449666a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: collect pinned PR 687 source snapshots for integration review
+codex/pr687-review-validation	9fa3c2cd55a156eee43d4d6d7ae6b38f1515e4ad	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: validate infinity builtin repair exposed by BF16 coverage
+codex/pr687-reviewed-integration	bd9bf5c8b566b6782cc9c7154164b053fa98ca0d	delete	ancestor of main	2026-09-16	-	c: recognize double infinity builtin in scalar constant folding
+codex/pr687-semantic-candidate	1cc21c101fa9a8b259a44ef8aa3ab585f9818f01	delete	ancestor of main	2026-09-16	-	ci: allow bounded completion of the Android Debug compiler suite
+codex/pr687-semantic-validation	a705e2bee71ca5b5eec18d31d84240f1aca7a5c2	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: validate PR 687 Android suite deadline and preserve monitor failure controls
+codex/pr816-rebased-staging	f87bbe906581d00e8a17693a05cd2022dec1b7aa	delete	ancestor of main	2026-09-19	-	ci: rebase Windows coverage onto current main
+codex/pr876-rebase-generator	948e1596cce6b2b49f4d8e3044bdb041348e4cee	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: publish validated PR 876 rebase
+codex/repair-600-result-20260916	a498e0d43f4b384ad3241af6f567da29435a5f8a	delete	ancestor of main	2026-09-16	600	c: preserve once-table hash bits and add probe/failure oracles (#600)
+codex/repair-600-work-20260916	70d094dae82f423c1d792bebd985af9e31e0d76f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	Prepare isolated PR #600 hash/probe/failure validation workbench
+codex/repair-688-candidate-20260916	29ae4dc93ad928b3d08d5476beec6efb7dea4f96	delete	ancestor of main	2026-09-16	-	Merge main into PR 688 and repair normalized symbol/type-specifier regressions
+codex/repair-688-hosted-20260916	d2f7f4eef4881d1f2ecfa6d51388f89d882e8039	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: construct and validate isolated PR 688 repair candidate
+codex/rescue-1159-local-merge	4e9ec4647f3f25e261fa5c9d9db814e652257c88	delete	merging into main changes nothing	2026-09-25	-	Merge ff61994e7563c599cc39690e25d47cff05ea2531 into 4d870ee3b22039a53ff1b59069433d5c4fc195a3
+codex/rescue-292-ir-free-syntax-only	a88cbbe1e961be8eb233fe3dca6e4993a18a311b	delete	triaged SUPERSEDED	2026-09-19	-	bench: run issue 292 measurement on PR
+codex/rescue-292-ir-free-syntax-only-wip	2be2c407764b0db3b9b52d66dd97ee61f6e67576	keep	committed since 2026-09-28; may be active	2026-09-28	-	wip(rescue): uncommitted Codex work on codex/292-ir-free-syntax-only (snapshot 2026-09-28, not reviewed; build-semantic/ excluded)
+codex/rescue-292-semantic-validation-review	c4da38f057bd6145baae2ddc6f496ed0cc011536	delete	triaged SUPERSEDED	2026-09-19	-	docs: record semantic-only validation and performance evidence
+codex/rescue-36-census-retirement	98ab7857b3cd596a8155fa9c17705250f50c0deb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	ci: quote retirement tree revision
+codex/rescue-447-ssa-scratch-stash	d31ad466f8b7fc7a9c6042440f9e4b05e4a8e5f4	delete	triaged OBSOLETE	2026-09-14	-	WIP on codex/issue447-ssa-scratch: 80b687b9 experiment: isolate SSA census overhead
+codex/rescue-493-local-validated	aecf684ab490736791c835f9adffb9949f5179dc	delete	triaged SUPERSEDED	2026-09-12	-	fix(aarch64): honor compact vector call ABI
+codex/rescue-556-main-protection	48ce1559a23054a7eb37c93aec76b1317951dae2	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	docs: align main protection with solo-maintainer policy
+codex/rescue-70-a64-final	22e223a95be77cb072b56418e3626fc70ccb9864	delete	triaged SUPERSEDED	2026-09-12	-	codegen: exempt x87 stack operands from GPR clobbers
+codex/rescue-70-win64-clobbers	f051eee445c09d54af48a1a93ffd192f780db031	delete	triaged SUPERSEDED	2026-09-12	-	codegen: preserve explicit Win64 XMM asm clobbers
+codex/rescue-797-enum-token-view-wip	c4034000103acd82178f3aea1c56f46036dc2bf8	keep	committed since 2026-09-28; may be active	2026-09-28	-	wip(rescue): uncommitted Codex work in /home/david/dev/buster on codex/797-enum-token-view (snapshot 2026-09-28, not reviewed)
+codex/rescue-853-ready-merge	8374c5e1bbb96551ab75911ff852dd07e9bb1839	delete	triaged OBSOLETE	2026-09-19	-	Merge remote-tracking branch 'origin/main' into codex/ready-853-20260920
+codex/rescue-895-green	18cc5ff9af8857a6e91da545e38c83c3bf92833e	delete	triaged SUPERSEDED	2026-09-20	-	c: implement long and long long ffs variants required by Android
+codex/rescue-92-analyzer-shards	2879475057fb2ebd6f5078ca156f8b8820e7d9ed	delete	merging into main changes nothing	2026-09-12	-	docs: record complete analyzer CI comparison
+codex/semantic-policy-probe-20260924	578f7e3152d4199e79552b6e79d19f4d1deacd89	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	test: rebuild exact literal-policy revision on its execution host
+codex/semantic-unevaluated-20260924-astra	291c34e7970b1d1f12537e461f845034d3e37cfc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	test: pin bounded unevaluated-operand semantic experiment
+codex/semantic-unevaluated-source-20260924-astra	6a13a69bacd45b179c88ccbe6d9f88b8e6f98afa	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	test: capture exact frontend source for bounded semantic inspection
+codex/tmp-source-snapshot-a062245	a062245b1c442769e897a04e0d1488549867741f	delete	ancestor of main	2026-09-19	-	Merge pull request #836 from buster14a/codex/835-explicit-vector-casts
+codex/vla-sizeof-triage-20260924	13464112b6b52a8912b59e7620cac72e624c4986	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	research(c): initialize diagnostic paths after runner allocation
+codex/x87-integer-unary-audit-20260925-astra	8426b8159547864662f85e87d43258e65e46d234	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	test: make double control conversion explicit and add x87 IR/reference probes
+compiler/issue-33-canonical-local-promotion	82a63c5110aa63c3fb0e03d045a49343148ca787	keep	referenced by a workflow on main	2026-09-20	-	Merge pull request #884 from buster14a/codex/426-zen5-host-qualification
+compiler/issue34-frontend-ssa	ea220e14f02a114527f2c9e905624179f49a0865	delete	triaged SUPERSEDED	2026-09-08	-	compiler: construct pruned SSA directly in the C frontend
+debug/674-generic-contexts	bdd1f4ea98928d1eb404a4f8b5bf290524252c60	delete	triaged SUPERSEDED	2026-09-17	-	ci: collect all issue 674 context diagnostics
+devin/1028-initializer-leaf-type-reuse	7f0c52beb9d3c35eb2d4edea64b2e9a8868d39ef	delete	triaged OBSOLETE	2026-09-24	-	experiment(1028): temporary hosted validation for the leaf-type reuse
+devin/1028-semantic-reuse-boundary-744a948f	64f45bd394d4b1feb96c800a21153ddb829ee3f2	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	experiment(1028): publish the settled C-to-IR type map in the trace
+devin/1790252498-initializer-slot-hoist	af0748a9eb65bc2ac37e896a1f38f87e6e45da4a	delete	ancestor of main	2026-09-24	1099	Merge current main into initializer-frame slot reuse
+devin/1790252737-quality-sparse-region-traffic	e9d6a430db3402939d0d4096ffcb6b51fa5b2e50	delete	ancestor of main	2026-09-24	1114	QUALITY: sparse ordered per-candidate region traffic rows (#125)
+devin/1790255056-x64-frame-chunk-records	9a019b38f1f687e675809d37f7a41da4824237ec	delete	ancestor of main	2026-09-24	1119	Record audit 2026-09-24T132002Z: prepared x86-64 frame chunk records
+devin/1790255378-macro-plain-direct-production	1cea9a8236187d19c49655120a35f4827b175866	delete	ancestor of main	2026-09-24	1121	c: guard replacement argument access for object-like macros (analyzer)
+devin/1790564841-issue-1661	c647d585241c7f6a641ae7cf8672b884d664c460	delete	ancestor of main	2026-09-28	1689	Merge remote-tracking branch 'origin/main' into devin/1790564841-issue-1661
+devin/1790564845-issue-1658	d50a452e62f14351b3ba5abe9bcfd762d8c0a153	delete	ancestor of main	2026-09-28	1684	c: accept alignment specifiers around typeof/_Atomic(T) specifiers (#1658)
+devin/1790564850-issue-1601	1d53915812aa435c5484509e208dafdd711e9755	delete	ancestor of main	2026-09-28	1678	c: give a redeclaration the return type of the function it joins (#1601)
+devin/1790564850-issue-1668	ba5a8590edddde7f461a73635462f14f19700be4	delete	ancestor of main	2026-09-28	1699	c: type a pointer-to-VLA statement-expression tail through its C type, diagnose other variably modified tails (#1668)
+devin/1790564851-issue-1665	13d9718c5e2cab274243693ad2e65d0604f5f981	delete	ancestor of main	2026-09-28	1681	c: mark a type-name-led cast prefix in the typeof operand scan (#1665)
+devin/1790564923-issue-1648	193c95c1f394e44ade013fcf8ffe102ce0a1f54e	delete	ancestor of main	2026-09-28	1674	build: derive generic argument diagnostic exclusion from one ownership predicate (#1648)
+devin/1790564943-issue-1664	c3184327d7304fb2e09c702b9a3fe35447f1e7cb	delete	ancestor of main	2026-09-28	1672	c: reconcile the #1664 typeof operand diagnostics with main's #1662 operand check
+devin/1790565324-issue-1659	36b303eb7a4aa0c41d562a2e4b12483e694b042b	delete	ancestor of main	2026-09-28	1692	c: accept non-decimal and parenthesized-name bit-field widths
+devin/1790565384-issue-1662	1508c280023769add068cd605c67db3c77cea0b6	delete	ancestor of main	2026-09-28	1691	Merge remote-tracking branch 'origin/main' into devin/1790565384-issue-1662
+devin/1790565762-issue-1633	ad2922b002fabcfdb117b687949dc278a3285b4b	delete	ancestor of main	2026-09-28	1680	c: accept the out-of-line definition after a GNU inline-only body
+devin/1790565868-issue-1503	18d89542cbf0748bac3d69af1ff46b02ffcfc035	delete	ancestor of main	2026-09-28	1682	c: keep a noreturn call's block open when a return/initializer consumes its value (#1503)
+devin/1790565974-issue-1660	9bbc35f5d03f3b2071c85c4880e32ce54e2321da	delete	ancestor of main	2026-09-28	1683	Merge remote-tracking branch 'origin/main' into devin/1790565974-issue-1660
+devin/1790566058-issue-1475	98ceeac259c58935b68a6db04aa0af3120d3fa96	delete	ancestor of main	2026-09-28	1690	c: admit unresolved __builtin_ names only as called builtins; diagnose type uses (#1475)
+devin/1790566226-issue-1619	263d5f9c8559637c766dd8017dda5f5c33c0ca5b	delete	ancestor of main	2026-09-28	1686	tests: cover list-declarator block-scope function declarations (#1619)
+devin/1790566227-issue-1669	e5153fef6479434b394e4b480cb1cbdc39398caa	delete	ancestor of main	2026-09-28	1693	Merge remote-tracking branch 'origin/main' into tmp1693
+devin/1790566408-issue-1666	a98dc42ce98b2ae7939f3ccd9ad6e49ff6b1ff4a	delete	ancestor of main	2026-09-28	1695	c: rename constant-expression syntax checker to avoid clashing with main's operand checker
+devin/1790566528-issue-1612	cc1cc9e39bd463b0427ae0f69378d0a7f78fd290	keep	open PR head or base	2026-09-30	1694	Merge remote-tracking branch 'origin/main' into devin/1790566528-issue-1612
+devin/1790566873-issue-1613	34f65b6797a3f7c3744cc323096c6b48bedc9797	delete	ancestor of main	2026-09-30	1696	Merge origin/main into PR #1696
+devin/1790567155-issue-1667	fa5c488cd06a866c9582a23cf98dbd7b0827fe16	delete	ancestor of main	2026-09-28	1698	c: share an enclosing SIZEOF frame's task reservation with nested cast operands (#1667)
+devin/1790601759-issue-1705	930faf08526bedf3c585f99546ccf9df331c21de	delete	ancestor of main	2026-09-28	1746	c: GNU attribute lists after a '*' in block-scope type names (#1705)
+devin/1790602153-issue-1718	1c47ecbdb0bbd02aafde264a7a79c81da1252c18	delete	ancestor of main	2026-09-28	1742	Merge remote-tracking branch 'origin/main' into devin/1790602153-issue-1718
+devin/1790602201-issue-1736	eb9c90721b22b10726576f3925aa62ff9f6862fd	delete	ancestor of main	2026-09-28	1743	c: an expression statement containing a noreturn call ends its block after its own rows (#1736)
+devin/1790602232-issue-1706	f3134899daac4cdc60a4cf9749192571bda4b884	delete	ancestor of main	2026-09-28	1745	ci: retrigger after iOS Debug launch timeout
+devin/1790602237-issue-1715	7cd51b1cd48eb9d3363fc9852e0ee0a2d2656b41	delete	ancestor of main	2026-09-28	1744	c: a block-scope function declaration keeps a file-scope name's binding (#1715)
+devin/1790631915-issue-1749-runner-loss-evidence	11045b8f373fd6530d080c392f14484082a6029b	delete	ancestor of main	2026-09-29	1754	Merge remote-tracking branch 'origin/main' into devin/1790631915-issue-1749-runner-loss-evidence
+devin/1790632405-issue-1748	9b57feff1f41e294c1669ec8998ee8410e19fb09	delete	ancestor of main	2026-09-28	1755	c: route __builtin_unreachable() through the noreturn-call block close (#1748)
+devin/1790632578-issue-1750	d7aa2c12a8ead7c1e27069c05c39e91f19770a6b	delete	ancestor of main	2026-09-28	1757	c: a complete tagged or typedef-named aggregate member is anonymous on *-windows-msvc (#1750)
+devin/1790633314-wasm-section-attr	0bd648e28135840e6045ce73ec8a545aee6e17e7	delete	merging into main changes nothing	2026-09-30	1764	wasm: name the data segment of a section-attributed definition (#1717)
+devin/1790633407-aarch64-elf-got-relocations	f991a9368873b4ab31f54fb4f7bb147f474855c3	delete	ancestor of main	2026-09-28	1774	Merge remote-tracking branch 'origin/main' into devin/1790633407-aarch64-elf-got-relocations
+devin/1790634057-elf-empty-sections-tls	e8a77a93a80de095e315a43f077394a687b34bd3	delete	ancestor of main	2026-09-28	1767	link: fix sign-conversion in ELF program header count
+devin/1790634361-init-array-symbol	76ba205b729fa53db36f05d19c1bbf253b3fe0ae	delete	ancestor of main	2026-09-28	1772	test: generate the initializer-array fixture instead of tracking it under tests/
+devin/1790634369-a64-none-f128	86e92213f77a5bd8f25850139b50fe86da6dc20b	delete	ancestor of main	2026-09-28	1769	codegen(aarch64): widen and load binary128 in the canonical none emitter
+devin/1790634382-aarch64-cross-libc	fa801d3f395395c8cc682d10f579f7da80ec8197	delete	ancestor of main	2026-09-30	1770	Merge branch 'main' into devin/1790634382-aarch64-cross-libc
+devin/1848-release-has-include-probe-mappings	294d2b689be2dd5370841a861d480eed493c2a77	delete	ancestor of main	2026-09-30	1884	preprocessor: release the mapping a __has_include probe does not transfer (#1848)
+devin/671-baseline-evidence	37db6502d3b66cf7a67cd4a5170109791b123788	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	ci: preserve hosted bf16 baseline and oracle diagnostics
+devin/671-candidate-evidence	180bb96ee94a8494623c258de57c7067ad6d2627	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	ci: bind the bf16 header evidence to the integrated source
+devin/671-float16-base	cb49ee9781b87c423e80b2123a8fda9860e0da7e	delete	ancestor of main	2026-09-15	-	integration: pin the binary16 prerequisite with current main
+devin/674-baseline-validation-20260915	4ebc3e15a624b4518550ac0eca64b59ea42c0143	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	ci: reproduce generic constant failures on frozen main
+devin/679-event-base	0b25c79dc5c72a4f971a0056307fa33cd2d16594	delete	ancestor of main	2026-09-15	-	integration: pin the event-recording prerequisite with current main
+devin/679-object-parity	6c6cb70fdf952b3e74f595a79d81db02af141d12	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	ci: retain frozen-input debug object parity for the owned baseline
+devin/label-values-gate-20260924	6dcf79d962c1dfd7a42a415abf7236442514e539	delete	ancestor of main	2026-09-24	1126	c: gate the label-provenance walk on a proven label address
+devin/label-values-gate-probe-20260924	d3c4ad273724488c6cf5a0fa17b9a10f0af8d95d	delete	triaged SUPERSEDED	2026-09-24	-	probe: add unity-configuration subjects and instruction counts
+diag/786-windows-abi-link	dc14ddef0766fbfa3166b94dcd4dbae1759267b3	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	ci: measure CodeView range floor
+diag/889-decouple-frozen-census	b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9	delete	ancestor of main	2026-09-20	-	Merge pull request #810 from buster14a/codex/83-atomic-artifact-publication-20260918
+diag/889-wrapper-contract-refresh	dced56f58c2c76887d313fcf48071ff236164e4b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: run wrapper repair from a normal script
+diagnose/767-windows-link	fd6d596ea52e9813785f94fa08d559b63a26b638	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	ci: validate and publish exact CodeView short-range repair
+diagnostics/133-event-equivalence-2e942e8	406b8ab97fabf394e348a76b71b189ff121d7014	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	diagnostics: execute exact QUALITY candidate matched measurements and correctness
+diagnostics/53-mission5-lane-tail	77c81849cba655441c90caa91a430a9afcde31dc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	diagnostics: retain single-thread blocker and screen frozen TU producers
+diagnostics/546-consumer-ownership-2e942e80	5e908c54f1b1b4589b30a1a4449020ad188c3218	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	diagnostics: compare CFG inverse ownership prototypes on hosted Clang
+diagnostics/708-child-process-attribution	9069cb092d80905eb8fff501cd3e298170f31ebb	delete	merging into main changes nothing	2026-09-17	-	ci: trace driver-test child processes for #708
+diagnostics/949-isolated-replay	b2693bf5c8ba7046face202644314d88c11f5591	delete	head of closed unmerged PR; scratch/evidence only	2026-09-22	991	ci: replay Windows Debug driver tests after matrix for attribution
+diagnostics/frontend-common-2e942e8	0723d1913398ce3ff06f02dbd09cd80c1fd6793d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	research: archive the actual test directory instead of a guessed test path
+diagnostics/mission10-capability-bb96b5d	bf8abb1c8badecfd4719fe1028ecb65d842feb00	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	ci: repair transport-only transcription without changing prototype bytes
+diagnostics/mission8-conditional-promotions-bb96b5d0	6d05a301418da5765597fc0adb68c6b848aae908	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	diagnostics: use a C byte-range witness and both diagnostic streams
+disabled-issue-891-patch	7e295f4e4eda1f33b46eae04c9a6658cef06e84b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: trigger issue 891 patch application
+docs/1733-reference-mode	88599b3a4b44c3aac13fdd250dcd56a577cb2b71	delete	merging into main changes nothing	2026-09-29	-	docs(c): name complex arithmetic reference mode
+evidence/125-independent-20260924-39ecd1ca30398421	57eb3bd75225b48a03d24dc9a3fc2e86d032a320	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-24	-	docs(evidence): archive #125 selector and independent validation
+fix/1654-clang-asan-runtime	931f195320dcfd207fd272dd3d8e0d06bc5e7fe2	keep	committed since 2026-09-28; may be active	2026-09-29	1768	build: reject missing Clang ASan runtime (#1654)
+fix/1731-x87-float16-runtime	d13a37fe184f036bd9aab96b2f0e9c2404068cd2	keep	committed since 2026-09-28; may be active	2026-09-29	-	c: support x87 long double to _Float16
+fix/1732-sysv-named-f80-varargs	2f257a12af182722bd2c34d5a90c0b2a7cf80ba5	keep	committed since 2026-09-28; may be active	2026-09-30	1800	tests: run the named-x87 variadic cases from the driver test
+fix/1790-desktop-artifact-resolution	e4482748dca88b7d4a419828a95491a0f2b88c51	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: measure proposed #1790 policy identity
+fix/1793-wasm-integer-exit	492d0625df397966d6d88f41cfaa445f85923cc4	keep	open PR head or base	2026-09-30	1796	Merge branch 'main' into fix/1793-wasm-integer-exit
+fix/183-gnu17-enum-types	6517d7c1aa4640031f8d41237ab1789a73ad6e1b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	chore: summarize issue 183 candidate failures
+fix/274-static-assert-ice	3e5e4183367d87a00edce0fbb46f7fc6b163e920	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: validate and publish issue 274 implementation
+fix/674-generic-constant-expressions	96ae69b13b592ec9ca92712f119640c32a697490	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-17	-	ci: fix issue 674 source export
+fix/880-9700x-durable-evidence	0ddb88b42fdf480fb0f3d84443073934d22a0004	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	chore: publish verified issue 880 workflow blob
+fix/891-native-runner-observation	671ad7a9eaa1ba088e85643b6818cb7bbe456b3b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: refresh issue 891 patch payload 1/7
+fix/932-admission-workflow-revision	388bf92a6c0db681e4609cc0ecf40b0d9b15ceaf	delete	head of closed unmerged PR; scratch/evidence only	2026-09-21	941	ci: run retirement admission regressions from the immutable event revision
+fix/932-behind-head-admission-tests	56ea8a1b6a93a9499dc46b0d7674e80e38e0f323	delete	head of closed unmerged PR; scratch/evidence only	2026-09-21	942	ci: test native admission on exact combined trees
+fix/arena-rewind-watermark-235	6f96c2ba5297bd46892f6c49333b4c811f2dc8f9	delete	triaged SUPERSEDED	2026-09-07	246	arena: preserve dirty bytes across client cursor rewinds
+fix/c-comma-condition-capability	94f511fff7c0e3b1eeb9f8da8dd879aefa3e597c	keep	open PR head or base	2026-09-30	1354	fix(c): reject void comma conditions and &comma sizeof operands
+fix/host-portability-audit	20717f706b1bdd4e8f60e61670f042754d12937f	delete	triaged SUPERSEDED	2026-09-07	-	os: make host executable lookup and protection flags portable
+fix/issue-63-resource-failures	8b1a3a8b7c0f590ecf4a5c01dd4730f54f591f91	delete	triaged SUPERSEDED	2026-09-17	-	test: use the canonical hosted bootstrap path
+fix/llvm-signed-minimum-constants-222	bb25896d405551817be91da5edf56b267ce4b2b3	delete	triaged SUPERSEDED	2026-09-07	-	fix(llvm): preserve narrow signed-minimum integer constants
+fix/macos-process-tree-readiness	8dd975e25f6ba4ba396d2114bd40cb365e8456f1	delete	triaged SUPERSEDED	2026-09-19	-	test(os): wait reliably for process-tree readiness
+fix/x86-evex-broadcast-disp8-audit	c69faa8b878c620cc1c5b20ad9f9a47791cb5dc1	delete	triaged SUPERSEDED	2026-09-08	-	fix(x86): scale EVEX broadcast displacements by element width
+fix/x86-rex2-memory-width-audit	0285c4d1f28570d3456c1d19d0531e2412d56914	delete	triaged SUPERSEDED	2026-09-08	-	fix(x86): derive REX2.W from scalar qword memory operands
+foo	f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e	delete	ancestor of main	2026-09-21	-	Merge pull request #932 from buster14a/codex/902-wide-enum-bit-fields
+gh-readonly-queue/main/pr-1690-0959a3acc9d169a19e92bcf4c2b4e0d6946d372c	34b352e509bcc1b5ad4a622c5b2f20e2a26e92de	keep	owned by merge queue / native-retirement automation	2026-09-28	-	Merge pull request #1690 from buster14a/devin/1790566058-issue-1475
+issue-55-production-pgo-profile	a6613ef20125a4c537fc174db705ea43476e95bf	delete	ancestor of main	2026-09-17	-	Merge pull request #645 from buster14a/codex/569-canonical-landing-20260914
+luna/604-producer-qualification-20260914	f3b460be724a22eb51c2ff4590241e16738d156c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	ci: qualify native Release producer profiles
+main	37a2902af873e99b467a3e44f1faf5d993007f43	keep	default branch	2026-09-30	-	Merge pull request #2009 from buster14a/claude/bold-tesla-b8kr3d
+maintenance/pr645-ci-repair-20260916	26c1f3cf05b03fdfad9d5d313d0ff7174d954ce3	delete	triaged SUPERSEDED	2026-09-17	-	ci: materialize PR 645 generated identities correctly
+maintenance/pr645-contract-fix	98f8d8d5658163ea65dfd94c365c845f85f29ff2	delete	ancestor of main	2026-09-17	-	ci: refresh retirement dependency identities
+maintenance/pr645-rebased-candidate	3ada7bf87dc1cc59f161a5d821364188731c174e	delete	triaged SUPERSEDED	2026-09-17	-	ci: validate rebased PR645 through pull-request workflows
+native-retirement-staging/pr-1801-36571836619-1	a160f2763366bc98978bb8386e489014820a45df	keep	owned by merge queue / native-retirement automation	2026-09-29	-	Integrate pull request #1801 with native-retirement binding
+native-retirement-staging/pr-1801-36577928221-1	a11562204ffd1cf6ca36dd6f665deba9fe8783b9	keep	owned by merge queue / native-retirement automation	2026-09-29	-	Integrate pull request #1801 with native-retirement binding
+native-retirement-staging/pr-927-35655313959-1	f3472cc66687c279a7de2fd9ee96587ea25eacac	keep	owned by merge queue / native-retirement automation	2026-09-21	-	Integrate pull request #927 with native-retirement binding
+native-retirement/catch-up	359ba3d5b34c21136d0ef6233ed293fd0bbf97e6	keep	referenced by a workflow on main	2026-09-30	1966	Integrate pull request #1966 with native-retirement binding
+perf/793-debug-recorder-residue	959f66d9f10898e29a493ca1bcbb8866119a6a84	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: run issue 793 Zen 5 acceptance
+perf/clang-unity-profile-20260910	d57c5b0f5f2f7c0fafd097f60552f44b2bf3c668	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-10	-	ci: capture isolated Clang Release unity compile profiles
+perf/zen5-1382-aggregate-definition-index	e1376693deca7b86eec2234dac1102c24f23c8c0	delete	triaged SUPERSEDED	2026-09-26	1484	c: filter whole-type-table definition scans with an exact position bitmap (#1382)
+recovery/6aa810a4/437-service-base	89414951a8fa8dd89f4716836c014aa2192fcb75	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	recovery: preserve #437 service base from session 6aa810a4
+recovery/6aa810a4/522-514-cutover	0f7676b27def833143727947fa0e20682007a73f	delete	triaged OBSOLETE	2026-09-14	-	recovery: preserve #522/#514 MIR cutover from session 6aa810a4
+recovery/6aa810a4/568-contract	139e787ccada8c61218382b54e842757a26503c4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	recovery: preserve #568/#615 performance contract from session 6aa810a4
+recovery/6aa810a4/569-native	4547b55709cf76b4b8f4d6e352f32bea98df5f4f	delete	triaged SUPERSEDED	2026-09-14	-	recovery: preserve #569 native correctness from session 6aa810a4
+recovery/6aa810a4/569-schema	e150b2b10767ebc80fdd036904ca83e8db65e932	delete	triaged SUPERSEDED	2026-09-14	-	recovery: preserve #569 census schema from session 6aa810a4
+recovery/6aa810a4/612-service	180efe922201c21a4207aa39dcf2b7476aec5f96	delete	triaged SUPERSEDED	2026-09-14	-	recovery: preserve #437/#612 service completion from session 6aa810a4
+recovery/6aa810a4/615-streaming	21676837514a6da28e2f7237d645606a25a81db6	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	recovery: preserve #615 streamed inputs from session 6aa810a4
+recovery/6aa84ae5/522-514-cutover-review	0f7676b27def833143727947fa0e20682007a73f	delete	triaged OBSOLETE	2026-09-14	-	recovery: preserve #522/#514 MIR cutover from session 6aa810a4
+recovery/6aa84ae5/569-reviewed-integration-v2	094c02b15dee322cb553584cbbc7928c1a7df968	delete	triaged SUPERSEDED	2026-09-15	-	recovery: preserve reviewed #569 integration v2 from conversation 6aa84ae5
+recovery/6aa84ae5/612-service-prior	180efe922201c21a4207aa39dcf2b7476aec5f96	delete	triaged SUPERSEDED	2026-09-14	-	recovery: preserve #437/#612 service completion from session 6aa810a4
+recovery/6aa84ae5/frontend-canonical-residuals	5ce13304252a63f8f76aaebf9fa22cf3c669f321	delete	triaged SUPERSEDED	2026-09-15	-	recovery: preserve frontend canonical residuals from conversation 6aa84ae5
+recovery/6aa9d3a7/atomic-baseline-99fb	6aa1f7aeacf34a523616cef155d6c3581c478239	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve atomic baseline worktree snapshot
+recovery/6aa9d3a7/census-178f	6dcd492488d9ae9f8b324ba61217875a7fc7f1cd	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve census worktree snapshot
+recovery/6aa9d3a7/correctness-41a2	41cc85bb5b491ba18b13ee7a737e47032b70153c	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve correctness integration worktree snapshot
+recovery/6aa9d3a7/cutover-883b	280e9a40c0d3d6aaacd6fa895924ac37b1b6d754	delete	triaged OBSOLETE	2026-09-16	-	recovery: preserve MIR-only cutover worktree snapshot
+recovery/6aa9d3a7/main-baseline-e68e	e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf	delete	ancestor of main	2026-09-15	-	Merge pull request #683 from buster14a/devin/ir-preparation-validated-state-reuse
+recovery/6aa9d3a7/orphan-569-canonical-exact	9a0d1977a0b90e0ec2d043220e570c79a234cd14	delete	triaged SUPERSEDED	2026-09-15	-	compiler: reconcile #569 canonical acceptance head
+recovery/6aa9d3a7/orphan-569-residual	254a3377fcc80fd7103f593ce8a4b89acc3a6d4f	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve orphaned #569 residual repair snapshot
+recovery/6aa9d3a7/orphan-612-service-integration	884584f9bc1cc1a0f374ec9e4f846cb34685a1e0	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve orphaned #612 service integration snapshot
+recovery/6aa9d3a7/orphan-612-service-successor	4a991973cb59022c9e47f9668b513f8833a71d28	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve orphaned #612 service successor snapshot
+recovery/6aa9d3a7/orphan-census-frontend	08da38e21214be509ff23058ed833e0e1ea6c792	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve orphaned census/frontend source snapshot
+recovery/6aa9d3a7/orphan-performance-reconcile	d1e5e87fba452d8202a0619b815e30d7a186a842	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve orphaned performance reconciliation snapshot
+recovery/6aa9d3a7/orphan-review-probes	2b6ae3c7208093b0d5a079d8fc1ce69310fe172b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	recovery: preserve standalone issue #36 review probes
+recovery/6aa9d3a7/performance-0814	fce38490cbbe2cc72e98e74cb5e7a9f1767cbeb5	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve performance integration worktree snapshot
+recovery/6aa9d3a7/performance-review-396a	4ba19eae0b35dae1fc35ec65e26a9ddf0fc18309	delete	triaged OBSOLETE	2026-09-16	-	recovery: preserve performance review worktree snapshot
+recovery/6aa9d3a7/performance-service-c289	0d1890eb0ee157425d7b5aee5074eb962a07c9c0	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve performance service integration worktree snapshot
+recovery/6aa9d3a7/service-dispatch-2475	7fdda1abb110e1e568fba7280dc4f2e1e47796b6	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve benchmark service dispatch worktree snapshot
+recovery/6aa9d3a7/service-f5ab	3e40cf5e39a07d128fc51684ca1a0fd457d473f1	delete	triaged SUPERSEDED	2026-09-16	-	recovery: preserve benchmark service recovery worktree snapshot
+recovery/821-rebased-b7346b3e-20260920	d3c3299778d2a96cba2cbfb6670a15caa980b4e5	delete	triaged SUPERSEDED	2026-09-20	-	Recover PR #821 rebased onto b7346b3e
+recovery/824-rebased-b7346b3e-20260920	5ddeb041e6c3eb9c408ec1469df822928bd39c04	delete	triaged SUPERSEDED	2026-09-20	-	Recover PR #824 rebased onto b7346b3e
+recovery/891-native-observation-payload	e845df6ebc846107c0320e9d295c334adf8bfde0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	ci: export complete issue 891 candidate
+refactor/canonical-complex-values	82c6437d1b4a61767d94dfef6efbda53ee628535	delete	triaged SUPERSEDED	2026-09-07	-	ir: construct complex rvalues without mutable temporaries
+repair/686-diagnostics	fddec478ac75915c6a2b964ddfe74580a90ec1da	delete	merging into main changes nothing	2026-09-16	-	chore: retire temporary PR 686 diagnostic recipe
+repair/922-ci-policy-20260921	2e13c023ec52a646d538e4548fa9a317871289c8	delete	merging into main changes nothing	2026-09-21	-	ci: remove completed PR 922 repair helper
+repair/922-verified-20260921	53dc9fc66f96c6eb8e6033158b3bf1b739fc2a1e	delete	ancestor of main	2026-09-21	-	ci: narrowly approve trusted merge preflight target event
+research/1125-serial-tests-d9e736e2-20260925	8a00c7443a2a12101b885713b1b6bf2f06194675	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(1125): preserve serial preparation contract in negative tests and retain focused evidence separately
+research/1125-work-removal-d9e736e2-20260925	b447f610317ebde8da9faa82fce8741c57b13c71	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(1125): compare eager shape-key reuse with generic oracle on frozen source
+research/1319-initjoin-casts-20260925-astra	30e068347e9d8966be6ff9b814de73dfd4b463ff	delete	ancestor of main	2026-09-26	-	test(link): explicitly convert initializer section enums on Windows
+research/1319-initjoin-evidence-20260925-astra	471123c9a1e0930d1bdd71016725ccd7e5f90391	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(link): provide Windows test temporary-root parent for exact repaired source
+research/1319-initjoin-falsify-20260925-astra	240794c44aa56823b593a6aabf350e6b00f46297	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(link): execute independent sanitizer falsification on hosted Linux
+research/1319-initjoin-portability-20260925-astra	824c22491496981ec552583c52942c3df6c8c2d1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(link): validate signed-enum test portability without changing production collector
+research/1319-initjoin-run-20260925-astra	c168c473cbe0b5bcd747870bb9a6bb10589fb72a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(link): run pinned before-after initializer join on hosted Linux
+research/1341-text-handoff-ade6	119ba63f410323190546b1d38307a9f3c23e82db	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: isolate #1341 borrowed-text correctness experiment
+research/1790-action-resolution-probe	7ff08cac225f6cabba21198f84afc2127403ed30	keep	committed since 2026-09-28; may be active	2026-09-29	1794	ci: prove bounded second action-resolution attempt
+research/20260925-pp-pack-law-ade6ac4-astra	9edfb9cc08ccf490c43ab6068008b7e887a6df58	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: run bounded packing transport controls without replacing failed evidence
+research/20260925-weak-binding-boundary-ade6ac4	c452b70e794df58ec2e78fff4c25d71cd65fb28d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	probe: deepen weak-binding evidence across preprocessed and C module assembly
+research/390-error-cause-boundary-8f67df7	0189f73c166f5f4d9b9d3898fcf34e967a58a797	keep	committed since 2026-09-28; may be active	2026-09-30	-	research: reject expression-swallowing recovery and test plain-name guard
+research/aapcs64-unnamed-alignment-20260925-astra	bc19891b41ade6261a0da646d4e0e65fb8ff5aef	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: run pinned AAPCS64 alignment oracle on approved hosted targets
+research/aapcs64-unnamed-exchange-20260925-astra	867401cab6b457415bb3a8c0d865a9651beaa60f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: freeze independent unnamed-bitfield ABI exchange witnesses for #1344
+research/aggregate-init-20260925-dce1-astra	a84ca3d3a5441b5510c6afd9edceac0121331177	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: preserve reduced all-mode initializer evidence and bitcode observations
+research/assignment-store-value-20260925-astra	ade6ac4b6ecb21f30b61b656439bac476c145e2f	delete	ancestor of main	2026-09-25	-	Merge pull request #981 from buster14a/codex/623-empty-promotion-sweep
+research/atomic-compound-probe-20260925-astra	e942955274c3022086875d78dff5b1eef465cdbe	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: link filed issue and deduplicated evidence with final source-only freshness checkpoint
+research/bootstrap-classification-20260925-astra	d56e514813fc566954eeefb2625d303f900a6959	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: retain observed bootstrap classification failure and exact evidence identities
+research/c-comma-condition-tests-only	40ac5619ecd7a790bec6e6d89d2d0b43d89526ef	delete	triaged OBSOLETE	2026-09-26	-	test(c): use portable storage and split source literals
+research/causal-liveness-ade6ac4-20260925	f3164a046d25ad41cf08cb3c01e5cf010c20fc0a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: use checked interior hunks for the disposable counter patch
+research/codeview-provenance-20260926	e1e2785a97adf6d3d8bf0ad0e7addfc629b19cbf	keep	open PR head or base	2026-09-30	1343	research: quote tree revision in CodeView provenance workflow
+research/constant-truth-boundary-20260925-astra	c6f785d7a289a69c98d7d5492095642676da4678	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: run retained holdouts and repaired diagnostic without repeating primary matrix
+research/false-necessity-20260925-astra	ba986fda54656f5a17a9ad3213b63a23122520ef	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: isolate declaration-effect counterfactual on hosted executors
+research/heavy-audit-20260925-ade6ac4-astra	a96663406359f9fad8948a93781dae8c56fbe64d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	docs(audit): preserve confirmed LLVM findings and evidence disposition
+research/interaction-cost-20260925-astra-7c91	c13b9579e686d5fa1cde1c3a8963bd0c5c1a4a17	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: correct preflight setup before grid observations and add count oracle
+research/m3-asm-label-mask-20260923	60d44cdbc6c381998795e887b6032d6e9ff0c646	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	research: retain every census exit and use the verified native self-host target
+research/m4-elf-write-screen-bb96b5d	6b1a79196d65e9eaf535d7b34d3605f76a28c42f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	research: retain formatted second prototype and initialization negative control
+research/meaning-seams-20260925-d9e7-astra	f0ce71a962e59b74deba6f94cd7c8b1b8c2bb57b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: retain semantic root causes, complete grouped results and independent IR evidence
+research/policy-resolution-census-20260925-ade6	1d30cfb8ebdd09eaa4c11d68d6c85afe1e45cbca	keep	open PR head or base	2026-09-30	1348	research: drop push-triggered census workflows; document local rerun
+research/promotion-quotient-20260925-astra-c74e	8322767c0f2aa20291073a9498e8552c4ac7142b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research(ir): retain hosted quotient rejection evidence
+research/representation-ledger-d9e736e2-20260925	cb02569e05ba70bf2e004224b02610e47c5bc16c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: validate corrected root-output prototype with separate clean and census builds
+research/return-edge-20260925-astra	1f790d6ecf5282383f3210cd6f43f4f8240de1db	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: distinguish unused C falloff results from unreachable return edges
+research/semantic-cast-law-20260925-astra	03f63b5d422628e94e5d0a6ee1070520a57b703d	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: test one shared sign-extension repair in isolated hosted worktrees
+research/shared-c-capability-20260925	b28269610284c3308495306abe6cbf23b1e3156f	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-25	-	research: test shared comma capability on pristine approved stb harness
+research/zen5-interval-lineage-9578d32a-20260922	41d63585101b82b47bf48ade6344b1d66fb1d62a	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-22	-	research: validate switch interval proofs and stable PDB survivor lineage
+review/125-region-boundary-tests-20260924-344eb1cc	1a5ebc1c42170327a639d69a5f009355408f767a	delete	head of merged PR	2026-09-24	1118	test(quality): challenge sparse region boundaries and every heap restart (#125)
+review/125-region-check-20260924-1a5ebc1c	263e4657a85536952a92ab2496b0be8e05f40847	delete	triaged OBSOLETE	2026-09-24	-	test: execute exact #1118 region regressions on hosted Clang
+scratch/183-current-main-source	6c8830c8599e138604f1b42a4a9670d99d587fce	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: export current issue 183 source tree
+scratch/183-current-progress	66fb683131d9a17ab2c7fcd73b8924bab64d4894	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: repair issue 183 source package
+scratch/183-typed-ice-analysis	6c77c970e29e0aa77dfa7eea4bac6ec682ad70db	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-19	-	ci: export tracked issue 183 source tree
+sol/408-qualification-20260914	16942369230cfa7ae6faed3fb4f10db0ef15f9e1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	ci: rerun #408 worker qualification on corrected runner
+sol/408-qualification-repair-20260915	5b3e03d05d23582478c6f7b9889671a861b657d1	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-15	-	ci: qualify repaired differential workers
+sol/603-analyzer-job-qualification-20260914	8e51fe39a5fd23326e85005db2048badea856494	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	ci: qualify analyzer job selection
+sol/603-analyzer-reference-provenance-v2-20260918	693bcdb33e5043dabf46e9402195084c80047bbc	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-18	-	ci: force-release PR 807 superseded run
+sol/603-analyzer-selection-20260914	44f7815e2050114470d73e9ef0f06159cecb3038	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-14	-	test: restore complete analyzer qualification regression file
+staging/203-zero-scope-placeholders	215ddcfb728865d5d72f7613e68d550ceb611e6f	delete	triaged SUPERSEDED	2026-09-18	-	fix(codeview): leave object scope links for the linker
+test/differential-harness-source-20260907	0046ac907e0938f0b7527466e706be039226525b	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-08	-	chore: transport tested CI content (temporary branch only)
+test/metamorphic-regressions	c5f7232951a6549ab8bc6ffab74341eeaf8ae818	delete	triaged SUPERSEDED	2026-09-07	-	test: add source-equivalence campaigns and fix empty token pastes
+test/native-differential-abi238	524dfc88391447343e8a5059026234ae25013721	delete	triaged SUPERSEDED	2026-09-08	-	test: add native differential matrix and fix canonical parameter alignment
+tmp/604-copilot-review-20260918	e251850c5bbddd5d38edd28180395ed116aa210f	delete	ancestor of main	2026-09-18	-	Merge pull request #787 from buster14a/codex/issue-63-resource-failures
+tmp/604-doc-profile-20260918	e251850c5bbddd5d38edd28180395ed116aa210f	delete	ancestor of main	2026-09-18	-	Merge pull request #787 from buster14a/codex/issue-63-resource-failures
+tmp/604-finalize-20260918	e251850c5bbddd5d38edd28180395ed116aa210f	delete	ancestor of main	2026-09-18	-	Merge pull request #787 from buster14a/codex/issue-63-resource-failures
+tmp/604-metrics-20260918	e251850c5bbddd5d38edd28180395ed116aa210f	delete	ancestor of main	2026-09-18	-	Merge pull request #787 from buster14a/codex/issue-63-resource-failures
+tmp/791-cgen-base-3a41	1dfa699c2dda29e34a175c951ee7cf2d734f8536	delete	triaged OBSOLETE	2026-09-19	-	tmp: merge #791 c_gen operand accounting
+tmp/791-rebind-853	316cc3a78e1defe24fa1b3f4b13ef9cbd970ed69	delete	triaged OBSOLETE	2026-09-19	870	Merge branch 'main' into tmp/791-rebind-853
+tmp/791-rebind-856	dbea5a99b8ecbe5bb19075cef72ce6c2ca748250	delete	triaged OBSOLETE	2026-09-19	871	tmp: compute #791 PR 856 retirement bindings
+tmp/791-rebind-857	9bff1b452ca723107d7cb6d4057fe3c3e882f68c	delete	triaged OBSOLETE	2026-09-19	872	Merge branch 'main' into tmp/791-rebind-857
+tmp/864-865-native-retirement-materialize	faed7ac42832819c25e6c93ceb3d7e6457b2d986	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	bootstrap: materialize native-retirement cutover
+tmp/869-policy-fix	4e07ab3fcf2eaa6bab6ac98c83d2479eecccdbeb	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-20	-	chore: patch issue 869 workflow policy test
+tmp/925-actions-app-attestation-fix	d5708a85ca96e468bd5720675e2bf67a18b992b5	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: minimize issue 925 App identity repair
+tmp/rebase-457-20260912	193b51abed05659d41b999e65f579d47c8bbd2c0	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-12	-	test(codegen): stage empty-asm clobber regression fixtures for #70
+tmp/rebase-460-20260912	c73d5c95a95ae276658a5fb9e84c584ee90c76b6	delete	triaged SUPERSEDED	2026-09-12	-	docs: specify wide-atomic correctness and mixed-compiler acceptance
+validation/1732-current-head	ccc06a732bb2ed136feafea0fa90477d15d828a3	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: validate rebased issue 1732 head
+validation/1732-x87-varargs	29517d05b3ec5375ce2c3df5e4b221cc099c9194	keep	committed since 2026-09-28; may be active	2026-09-29	-	ci: run targeted issue 1732 differential
+validation/203-pr796-windows-abi	159b633724813777d9768b1df00a2929ec5a6b18	delete	triaged OBSOLETE	2026-09-18	-	chore: trigger focused issue 203 ABI validation
+validation/203-pr796-windows-strict	594f68316ab3dcf0bce163bf6f9f16eeff26722c	delete	triaged OBSOLETE	2026-09-18	-	chore: trigger issue 203 strict validation
+validation/839-cpython-final	30cc56a28b0e229fc47983443756083d38be20e9	delete	triaged SUPERSEDED	2026-09-19	-	ci: replay exact issue 837 CPython recipes
+verify/909-windows-repeat-e7ada	65de0fa8ff39bb533d35f5f503b357601aed286e	delete	triaged SUPERSEDED	2026-09-20	-	ci: verify issue 909 on Windows twice
+work/2026-09-06-integration-gates	fbb2191e5d96e69a73ddda335a68db6701d83e46	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-06	-	ci: refresh immutable merge trees after the reviewed constant-p follow-up
+work/2026-09-06-issue-batch-validation	6c814e76d3406b48c8418d4f537209ed18754835	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-06	-	publish independently tested iOS monitor cleanup without unrelated changes
+work/36-recovered-integration-20260915	537e334d1860cf156ad9b8fc01f6590b3ef79918	delete	triaged SUPERSEDED	2026-09-16	-	aarch64: encode aggregate pointer copies beyond imm12
+work/360-source-snapshot	26df557c251a1b64ea545db6bdfa8bfeffac567c	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-11	-	ci: repair checked issue 360 transport transcription
+work/697-worker-deadline-evidence	8725d8bec34bff18e4f159fbaa7a77d6f5c71937	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-16	-	ci: preserve new service tests while resolving the deadline fixture conflict
+work/697-worker-deadline-reconciled	f47b7929748fd052b7d30d7e1282cfdae4bdcab2	delete	ancestor of main	2026-09-16	699	Merge current main into the worker deadline test repair
+work/902-enum-bitfields-runner	253c81ec48c7d29f041510e57cd7e17002a28927	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	work: handle expected negative-control exit before validating issue 902 candidate
+work/923-881-recipe-20260921	6e2110bb48761429a8533db36a929d47414c99d4	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: export pinned source-only bundle for #923 implementation workspace
+work/923-native-sample-producer	2cce78770ecb5a6d416b8f7727b90916927ff967	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	bench: produce bounded native retirement paired samples
+work/923-source-access	6ec395ab8b74abfac8b40356c127fbab5f3f9a14	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-21	-	ci: remove completed PR 923 patch transport
+work/audit-191-rebase-publish-20260907	b4bcaf05c2edc33ed0343d8af324c23205f3b908	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: rebase audited encoding fix and export the exact new baseline
+work/audit-238-source-20260907	0a3a365b3131fb08c340f9bbbfa41ae09cc8ac45	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	chore: transport test-only alignment follow-up without competing with PR 282
+work/issue-267-encoding-snapshot	fe9120bea8d11c7d023edc5562197d8c28969a67	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-08	-	chore: capture refreshed main and dispatch unchanged slice CI
+work/issue267-source-20260908	5b66761437aa4be1ae71de6309eb3b783eb807e6	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-08	-	chore: stage verified issue 267 patch transfer (2/4)
+work/llvm-222-candidate	44d4d5f242696362bb9896db41da84e31496ad84	delete	triaged SUPERSEDED	2026-09-07	-	fix(llvm): preserve narrow signed-minimum integer constants
+work/llvm-222-validation	ccfe0b75f4bae1d7f2ad6b639d008272433bc873	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: validate tested LLVM patch against current main on the current runner image
+work/self-host-audit-20260907	53ea57c1a755411b3b300ebf9b025f97cb5866aa	delete	no PR; scratch/evidence only (no production diff vs main)	2026-09-07	-	ci: export the published bootstrap head with current main integration
+work/strict-ir-verifier-source	c0f944231b32f574bec4a4054df5c021c34c2270	delete	triaged SUPERSEDED	2026-09-07	-	ci: export exact source bundle for verifier development

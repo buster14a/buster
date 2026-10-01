@@ -1,6 +1,27 @@
 #pragma once
 #include <buster/lib/base.h>
 #include <buster/lib/integer.h>
+#if BUSTER_SANITIZE
+// arena_release_to_position poisons what it releases; every allocation
+// unpoisons what it hands out. Sanitized builds always link AddressSanitizer,
+// whose runtime exports these two entry points; they are declared here rather
+// than through <sanitizer/asan_interface.h>, which some Clang installations
+// linking that runtime do not ship. Outside sanitized builds both are no-ops.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreserved-identifier"
+#endif
+void __asan_poison_memory_region(void const volatile* address, size_t size);
+void __asan_unpoison_memory_region(void const volatile* address, size_t size);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#define BUSTER_ARENA_POISON(pointer, size) __asan_poison_memory_region((pointer), (size_t)(size))
+#define BUSTER_ARENA_UNPOISON(pointer, size) __asan_unpoison_memory_region((pointer), (size_t)(size))
+#else
+#define BUSTER_ARENA_POISON(pointer, size) ((void)(pointer), (void)(size))
+#define BUSTER_ARENA_UNPOISON(pointer, size) ((void)(pointer), (void)(size))
+#endif
 typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
@@ -99,6 +120,28 @@ BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
 // Apple retains the dirty watermark because its discard can preserve bytes;
 // use zeroed allocation when recommitted storage must be initialized.
 BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
+// Phase reclamation: rewinds to `position` and declares every byte above it
+// dead. Unlike a scratch rewind, the caller has proven that no surviving
+// reference targets the released range, so sanitized builds poison it and the
+// first access through a stale pointer is reported where it happens instead of
+// reading whatever the next phase allocates there. The pages stay committed
+// for that next phase and the dirty high-water mark covers them, exactly as
+// arena_set_position leaves them. Returns the number of bytes released.
+BUSTER_F_DECL u64 arena_release_to_position(Arena* arena, u64 position);
+// Ends an arena's use by the thread that created it: rewinds it, returns
+// every committed page beyond `retained_size` bytes of buffer to the OS and
+// destroys it, which parks a pool-eligible mapping for the next creation of
+// the same shape on this thread. A transient peak therefore neither stays
+// resident nor forces the next user to reserve and fault a fresh mapping.
+BUSTER_F_DECL void arena_retire(Arena* arena, u64 retained_size);
+// True when `pointer` lies in [start, end) of `arena`'s byte space: the test a
+// phase uses to prove its result keeps no reference into what it releases.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_range_contains(Arena const* arena, u64 start, u64 end, void const* pointer)
+{
+    u8 const* base = (u8 const*)arena;
+    u8 const* address = (u8 const*)pointer;
+    return address >= base + start && address < base + end;
+}
 BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
 // The commit half of arena_allocate_bytes, outlined so the bump below stays a
 // handful of instructions at each of its ~1.400 call sites.
@@ -106,6 +149,13 @@ BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void arena_test_fail_next_reserve(void);
 BUSTER_F_DECL void arena_test_fail_next_commit(void);
+// While enabled, arena_release_to_position also overwrites what it releases
+// with ARENA_TEST_RELEASE_FILL, so a reference that outlives its phase reads
+// a recognizable pattern in builds without AddressSanitizer. Process-wide,
+// because a unit's phases can run on a compile lane; tests toggle it serially.
+BUSTER_F_DECL void arena_test_fill_releases(bool enabled);
+#define ARENA_TEST_RELEASE_FILL 0xa5
+BUSTER_F_DECL u64 arena_test_pool_count(u64 reserved_size);
 #endif
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 
@@ -197,6 +247,7 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
     void* result = (u8*)arena + aligned_offset;
     arena->position = aligned_size_after;
     BUSTER_CHECK(arena->position <= arena->os_position);
+    BUSTER_ARENA_UNPOISON(result, size);
     return result;
 }
 

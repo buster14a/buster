@@ -8,6 +8,7 @@
 // Parsing, allocation, scheduling and object-format relocation policy remain
 // consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/os.h>
 #include <buster/lib/simd.h>
@@ -304,6 +305,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_base64_chunk_avx512(u8* deco
 // BUSTER_X86_METADATA_BLOB_CAPACITY(blob.byte_count) bytes.
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_blob(u8* decoded, BusterX86MetadataBlob blob)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_BASE64_BYTES_DECODED, blob.byte_count);
     // The group arithmetic of buster_x86_generated_base64_encoded_count.
     u64 group_count = (blob.byte_count + 2u) / 3u;
     u64 group_index = 0;
@@ -762,6 +764,12 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     buster_x86_metadata_tables_decoding = true;
     buster_x86_metadata_decode_string_pool();
+    WORK_LEDGER_RECORD(TARGET_X86_POOL_BYTES_COPIED, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
+    WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED,
+                       (u64)BUSTER_X86_GENERATED_OPERAND_COUNT + BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT + BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT +
+                           BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT + BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT + BUSTER_X86_GENERATED_IFORM_RANGE_COUNT +
+                           BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT +
+                           BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_COUNT);
     // Each blob is decoded whole into the scratch array, copied out into its
     // typed cache, and three of its records are then re-read through the
     // generated reader as the layout check described at the flat readers.
@@ -849,6 +857,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_coverage(void)
         }
         BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_coverage_records, BUSTER_X86_GENERATED_COVERAGE_COUNT, buster_x86_generated_coverage_at,
                                        buster_x86_metadata_coverages_equal);
+        WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, BUSTER_X86_GENERATED_COVERAGE_COUNT);
         buster_x86_metadata_coverage_decoded = true;
     }
 }
@@ -1445,6 +1454,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataVa
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u16 buster_x86_metadata_fill_nul_distance(u32 offset)
 {
     BUSTER_CHECK_SERIAL_INITIALIZATION();
+    WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, 1);
     u16 distance = buster_x86_metadata_nul_distance_at(buster_x86_metadata_pool_bytes, BUSTER_X86_GENERATED_STRING_POOL_SIZE, offset);
     buster_x86_metadata_pool_nul_distances[offset] = distance;
     buster_x86_metadata_pool_nul_known[offset / 64u] |= (u64)1 << (offset % 64u);
@@ -1466,6 +1476,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset
     {
         return false;
     }
+    WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_READS, 1);
     u16 distance = buster_x86_metadata_nul_distance(offset);
     if (distance == UINT16_MAX)
     {
@@ -9090,6 +9101,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_apx_ndd_projection(BusterX86Metadat
 
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_FORM_SELECTIONS, 1);
     BusterX86MetadataSelectResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
         .form_id = UINT32_MAX,
@@ -10031,6 +10043,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX8
 BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86MetadataMachineExactToken token,
                                                                     BusterX86MetadataMachineExactQuery query)
 {
+    WORK_LEDGER_RECORD(TARGET_X86_METADATA_ENCODES, 1);
     BusterX86MetadataEmitResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
         .form_id = UINT32_MAX,
@@ -11983,15 +11996,27 @@ void buster_x86_metadata_prewarm(void)
 // Unlike prewarm_all_forms, an ordinary non-TLS compile never prepares them.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd[BUSTER_X86_METADATA_TLS_GD_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_le[BUSTER_X86_METADATA_TLS_GD_SIZE];
+// General dynamic's -fno-plt call, `data16 rex.W call [rip + helper]`, which
+// fills the same eight bytes as the padded direct call with its field at the
+// same offset.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd_indirect_call[BUSTER_X86_METADATA_TLS_GD_SIZE - 8];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_add[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+// Local dynamic's LEA and direct CALL, and the -fno-plt indirect CALL that can
+// stand in for the direct one.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld[BUSTER_X86_METADATA_TLS_LD_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld_indirect_call[BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET - 4];
 enum
 {
     BUSTER_X86_TLS_PREPARE_GD = 1,
     BUSTER_X86_TLS_PREPARE_LE = 2,
     BUSTER_X86_TLS_PREPARE_IE = 4,
-    BUSTER_X86_TLS_PREPARE_ALL = 7,
+    BUSTER_X86_TLS_PREPARE_LD = 8,
+    BUSTER_X86_TLS_PREPARE_ALL = 15,
 };
+// The bytes of local exec's `mov rax, fs:0`, the only instruction the
+// local-dynamic relaxation keeps.
+#define BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE 9u
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_prepared;
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_valid;
 
@@ -12058,6 +12083,15 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
             };
             valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd + 11, 5, S8("CALL"), operands, 1,
                                                   BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - 11, BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("helper"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            buster_x86_metadata_tls_gd_indirect_call[0] = 0x66;
+            buster_x86_metadata_tls_gd_indirect_call[1] = 0x48;
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd_indirect_call + 2, 6, S8("CALL"), operands, 1,
+                                                  BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - 10, BUSTER_X86_METADATA_RELOCATION_PC32);
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_GD;
         }
         if (missing & BUSTER_X86_TLS_PREPARE_LE)
@@ -12100,6 +12134,33 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
         }
+        if (missing & BUSTER_X86_TLS_PREPARE_LD)
+        {
+            operands[0] = buster_x86_metadata_tls_register(7);
+            operands[1] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("tls"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            u32 call_offset = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET + BUSTER_X86_METADATA_TLS_FIELD_SIZE;
+            bool valid = buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld, call_offset, S8("LEA"), operands, 2,
+                                                     BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET, BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32, .has_symbol = true, .symbol = S8("helper"),
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld + call_offset, BUSTER_X86_METADATA_TLS_LD_SIZE - call_offset,
+                                                  S8("CALL"), operands, 1, BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - call_offset,
+                                                  BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("helper"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ld_indirect_call, sizeof(buster_x86_metadata_tls_ld_indirect_call),
+                                                  S8("CALL"), operands, 1, BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - call_offset,
+                                                  BUSTER_X86_METADATA_RELOCATION_PC32);
+            if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_LD;
+        }
         // Publish readiness last, including a cached failure. A changed
         // metadata shape must fail closed rather than using partial templates.
         buster_x86_metadata_tls_prepared |= missing;
@@ -12138,8 +12199,10 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
             {
                 // Both relocation fields are arbitrary; every other byte is
                 // part of the ABI envelope and must match before any write.
+                // The call is the padded direct one or the -fno-plt one.
                 if (memcmp(sequence, buster_x86_metadata_tls_gd, BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET) == 0 &&
-                    memcmp(sequence + 8, buster_x86_metadata_tls_gd + 8, 4) == 0)
+                    (memcmp(sequence + 8, buster_x86_metadata_tls_gd + 8, 4) == 0 ||
+                     memcmp(sequence + 8, buster_x86_metadata_tls_gd_indirect_call, 4) == 0))
                 {
                     replacement = buster_x86_metadata_tls_le;
                     size = BUSTER_X86_METADATA_TLS_GD_SIZE;
@@ -12172,6 +12235,39 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
             }
             result = true;
         }
+    }
+    return result;
+}
+
+u32 buster_x86_metadata_relax_tls_local_dynamic(u8* sequence, u32 capacity)
+{
+    u32 result = 0;
+    u32 call_offset = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET + BUSTER_X86_METADATA_TLS_FIELD_SIZE;
+    if (sequence && capacity >= BUSTER_X86_METADATA_TLS_LD_SIZE &&
+        buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_LD | BUSTER_X86_TLS_PREPARE_LE) &&
+        memcmp(sequence, buster_x86_metadata_tls_ld, BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET) == 0)
+    {
+        // Only the call's opcode bytes pick the envelope; both relocation
+        // fields are arbitrary.
+        u32 direct_opcode_size = BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - call_offset;
+        u32 indirect_opcode_size = BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - call_offset;
+        if (memcmp(sequence + call_offset, buster_x86_metadata_tls_ld + call_offset, direct_opcode_size) == 0)
+        {
+            result = BUSTER_X86_METADATA_TLS_LD_SIZE;
+        }
+        else if (capacity >= BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE &&
+                 memcmp(sequence + call_offset, buster_x86_metadata_tls_ld_indirect_call, indirect_opcode_size) == 0)
+        {
+            result = BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE;
+        }
+    }
+    if (result)
+    {
+        // data16 is the psABI's padding here too: redundant on a MOV whose
+        // REX.W already fixes the operand size.
+        u32 padding = result - BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE;
+        memset(sequence, 0x66, padding);
+        memcpy(sequence + padding, buster_x86_metadata_tls_le, BUSTER_X86_TLS_LE_THREAD_POINTER_SIZE);
     }
     return result;
 }
@@ -12733,6 +12829,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         // offset would store, so no lane ever fills one.
         buster_x86_metadata_fill_nul_distances(buster_x86_metadata_pool_bytes, buster_x86_metadata_pool_nul_distances,
                                                BUSTER_X86_GENERATED_STRING_POOL_SIZE);
+        WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
         memset(buster_x86_metadata_pool_nul_known, 0xff, sizeof(buster_x86_metadata_pool_nul_known));
         for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
         {
