@@ -11,7 +11,7 @@ if (BUSTER_BUILD_IMAGE_BROWSER)
     target_link_libraries(image_browser PRIVATE m xcb)
     if (BUSTER_INCLUDE_TESTS)
         executable_add(image_browser_state_tests OFF src/buster/tests/image_browser_state_runner.c
-            MODULES os entry_point arena integer string file hash time float target image image_browser_state image_browser_linux
+            MODULES os entry_point arena integer string file hash time float target x86_64 image image_browser_state image_browser_linux
             SOURCES src/buster/tests/image_browser_state_test.c src/buster/tests/image_browser_linux_test.c)
         target_link_libraries(image_browser_state_tests PRIVATE m)
         add_custom_target(test_image_browser_state
