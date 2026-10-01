@@ -189,11 +189,14 @@ with tempfile.TemporaryDirectory(prefix="frame-controller-", dir=os.environ["RUN
         lines = []
         for target, cpus, fixtures in (("x86_64-", range(3), range(10)), ("aarch64-", range(1), range(4, 10))):
             for platform, allocator, frontend, pic, cpu, fixture in itertools.product(platforms, range(4), range(2), range(2), cpus, fixtures):
-                runtime = target == "x86_64-" and platform == "windows" and allocator == frontend == pic == cpu == 0 and fixture in native_fixtures
+                runtime = target == "x86_64-" and platform == "windows" and fixture != 3 and (cpu == 0 or fixture >= 7)
                 lines.append("NATIVE_FRAME_VECTOR_COMPILE_V1 target=" + target + platform + " allocator=" + str(allocator) + " frontend=" + str(frontend) + " pic=" + str(pic) + " cpu=" + str(cpu) + " fixture=" + str(fixture) + " error=0 classification=" + ("runtime" if runtime else "compile-only"))
-        for fixture in native_fixtures:
-            lines.append("NATIVE_FRAME_VECTOR_CASE_V1 id=x86_64-windows.allocator-0.frontend-0.pic-0.cpu-0.fixture-" + str(fixture) + " classification=runtime batch_size=8 status=pass")
-        lines.append("NATIVE_FRAME_VECTOR_BATCH_V1 enabled=1 cases=8 batches=1 batch_size=8 executions=1")
+        for allocator, frontend, pic, cpu, fixture in itertools.product(range(4), range(2), range(2), range(3), range(10)):
+            if fixture == 3 or (cpu != 0 and fixture < 7):
+                continue
+            batch_size = 8 if cpu == 0 and fixture in native_fixtures else 1
+            lines.append("NATIVE_FRAME_VECTOR_CASE_V1 id=x86_64-windows.allocator-" + str(allocator) + ".frontend-" + str(frontend) + ".pic-" + str(pic) + ".cpu-" + str(cpu) + ".fixture-" + str(fixture) + " classification=runtime batch_size=" + str(batch_size) + " status=pass")
+        lines.append("NATIVE_FRAME_VECTOR_BATCH_V1 enabled=1 cases=240 batches=16 batch_size=8 executions=128")
         lines.append("DRIVER_OPERATION_TIMING_V1 fixture=native_frame_vectors operation=buster_compile calls=3456 duration_ns=0 measurement=inclusive-wall status=completed")
         lines.append("DRIVER_OPERATION_TIMING_V1 fixture=native_frame_vectors operation=positive_compile calls=48 duration_ns=0 measurement=inclusive-wall status=completed")
         return lines
@@ -204,7 +207,7 @@ with tempfile.TemporaryDirectory(prefix="frame-controller-", dir=os.environ["RUN
             raw = b"malformed negative control --\xff\xfe" + ending + ending.join(line.encode("ascii") for line in native_manifest_lines()) + ending
             log.write_bytes(raw)
             parsed = g["manifest"](log)
-            check(len(parsed["compile"]) == 3456 and len(parsed["runtime"]) == 8 and parsed["operations"] == {"buster_compile": "3456", "positive_compile": "48"}, "newline-normalized manifest must preserve exact populations")
+            check(len(parsed["compile"]) == 3456 and len(parsed["runtime"]) == 240 and parsed["operations"] == {"buster_compile": "3456", "positive_compile": "48"}, "newline-normalized manifest must preserve exact populations")
             check(log.read_bytes() == raw, "parsing must not alter raw capture")
     execute("LF CRLF bare CR and malformed-byte manifest", newline_manifest)
 
