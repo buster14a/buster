@@ -1846,11 +1846,13 @@ function(executable_add name is_buster_program main_file)
         endif()
     endif()
 
-    if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
+    # The sealed production profile is trained on ide. Other executables have
+    # different unity call graphs and cannot consume its control-flow hashes.
+    if ("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
         set(BUSTER_PGO_GENERATE_FLAG "-fprofile-generate=${BUSTER_PGO_GENERATE}")
         target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
         target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
-    elseif(NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    elseif("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_USE}" STREQUAL "")
         set(BUSTER_PGO_USE_FLAG "-fprofile-use=${BUSTER_PGO_USE}")
         target_compile_options(${name} PRIVATE
             "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_USE_FLAG}>"
@@ -2281,6 +2283,24 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         VERBATIM
     )
 else()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        # Exercise real UI consumers without adding native window/rendering
+        # modules to the headless compiler. The runner owns an inert renderer
+        # boundary and the same foundation modules as the measurement tools.
+        executable_add(ui_utf8_component_tests OFF src/buster/tests/ui_utf8_component_test.c
+            MODULES os arena integer string file hash time float ui_core)
+        if (UNIX)
+            target_link_libraries(ui_utf8_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_utf8_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_utf8
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_utf8_component_tests>"
+            DEPENDS ui_utf8_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI UTF-8 consumer regressions"
+            VERBATIM)
+    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2320,6 +2340,11 @@ else()
             COMMENT "Test all"
             VERBATIM
         )
+    endif()
+
+    if (TARGET test_ui_utf8)
+        add_dependencies(test_all test_ui_utf8)
+        add_dependencies(test_units test_ui_utf8)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:

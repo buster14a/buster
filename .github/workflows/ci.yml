@@ -155,9 +155,9 @@ jobs:
         run: python3 -B tools/main_ci_reuse.py decide --output "$RUNNER_TEMP/main-ci-reuse.json"
 
   test:
-    # Queue desktop shards wait for cheap workflow lint. Ordinary runs still
+    # Desktop shards wait for the main reuse decision and cheap queue lint. Ordinary runs still
     # execute for diagnostics even when lint fails.
-    needs: lint
+    needs: [lint, reuse]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -296,7 +296,7 @@ jobs:
 
       - name: Workflow tool regression tests
         id: workflow_tools
-        if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ matrix.shard == 'release' && needs.reuse.outputs.reuse != 'true' && steps.zig_cache_policy.outcome == 'success' }}
         # Native fixture builds and process launches; see docs/ci-bootstrap-wrapper.md.
         # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
         # exhausted 120s in run 35934837738 despite passing suite summaries.
@@ -338,7 +338,7 @@ jobs:
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
         shell: bash
         run: |
@@ -358,7 +358,7 @@ jobs:
 
       - name: Install mold
         id: mold
-        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -466,7 +466,7 @@ jobs:
       # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
       - name: Install latest stable LLVM
         id: llvm
-        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
         timeout-minutes: 15
         shell: bash
         env:
@@ -480,7 +480,7 @@ jobs:
 
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -492,7 +492,7 @@ jobs:
         id: combinations_unix
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -504,7 +504,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
@@ -535,7 +535,7 @@ jobs:
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
       - name: Collect CMake configure evidence
         id: configure_evidence
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -543,7 +543,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"
 
       - name: Desktop result and reproduction
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
@@ -557,6 +557,15 @@ jobs:
           BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
           BUSTER_CI_COVERAGE_ARCH: ${{ matrix.arch }}
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
+
+      - name: Report reused desktop validation
+        if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' && steps.zig_cache_evidence.outcome == 'success' }}
+        shell: bash
+        env:
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: |
+          set -euo pipefail
+          printf 'Desktop build/test validation reused from the exact queue execution. This job ran only the main Zig cache lifecycle. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-ci/desktop-reuse.txt" >> "$GITHUB_STEP_SUMMARY"
 
       # Logs may contain symlinks into build/.buster-cache. upload-artifact
       # follows those links and can fail on intentionally unreadable cache entries.
@@ -1152,8 +1161,9 @@ jobs:
           retention-days: 14
 
   analyzer:
+    needs: reuse
     name: Clang analyzer shards
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
@@ -1162,6 +1172,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Bootstrap candidate and select reference build driver
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1242,16 +1253,19 @@ jobs:
             trap - EXIT
           fi
       - name: Exercise analyzer failure and coverage controls
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/self-test.log"
       - name: Configure the authoritative split-source database
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
       - name: Compare reference analysis and aggregate all module shards
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1360,6 +1374,15 @@ jobs:
               ;;
           esac
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
+      - name: Report reused analyzer validation
+        if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}
+        shell: bash
+        env:
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-analyzer"
+          printf 'Full candidate analyzer validation and failure/coverage controls reused from the exact queue execution. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-analyzer/reuse.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain analyzer inventory, results and measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

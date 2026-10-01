@@ -541,17 +541,56 @@ recover_shutdown_after_non_shutdown_postcondition() {
     [[ $evidence_status -eq 0 && $shutdown_disposition == recovered-shutdown-after-timeout ]]
 }
 
+# Module timing is emitted on completion; arena records can identify the most
+# recently observed module, but do not prove which module is currently running.
+# Scan once with constant retained state even when verbose output is large.
+print_test_progress() {
+    local label=$1 console_log=$2
+    awk -v label="$label" '
+        BEGIN { completed = "unavailable"; observed = "unavailable"; completed_index = "unavailable" }
+        /^TEST_MODULE_TIMING / {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^module=/) { completed = substr($i, 8); observed = completed }
+                if ($i ~ /^index=/) completed_index = substr($i, 7)
+            }
+        }
+        /^TEST_ARENA_V1 / {
+            for (i = 1; i <= NF; i++) if ($i ~ /^module=/) observed = substr($i, 8)
+        }
+        END {
+            printf "BUSTER_IOS_TEST_PROGRESS label=%s console_lines=%d last_completed_module=%s last_completed_index=%s last_observed_module=%s\n", label, NR, completed, completed_index, observed
+        }
+    ' "$console_log" >&2
+}
+
+run_launch_diagnostic_probe() {
+    local name=$1 label=$2 console_log=$3
+    shift 3
+    local status=0 output_log="${console_log}.diagnostic-${name}.log"
+    if run_lifecycle_phase "diagnostic-${name}" "$label" "$console_log" \
+        "$monitor_command_timeout_seconds" "$@"; then
+        echo "----- iOS diagnostic $name (bounded output tail) -----" >&2
+        if [[ -s $output_log ]]; then
+            tail -c 4096 "$output_log" >&2 || true
+        else
+            echo "(probe succeeded with no output)" >&2
+        fi
+    else
+        status=$?
+        printf 'warning: iOS diagnostic unavailable name=%s outcome=%s status=%s; see command, native_status, capture receipt and bounded stderr above\n' \
+            "$name" "$last_lifecycle_outcome" "$status" >&2
+        echo "A failed probe does not establish whether the app exited or crashed." >&2
+    fi
+}
+
 collect_launch_diagnostics() {
     local label=$1
     local console_log=$2
     local app_pid=$3
     local outcome=${4:-missing-marker}
-    local process_output
-    local unified_log_output
-    local crash_output
-    local process_probe_status
 
     echo "----- iOS ${label} launch diagnostics -----" >&2
+    print_test_progress "$label" "$console_log"
     if [[ $outcome == failure-marker ]]; then
         echo "the app emitted a failure marker; collecting simulator diagnostics." >&2
     else
@@ -560,46 +599,20 @@ collect_launch_diagnostics() {
     fi
     if [[ -n $app_pid ]]; then
         echo "App PID reported by simctl: $app_pid" >&2
-        if process_output=$(run_with_timeout "$monitor_command_timeout_seconds" \
-            xcrun simctl spawn "$udid" ps -p "$app_pid" -o pid=,ppid=,stat=,comm=,args= 2>&1); then
-            printf '%s\n' "$process_output" >&2
-        else
-            process_probe_status=$?
-            if [[ $process_probe_status -eq 124 || $process_probe_status -eq 137 ]]; then
-                echo "App PID probe timed out; simulator process state is unknown." >&2
-            else
-                echo "App PID $app_pid is no longer visible to the simulator process table." >&2
-                echo "Interpretation: the app likely terminated or crashed before producing the marker; this is not a launch-timeout classification." >&2
-            fi
-        fi
+        run_launch_diagnostic_probe app-pid "$label" "$console_log" \
+            xcrun simctl spawn "$udid" ps -p "$app_pid" -o pid=,ppid=,stat=,comm=,args=
     fi
-    if process_output=$(run_with_timeout "$monitor_command_timeout_seconds" \
-        xcrun simctl spawn "$udid" ps -A -o pid=,ppid=,stat=,comm=,args= 2>&1); then
-        echo "----- simulator process table (buster matches) -----" >&2
-        printf '%s\n' "$process_output" | grep -iE "${bundle_id}|ide" >&2 || true
-    else
-        echo "warning: could not read the simulator process table" >&2
-    fi
-    if unified_log_output=$(run_with_timeout "$monitor_command_timeout_seconds" \
+    echo "----- simulator process table -----" >&2
+    run_launch_diagnostic_probe process-table "$label" "$console_log" \
+        xcrun simctl spawn "$udid" ps -A -o pid=,ppid=,stat=,comm=,args=
+    echo "----- simulator unified log (last 5m) -----" >&2
+    run_launch_diagnostic_probe unified-log "$label" "$console_log" \
         xcrun simctl spawn "$udid" log show --style compact --last 5m \
-        --predicate "process == '${bundle_id}' OR eventMessage CONTAINS[c] '${bundle_id}'" 2>&1); then
-        echo "----- simulator unified log (last 5m) -----" >&2
-        printf '%s\n' "$unified_log_output" | tail -n 160 >&2
-    else
-        echo "warning: could not read the simulator unified log" >&2
-    fi
-    if crash_output=$(run_with_timeout "$monitor_command_timeout_seconds" \
+        --predicate "process == '${bundle_id}' OR eventMessage CONTAINS[c] '${bundle_id}'"
+    echo "----- recent simulator crash reports and tails -----" >&2
+    run_launch_diagnostic_probe crash-reports "$label" "$console_log" \
         xcrun simctl spawn "$udid" sh -c \
-        'find /var/mobile/Library/Logs/CrashReporter -type f -mmin -10 -print -exec tail -n 80 {} \; 2>/dev/null' 2>&1); then
-        echo "----- recent simulator crash reports and tails -----" >&2
-        if [[ -n $crash_output ]]; then
-            printf '%s\n' "$crash_output" >&2
-        else
-            echo "(no recent crash-report paths found)" >&2
-        fi
-    else
-        echo "warning: could not inspect simulator crash-report paths" >&2
-    fi
+        'find /var/mobile/Library/Logs/CrashReporter -type f -mmin -10 -print -exec tail -n 80 {} \;'
     echo "----- ${label} console log tail -----" >&2
     tail -n 80 "$console_log" >&2 || true
     print_simulator_diagnostics
@@ -1138,7 +1151,7 @@ run_one_bundle() {
     tee "$console_log" <"$active_launch_pipe_dir/console" &
     active_launch_reader_pid=$!
     "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
-        xcrun simctl launch --console-pty "$udid" "$bundle_id" test \
+        xcrun simctl launch --console-pty "$udid" "$bundle_id" test --verbose=1 --ci=1 \
         >"$active_launch_pipe_dir/console" 2>&1 &
     launch_stream_pid=$!
     active_launch_stream_pid=$launch_stream_pid

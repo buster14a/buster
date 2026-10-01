@@ -660,6 +660,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_row_streams(UnitTestArguments* argu
     return result;
 }
 
+// A returned bit-field assignment result must not reread a volatile object.
+// Count only volatile memory operations, independent of parameter/local form.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_assignment_accesses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct S { unsigned char c:3; signed char y:4; _Bool b:1; };\n"
+                        "int assign(volatile struct S *p, int n) { return p->c = n; }\n"
+                        "int compound(volatile struct S *p, int n) { return p->y += n; }\n"
+                        "int prefix(volatile struct S *p) { return ++p->c; }\n"
+                        "int boolean(volatile struct S *p, int n) { return p->b = n; }\n");
+    String8 names[] = {S8("assign"), S8("compound"), S8("prefix"), S8("boolean")};
+    u32 expected_loads[] = {1, 2, 2, 1};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bit-field-assignment-accesses.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, names[name_index]);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            u32 stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + index;
+                                if (instruction->volatile_access)
+                                {
+                                    loads += instruction->opcode == IR_OPCODE_LOAD;
+                                    stores += instruction->opcode == IR_OPCODE_STORE;
+                                }
+                            }
+                            BUSTER_TEST(arguments, loads == expected_loads[name_index]);
+                            BUSTER_TEST(arguments, stores == 1);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -28858,6 +28919,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);

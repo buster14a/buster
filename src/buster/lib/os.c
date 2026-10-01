@@ -75,6 +75,9 @@ BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 #endif
 
 BUSTER_GLOBAL_LOCAL OsError os_file_invalid_error(void);
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_windows_ascii_equal_ignore_case(String8 a, String8 b);
+#endif
 
 #if !BUSTER_SINGLE_THREADED
 BUSTER_GLOBAL_LOCAL void lane_gang_release(ThreadContext* thread_context);
@@ -5648,6 +5651,63 @@ String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
     return result;
 }
 
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_windows_environment_name_equal(String8 a, String8 b)
+{
+    bool result = os_windows_ascii_equal_ignore_case(a, b);
+    if (!result && a.length <= INT32_MAX && b.length <= INT32_MAX)
+    {
+        bool non_ascii = false;
+        for (u64 index = 0; index < a.length && !non_ascii; index += 1)
+        {
+            non_ascii = (u8)a.pointer[index] >= 0x80;
+        }
+        for (u64 index = 0; index < b.length && !non_ascii; index += 1)
+        {
+            non_ascii = (u8)b.pointer[index] >= 0x80;
+        }
+        // The shared conversion replaces malformed UTF-8. Refuse that path
+        // rather than aliasing an invalid query to a real U+FFFD name.
+        bool valid_utf8 = non_ascii &&
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a.pointer, (int)a.length, 0, 0) > 0 &&
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, b.pointer, (int)b.length, 0, 0) > 0;
+        if (valid_utf8)
+        {
+            // Preserve allocation-free ASCII and byte-equal names. Unicode
+            // mismatches use Windows' ordinal case mapping, independent of the
+            // locale. Entry/teardown callers can have no selected context.
+            bool has_context = thread_context_selected() != 0;
+            TemporalArena temp = {0};
+            Arena* arena;
+            if (has_context)
+            {
+                temp = scratch_begin(0, 0);
+                arena = temp.arena;
+            }
+            else
+            {
+                arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+            }
+            if (arena)
+            {
+                String16 left = string16_from_string8(arena, a, false);
+                String16 right = string16_from_string8(arena, b, false);
+                result = CompareStringOrdinal(left.pointer, (int)left.length, right.pointer, (int)right.length, TRUE) == CSTR_EQUAL;
+            }
+            if (has_context)
+            {
+                scratch_end(temp);
+            }
+            else if (arena)
+            {
+                arena_destroy(arena, 1);
+            }
+        }
+    }
+    return result;
+}
+#endif
+
 String8 os_get_environment_variable(String8 variable)
 {
     String8 result = {0};
@@ -5658,7 +5718,12 @@ String8 os_get_environment_variable(String8 variable)
         for (u64 i = 0; i < env_count; i += 1)
         {
             String8 env = env_pointer[i];
-            if (string_equal(variable, env))
+#if BUSTER_WINDOWS
+            bool matches = os_windows_environment_name_equal(variable, env);
+#else
+            bool matches = string_equal(variable, env);
+#endif
+            if (matches)
             {
                 result = program_state->input.environment_values.pointer[i];
                 break;
