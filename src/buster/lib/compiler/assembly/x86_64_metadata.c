@@ -7317,8 +7317,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         }
         if (immediate.has_symbol)
         {
-            if (!buster_x86_metadata_emit_relocation(scratch, immediate.symbol, buster_x86_metadata_emit_absolute_relocation_kind(width), width,
-                                                     immediate.addend))
+            // SIMMz extends an imm32 to a 64-bit data operand.  DF64 forms
+            // such as PUSH have no explicit register/memory data binding.
+            // UIMM32 control fields remain unsigned even with 64-bit operands.
+            bool data64 = data_width == 64 ||
+                          (!data_width && pattern.df64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64);
+            u8 relocation_kind = width == 4 && signed_immediate && data64
+                                     ? BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED
+                                     : buster_x86_metadata_emit_absolute_relocation_kind(width);
+            if (!buster_x86_metadata_emit_relocation(scratch, immediate.symbol, relocation_kind, width, immediate.addend))
                 return BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY;
             if (!buster_x86_metadata_emit_write_le(scratch, 0, width)) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
         }

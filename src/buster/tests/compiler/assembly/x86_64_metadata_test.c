@@ -8662,7 +8662,91 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    push_symbol_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && push_symbol_emit.form_id == 9743 &&
                                    push_symbol_emit.byte_count == 5 && push_symbol_emit.relocation_count == 1 &&
                                    push_symbol_relocations[0].offset == 1 && push_symbol_relocations[0].width == 4 &&
-                                   push_symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                                   push_symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED);
+        {
+            // The schema's signedness and the semantic data width both
+            // matter: BEXTR's unsigned control is still imm32 with GPR64.
+            BusterX86MetadataPhysicalOperand symbol32 = x86_64_metadata_test_physical_imm(0, 32);
+            symbol32.has_value = false;
+            symbol32.symbol = S8("immediate_target");
+            symbol32.has_symbol = true;
+            symbol32.addend = -7;
+            BusterX86MetadataPhysicalOperand symbol64 = symbol32;
+            symbol64.width = 64;
+            BusterX86MetadataPhysicalOperand register64[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 64), symbol32,
+            };
+            BusterX86MetadataPhysicalOperand register32[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 32), symbol32,
+            };
+            BusterX86MetadataPhysicalOperand memory64[2] = {
+                x86_64_metadata_test_physical_mem_base(3, 64, 0), symbol32,
+            };
+            BusterX86MetadataPhysicalOperand mov64[2] = {register64[0], symbol64};
+            BusterX86MetadataPhysicalOperand multiply64[3] = {register64[0], register64[0], symbol32};
+            BusterX86MetadataPhysicalOperand control64[3] = {register64[0], memory64[0], symbol32};
+            typedef struct X86_64MetadataImmediateRelocationCase X86_64MetadataImmediateRelocationCase;
+            struct X86_64MetadataImmediateRelocationCase
+            {
+                String8 mnemonic;
+                u32 form_id;
+                BusterX86MetadataPhysicalOperand const* operands;
+                u32 operand_count;
+                u8 execution_mode;
+                u8 kind;
+                u8 width;
+                u8 offset;
+            };
+            X86_64MetadataImmediateRelocationCase immediate_cases[] = {
+                {S8("PUSH"), 9743, &symbol32, 1, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 1},
+                {S8("PUSH"), 9743, &symbol32, 1, BUSTER_X86_METADATA_EXECUTION_MODE_32, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32, 4, 1},
+                {S8("ADD"), 9270, register64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 3},
+                {S8("ADD"), 9270, register32, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32, 4, 2},
+                {S8("ADD"), 607, register64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 6},
+                {S8("MOV"), 9533, register64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 3},
+                {S8("MOV"), 9533, register32, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32, 4, 2},
+                {S8("MOV"), 9534, memory64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 3},
+                {S8("MOV"), 10018, register32, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32, 4, 1},
+                {S8("MOV"), 10018, mov64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64, 8, 2},
+                {S8("TEST"), 9454, register64, 2, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 3},
+                {S8("IMUL"), 9745, multiply64, 3, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED, 4, 3},
+                {S8("BEXTR_XOP"), 326, control64, 3, BUSTER_X86_METADATA_EXECUTION_MODE_64, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32, 4, 5},
+            };
+            String8 immediate_features[] = {S8("*")};
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(immediate_cases); case_index += 1)
+            {
+                X86_64MetadataImmediateRelocationCase test = immediate_cases[case_index];
+                BusterX86MetadataPhysicalQuery query = x86_64_metadata_test_physical_query(
+                    test.mnemonic, test.operands, test.operand_count, (BusterX86MetadataPhysicalAttributes){0},
+                    immediate_features, BUSTER_ARRAY_LENGTH(immediate_features));
+                query.execution_mode = test.execution_mode;
+                if (test.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_32) query.address_size = 32;
+                u8 bytes[32] = {0};
+                BusterX86MetadataRelocation relocations[2] = {0};
+                BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = query, .form_id = test.form_id,
+                    .output = bytes, .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
+                    .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                BUSTER_TEST_RAW(arguments, emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 1 &&
+                                           relocations[0].kind == test.kind && relocations[0].width == test.width &&
+                                           relocations[0].offset == test.offset && relocations[0].addend == symbol32.addend &&
+                                           string_equal(relocations[0].symbol, symbol32.symbol),
+                                string_format(arguments->arena, S8("symbolic immediate form={u32} mode={u32}"), test.form_id, test.execution_mode));
+                if (test.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
+                {
+                    BusterX86MetadataFormKey key = {0};
+                    bool key_valid = buster_x86_metadata_form_key(test.form_id, &key);
+                    BUSTER_TEST(arguments, key_valid);
+                    if (key_valid)
+                    {
+                        BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                            key, test.operands, test.operand_count, (BusterX86MetadataPhysicalAttributes){0},
+                            immediate_features, BUSTER_ARRAY_LENGTH(immediate_features)));
+                    }
+                }
+            }
+        }
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("RET_NEAR"), 10019, &ret_imm16, 1,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
                                                                  (u8 const[]){0xc2, 0x34, 0x12}, 3));

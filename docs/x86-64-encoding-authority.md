@@ -132,6 +132,12 @@ distance are not interchangeable. The plan chooses legal immediate/displacement
 widths, including imm8/imm32 boundaries and divisible in-range disp8*N. An
 unresolved symbol cannot use a short form merely because its placeholder is zero.
 
+A symbolic imm32 uses the signed absolute-32 fixup when the selected signed
+immediate schema extends it to a 64-bit data operand. Default-64 forms such as
+PUSH derive that width from the execution mode even without an explicit data
+binding. A 32-bit data operand and unsigned UIMM32 control fields retain the
+ordinary absolute-32 fixup; encoded width alone does not determine interpretation.
+
 Return a neutral fixup descriptor containing byte offset, field width, value
 interpretation, relocation kind, symbol/addend, and the PC base used to compute
 relative values. ELF/COFF/Mach-O/JIT adapters select their relocation records and
