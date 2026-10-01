@@ -37,6 +37,11 @@
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
   compile each test source independently.
+- The separate desktop `test_ui_utf8` component target runs actual UI text-event
+  activation and underline draw-command consumers using the production
+  `ui_core` module and an inert native renderer boundary. It is included in
+  `test_all` and `test_units` when tests and libc are enabled, without adding UI
+  dependencies or a descriptor to `ide`; see [graphics/UI](../projects/graphics-ui.md).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
