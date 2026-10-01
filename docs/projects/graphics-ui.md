@@ -49,5 +49,10 @@ A completed slider click reads its own release coordinate from
 still update hover state, but do not change that committed value. A slider with
 live left-button capture continues following the current pointer, including
 outside its bounds; an outside release ends capture without reporting a click.
-Registered `ui_tests` cover these rules against the completed hit tree and when
-widgets are rebuilt in another order.
+`./build.sh build --config Release -t test_ui_slider` runs the focused
+`ui_slider_tests` module against the real `ui_core`/`ui_builder` front doors and
+an inert native renderer boundary. Desktop `test_all` and `test_units` include
+this component when tests and libc are enabled; mobile and tests-disabled graphs
+omit it. It covers the completed hit tree and reordered widget builds without
+adding UI dependencies to the compiler. The broad retained `ui_tests` suite is
+unregistered; these component checks do not establish device rendering support.

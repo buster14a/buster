@@ -4,9 +4,9 @@
 
 ## Tests
 
-- All tests run inside the `ide` executable; there is no external unit-test
-  framework. From the repository root, run `ide test --verbose=1 --ci=1` or
-  build the `test_all` target.
+- Compiler and foundation module tests run inside the `ide` executable; there
+  is no external unit-test framework. From the repository root, run
+  `ide test --verbose=1 --ci=1` or build the `test_all` target.
 - `ide test --module=<name>[,<name>...]` runs only the named modules. A name
   is a `TestDescriptor.name` from `test_descriptors` in
   `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.
@@ -37,6 +37,12 @@
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
   compile each test source independently.
+- The desktop `test_ui_slider` component target runs the focused
+  `ui_slider_tests` module against production `ui_core`/`ui_builder` and an
+  unused native renderer boundary. It is part of `test_all` and `test_units`
+  when tests and libc are enabled, without adding UI dependencies to `ide`.
+  The retained broad `ui_tests` suite remains unregistered; see
+  [graphics/UI](../projects/graphics-ui.md).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
