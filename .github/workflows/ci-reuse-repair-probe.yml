@@ -1,9 +1,13 @@
 name: Main CI reuse repair probe
 on:
   push:
-    branches: [codex/2134-bind-reuse-finalization]
+    branches:
+      - codex/2134-bind-reuse-finalization
 permissions:
   contents: read
+concurrency:
+  group: reuse-repair-${{ github.run_id }}
+  cancel-in-progress: false
 jobs:
   regressions:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
@@ -13,23 +17,115 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Preserve exact source inputs
+      - name: Run reuse and surrounding contract regressions
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/reuse-repair"
           git rev-parse HEAD > "$RUNNER_TEMP/reuse-repair/revision.txt"
-          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/reuse-repair/source.tar.gz"
-      - name: Run existing reuse regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -B tools/main_ci_reuse_test.py -v 2>&1 | tee "$RUNNER_TEMP/reuse-repair/tests.log"
-      - name: Retain pinned source and test results
+          git hash-object tools/main_ci_reuse.py tools/main_ci_reuse_test.py .github/workflows/ci.yml docs/ci-main-reuse.md > "$RUNNER_TEMP/reuse-repair/blobs.txt"
+          for suite in tools/main_ci_reuse_test.py tools/github_ci_time_test.py tools/matrix_shard_test.py tools/ci_artifact_upload_test.py tools/ci_zig_cache_test.py tests/action_pins_test.py tests/ci_tools_test.py; do
+            python3 -B "$suite" -v 2>&1 | tee "$RUNNER_TEMP/reuse-repair/$(basename "$suite").log"
+          done
+          python3 -B tools/check_action_pins.py
+          git diff --check
+      - name: Retain regression results
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reuse-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: reuse-repair-regressions-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/reuse-repair/
+          if-no-files-found: error
+          retention-days: 7
+  fixture_decision:
+    name: Synthetic receipt producer (not production admission)
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      receipt: ${{ steps.fixture.outputs.receipt }}
+      receipt_digest: ${{ steps.fixture.outputs.receipt_digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Exercise the decision CLI with synthetic API records
+        id: fixture
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, 'tools')
+          from main_ci_reuse_test import MainCIReuseTests
+          case = MainCIReuseTests()
+          case.setUp()
+          try:
+              status, report, outputs, console = case.call_cli('decide')
+              assert status == 0 and outputs['reuse'] == 'true', console
+              root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-receipt'
+              root.mkdir()
+              (root / 'decision.json').write_text(json.dumps(report, indent=2))
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+                  for key in ('receipt', 'receipt_digest'):
+                      stream.write(key + '=' + outputs[key] + '\n')
+              print('SYNTHETIC_DECISION_OK: fixture source 100 / main 101; no live admission')
+          finally:
+              case.doCleanups()
+          PY
+      - name: Retain synthetic decision result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reuse-repair-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-receipt/
+          if-no-files-found: error
+          retention-days: 7
+  fixture_finish:
+    name: Synthetic receipt consumer and rejection (not production admission)
+    needs: fixture_decision
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify the transferred receipt and retain rejection diagnostics
+        shell: bash
+        env:
+          SOURCE_RECEIPT: ${{ needs.fixture_decision.outputs.receipt }}
+          SOURCE_RECEIPT_DIGEST: ${{ needs.fixture_decision.outputs.receipt_digest }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, 'tools')
+          from main_ci_reuse_test import MainCIReuseTests
+          case = MainCIReuseTests()
+          case.setUp()
+          try:
+              case.api.repository_rows = []
+              case.unexpanded_main_jobs()
+              text = os.environ['SOURCE_RECEIPT']
+              digest = os.environ['SOURCE_RECEIPT_DIGEST']
+              result = case.call_cli('finish', text=text, digest=digest)
+              assert result[0] == 0 and result[1]['status'] == 'verified', result[3]
+              assert len(result[1]['receipt']['main_jobs']) == 13
+              root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-receipt'
+              root.mkdir()
+              (root / 'verified.json').write_text(json.dumps(result[1], indent=2))
+              case.api.scoped_rows = []
+              rejected = case.call_cli('finish', text=text, digest=digest)
+              case.assert_rejected(rejected, stage='source-uniqueness', kind='missing-queue-run')
+              (root / 'rejected.json').write_text(json.dumps(rejected[1], indent=2))
+              print('SYNTHETIC_HANDOFF_OK: real job output/environment transport, 13 retained fixture jobs')
+              print('SYNTHETIC_REJECTION_OK: missing scoped evidence remains red with diagnostic JSON')
+          finally:
+              case.doCleanups()
+          PY
+      - name: Retain synthetic finish and failure results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reuse-repair-finish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-receipt/
           if-no-files-found: error
           retention-days: 7
