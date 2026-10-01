@@ -15,7 +15,7 @@ concurrency:
 jobs:
   external-archive:
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - name: Checkout diagnostic controller
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -53,10 +53,9 @@ jobs:
         run: |
           set -euo pipefail
           exec > >(tee "$RUNNER_TEMP/1898-evidence/build.log") 2>&1
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-          ./build/build generate --cc clang --ci --linker DEFAULT
-          ./build/build build --config Release -t ide
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/1898-build-driver"
+          "$RUNNER_TEMP/1898-build-driver" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/1898-build-driver" build --config Release -t ide
       - name: Independent ordinary archive controls
         timeout-minutes: 5
         shell: bash
