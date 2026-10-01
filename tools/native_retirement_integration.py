@@ -6,20 +6,27 @@ current default-branch revision. Candidate code is never imported or executed
 by this module. Publication is one lease-guarded ref update after a separate
 read-only job validates the exact final tree. See docs/native-retirement-automation.md
 for the opt-in standing grant; manual authorization remains the default.
+API reads for both admission clients use github_read_json: bounded GET-only
+recovery, sanitized APIReadError diagnostics, and no replay of publication.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 import hashlib
+import http.client
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -81,6 +88,8 @@ TRUSTED_FILE_PATHS = (
 STALE_MAIN_EXIT = 75
 STALE_HEAD_EXIT = 76
 MAX_API_PAGES = 10
+API_READ_ATTEMPTS = 4
+API_READ_BUDGET_SECONDS = 30
 SHA256_FIELDS = ("policy_sha256", "receipt_sha256", "project_sha256", "ledger_sha256")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -88,6 +97,63 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 class IntegrationError(Exception):
     """A fail-closed candidate, repository, or publication error."""
+
+
+class APIReadError(OSError):
+    """Sanitized, unresolved GET failure; never a correctness rejection."""
+
+    def __init__(self, path: str, status: int | None, attempts: int):
+        self.path, self.status = path, status
+        super().__init__(f"GET {path}: HTTP {status}" if status is not None else
+                         f"GET {path}: transport failure")
+        self.args = (self.args[0] + f" after {attempts} attempt(s); not admitted",)
+
+
+def github_read_json(request, path: str, *, retry_404: bool = False):
+    """Retry GETs only, within one elapsed budget; never log headers or bodies."""
+    if request.get_method() != "GET":
+        raise IntegrationError("admission retries accept only GET requests")
+    deadline = time.monotonic() + API_READ_BUDGET_SECONDS
+    result = None
+    for attempt in range(1, API_READ_ATTEMPTS + 1):
+        status, delay, retry = None, 2 ** (attempt - 1), True
+        try:
+            with urllib.request.urlopen(request, timeout=max(0.001, deadline - time.monotonic())) as response:
+                payload = response.read()
+            result = json.loads(payload) if payload else None
+            break
+        except urllib.error.HTTPError as error:
+            status = error.code
+            headers = error.headers or {}
+            retry = (status in (429, 500, 502, 503, 504) or
+                     (status == 404 and retry_404) or
+                     (status == 403 and (headers.get("X-RateLimit-Remaining") == "0" or
+                                        headers.get("Retry-After") is not None)))
+            timing = headers.get("Retry-After")
+            try:
+                if timing is not None:
+                    try:
+                        requested = float(timing)
+                    except ValueError:
+                        requested = parsedate_to_datetime(timing).timestamp() - time.time()
+                elif headers.get("X-RateLimit-Remaining") == "0":
+                    requested = float(headers["X-RateLimit-Reset"]) - time.time()
+                else:
+                    requested = delay
+                if not math.isfinite(requested):
+                    retry = False
+                delay = max(delay, requested)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                retry = False
+            error.close()
+        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead):
+            pass
+        if not retry or attempt == API_READ_ATTEMPTS or not 0 <= delay < deadline - time.monotonic():
+            raise APIReadError(path, status, attempt) from None
+        print(f"GET {path}: retry {attempt}/{API_READ_ATTEMPTS - 1} in {delay:g}s "
+              f"(HTTP {status if status is not None else 'transport'}); not admitted", file=sys.stderr)
+        time.sleep(delay)
+    return result
 
 
 class StaleMain(IntegrationError):
