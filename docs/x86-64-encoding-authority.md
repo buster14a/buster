@@ -29,7 +29,7 @@ Paths below are relative to `src/buster/lib/` unless stated otherwise.
 | Consumer | Route and independent decisions still present |
 |---|---|
 | `compiler/assembly/assembly.c` | Intel/AT&T parsing and inline/global assembly become physical operands, then `assembly_x86_metadata_select_source_form` / `assembly_x86_metadata_emit`. Final ordinary bytes use metadata. |
-| The same assembler's size/legality paths | Source `LEA`, `MOVZX`/`MOVSX`/`MOVSXD`, rotates, shifts, double shifts and the scalar integer/control family now bypass the handwritten size functions: checked metadata selection supplies length, displacement width and form for both layout and emission. [LEA Intel and AT&T oracle](x86-64-source-layout-oracle.s); [move-extension oracle](x86-64-source-move-extend-oracle.s); [shift oracle](x86-64-source-shift-oracle.s); [scalar/control oracle](x86-64-source-scalar-oracle.s). Their obsolete handwritten size functions are removed. The selected form ID is retained through checked emission rather than selecting an alternative again. The other families still call `assembly_x86_memory_displacement_size`, `memory_encoding_size`, `instruction_size`, `general_instruction_size`, `size_*`, `evex_*`, `apx_*`, `amd_*`, `amx_*`, or `mask_instruction_size`, duplicating size, immediate, address, suffix, feature and operand decisions. AMD/vector form tables are not another final byte packer, but they remain independent encoding-decision authorities to migrate separately. |
+| The same assembler's size/legality paths | Source `LEA`, `MOVZX`/`MOVSX`/`MOVSXD`, rotates, shifts, double shifts and the scalar integer/control, x87, MMX, SSE and VEX families now bypass the handwritten size functions: checked metadata selection supplies length, displacement width and form for both layout and emission. [LEA Intel and AT&T oracle](x86-64-source-layout-oracle.s); [move-extension oracle](x86-64-source-move-extend-oracle.s); [shift oracle](x86-64-source-shift-oracle.s); [scalar/control oracle](x86-64-source-scalar-oracle.s); [legacy vector/x87 oracle](x86-64-source-legacy-oracle.s). Their obsolete handwritten size functions are removed. The selected form ID is retained through checked emission rather than selecting an alternative again. The other families still call `assembly_x86_memory_displacement_size`, `memory_encoding_size`, `instruction_size`, `general_instruction_size`, `size_*`, `evex_*`, `apx_*`, `amd_*`, `amx_*`, or `mask_instruction_size`, duplicating size, immediate, address, suffix, feature and operand decisions. AMD/vector form tables are not another final byte packer, but they remain independent encoding-decision authorities to migrate separately. |
 | `compiler/codegen/codegen.c` | `codegen_canonical_x64_metadata_emit*` and relocation helpers adapt canonical lowering to metadata. Query, immediate/displacement, and byte-template caches are derived emission routes. Scalar/SIMD/x87/EVEX helpers and ABI expansion choose operations; they must not invent fields. Inline/global assembly rejoins the source assembler. |
 | `compiler/codegen/machine.c`, `machine_x86_64.c` | Exact DIRECT/FAMILY recipes, shape caches, prevalidated register/memory/immediate templates, and EXPANSION switch. `machine_x86_64_exact_prewarm` prepares exact shapes. The registry has 126 rows: 47 DIRECT, 50 FAMILY, 29 EXPANSION, plus documented LEA_BLOCK, INDIRECT_BRANCH and LOAD_SYMBOL_GOT surfaces. These are dispatch/expansion paths, not 126 encoders. |
 | `x86_64.c` | `x86_64_encode_register_operation` already sends ordinary register operations through metadata, including extended-register variants. CPU-identification constants are not instruction emission. |
@@ -189,6 +189,20 @@ Scalar/control syntax policy also retains full-width byte immediates, typed
 conditional-move aliases, the metadata-owned EMMS form, and the existing limits
 on symbolic arithmetic immediates and reserved control/debug register spellings.
 These projections do not create another encoding or relocation authority.
+
+Legacy XMM, MMX and x87 source memory qualifiers are checked against the generated
+operand schema. Candidate-local normalization keeps public vector source widths
+separate from encoded element widths; invalid qualifiers cannot choose another
+form or publish symbols/relocations. Unsized x87 data/arithmetic source is rejected
+instead of picking a type by encoded size. The source census uses the same schema
+projection, including the accepted unsized x87 environment-image spelling.
+
+The legacy migration characterizes all 11,013 stable census records and pins the
+175 changed outcomes, byte counts and relocation counts. Intel exact witnesses
+increase by 105 and AT&T exact witnesses by 54, with no previously exact witness
+losing its complete outcome. Twelve x87 state-image operand-size variants and one
+alternate MOVQ encoding remain strict byte mismatches; equivalent operations are
+not counted as identical bytes.
 
 ### Throughput and publication
 

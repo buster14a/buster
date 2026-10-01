@@ -8318,6 +8318,17 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_single_physical_width(u16 flags)
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_form_width_token(String8 token)
 {
+    if (buster_x86_metadata_input_string_equal(token, S8("mem16"))) return 16;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem32real")) ||
+        buster_x86_metadata_input_string_equal(token, S8("mem32int"))) return 32;
+    if (buster_x86_metadata_input_string_equal(token, S8("m64real")) ||
+        buster_x86_metadata_input_string_equal(token, S8("mem64int"))) return 64;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem80real")) ||
+        buster_x86_metadata_input_string_equal(token, S8("mem80dec"))) return 80;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem14"))) return 112;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem28"))) return 224;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem94"))) return 752;
+    if (buster_x86_metadata_input_string_equal(token, S8("mem108"))) return 864;
     if (buster_x86_metadata_input_string_equal(token, S8("b"))) return 8;
     if (buster_x86_metadata_input_string_equal(token, S8("w")) ||
         buster_x86_metadata_input_string_equal(token, S8("wrd")))
@@ -8417,7 +8428,20 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
                       (pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_FULL ||
                        pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_HALF);
     bool fixed_conversion = form.encoder_family != BUSTER_X86_METADATA_ENCODER_EVEX && conversion;
-    if ((!evex_tuple && !fixed_conversion) || !query.operands || !query.operand_count || query.operand_count > 16)
+    bool fixed_legacy_vector = false;
+    if (query.operands && query.operand_count <= 16 &&
+        (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
+         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX))
+    {
+        for (u32 index = 0; index < query.operand_count; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = query.operands[index];
+            fixed_legacy_vector |= operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                   (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX ||
+                                    operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM);
+        }
+    }
+    if ((!evex_tuple && !fixed_conversion && !fixed_legacy_vector) || !query.operands || !query.operand_count || query.operand_count > 16)
         return false;
 
     u16 encoded_width = 0;
@@ -8443,21 +8467,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
             encoded_width = evex_tuple
                                 ? buster_x86_metadata_single_scalar_width(metadata.physical_width_flags)
                                 : buster_x86_metadata_single_physical_width(metadata.physical_width_flags);
-            if (conversion) form_source_width = buster_x86_metadata_form_memory_source_width(form, metadata.atom);
+            if (conversion || fixed_legacy_vector) form_source_width = buster_x86_metadata_form_memory_source_width(form, metadata.atom);
         }
         physical_index += 1;
     }
-    if (conversion && form_source_width)
+    if ((conversion || fixed_legacy_vector) && form_source_width)
     {
-        // Conversion metadata publishes the source tuple in the operand
-        // schema itself.  That remains authoritative for EVEX rows too:
-        // some AVX10 rows use a half-memory tuple whose parser-side vector
-        // length is intentionally not a scalar source width.
+        // Conversion and legacy vector metadata publish the source tuple
+        // in the operand schema itself. That remains authoritative for EVEX
+        // rows too: some AVX10 rows use a half-memory tuple whose parser-side
+        // vector length is intentionally not a scalar source width.
         tuple_width = form_source_width;
     }
     else if (!evex_tuple)
     {
-        tuple_width = fixed_conversion && form_source_width ? form_source_width : encoded_width;
+        tuple_width = (fixed_conversion || fixed_legacy_vector) && form_source_width ? form_source_width : encoded_width;
     }
     if (metadata_memory_count != 1 || !encoded_width || !tuple_width || physical_memory_index >= query.operand_count ||
         query.operands[physical_memory_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
@@ -8469,11 +8493,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
     *source_width_valid = !source_width || source_width == required_source_width;
     memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
     candidate_operands[physical_memory_index].width = encoded_width;
-    // Legacy/VEX/XOP conversion rows use the source tuple only as a
-    // source-level constraint. Their scalar metadata width still drives the
-    // encoder, so do not pass the aggregate qualifier into the low-level
-    // fixed-form emitter after validating it above.
-    if (fixed_conversion) candidate_operands[physical_memory_index].memory.source_width = 0;
+    // Fixed conversion and legacy MMX/XMM rows use the source tuple only
+    // as a source-level constraint. Their scalar metadata width still drives
+    // the encoder, so keep the validated aggregate qualifier out of the
+    // low-level fixed-form emitter.
+    if (fixed_conversion || fixed_legacy_vector) candidate_operands[physical_memory_index].memory.source_width = 0;
     *source_tuple_width = tuple_width;
     *source_memory_operand = (u8)physical_memory_index;
     return true;
@@ -9310,9 +9334,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 }
                 else
                 {
-                    bool candidate_source_query_possible = source_tuple_query_possible ||
-                        (conversion_source_query_possible &&
-                         buster_x86_metadata_string_input_equal(form.category.offset, S8("CONVERT")));
+                    bool candidate_source_query_possible = source_tuple_query_possible || conversion_source_query_possible;
                     inferred_memory_width = candidate_source_query_possible &&
                         buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands,
                                                                        &source_width_valid, &candidate_source_tuple_width,

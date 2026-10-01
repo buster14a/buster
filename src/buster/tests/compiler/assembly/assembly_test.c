@@ -367,6 +367,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_scalar_layout(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_legacy_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 3);
+
+    // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-legacy-oracle.s.
+    u8 const expected[] = {
+        0xd9, 0x45, 0x00, 0x41, 0xdd, 0x45, 0x7f, 0x43, 0xdb, 0xac, 0x8c, 0x80,
+        0x00, 0x00, 0x00, 0x41, 0xdb, 0xbd, 0x00, 0x00, 0x00, 0x00, 0x41, 0xdf,
+        0x45, 0x00, 0x41, 0xdf, 0xbd, 0x80, 0x00, 0x00, 0x00, 0xd8, 0x05, 0x00,
+        0x00, 0x00, 0x00, 0xd8, 0xe3, 0xde, 0xfb, 0xdb, 0xea, 0xd9, 0xcf, 0x41,
+        0xd9, 0x7d, 0x00, 0x9b, 0x0f, 0x77, 0x41, 0x0f, 0x6f, 0xbd, 0x00, 0x00,
+        0x00, 0x00, 0x43, 0x0f, 0xfd, 0x7c, 0x8c, 0x80, 0x0f, 0xef, 0xfe, 0x44,
+        0x0f, 0x10, 0x45, 0x00, 0x66, 0x47, 0x0f, 0x28, 0x8c, 0x8c, 0x7f, 0xff,
+        0xff, 0xff, 0xf3, 0x45, 0x0f, 0x7f, 0x95, 0x00, 0x00, 0x00, 0x00, 0x66,
+        0x44, 0x0f, 0x58, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x45, 0x0f, 0x59, 0xe5,
+        0xf3, 0x45, 0x0f, 0x58, 0x75, 0x7f, 0xf2, 0x45, 0x0f, 0x5e, 0xbd, 0x80,
+        0x00, 0x00, 0x00, 0xc4, 0x01, 0x7c, 0x10, 0x44, 0x8c, 0x80, 0xc4, 0x41,
+        0x7e, 0x7f, 0x8d, 0x00, 0x00, 0x00, 0x00, 0xc4, 0x01, 0x24, 0x58, 0x94,
+        0x8c, 0x7f, 0xff, 0xff, 0xff, 0xc5, 0x15, 0x5c, 0x25, 0x00, 0x00, 0x00,
+        0x00, 0xc4, 0x41, 0x05, 0xef, 0xf0,
+    };
+    String8 const sources[] = {
+        S8("fld dword ptr [rbp]\n"
+           "fld qword ptr [r13+127]\n"
+           "fld tbyte ptr [r12+r9*4+128]\n"
+           "fstp tbyte ptr [r13+external_x87]\n"
+           "fild word ptr [r13]\n"
+           "fistp qword ptr [r13+128]\n"
+           "fadd dword ptr [rip+external_float]\n"
+           "fsub st(0), st(3)\n"
+           "fdivp st(3), st(0)\n"
+           "fucomi st(0), st(2)\n"
+           "fxch st(7)\n"
+           "fnstcw word ptr [r13]\n"
+           "fwait\n"
+           "emms\n"
+           "movq mm7, qword ptr [r13+external_mmx]\n"
+           "paddw mm7, qword ptr [r12+r9*4-128]\n"
+           "pxor mm7, mm6\n"
+           "movups xmm8, xmmword ptr [rbp]\n"
+           "movapd xmm9, xmmword ptr [r12+r9*4-129]\n"
+           "movdqu xmmword ptr [r13+external_sse], xmm10\n"
+           "addpd xmm11, xmmword ptr [rip+external_packed]\n"
+           "mulps xmm12, xmm13\n"
+           "addss xmm14, dword ptr [r13+127]\n"
+           "divsd xmm15, qword ptr [r13+128]\n"
+           "vmovups ymm8, ymmword ptr [r12+r9*4-128]\n"
+           "vmovdqu ymmword ptr [r13+external_vex], ymm9\n"
+           "vaddps ymm10, ymm11, ymmword ptr [r12+r9*4-129]\n"
+           "vsubpd ymm12, ymm13, ymmword ptr [rip+external_vector]\n"
+           "vpxor ymm14, ymm15, ymm8\n"),
+        S8("flds (%rbp)\n"
+           "fldl 127(%r13)\n"
+           "fldt 128(%r12,%r9,4)\n"
+           "fstpt external_x87(%r13)\n"
+           "filds (%r13)\n"
+           "fistpll 128(%r13)\n"
+           "fadds external_float(%rip)\n"
+           "fsub %st(3), %st\n"
+           "fdivrp %st, %st(3)\n"
+           "fucomi %st(2), %st\n"
+           "fxch %st(7)\n"
+           "fnstcw (%r13)\n"
+           "fwait\n"
+           "emms\n"
+           "movq external_mmx(%r13), %mm7\n"
+           "paddw -128(%r12,%r9,4), %mm7\n"
+           "pxor %mm6, %mm7\n"
+           "movups (%rbp), %xmm8\n"
+           "movapd -129(%r12,%r9,4), %xmm9\n"
+           "movdqu %xmm10, external_sse(%r13)\n"
+           "addpd external_packed(%rip), %xmm11\n"
+           "mulps %xmm13, %xmm12\n"
+           "addss 127(%r13), %xmm14\n"
+           "divsd 128(%r13), %xmm15\n"
+           "vmovups -128(%r12,%r9,4), %ymm8\n"
+           "vmovdqu %ymm9, external_vex(%r13)\n"
+           "vaddps -129(%r12,%r9,4), %ymm11, %ymm10\n"
+           "vsubpd external_vector(%rip), %ymm13, %ymm12\n"
+           "vpxor %ymm8, %ymm15, %ymm14\n"),
+    };
+    u64 const offsets[] = {18, 35, 58, 91, 100, 135, 153};
+    s64 const addends[] = {0, -4, 0, 0, -4, 0, -4};
+    AssemblyRelocationKind const kinds[] = {ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED, ASSEMBLY_RELOCATION_X86_PC32};
+    String8 const symbols[] = {S8("external_x87"), S8("external_float"), S8("external_mmx"), S8("external_sse"), S8("external_packed"), S8("external_vex"), S8("external_vector")};
+    for (u32 syntax = 0; syntax < BUSTER_ARRAY_LENGTH(sources); syntax += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, sources[syntax],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, expected, sizeof(expected)));
+        bool relocations_match = encoded.relocation_count == BUSTER_ARRAY_LENGTH(offsets);
+        for (u32 index = 0; relocations_match && index < encoded.relocation_count; index += 1)
+        {
+            AssemblyRelocation relocation = encoded.relocations[index];
+            relocations_match = relocation.offset == offsets[index] && relocation.addend == addends[index] &&
+                                relocation.kind == kinds[index] && relocation.symbol < encoded.symbol_count &&
+                                string_equal(encoded.symbols[relocation.symbol].name, symbols[index]);
+        }
+        BUSTER_TEST(arguments, relocations_match);
+    }
+    AssemblyEncodeResult invalid = assembly_encode(arguments->arena,
+        S8("nop\n"
+           "fld xmm0\n"
+           "fstp byte ptr [r13+invalid_x87]\n"
+           "movups xmm8, qword ptr [r13+invalid_sse]\n"
+           "vaddps ymm1, xmm2, ymm3\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const valid_prefix[] = {0x90};
+    BUSTER_TEST(arguments, invalid.diagnostic_count == 4 &&
+                               assembly_test_bytes_equal(invalid.bytes, valid_prefix, sizeof(valid_prefix)) &&
+                               invalid.relocation_count == 0 && invalid.symbol_count == 0);
+    String8 const mnemonics[] = {S8("MOVUPS"), S8("MOVDQU"), S8("FLD"), S8("FLD"), S8("FLD"), S8("FILD")};
+    u16 const widths[] = {128, 128, 32, 64, 80, 16};
+    s64 const displacements[] = {-129, -128, 0, 127, 128, 0};
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(mnemonics); operation += 1)
+    {
+        for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+        {
+            u16 width = widths[operation];
+            BusterX86MetadataPhysicalOperand operands[2] = {
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 128,
+                 .reg = {.index = 8, .width = 128, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = width,
+                 .memory = {.has_base = true, .base = {.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                            .source_width = width, .has_displacement = true, .displacement = displacements[displacement_index],
+                            .has_symbol = displacement_index == 5, .symbol = displacement_index == 5 ? S8("external_disp") : (String8){0}}},
+            };
+            String8 features[] = {S8("*")};
+            UnitTestResult agreement = assembly_test_metadata_layout_agreement(arguments, (BusterX86MetadataPhysicalQuery){
+                .mnemonic = mnemonics[operation], .operands = operands + (operation >= 2), .operand_count = operation >= 2 ? 1u : 2u,
+                .features = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)}, .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true});
+            result.test_count += agreement.test_count;
+            result.succeeded_test_count += agreement.succeeded_test_count;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
 {
     bool result = false;
@@ -3028,6 +3172,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     };
     BUSTER_TEST_FIXTURE(arguments, assembly_test_shift_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_scalar_layout);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_legacy_layout);
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;

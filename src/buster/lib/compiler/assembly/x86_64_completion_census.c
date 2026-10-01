@@ -608,7 +608,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
                                                                 BusterX86MetadataPhysicalOperand operand,
                                                                 BusterX86MetadataPhysicalAttributes attributes,
-                                                                BusterX86CompletionCensusSourceReason* reason)
+                                                                BusterX86CompletionCensusSourceReason* reason, bool unsized)
 {
     BusterX86MetadataPhysicalMemory memory = operand.memory;
     u16 width = memory.source_width ? memory.source_width : operand.width;
@@ -621,7 +621,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
     String8 base = {0};
     String8 index = {0};
     String8 symbol = {0};
-    if (!qualifier.length)
+    if (!qualifier.length && !unsized)
     {
         buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
         return (String8){0};
@@ -966,7 +966,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_typed_source(
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
             spelling = buster_x86_completion_register(arena, operand.reg);
         else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
-            spelling = buster_x86_completion_memory_intel(arena, operand, query.attributes, reason);
+            spelling = buster_x86_completion_memory_intel(arena, operand, query.attributes, reason, false);
         else spelling = buster_x86_completion_immediate(arena, operand);
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE ||
             operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
@@ -1026,8 +1026,19 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool mask_decorator = false;
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
+    bool unsized_memory = false;
     bool block_source_topology = buster_x86_metadata_block_memory_source_topology(form, query) ||
                                  buster_x86_metadata_aggregate_memory_source_topology(form, query);
+    bool legacy_memory_source = buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("X87_ALU"));
+    for (u32 index = 0; index < query.operand_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand physical = query.operands[index];
+        legacy_memory_source |= physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                (physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX ||
+                                 physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM);
+    }
+    legacy_memory_source &= form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
+                            form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
     if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);
@@ -1054,7 +1065,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             source_memory.width = 32;
             source_memory.memory.source_width = 32;
         }
-        spelling = buster_x86_completion_memory_intel(arena, source_memory, query.attributes, reason);
+        spelling = buster_x86_completion_memory_intel(arena, source_memory, query.attributes, reason, false);
         if (!spelling.length) return (String8){0};
         store = form.fixed_bytes[0] == 0xa2 || form.fixed_bytes[0] == 0xa3;
         return store ? string_format(arena, S8("{S8} {S8}, {S8}\n"), source, spelling, accumulator)
@@ -1123,6 +1134,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             return (String8){0};
         }
         operand = query.operands[physical_index++];
+        unsized_memory = false;
         if (query.attributes.has_mask_register && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
             operand.reg.index == query.attributes.mask_register)
@@ -1138,21 +1150,28 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             operand.memory.source_width = 512;
         }
         else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-                 buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) &&
-                 (form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY ||
-                  form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX ||
-                  form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP) &&
+                 (legacy_memory_source ||
+                  (buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) &&
+                   (form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY ||
+                    form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX ||
+                    form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP))) &&
                  metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
-                 (metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
-                 !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE))
+                 (legacy_memory_source ||
+                  ((metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
+                   !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE))))
         {
             u16 source_width = buster_x86_metadata_form_memory_source_width(form, metadata.atom);
             if (source_width) operand.memory.source_width = source_width;
+            // X87 environment/save images have no Intel ptr-size keyword.
+            // Their schema fixes the extent, so retain the accepted unsized
+            // source spelling instead of inventing a scalar qualifier.
+            unsized_memory = buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("X87_ALU")) &&
+                             (source_width == 112 || source_width == 224 || source_width == 752 || source_width == 864);
         }
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
-                             ? buster_x86_completion_memory_intel(arena, operand, query.attributes, reason)
+                             ? buster_x86_completion_memory_intel(arena, operand, query.attributes, reason, unsized_memory)
                              : buster_x86_completion_immediate(arena, operand);
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE ||
             operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
