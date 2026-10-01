@@ -1239,7 +1239,6 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 };
                 checkpoint_offsets[checkpoint_count] = (u32)output;
                 checkpoint_count += 1;
-                run_broken = false;
             }
             if (newline_length)
             {
