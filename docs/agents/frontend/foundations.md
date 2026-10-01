@@ -266,6 +266,8 @@ without facts for identical bitcode and diagnostics.
   different definition can expand inside an older replacement. A pop snapshots
   only suspended invocations whose definition it changes, and restores the
   generation's disabled state from active ENABLE tasks without consuming them.
+  The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
+  so restoring one after an ordinary definition also restores its behavior.
   `c_macro_conditional_tests` checks these boundaries against literal token
   expectations, independent hosted Clang/GCC preprocessors and both frontend
   lowering forms.

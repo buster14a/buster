@@ -220,6 +220,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
             "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11) M\n"), S8("11 7")},
         {S8("#define M 7\n#pragma push_macro(\"M\")\n#undef M\n#define M(x,...) x , ##__VA_ARGS__\n"
             "M(_Pragma(\"pop_macro(\\\"M\\\")\") 11,) M\n"), S8("11 , 7")},
+        // The dynamic builtin kind is part of the saved definition, including
+        // a regular function invocation suspended while the builtin is restored.
+        {S8("#line 100 \"builtin-restored.c\"\n#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n"
+            "#define __LINE__ 7\n#pragma pop_macro(\"__LINE__\")\n__LINE__\n"), S8("104")},
+        {S8("#line 100 \"builtin-restored.c\"\n#pragma push_macro(\"__FILE__\")\n#undef __FILE__\n"
+            "#define __FILE__ \"replacement.c\"\n#pragma pop_macro(\"__FILE__\")\n__FILE__\n"), S8("\"builtin-restored.c\"")},
+        {S8("#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n#define __LINE__(x,y) x + y\n"
+            "__LINE__(_Pragma(\"pop_macro(\\\"__LINE__\\\")\") 1,2) __LINE__\n"), S8("1 + 2 4")},
+        {S8("#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n"
+            "#define __LINE__ _Pragma(\"pop_macro(\\\"__LINE__\\\")\") __LINE__\n__LINE__\n"), S8("4")},
         // Restoring the same active generation keeps its replacement disabled.
         {S8("#define SAME _Pragma(\"push_macro(\\\"SAME\\\")\") "
             "_Pragma(\"pop_macro(\\\"SAME\\\")\") SAME\nSAME\n"), S8("SAME")},

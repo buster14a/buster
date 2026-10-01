@@ -3313,6 +3313,9 @@ struct CMacroDefinition
     // row for a paste pass with nothing to do.
     bool has_paste;
     bool has_stringify;
+    // Dynamic builtins belong to the saved definition just like replacement
+    // tokens, so push/pop and suspended invocations restore their kind too.
+    u8 builtin;
 };
 
 #define C_MACRO_PARAMETER_NONE UINT32_MAX
@@ -3342,7 +3345,6 @@ struct CMacro
     u32 by_symbol_capacity;
     u32 next_generation;
     bool disabled;
-    u8 builtin;
     // Head-of-list state for the lazy builtin macros: the main preprocess
     // loop stores the current frame and token offset here each iteration
     // (two stores, no location recovery), and __LINE__/__FILE__ recover the
@@ -4475,6 +4477,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
     }
     macro->next_generation += 1;
     macro->disabled = false;
+    // A new definition also clears any previous dynamic builtin kind.
     macro->definition = (CMacroDefinition){
         .generation = macro->next_generation,
         .replacement = replacement,
@@ -4485,9 +4488,6 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         .variadic = variadic,
         .defined = true,
     };
-    // A later ordinary or command-line definition replaces a dynamic builtin
-    // as a macro, not merely its replacement tokens.
-    macro->builtin = C_MACRO_BUILTIN_NONE;
     macro->definition.plain_count = replacement_count;
     // Allocated for every parameter list, empty replacement included: a
     // `#define F(x)` with no replacement tokens still reaches the capacity
@@ -4944,10 +4944,10 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
     u8 const* definition_spaces = definition->replacement_space;
     u32 const* parameter_indices = definition->parameter_index;
     bool ok = true;
-    if (macro->builtin)
+    if (definition->builtin)
     {
         CPpToken* builtin_token = arena_allocate(arena, CPpToken, 1);
-        builtin_token[0] = c_macro_builtin_token(space, first, macro->builtin, stamp, location.line);
+        builtin_token[0] = c_macro_builtin_token(space, first, definition->builtin, stamp, location.line);
         builtin_token[0].preceded_by_space = invocation.preceded_by_space;
         *tokens_out = builtin_token;
         *token_count_out = 1;
@@ -5397,7 +5397,7 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
             }
         }
     }
-    else if (!macro->builtin && !definition->has_paste && !definition->has_stringify)
+    else if (!definition->builtin && !definition->has_paste && !definition->has_stringify)
     {
         macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
         c_macro_produce_plain_tasks(arena, tasks, macro, definition, arguments, invocation);
@@ -8564,9 +8564,9 @@ BUSTER_C_INTERNAL void c_preprocess_command_operations(Arena* arena, CSpellingSp
 BUSTER_C_INTERNAL void c_preprocess_builtins(Arena* arena, CSymbolTable* symbols, CMacro** first_macro, CMacro** last_macro, String8 path, CSourceLocation location)
 {
     CMacro* line_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__LINE__"), 0, 0, 0, 0, false, false);
-    line_macro->builtin = C_MACRO_BUILTIN_LINE;
+    line_macro->definition.builtin = C_MACRO_BUILTIN_LINE;
     CMacro* file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE__"), 0, 0, 0, 0, false, false);
-    file_macro->builtin = C_MACRO_BUILTIN_FILE;
+    file_macro->definition.builtin = C_MACRO_BUILTIN_FILE;
     (*first_macro)->builtin_line = location.line;
     (*first_macro)->builtin_path = path;
 }
@@ -8779,7 +8779,7 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
         else
         {
             CMacro* macro = c_macro_find_token(first_macro, symbols, lex.spelling_base, &name);
-            if (macro && (allow_builtin || !macro->builtin))
+            if (macro && (allow_builtin || !macro->definition.builtin))
             {
                 macro->definition.defined = false;
             }
