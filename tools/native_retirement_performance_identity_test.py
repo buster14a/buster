@@ -1561,7 +1561,7 @@ class InvocationEvidenceTests(unittest.TestCase):
             (lambda plan: plan.update(campaign_budget=self.campaign_budget(
                 edit=lambda record: record.replace("batch=4:", "batch=04:", 1))), "canonical uint64"),
             (lambda plan: plan.update(campaign_budget=self.campaign_budget(
-                edit=lambda record: record.replace("-v2", "-v1", 1))), "schema and derivation"),
+                edit=lambda record: record.replace("-v3", "-v2", 1))), "schema and derivation"),
             (lambda plan: plan.pop("campaign_budget"), "missing fields"),
             (lambda plan: plan["groups"][0].update(input_list_sha256="e" * 64), "no response file"),
             (lambda plan: plan["groups"][1].pop("input_list_sha256"), "missing fields"),
