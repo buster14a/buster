@@ -55,6 +55,14 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
                                                                 u32 end, bool checked, bool nested, CTypeId cached, bool scalars,
                                                                 bool machine_only);
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
+typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
+struct CTestTypeConstantQuery
+{
+    CIntegerConstant constant;
+    bool model_unchanged;
+};
+BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                CScopeId scope, u32 start, u32 end);
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);

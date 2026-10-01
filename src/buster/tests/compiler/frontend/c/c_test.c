@@ -17233,6 +17233,212 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
 // answers and every piece of machine and result state they leave must agree.
 // A whole compile through the driver must also produce identical objects and
 // diagnostics in both modes.
+// Type-embedded constants have no live declaration-machine input. Pin the
+// values independently and snapshot the full shared buffers, including spare
+// slots a later model may own, on both successful and refused queries.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestTypeConstantCase CTestTypeConstantCase;
+    struct CTestTypeConstantCase
+    {
+        String8 expression;
+        u64 value;
+        bool valid;
+        u64 magnitude_high;
+        bool is_negative;
+    };
+    CTestTypeConstantCase cases[] = {
+        {S8("(5)"), 5, true},
+        {S8("0x5u"), 5, true},
+        {S8("010"), 8, true},
+        {S8("0b101"), 5, true},
+        {S8("'\\5'"), 5, true},
+        {S8("(unsigned char)261"), 5, true},
+        {.expression = S8("(CE)-1"), .value = 1, .valid = true, .is_negative = true},
+        {S8("(K) + 5"), 10, true},
+        {S8("sizeof \"abcde\""), 6, true},
+        {S8("sizeof((int[3]){1,2,3})"), 12, true},
+        {S8("sizeof(int(int, int))"), 1, true},
+        // Parenthesized abstract function-pointer declarators are not yet
+        // supported by this query; refusal must still leave all rows intact.
+        {S8("sizeof(int (*)(int, int))"), 0, false},
+        {S8("(unsigned float)1"), 0, false},
+        {S8("sizeof(0 ? obj : obj)"), 4, true},
+        {S8("sizeof(struct F *)"), 8, true},
+        {S8("sizeof(struct F)"), 2, true},
+        {S8("sizeof(struct G *)"), 8, true},
+        {S8("sizeof(struct Missing *)"), 8, true},
+        {S8("sizeof(V16)"), 16, true},
+        {S8("sizeof(UnsafeArray)"), 0, false},
+        {S8("sizeof(int __attribute__((vector_size(16))))"), 16, true},
+        {S8("sizeof(int __attribute__((vector_size(8 * 2))))"), 0, false},
+        {S8("sizeof(int __attribute__((__vector_size(8 * 2))))"), 0, false},
+        {S8("sizeof(int __attribute__((__vector_size__(sizeof(int __attribute__((vector_size(16)))) * 4))))"), 0, false},
+        {S8("sizeof(int [[gnu::vector_size(sizeof(int))]])"), 0, false},
+        {S8("_Generic((struct S *)0, struct S *: 9, default: 3)"), 9, true},
+        {S8("_Generic((__typeof__(obj) *)0, __typeof__(obj) *: 11, default: 3)"), 11, true},
+        {S8("_Generic(0, int: _Generic(0, int: 7, default: 9), default: 3)"), 7, true},
+        {S8("(1 << 40) + 3"), 0, false},
+        {S8("1 << -1"), 0, false},
+        {S8("1 << 4294967296ULL"), 0, false},
+        {S8("1 << ((__int128)1 << 64)"), 0, false},
+        {S8("1u << 31"), UINT64_C(2147483648), true},
+        {S8("(-1) << 1"), 0, false},
+        {S8("2147483647 + 1"), 0, false},
+        {S8("(-2147483647 - 1) - 1"), 0, false},
+        {S8("1073741824 * 2"), 0, false},
+        {S8("(-2147483647 - 1) / -1"), 0, false},
+        {S8("(-2147483647 - 1) % -1"), 0, false},
+        {S8("-(-2147483647 - 1)"), 0, false},
+        {S8("((__int128)1 << 126) + ((__int128)1 << 126)"), 0, false},
+        {S8("((__int128)1 << 126) * 2"), 0, false},
+        {S8("((unsigned __int128)-1) + 1"), 0, true},
+        {.expression = S8("(unsigned __int128)-1"), .value = UINT64_MAX, .valid = true, .magnitude_high = UINT64_MAX},
+        {.expression = S8("-((__int128)1 << 126) - ((__int128)1 << 126)"), .valid = true,
+            .magnitude_high = UINT64_C(1) << 63, .is_negative = true},
+        {S8("((__int128)1 << 64) || 0"), 1, true},
+        {S8("!((__int128)1 << 64)"), 0, true},
+        {S8("!1.0L"), 0, true},
+        {S8("1 ? 3 : (1 << 40)"), 3, true},
+        {S8("0 && (1 << 40)"), 0, true},
+        {S8("sizeof(struct S { int q; } *)"), 0, false},
+        {S8("_Generic((struct S { char q[40]; } *)0, struct S *: 9, default: 3)"), 0, false},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTestTypeConstantCase test = cases[case_index];
+        String8 prefix = S8("typedef int K; struct S { int q; }; struct F { char q[10]; }; struct G; struct S obj;"
+               " typedef int V16 __attribute__((vector_size(16)));"
+               " enum E; typedef const enum E CE; enum E { N = -1 };"
+               " typedef char UnsafeArray[sizeof(int __attribute__((vector_size(4 * sizeof(int)))) *)];"
+               " int f(void) { enum { K = 5 }; struct F { char q[2]; }; int probe = ");
+        String8 suffix = S8("; return probe; }");
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), prefix, test.expression, suffix);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CPreprocessResult model_preprocess = preprocess;
+        if (string_equal(test.expression, S8("(unsigned float)1")))
+        {
+            // The malformed queried type must not prevent construction of
+            // its owner's model. This valid stand-in keeps every token index
+            // and delimiter position, while the query sees the original type.
+            String8 model_source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), prefix, S8("(unsigned int)1"), suffix);
+            model_preprocess = c_preprocess(temporary.arena, model_source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+            BUSTER_TEST(arguments, model_preprocess.token_count == preprocess.token_count);
+        }
+        CParseResult parse = c_parse(temporary.arena, model_preprocess);
+        u32 start = UINT32_MAX;
+        u32 end = UINT32_MAX;
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        for (u32 index = 0; index < parse.entity_count; index += 1)
+        {
+            if (string_equal(parse.entities[index].name, S8("probe"))) scope = parse.entities[index].scope;
+        }
+        for (u32 index = 0; index + 1 < preprocess.token_count; index += 1)
+        {
+            if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("probe")) &&
+                preprocess.tokens[index + 1].kind == C_TOKEN_PUNCTUATOR && preprocess.tokens[index + 1].punctuator == C_PUNCTUATOR_ASSIGN)
+            {
+                start = index + 2;
+                u32 depth = 0;
+                for (u32 cursor = start; cursor < preprocess.token_count && end == UINT32_MAX; cursor += 1)
+                {
+                    CToken token = preprocess.tokens[cursor];
+                    if (token.kind == C_TOKEN_PUNCTUATOR)
+                    {
+                        if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                            token.punctuator == C_PUNCTUATOR_LEFT_BRACE) depth += 1;
+                        else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                                 token.punctuator == C_PUNCTUATOR_RIGHT_BRACE) depth -= depth != 0;
+                        else if (!depth && token.punctuator == C_PUNCTUATOR_SEMICOLON) end = cursor;
+                    }
+                }
+            }
+        }
+        if (scope.value >= parse.scope_count)
+        {
+            for (u32 index = 1; index < parse.scope_count; index += 1)
+            {
+                if (parse.scopes[index].token_start <= start && start < parse.scopes[index].token_end) scope = (CScopeId){.value = index};
+            }
+        }
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, start < end && scope.value < parse.scope_count,
+            string_format(temporary.arena, S8("protected query setup {S8}"), test.expression));
+        if (start < end && scope.value < parse.scope_count)
+        {
+            if (string_starts_with_sequence(test.expression, S8("_Generic(")))
+            {
+                BUSTER_TEST_RAW(arguments, parse.type_identity_query_count > 0 && parse.type_identity_queries != 0,
+                    string_format(temporary.arena, S8("protected query inherited identity cache {S8}"), test.expression));
+            }
+            CParseResult checkpoint = parse;
+            for (u32 variant = 0; variant < 5; variant += 1)
+            {
+                parse = checkpoint;
+                CTypeId scalar_types[C_TYPE_COUNT];
+                memset(scalar_types, 0xff, sizeof(scalar_types));
+                parse.expression_scalar_types = scalar_types;
+                CTokenPositionIndex positions = {0};
+                if (variant == 1)
+                {
+                    // Force any syntax probe's temporary rows to grow in the
+                    // query arena before its scratch mark is rewound.
+                    parse.type_capacity = parse.type_count;
+                    parse.array_bound_capacity = parse.array_bound_count;
+                }
+                else if (variant == 2)
+                {
+                    // Lazy delimiter indexing must publish only privately.
+                    parse.position_index = &positions;
+                }
+                else if (variant == 3)
+                {
+                    // A caller without an index still receives private
+                    // delimiter matching without changing its null pointer.
+                    parse.position_index = 0;
+                }
+                else if (variant == 4)
+                {
+                    // The declaration-point view can share a populated
+                    // identity buffer with its finished owner. A cache miss
+                    // must append only to the protected query's private rows.
+                    parse.type_identity_query_count = 0;
+                }
+                CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
+                BUSTER_TEST(arguments, query.model_unchanged);
+                BUSTER_TEST_RAW(arguments, query.constant.valid == test.valid,
+                    string_format(temporary.arena, S8("protected query {S8} variant={u32} expected={u32} actual={u32}"),
+                        test.expression, variant, (u32)test.valid, (u32)query.constant.valid));
+                if (query.constant.valid && test.valid)
+                {
+                    BUSTER_TEST(arguments, query.constant.is_negative == test.is_negative);
+                    BUSTER_TEST(arguments, query.constant.magnitude_high == test.magnitude_high);
+                    BUSTER_TEST(arguments, query.constant.magnitude == test.value);
+                }
+            }
+            if (string_equal(test.expression, S8("sizeof(struct Missing *)")))
+            {
+                // A declaration-point copy can share its type buffer with
+                // the finished owner. Keep only the initial int row visible;
+                // all subsequent occupied rows must survive private forwards.
+                parse = checkpoint;
+                BUSTER_TEST(arguments, parse.type_count > 1 && parse.types[0].kind == C_TYPE_INT);
+                parse.type_count = 1;
+                CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, preprocess, &parse, scope, start, end);
+                BUSTER_TEST(arguments, query.model_unchanged);
+                BUSTER_TEST(arguments, query.constant.valid && query.constant.magnitude == 8);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29046,6 +29252,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);

@@ -1188,6 +1188,17 @@ struct CParseExpressionQuery
     u32 flags;
 };
 
+typedef enum CConstantEvaluationMode
+{
+    C_CONSTANT_EVALUATION_NORMAL,
+    // Existing enum folding stays on the declaration machine until its
+    // owner prepares the protected query's type facts.
+    C_CONSTANT_EVALUATION_ENUM,
+    // Query-only type readers: no tag definition, shared cache publication,
+    // or re-entry into the declaration's active type-parse machine.
+    C_CONSTANT_EVALUATION_TYPE,
+} CConstantEvaluationMode;
+
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
@@ -1228,16 +1239,12 @@ struct CTypeParseMachine
     u32 mutation_type_limit;
     u32 expression_task_count;
     u32 expression_task_capacity;
-    // The enum currently evaluating an explicit initializer. Earlier members
-    // are visible before ordinary entity publication; the start bounds lookup
-    // to this definition so an unrelated enum cannot satisfy an identifier.
-    u32 enum_constant_member_start;
+    CConstantEvaluationMode constant_evaluation_mode;
     bool result_valid;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
-    bool enum_constant_members_active;
     bool type_identity_queries_active;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
