@@ -1,0 +1,100 @@
+name: Issue 2116 focused repair
+on:
+  push:
+    branches: [codex/2116-summary-write-publish]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Materialize against the exact inspected base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/issue-2116-prepare.py "$RUNNER_TEMP/issue-2116-prepare.py"
+          git fetch --no-tags --depth=1 origin 09dfe3d2d15510470758401ccb5a0a6f84bd545f
+          git checkout --detach 09dfe3d2d15510470758401ccb5a0a6f84bd545f
+          python3 "$RUNNER_TEMP/issue-2116-prepare.py"
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 2
+          git diff --stat
+          git diff
+      - name: Native and sanitized Linux harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput self-test > build/issue-2116-native.log 2>&1 || { cat build/issue-2116-native.log; exit 1; }
+          ./build/build bench_throughput self-test --sanitize > build/issue-2116-sanitized.log 2>&1 || { cat build/issue-2116-sanitized.log; exit 1; }
+          grep -E 'THROUGHPUT_(SELF|INTEGRATION)_TEST' build/issue-2116-native.log build/issue-2116-sanitized.log
+          cat build/throughput-tool-tests/summary-write-failure.log build/throughput-tool-tests/summary-write-setup-failure.log
+      - name: Publish one normal fast-forward on the owned repair branch
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch=codex/2116-summary-write-diagnostics
+          expected=09dfe3d2d15510470758401ccb5a0a6f84bd545f
+          test "$(git rev-parse HEAD)" = "$expected"
+          gh auth setup-git
+          remote=$(git ls-remote --exit-code origin "refs/heads/$branch" | cut -f1)
+          test "$remote" = "$expected"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- tools/throughput/tests.c tools/throughput/README.md
+          git commit -m 'test: preserve throughput summary-write failure diagnostics (#2116)'
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'REPAIR_COMMIT=%s\n' "$(git rev-parse HEAD)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-2116-linux-${{ github.run_id }}
+          path: |
+            build/issue-2116-*.log
+            build/throughput-tool-tests
+            build/throughput-tool-tests-sanitized
+          retention-days: 7
+          if-no-files-found: warn
+  macos:
+    needs: prepare
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Native macOS exact-head harness through the standard driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          git rev-parse HEAD
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput self-test > build/issue-2116-native.log 2>&1 || { cat build/issue-2116-native.log; exit 1; }
+          grep -E 'THROUGHPUT_(SELF|INTEGRATION)_TEST' build/issue-2116-native.log
+          cat build/throughput-tool-tests/summary-write-failure.log build/throughput-tool-tests/summary-write-setup-failure.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-2116-macos-${{ github.run_id }}
+          path: |
+            build/issue-2116-*.log
+            build/throughput-tool-tests
+          retention-days: 7
+          if-no-files-found: warn
