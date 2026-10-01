@@ -1,0 +1,166 @@
+name: External C capability portfolio
+on:
+  push:
+    branches: [codex/capability-portfolio]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: capability-portfolio-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  correctness:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lua/lua
+          ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
+          path: external/lua-git
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: bellard/quickjs
+          ref: 3d5e064e9dd67c70f7962836505a7fa067bf0a4e
+          path: external/quickjs
+          persist-credentials: false
+      - name: Authenticate release and retain input provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence .ci-tools
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
+          git archive --format=tar HEAD > evidence/buster-source.tar
+          sha256sum evidence/buster-source.tar > evidence/buster-source.tar.sha256
+          for project in cjson zlib stb lua-git quickjs; do
+            git -C "external/$project" rev-parse HEAD > "evidence/$project.commit"
+            git -C "external/$project" rev-parse 'HEAD^{tree}' > "evidence/$project.tree"
+            git -C "external/$project" status --porcelain --untracked-files=all > "evidence/$project.status"
+            test ! -s "evidence/$project.status"
+            git -C "external/$project" ls-tree -r HEAD > "evidence/$project.files"
+          done
+          curl --fail --location --retry 3 https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+          sha256sum external/lua.tar.gz > evidence/lua-release.sha256
+          cp external/cjson/LICENSE evidence/cjson-LICENSE
+          cp external/cjson/tests/unity/docs/license.txt evidence/cjson-unity-LICENSE
+          cp external/cjson/tests/json-patch-tests/README.md evidence/cjson-patch-fixtures-LICENSE
+          cp external/zlib/LICENSE evidence/zlib-LICENSE
+          cp external/stb/LICENSE evidence/stb-LICENSE
+          cp external/lua-git/lua.h evidence/lua-license-header
+          cp external/lua-git/testes/all.lua evidence/lua-suite-license
+          cp external/quickjs/LICENSE evidence/quickjs-LICENSE
+          sha256sum tests/basic_cjson_roundtrip.c tests/basic_zlib_compat.c tests/basic_stb_compat.c tests/basic_quickjs_workload.js build.c > evidence/buster-fixtures.sha256
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          uname -a > evidence/host.txt
+          printf 'Cloud correctness only; no qualified performance acceptance.\n' > evidence/scope.txt
+      - name: Prepare documented hosted dependencies
+        run: python3 tools/ci_apt.py readline --out evidence/apt-readline
+      - name: Build compiler through the native build driver
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+          .ci-tools/build build --config Release -t ide
+          sha256sum .ci-tools/build build/Release/ide > evidence/compiler.sha256
+      - name: Baseline self-host fixed point
+        id: selfhost
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_self_host --config Release 2>&1 | tee evidence/self-host.log
+      - name: cJSON control
+        id: cjson
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_cjson --config Release "$PWD/external/cjson" 2>&1 | tee evidence/cjson.log
+      - name: zlib compression and archive
+        id: zlib
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_zlib --config Release "$PWD/external/zlib" 2>&1 | tee evidence/zlib.log
+      - name: stb headers and macro places
+        id: stb
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_stb --config Release "$PWD/external/stb" 2>&1 | tee evidence/stb.log
+      - name: Lua VM and hosted linking
+        id: lua
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
+      - name: QuickJS tagged values and POSIX callbacks
+        id: quickjs
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_quickjs --config Release "$PWD/external/quickjs" 2>&1 | tee evidence/quickjs.log
+      - name: Preserve independent outcomes
+        if: always()
+        shell: bash
+        env:
+          COMPILER: ${{ steps.compiler.outcome }}
+          SELFHOST: ${{ steps.selfhost.outcome }}
+          CJSON: ${{ steps.cjson.outcome }}
+          ZLIB: ${{ steps.zlib.outcome }}
+          STB: ${{ steps.stb.outcome }}
+          LUA: ${{ steps.lua.outcome }}
+          QUICKJS: ${{ steps.quickjs.outcome }}
+        run: |
+          mkdir -p evidence
+          printf 'compiler=%s\nselfhost=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\n' "$COMPILER" "$SELFHOST" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" | tee evidence/outcomes.txt
+          cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: capability-portfolio-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            evidence
+            build/cjson-*
+            build/zlib-*
+            build/stb-*
+            build/lua-*
+            build/quickjs-*
