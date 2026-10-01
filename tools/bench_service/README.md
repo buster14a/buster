@@ -270,7 +270,8 @@ Final validation compares the exported receipts with the queue's authoritative
 copies. Unknown, duplicate, oversized, stale, descriptor-bearing or partial
 messages cannot advance the protocol. The smoke recipe's messages are the
 48-byte `BQPHASE1` packets. The retirement recipe's channel is the 80-byte
-`BQPHASE2`, which also carries the ready record's and the receipt authority's
+`BQPHASE2`, which also carries the ready record's, the attested A/A rows'
+(AA_MEASURED, between A/A and A/B, #1021) and the receipt authority's
 digests (see
 [the coordinator side](RETIREMENT_PREPARATION.md#coordinator-side-881-pr-4)).
 

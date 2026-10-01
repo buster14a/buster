@@ -28,13 +28,18 @@
  * recipe (bq_worker_recipe_admitted, #881 N1), so the queue's own admission
  * predicate never substitutes for that completeness gate. Such a job loads
  * the installed budget (bq_retirement_coordinator_budget_load), follows a
- * BQPHASE2 channel whose RETIREMENT_READY digest bq_worker_phase_accept keeps
- * and whose MEASURED digest it hands off (bq_retirement_coordinator_handoff,
- * bound by the context chain to the coordinator's own digests) before
- * writing MEASURED's record and acknowledging, and succeeds only if
+ * BQPHASE2 channel whose RETIREMENT_READY digest bq_worker_phase_accept keeps,
+ * whose AA_MEASURED digest it attests against the published A/A sample
+ * shards before journalling and acknowledging (#1021,
+ * bq_retirement_coordinator_aa_attest; A/B starts only after that ACK), and
+ * whose MEASURED digest it hands off (bq_retirement_coordinator_handoff,
+ * bound by the context chain to the coordinator's own digests and the
+ * attested A/A digest) before writing MEASURED's record and acknowledging,
+ * and succeeds only if
  * bq_worker_retirement_finalize replays the ready record and finds the
- * journalled authority in bq_worker_finish. Recovery reloads those digests
- * from the durable queue records (bq_worker_retirement_reload,
+ * journalled authority in bq_worker_finish, and the admission receipt names
+ * its AA_MEASURED receipt (bq_worker_phase_record_sha256). Recovery reloads
+ * those digests from the durable queue records (bq_worker_retirement_reload,
  * bq_worker_phase_record_digest) and never rewrites a durable success.
  * Before recovery finishes a retirement job, and before bq_worker_finish
  * records any failed, cancelled or interrupted outcome for one (a failed
@@ -2092,12 +2097,13 @@ struct BqWorkerFinalization
     /* #881 PR 4. The channel's BQPHASE version (0 before the handoff); the
      * retirement seams whose profile opens the coordinator's recipe gates
      * (NULL admits no retirement job; bq_worker_run passes the installed
-     * seams, whose profile is blocked); A's digest; and the ready and
-     * authority digests the version-2 channel carried. */
+     * seams, whose profile is blocked); A's digest; and the ready, A/A row
+     * (#1021) and authority digests the version-2 channel carried. */
     unsigned phase_version;
     BqRetirementWorkerUnitSeams const* retirement;
     char retirement_preparation_sha256[SHA256_HEX_CAPACITY];
     char retirement_ready_sha256[SHA256_HEX_CAPACITY];
+    char retirement_aa_sha256[SHA256_HEX_CAPACITY];
     char retirement_authority_sha256[SHA256_HEX_CAPACITY];
     /* #881 recovery L2: bq_worker_retirement_handoff_hold held this job. */
     bool retirement_held;
@@ -3504,7 +3510,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_control_publish(BqWorkerFinalizatio
  * and exported evidence, then acknowledge. A crash between either write or the
  * acknowledgement leaves an interrupted attempt, never a resumable sample set.
  * On a version-2 (retirement) channel the receipt and record also carry the
- * digest. RETIREMENT_READY's is kept for the replay at finalization. A
+ * digest. RETIREMENT_READY's is kept for the replay at finalization. An
+ * AA_MEASURED (#1021) is first attested: the published A/A sample shards must
+ * hash to its digest (bq_retirement_coordinator_aa_attest); it keeps the job
+ * in MEASURING and its digest is kept for the MEASURED handoff and the
+ * finalization. A
  * MEASURED is first handed off: the receipt authority it names, bound by its
  * context chain to the coordinator's own A digest, ready digest and row-plan
  * pin, is copied and journalled (bq_retirement_coordinator_handoff), and only
@@ -3530,6 +3540,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_accept(BqQueue* queue, BqPhaseChanne
         bq_phase_digest_format(message + BQ_PHASE_DIGEST_OFFSET, digest);
         snprintf(digest_line, sizeof(digest_line), "digest-sha256=%s\n", digest);
     }
+    /* #1021: before acknowledging AA_MEASURED, the published A/A sample
+     * shards must hash to its digest; A/B starts only after the ACK. */
+    if (error == BQ_OK && retirement && phase == BQ_PHASE_AA_MEASURED)
+    {
+        error = bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
+                bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT :
+                bq_retirement_coordinator_aa_attest(finalization->result_directory, digest);
+        if (error == BQ_OK && bq_worker_finalization_expired(finalization)) error = BQ_WORKER_TIMEOUT;
+    }
     if (error == BQ_OK && retirement && phase == BQ_PHASE_MEASURED)
     {
         error = bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
@@ -3537,7 +3556,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_accept(BqQueue* queue, BqPhaseChanne
                 bq_retirement_coordinator_handoff(finalization->result_directory,
                     finalization->config ? finalization->config->workspace_root : (String8){0}, queue->directory_fd,
                     job->id, job->token, finalization->retirement ? finalization->retirement->profile : (String8){0},
-                    finalization->retirement_preparation_sha256, finalization->retirement_ready_sha256, digest);
+                    finalization->retirement_preparation_sha256, finalization->retirement_ready_sha256,
+                    finalization->retirement_aa_sha256, digest);
         if (error == BQ_OK && bq_worker_finalization_expired(finalization)) error = BQ_WORKER_TIMEOUT;
         if (error == BQ_OK) memcpy(finalization->retirement_authority_sha256, digest, SHA256_HEX_CAPACITY);
     }
@@ -3562,6 +3582,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_accept(BqQueue* queue, BqPhaseChanne
         error = bq_real_advance(queue, job, phase == BQ_PHASE_SETTLING ? BQ_SETTLING : BQ_MEASURING, BQ_NO_OUTCOME);
     if (error == BQ_OK && retirement && phase == BQ_PHASE_RETIREMENT_READY)
         memcpy(finalization->retirement_ready_sha256, digest, SHA256_HEX_CAPACITY);
+    if (error == BQ_OK && retirement && phase == BQ_PHASE_AA_MEASURED)
+        memcpy(finalization->retirement_aa_sha256, digest, SHA256_HEX_CAPACITY);
     if (error == BQ_OK && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     if (error == BQ_OK)
     {
@@ -3597,6 +3619,24 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_phase_record_digest(BqQueue* queue, BqJob con
          body[size - 1] == '\n' && bq_retirement_hex((String8){(char8*)line + 15, 64}, 64);
     if (ok) memcpy(digest, line + 15, 64);
     digest[ok ? 64 : 0] = 0;
+    return ok;
+}
+
+/* The SHA-256 of a durable version-2 phase record's bytes, which equal its
+ * published worker-phase-N receipt (bq_worker_phases_validate): the
+ * AA_MEASURED receipt digest the admission receipt binds (#1021). The record
+ * must carry its digest (bq_worker_phase_record_digest). */
+BUSTER_GLOBAL_LOCAL bool bq_worker_phase_record_sha256(BqQueue* queue, BqJob const* job, unsigned phase,
+                                                       char output[SHA256_HEX_CAPACITY])
+{
+    char name[48], record[48], carried[SHA256_HEX_CAPACITY] = {0};
+    u8 body[512];
+    u32 size = 0;
+    snprintf(name, sizeof(name), "worker-phase-%u", phase);
+    bool ok = bq_worker_phase_record_digest(queue, job, phase, carried) && bq_record_name(record, name, job->id) &&
+              bq_record_read(queue, record, body, sizeof(body), &size) == BQ_OK && size > 0;
+    if (ok) bq_digest(body, size, (char8*)output);
+    else output[0] = 0;
     return ok;
 }
 
@@ -4089,8 +4129,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
 /* Recovery's finalization starts without the digests the run held in memory.
  * Reload each missing one from the coordinator's own durable records: A from
  * the queue's preparation-<id> record, whose digest the export and the lease
- * handoff carried, and the ready and authority digests from the queue's
- * worker-phase-5 and worker-phase-4 records (a worker-phase-4 exists only
+ * handoff carried, and the ready, A/A row and authority digests from the
+ * queue's worker-phase-5, worker-phase-6 and worker-phase-4 records (a
+ * worker-phase-6 exists only after an attested A/A, a worker-phase-4 only
  * after a completed handoff). A missing or malformed record leaves the digest
  * empty, which fails the finalization closed. */
 BUSTER_GLOBAL_LOCAL void bq_worker_retirement_reload(BqQueue* queue, BqJob const* job,
@@ -4104,6 +4145,8 @@ BUSTER_GLOBAL_LOCAL void bq_worker_retirement_reload(BqQueue* queue, BqJob const
         bq_digest(bytes, size, (char8*)finalization->retirement_preparation_sha256);
     if (!finalization->retirement_ready_sha256[0])
         bq_worker_phase_record_digest(queue, job, BQ_PHASE_RETIREMENT_READY, finalization->retirement_ready_sha256);
+    if (!finalization->retirement_aa_sha256[0])
+        bq_worker_phase_record_digest(queue, job, BQ_PHASE_AA_MEASURED, finalization->retirement_aa_sha256);
     if (!finalization->retirement_authority_sha256[0])
         bq_worker_phase_record_digest(queue, job, BQ_PHASE_MEASURED, finalization->retirement_authority_sha256);
 }
@@ -4182,16 +4225,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_finalize(BqQueue* queue, BqJob 
 {
     bool retirement = job && bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
     if (retirement && finalization && queue) bq_worker_retirement_reload(queue, job, finalization);
+    char phase_receipt[SHA256_HEX_CAPACITY] = {0};
     bool bound = finalization && finalization->config && finalization->retirement && queue &&
                  finalization->retirement_ready_sha256[0] && finalization->retirement_preparation_sha256[0] &&
-                 finalization->retirement_authority_sha256[0];
+                 finalization->retirement_aa_sha256[0] && finalization->retirement_authority_sha256[0] &&
+                 bq_worker_phase_record_sha256(queue, job, BQ_PHASE_AA_MEASURED, phase_receipt);
     BqError error = !retirement ? BQ_OK : !bound || bq_retirement_poisoned(queue, job) ? BQ_WORKER_MISMATCH :
                     bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
                     bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT :
                     bq_retirement_coordinator_finalize(finalization->retirement, finalization->config->workspace_root,
                         finalization->result_directory, queue->directory_fd, job->id, job->token,
                         finalization->retirement_preparation_sha256, finalization->retirement_ready_sha256,
-                        finalization->retirement_authority_sha256);
+                        finalization->retirement_aa_sha256, phase_receipt, finalization->retirement_authority_sha256);
     if (retirement && error == BQ_OK)
         error = bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL :
                 bq_worker_finalization_expired(finalization) ? BQ_WORKER_TIMEOUT : BQ_OK;

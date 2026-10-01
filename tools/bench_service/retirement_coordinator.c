@@ -20,12 +20,18 @@
  *                                        record, read-only, whose bytes must
  *                                        hash to the profile's
  *                                        campaign-budget-sha256= pin
+ *   bq_retirement_coordinator_aa_attest  (#1021) before the AA_MEASURED
+ *                                        acknowledgement: the published A/A
+ *                                        sample shards, read in export order,
+ *                                        hash to the digest the packet
+ *                                        carried
  *   bq_retirement_coordinator_handoff    before the MEASURED acknowledgement:
  *                                        the producer's receipt authority,
  *                                        named by the digest the MEASURED
  *                                        packet carried and bound by its
  *                                        context chain to the coordinator's
- *                                        own facts, copied and journalled
+ *                                        own facts and the attested A/A
+ *                                        digest, copied and journalled
  *                                        into the queue-private root
  *                                        (tp_retirement_store_authority_handoff)
  *   bq_retirement_coordinator_replay     at finalization: bq_retirement_unit_
@@ -39,7 +45,13 @@
  *   bq_retirement_coordinator_finalize   at finalization: the replay, the
  *                                        journalled authority and the
  *                                        derivation of its plan and context
- *                                        (#881 PR 3, review item M1 of #1961)
+ *                                        (#881 PR 3, review item M1 of #1961);
+ *                                        the chain's A/A raw digest is the
+ *                                        attested AA_MEASURED one and the
+ *                                        admission receipt names the
+ *                                        coordinator's AA_MEASURED receipt
+ *                                        (#1021,
+ *                                        bq_retirement_coordinator_admission_phase)
  *   bq_retirement_coordinator_handoff_class
  *                                        at recovery (L2): the MEASURED
  *                                        handoff classified complete,
@@ -105,6 +117,8 @@
 #define BQ_RETIREMENT_COORDINATOR_RETAINED_CAP (UINT32_C(2) << 20)
 #define BQ_RETIREMENT_COORDINATOR_BINDING_CAP ((u32)BQ_WORKER_BUNDLE_FILE_CAP)
 #define BQ_RETIREMENT_COORDINATOR_ARENA_BYTES (UINT64_C(1) << 32)
+/* The read buffer of the AA_MEASURED shard rehash (#1021). */
+#define BQ_RETIREMENT_COORDINATOR_AA_READ_BYTES (UINT32_C(1) << 20)
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_request_valid_pinned(BqRequest const* request, String8 profile)
 {
@@ -295,27 +309,117 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_coordinator_authority_root(String8 workspa
     return authority;
 }
 
+/* One published A/A sample shard into `hash`: a single-link, owner's
+ * regular file within the store's per-file cap, read whole through its
+ * descriptor and unchanged across the read. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_aa_shard(int file, Sha256* hash, u8* buffer)
+{
+    struct stat before = {0}, after = {0};
+    bool ok = fstat(file, &before) == 0 && S_ISREG(before.st_mode) && before.st_nlink == 1 &&
+              before.st_uid == geteuid() && before.st_size > 0 && (u64)before.st_size <= TP_RETIREMENT_STORE_FILE_BYTES;
+    u64 total = 0;
+    bool done = !ok;
+    while (!done)
+    {
+        ssize_t count = read(file, buffer, BQ_RETIREMENT_COORDINATOR_AA_READ_BYTES);
+        if (count > 0)
+        {
+            sha256_add(hash, buffer, (u64)count);
+            total += (u64)count;
+        }
+        else if (count < 0 && errno == EINTR) done = false;
+        else
+        {
+            ok = count == 0;
+            done = true;
+        }
+    }
+    ok = ok && total == (u64)before.st_size && fstat(file, &after) == 0 && before.st_dev == after.st_dev &&
+         before.st_ino == after.st_ino && before.st_size == after.st_size && after.st_nlink == 1 &&
+         before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
+    return ok;
+}
+
+/* #1021: called by bq_worker_phase_accept for a version-2 AA_MEASURED, before
+ * its acknowledgement and before its receipt. The A/A stage's published
+ * sample shards in the result root, `retirement-samples-aa-NNNN.jsonl` and
+ * then `retirement-batches-aa-NNNN.jsonl`, each numbered contiguously from
+ * 0000 (bq_retirement_worker_stream_path), read in that order must hash to
+ * aa_sha256, the digest the packet carried (lane D's raw numeric digest of
+ * the A/A stage), and at least one row shard must exist. The unit's
+ * production admission computes only from rows whose canonical lines hash to
+ * the same digest (retirement_aa_admission.c), and its MEASURED chain must
+ * carry it as the A/A stage's raw digest (bq_retirement_coordinator_handoff,
+ * bq_retirement_coordinator_finalize). BQ_WORKER_MISMATCH otherwise. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_aa_attest(int result_directory,
+    char const aa_sha256[SHA256_HEX_CAPACITY])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    u8* buffer = malloc(BQ_RETIREMENT_COORDINATOR_AA_READ_BYTES);
+    bool ok = result_directory >= 0 && buffer && aa_sha256 && tp_retirement_digest(aa_sha256);
+    u32 shards[2] = {0, 0};
+    for (u32 population = 0; ok && population < 2; population += 1)
+    {
+        bool more = true;
+        for (u32 index = 0; ok && more; index += 1)
+        {
+            char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+            ok = index < TP_RETIREMENT_STORE_FILES &&
+                 bq_retirement_worker_stream_path(path, BQ_RETIREMENT_WORKER_STREAM_SAMPLES, 0, NULL, index,
+                                                  population ? 0u : UINT32_MAX);
+            int file = ok ? openat(result_directory, path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+            if (ok && file < 0)
+            {
+                more = false;
+                ok = errno == ENOENT;
+            }
+            else if (ok)
+            {
+                ok = bq_retirement_coordinator_aa_shard(file, &hash, buffer);
+                shards[population] += 1;
+            }
+            if (file >= 0 && close(file) != 0) ok = false;
+        }
+    }
+    char computed[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && shards[0];
+    if (ok)
+    {
+        sha256_finish_hex(&hash, (char8*)computed);
+        ok = !strcmp(computed, aa_sha256);
+    }
+    free(buffer);
+    BqError result = ok ? BQ_OK : BQ_WORKER_MISMATCH;
+    return result;
+}
+
 /* Called by bq_worker_phase_accept for a version-2 MEASURED, before its
  * acknowledgement and before its receipt. result_directory is the attempt's
  * result root (the composer's store root); authority_sha256 is the digest the
  * packet carried; profile, preparation_sha256 and ready_sha256 are the
- * coordinator's own (bq_retirement_coordinator_chain_check). A missing or
- * foreign chain refuses before the queue-private root exists and before any
- * copy or journal. BQ_WORKER_MISMATCH: no authority or chain matches, or the
- * store's handoff refuses (another identity, a changed receipt or retained
- * file, an earlier copy or journal). BQ_IO: a root cannot be opened. */
+ * coordinator's own (bq_retirement_coordinator_chain_check), and the chain's
+ * A/A stage raw digest must be aa_sha256, the AA_MEASURED digest the
+ * coordinator attested (#1021). A missing or foreign chain refuses before the
+ * queue-private root exists and before any copy or journal.
+ * BQ_WORKER_MISMATCH: no authority or chain matches, or the store's handoff
+ * refuses (another identity, a changed receipt or retained file, an earlier
+ * copy or journal). BQ_IO: a root cannot be opened. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_handoff(int result_directory, String8 workspace_root,
     int queue_directory, u64 job_id, u64 attempt_token, String8 profile, char const* preparation_sha256,
-    char const* ready_sha256, char const authority_sha256[SHA256_HEX_CAPACITY])
+    char const* ready_sha256, char const* aa_sha256, char const authority_sha256[SHA256_HEX_CAPACITY])
 {
     TpRetirementReceiptAuthority trusted = {0};
     TpRetirementAuthorityJournal journal = {0};
+    BqRetirementContextChainCarried carried = {0};
     int authority = result_directory >= 0 ? bq_retirement_coordinator_authority_root(workspace_root, job_id,
                                                                                      attempt_token) : -1;
     BqError result = authority >= 0 ? BQ_OK : BQ_IO;
-    if (result == BQ_OK && !bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile,
-                                                                  preparation_sha256, ready_sha256, authority_sha256,
-                                                                  &trusted, NULL))
+    if (result == BQ_OK && !(aa_sha256 && tp_retirement_digest(aa_sha256) &&
+                             bq_retirement_coordinator_chain_check(authority, job_id, attempt_token, profile,
+                                                                   preparation_sha256, ready_sha256, authority_sha256,
+                                                                   &trusted, &carried) &&
+                             !strcmp(carried.stages[0].raw, aa_sha256)))
         result = BQ_WORKER_MISMATCH;
     int queue_root = result == BQ_OK ? bq_retirement_coordinator_queue_root(queue_directory) : -1;
     if (result == BQ_OK && queue_root < 0) result = BQ_IO;
@@ -821,13 +925,38 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_derive(BqRetirementWorkerU
     return result;
 }
 
+/* The result's A/A admission receipt (BQ_RETIREMENT_WORKER_ADMISSION_PATH)
+ * names `phase_receipt_sha256`, the digest of the coordinator's own
+ * AA_MEASURED receipt (#1021), as its phase_receipt_sha256 member. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_coordinator_admission_phase(int result_directory,
+    char const phase_receipt_sha256[SHA256_HEX_CAPACITY])
+{
+    char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], quoted[SHA256_HEX_CAPACITY + 2];
+    int file = result_directory >= 0 ? openat(result_directory, BQ_RETIREMENT_WORKER_ADMISSION_PATH,
+                                              O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    u32 length = 0;
+    bool ok = file >= 0 && phase_receipt_sha256 && tp_retirement_digest(phase_receipt_sha256) &&
+              fstat(file, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_size > 2 &&
+              (u64)info.st_size <= sizeof(receipt) &&
+              bq_read_file(file, (u8*)receipt, (u32)info.st_size, &length) && length == (u32)info.st_size;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (ok) snprintf(quoted, sizeof(quoted), "\"%s\"", phase_receipt_sha256);
+    ok = ok && receipt[0] == '{' && receipt[length - 1] == '}' &&
+         bq_retirement_unit_campaign_member(receipt, length, "phase_receipt_sha256", quoted);
+    return ok;
+}
+
 /* At finalization, in order: the replay of the attempt from the A digest and
- * the ready digest, the journalled authority the MEASURED packet named, and
- * the derivation of that authority's plan and context
- * (bq_retirement_coordinator_derive). */
+ * the ready digest, the journalled authority the MEASURED packet named, whose
+ * chain must carry the AA_MEASURED digest as the A/A stage's raw digest, the
+ * derivation of that authority's plan and context
+ * (bq_retirement_coordinator_derive), and the admission receipt's binding of
+ * the coordinator's AA_MEASURED receipt digest (#1021). */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_finalize(BqRetirementWorkerUnitSeams const* seams,
     String8 workspace_root, int result_directory, int queue_directory, u64 job_id, u64 attempt_token,
     char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY],
+    char const aa_sha256[SHA256_HEX_CAPACITY], char const phase_receipt_sha256[SHA256_HEX_CAPACITY],
     char const authority_sha256[SHA256_HEX_CAPACITY])
 {
     BqRetirementUnitReplayed replayed = {0};
@@ -838,9 +967,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_coordinator_finalize(BqRetirementWorke
     if (result == BQ_OK)
         result = bq_retirement_coordinator_authority_complete(result_directory, workspace_root, queue_directory, job_id,
             attempt_token, seams->profile, preparation_sha256, ready_sha256, authority_sha256, &journalled, &carried);
+    if (result == BQ_OK && !(aa_sha256 && tp_retirement_digest(aa_sha256) && !strcmp(carried.stages[0].raw, aa_sha256)))
+        result = BQ_WORKER_MISMATCH;
     if (result == BQ_OK)
         result = bq_retirement_coordinator_derive(seams, &replayed, job_id, attempt_token, ready_sha256, &journalled,
                                                   &carried, result_directory);
+    if (result == BQ_OK && !bq_retirement_coordinator_admission_phase(result_directory, phase_receipt_sha256))
+        result = BQ_WORKER_MISMATCH;
     if (!bq_retirement_unit_replayed_release(&replayed) && result == BQ_OK) result = BQ_IO;
     return result;
 }

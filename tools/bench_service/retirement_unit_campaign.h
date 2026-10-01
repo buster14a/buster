@@ -6,9 +6,11 @@
  * the contract allows, and derives the frozen plan and its pre-sample and
  * post-sample context digests from service-authenticated inputs only. It does
  * not admit the recipe: the producer evaluates the pinned #426 A/A policy
- * (retirement_aa_admission.c), but production has no #1021 phase authority
- * over the A/A rows and always refuses here, so production can never reach
- * A/B; only the functional fixture build compiles the stand-in.
+ * (retirement_aa_admission.c) over the A/A rows the coordinator attested as
+ * AA_MEASURED (#1021), and A/B is entered only through the campaign's
+ * production transition over that attested digest; the blocked profile never
+ * starts a campaign, and only the functional fixture build compiles the
+ * receipt stand-in.
  *
  * Entry points, in the only order the driver accepts:
  *   bq_retirement_unit_campaign_begin      SETTLING acknowledgement; the heavy
@@ -33,7 +35,12 @@
  *                                          exact held descriptors in cursor
  *                                          order, shards, metrics, export;
  *                                          after A/A the post-A/A binding
- *   bq_retirement_unit_campaign_admit      A/A admission (A/B: fixture only)
+ *   bq_retirement_unit_campaign_aa_attest  (#1021) AA_MEASURED with the A/A
+ *                                          stage's raw digest, acknowledged
+ *                                          only after the coordinator
+ *                                          rehashed the published A/A shards
+ *   bq_retirement_unit_campaign_admit      A/A admission over the attested
+ *                                          digest
  *   bq_retirement_unit_campaign_post_aa_document  (retirement_unit_documents.h)
  *                                          the post-A/A binding over the
  *                                          admission receipt
@@ -899,6 +906,10 @@ typedef struct BqRetirementUnitCampaign
     BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
     unsigned partition_counts[2], documented;
     char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65];
+    /* (#1021) The A/A stage's raw numeric digest the coordinator attested and
+     * acknowledged as AA_MEASURED (bq_retirement_unit_campaign_aa_attest);
+     * empty until then. */
+    char aa_attested_sha256[65];
     /* The support declaration and census manifest pins the documents named,
      * the digest of the timed-row layout they derived
      * (bq_retirement_unit_campaign_timed_line) and the post-sample record. */
@@ -1899,6 +1910,30 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
     return ok;
 }
 
+/* (#1021) After A/A, once its sample shards are published: on the
+ * worker-unit's BQPHASE2 channel, AA_MEASURED carrying the A/A stage's raw
+ * numeric digest (TpRetirementSamples.raw_sha256: the canonical
+ * `row-round-pair` then `group-round-pair` lines of its sample shards). The
+ * coordinator rehashes the published shards and journals its worker-phase-6
+ * receipt before acknowledging (bq_retirement_coordinator_aa_attest); the
+ * acknowledged digest is kept, and A/B may start only after it. A BQPHASE1
+ * channel has no such phase, so nothing is attested and production admission
+ * refuses. */
+static inline int bq_retirement_unit_campaign_aa_attest(BqRetirementUnitCampaign* driver)
+{
+    TpRetirementCampaign* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
+    TpRetirementSamples const* samples = campaign ? campaign->samples[0] : NULL;
+    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_AA && campaign &&
+        campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA && !driver->aa_attested_sha256[0] && samples &&
+        samples->finished && !samples->failed && tp_retirement_digest(samples->raw_sha256) &&
+        driver->phases && driver->phases->version == BQ_PHASE_VERSION_2 &&
+        bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
+        bq_phase_exchange_digest_until(driver->phases, BQ_PHASE_AA_MEASURED, samples->raw_sha256, driver->deadline_ns);
+    if (ok) memcpy(driver->aa_attested_sha256, samples->raw_sha256, 65);
+    else bq_retirement_unit_campaign_fail(driver);
+    return ok;
+}
+
 /* The A/A admission the service must present: the #426 decision bound to
  * this job's frozen plan, pre-sample context and post-A/A evidence digest,
  * delivered as #1021's one-use capability, with the #437 admission receipt's
@@ -1912,6 +1947,9 @@ typedef struct BqRetirementUnitCampaignAdmission
     unsigned char const* receipt;
     size_t receipt_bytes;
     int admitted;
+    /* (#1021) The digest of the coordinator's AA_MEASURED receipt, which the
+     * receipt's phase_receipt_sha256 must name on an attested channel. */
+    char const* phase_receipt_sha256;
 } BqRetirementUnitCampaignAdmission;
 
 /* Whether the flat JSON object `text` holds `"key":value` with exactly that
@@ -1927,6 +1965,19 @@ static inline int bq_retirement_unit_campaign_member(char const* text, size_t le
         found = (text[at - 1] == ',' || text[at - 1] == '{') && !memcmp(text + at, member, size) &&
             (text[at + size] == ',' || text[at + size] == '}');
     return found;
+}
+
+/* (#1021) The receipt names the admission's phase receipt digest as its
+ * phase_receipt_sha256 member. */
+static inline int bq_retirement_unit_campaign_phase_receipt(BqRetirementUnitCampaignAdmission const* admission)
+{
+    char quoted[68];
+    int ok = admission && admission->receipt && admission->phase_receipt_sha256 &&
+        tp_retirement_digest(admission->phase_receipt_sha256) &&
+        snprintf(quoted, sizeof(quoted), "\"%s\"", admission->phase_receipt_sha256) == 66 &&
+        bq_retirement_unit_campaign_member((char const*)admission->receipt, admission->receipt_bytes,
+                                           "phase_receipt_sha256", quoted);
+    return ok;
 }
 
 /* The #437 receipt the admission carries: its bytes hash to the recorded
@@ -1969,14 +2020,19 @@ static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign c
     return ok;
 }
 
-/* Production refuses and leaves the A/A attempt awaiting authority (A/B
- * stays unreachable): the producer's #426 policy decision
- * (retirement_aa_admission.c) is computed in this unit from rows this unit
- * measured, and no #1021 phase authenticates those rows to the coordinator
- * between A/A and A/B (the BQPHASE2 sequence has no post-A/A phase), so no
- * production transition into A/B exists. The functional fixture build enters
- * A/B through the campaign's fixture stand-in, which poisons the attempt on a
- * denied, stale or mismatched admission. */
+/* The admission into A/B: this job's frozen plan, pre-sample and post-A/A
+ * digests and the #437 receipt (bq_retirement_unit_campaign_receipt), over
+ * the A/A rows the coordinator attested (#1021). On the worker-unit's
+ * BQPHASE2 channel the AA_MEASURED acknowledgement is required, its digest
+ * must still be the A/A stage's raw numeric digest, and the transition is
+ * the campaign's production one (tp_retirement_campaign_admit_aa), so a
+ * production and a fixture admission enter A/B the same way; the producer's
+ * #426 policy decision (retirement_aa_admission.c) or, in the fixture build,
+ * its stand-in supplies the receipt. Without an attested AA_MEASURED,
+ * production refuses and leaves the attempt awaiting one. Only the
+ * functional fixture build admits a BQPHASE1 channel (lane D's own driver
+ * fixture), through the campaign's fixture stand-in. A denied, stale or
+ * mismatched admission poisons the attempt. */
 static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* driver,
     BqRetirementUnitCampaignAdmission const* admission)
 {
@@ -1984,25 +2040,30 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_AA && campaign && admission &&
         campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
-#if defined(BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA)
+    bool attested = ok && driver->phases->version == BQ_PHASE_VERSION_2;
     ok = ok && admission->plan_sha256 && admission->context_sha256 && admission->post_aa_sha256 &&
         !strcmp(admission->plan_sha256, driver->plan_sha256) &&
         !strcmp(admission->context_sha256, driver->context_sha256) &&
         !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) &&
-        bq_retirement_unit_campaign_receipt(driver, campaign, admission) &&
-        tp_retirement_campaign_admit_aa_fixture(campaign, admission->admitted, admission->plan_sha256,
-            admission->context_sha256, admission->receipt_sha256);
+        bq_retirement_unit_campaign_receipt(driver, campaign, admission);
+    bool fixture = false;
+#if defined(BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA)
+    fixture = ok && !attested;
+    if (fixture)
+        ok = tp_retirement_campaign_admit_aa_fixture(campaign, admission->admitted, admission->plan_sha256,
+                                                     admission->context_sha256, admission->receipt_sha256);
+#endif
+    if (!fixture)
+        ok = ok && attested && tp_retirement_digest(driver->aa_attested_sha256) &&
+            bq_retirement_unit_campaign_phase_receipt(admission) &&
+            tp_retirement_campaign_admit_aa(campaign, admission->admitted, admission->plan_sha256,
+                admission->context_sha256, admission->receipt_sha256, driver->aa_attested_sha256);
     if (ok)
     {
         memcpy(driver->aa_admission_sha256, admission->receipt_sha256, 65);
         driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED;
     }
     else bq_retirement_unit_campaign_fail(driver);
-#else
-    /* The pinned #426 policy can admit this job's A/A rows, but #1021 has no
-     * authenticated post-A/A phase over them: nothing can authorize A/B. */
-    ok = 0;
-#endif
     return ok;
 }
 

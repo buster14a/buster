@@ -14,10 +14,12 @@
  *     48-byte head under magic BQPHASE2, then a 32-byte SHA-256 digest at
  *     BQ_PHASE_DIGEST_OFFSET. The sequence is PREPARING, RETIREMENT_READY
  *     (the ready record's digest, sent right after bq_retirement_unit_ready),
- *     SETTLING, MEASURING, MEASURED (the receipt authority's digest). Only
- *     RETIREMENT_READY and MEASURED carry a digest, which must be nonzero; the
- *     other phases carry 32 zero bytes. The unit and the coordinator share a
- *     UID, so these digests never travel through files.
+ *     SETTLING, MEASURING, AA_MEASURED (#1021: the A/A stage's canonical
+ *     row digest, sent once its sample shards are published, between A/A
+ *     and A/B), MEASURED (the receipt authority's digest). Only
+ *     RETIREMENT_READY, AA_MEASURED and MEASURED carry a digest, which must
+ *     be nonzero; the other phases carry 32 zero bytes. The unit and the
+ *     coordinator share a UID, so these digests never travel through files.
  *
  * Map: bq_phase_bytes (size per version), bq_phase_next (the only successor
  * of a sequence), bq_phase_digest_carried, bq_phase_digest_parse and
@@ -57,6 +59,12 @@
 #define BQ_PHASE_MEASURED 4u
 /* Version 2 only, between PREPARING and SETTLING: the ready record's digest. */
 #define BQ_PHASE_RETIREMENT_READY 5u
+/* Version 2 only, between MEASURING and MEASURED (#1021): the A/A stage's
+ * canonical row digest (lane D's raw numeric digest: the A/A sample shards'
+ * `row-round-pair` then `group-round-pair` lines). The coordinator rehashes
+ * the published A/A sample shards and journals it before acknowledging, and
+ * A/B may start only after that acknowledgement. */
+#define BQ_PHASE_AA_MEASURED 6u
 
 typedef struct BqPhaseChannel
 {
@@ -116,14 +124,15 @@ static inline unsigned bq_phase_next(unsigned version, unsigned sequence)
         next = sequence == 0 ? BQ_PHASE_PREPARING : sequence == BQ_PHASE_PREPARING ? BQ_PHASE_RETIREMENT_READY :
                sequence == BQ_PHASE_RETIREMENT_READY ? BQ_PHASE_SETTLING :
                sequence == BQ_PHASE_SETTLING ? BQ_PHASE_MEASURING :
-               sequence == BQ_PHASE_MEASURING ? BQ_PHASE_MEASURED : 0;
+               sequence == BQ_PHASE_MEASURING ? BQ_PHASE_AA_MEASURED :
+               sequence == BQ_PHASE_AA_MEASURED ? BQ_PHASE_MEASURED : 0;
     return next;
 }
 
 static inline bool bq_phase_digest_carried(unsigned version, unsigned phase)
 {
     bool carried = version == BQ_PHASE_VERSION_2 &&
-                   (phase == BQ_PHASE_RETIREMENT_READY || phase == BQ_PHASE_MEASURED);
+                   (phase == BQ_PHASE_RETIREMENT_READY || phase == BQ_PHASE_AA_MEASURED || phase == BQ_PHASE_MEASURED);
     return carried;
 }
 
@@ -285,17 +294,19 @@ static inline int bq_phase_check(BqPhaseChannel const* channel, unsigned char co
 
 /* The acknowledgement deadline of one exchange that starts at `start`: the
  * 5 s per-ack cap under the caller's deadline, except for a version-2
- * MEASURED. Before acknowledging that one, the coordinator copies and
+ * AA_MEASURED or MEASURED. Before acknowledging AA_MEASURED the coordinator
+ * rehashes every published A/A sample shard; before MEASURED it copies and
  * journals the receipt authority (tp_retirement_store_authority_handoff),
- * which reopens every retained file. That wait is therefore bounded only by
- * the caller's deadline, the job's remaining execution budget. The smoke
+ * which reopens every retained file. Those waits are therefore bounded only
+ * by the caller's deadline, the job's remaining execution budget. The smoke
  * recipe keeps the cap. */
 static inline uint64_t bq_phase_ack_deadline(BqPhaseChannel const* channel, unsigned phase, uint64_t start,
                                              uint64_t deadline_ns)
 {
     uint64_t ack_budget = (uint64_t)BQ_PHASE_ACK_MILLISECONDS * UINT64_C(1000000);
     uint64_t capped = start && ack_budget <= UINT64_MAX - start ? start + ack_budget : UINT64_MAX;
-    bool whole = channel && channel->version == BQ_PHASE_VERSION_2 && phase == BQ_PHASE_MEASURED;
+    bool whole = channel && channel->version == BQ_PHASE_VERSION_2 &&
+                 (phase == BQ_PHASE_AA_MEASURED || phase == BQ_PHASE_MEASURED);
     uint64_t result = whole || deadline_ns < capped ? deadline_ns : capped;
     return result;
 }

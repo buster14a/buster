@@ -11,13 +11,15 @@
  * campaign budget (retirement_budget.h) to match the recipe pin its caller
  * passes and to hold the derived counts, each timed group costed by its kind
  * and stage. It does not confer receipt authority, evaluate #426, or admit a
- * service recipe.
+ * service recipe: tp_retirement_campaign_admit_aa enters A/B only over the
+ * service-attested A/A digest its caller supplies (#1021).
  *
  * Map: TpRetirementCampaignShape, tp_retirement_campaign_metrics_shards,
  * tp_retirement_campaign_capacity, tp_retirement_campaign_store_preflight,
  * TpRetirementCampaignReview, tp_retirement_campaign_freeze,
  * tp_retirement_campaign_run, tp_retirement_campaign_rotate,
- * tp_retirement_campaign_finish_stage, tp_retirement_campaign_outcome.
+ * tp_retirement_campaign_finish_stage, tp_retirement_campaign_admit_aa,
+ * tp_retirement_campaign_outcome.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
 #define BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
@@ -843,10 +845,35 @@ static inline int tp_retirement_campaign_finish_stage(TpRetirementCampaign* camp
     return ok;
 }
 
-/* This transition is compiled for functional fixtures only. An authenticated
- * #426 A/A evaluator and #1021 supervisor handoff must implement production
- * admission; comparing a local digest cannot make a receipt authoritative.
- * Until that handoff lands, production cannot enter A/B. */
+/* The production transition into A/B (#426 plan step 6, #1021). The caller
+ * (bq_retirement_unit_campaign_admit) supplies the admission the producer's
+ * pinned #426 policy decided and the A/A stage digest the service attested
+ * over its private phase channel (AA_MEASURED, acknowledged only after the
+ * coordinator rehashed the published A/A shards). That attested digest must
+ * still be the finished A/A stage's raw numeric digest, so A/B starts only
+ * over the rows the service attested; the plan, context and an untouched A/B
+ * stage are rechecked as for the fixture. Anything else poisons the attempt. */
+static inline int tp_retirement_campaign_admit_aa(TpRetirementCampaign* campaign, int admitted,
+    char const* checked_plan_sha256, char const* checked_context_sha256, char const* aa_receipt_sha256,
+    char const* attested_aa_sha256)
+{
+    TpRetirementSamples const* aa = campaign ? campaign->samples[0] : NULL;
+    int ok = campaign && campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA && admitted == 1 &&
+        checked_plan_sha256 && checked_context_sha256 &&
+        !strcmp(checked_plan_sha256, campaign->plan_sha256) &&
+        !strcmp(checked_context_sha256, campaign->context_sha256) &&
+        tp_retirement_digest(aa_receipt_sha256) && tp_retirement_digest(attested_aa_sha256) && aa &&
+        aa->finished && !aa->failed && !strcmp(aa->raw_sha256, attested_aa_sha256) &&
+        tp_retirement_campaign_stage_ready(campaign, 0) &&
+        !campaign->samples[1]->collected && !campaign->samples[1]->failed;
+    if (ok) campaign->phase = TP_RETIREMENT_CAMPAIGN_AB;
+    else tp_retirement_campaign_poison(campaign);
+    return ok;
+}
+
+/* This transition is compiled for functional fixtures only: it admits
+ * without a service-attested A/A digest, which only the lane D driver's own
+ * BQPHASE1 fixture lacks. Production uses tp_retirement_campaign_admit_aa. */
 #ifdef TP_RETIREMENT_CAMPAIGN_FIXTURE_AA
 /* Lets a later functional-fixture consumer (retirement_unit_campaign.h) check
  * that this stand-in was compiled into its translation unit. */

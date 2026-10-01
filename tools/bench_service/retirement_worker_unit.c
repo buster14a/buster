@@ -43,9 +43,9 @@
  *
  * The producer exits 0 only after MEASURED was acknowledged and the manifest
  * written. Production A/A admission decides from the pinned #426 policy
- * (retirement_aa_admission.c), but no #1021 phase authenticates the A/A rows,
- * so production cannot reach A/B, and the compiled profile is blocked, so it
- * cannot even start. Nothing here is a timing fact.
+ * (retirement_aa_admission.c) over the A/A rows the coordinator attested as
+ * AA_MEASURED (#1021); the compiled profile is blocked and pins no policy,
+ * so the producer cannot even start. Nothing here is a timing fact.
  */
 #include <poll.h>
 #include <pwd.h>
