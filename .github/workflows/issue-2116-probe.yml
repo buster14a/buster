@@ -16,92 +16,64 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: b6639643533771ec123978bbd997eb9cea773bd4
           persist-credentials: false
-      - name: Compile original-child and diagnostic-child stress harnesses
+      - name: Require positive execution and rejection of each isolated mutation
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build/issue-2116
-          clang --version
           git rev-parse HEAD
-          test "$(git hash-object tools/throughput/tests.c)" = 95dc53ba95f7c3e681bb3e818d74ef04ad9da6be
+          clang --version
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('tools/throughput/tests.c')
-          text = p.read_text()
-          old = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);\n        test_summaries(directory, 0);'
-          new = '        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);\n        CHECK_CHILD_EXIT(child, 0, log);\n        test_summaries(directory, 0);'
-          assert text.count(old) == 1
-          text = text.replace(old, new)
-          old = '        test_summary_write_failure(executable, root);'
-          new = '        for (unsigned probe_index = 0; probe_index < 256; ++probe_index)\n            test_summary_write_failure(executable, root);'
-          assert text.count(old) == 1
-          p.write_text(text.replace(old, new))
+          import subprocess
+          source = Path('tools/throughput/tests.c')
+          original = source.read_text()
+          variants = {
+              'positive': None,
+              'no-limit-restoration': ('restore_status = setrlimit(resource, &saved);', 'restore_status = 0;'),
+              'no-comparison': ('comparison = tp_compare(argv[3]);', 'comparison = 2;'),
+              'missing-diagnostic': ('"\\nSUMMARY_WRITE_FAILURE stage=%s', '"\\nOMITTED_SUMMARY_DIAGNOSTIC stage=%s'),
+          }
+          root = Path('build/issue-2116')
+          all_ok = True
+          try:
+              for name, mutation in variants.items():
+                  text = original
+                  if mutation:
+                      old, new = mutation
+                      if text.count(old) != 1:
+                          raise SystemExit(f'mutation source mismatch: {name}')
+                      text = text.replace(old, new)
+                  source.write_text(text)
+                  binary = root / name
+                  subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', '-Isrc', '-DBUSTER_SINGLE_THREADED=1', str(source), 'tools/throughput/shared.c', '-lm', '-o', str(binary)], check=True, timeout=120)
+                  log = root / (name + '.log')
+                  with log.open('w') as out:
+                      result = subprocess.run([str(binary.resolve()), str((root / (name + '-root')).resolve())], stdout=out, stderr=subprocess.STDOUT, timeout=60)
+                  output = log.read_text()
+                  accepted = result.returncode == (0 if mutation is None else 1)
+                  accepted = accepted and ('THROUGHPUT_INTEGRATION_TEST' in output)
+                  accepted = accepted and (('TEST failure' in output) == (mutation is not None))
+                  record = f'MUTATION_CONTROL name={name} exit={result.returncode} expected={0 if mutation is None else 1} accepted={accepted}'
+                  print(record, flush=True)
+                  with (root / 'outcomes.txt').open('a') as out:
+                      out.write(record + '\n')
+                  for line in output.splitlines():
+                      if 'TEST failure' in line or 'THROUGHPUT_INTEGRATION_TEST' in line or 'SUMMARY_WRITE_FAILURE' in line:
+                          print(line, flush=True)
+                  all_ok = all_ok and accepted
+          finally:
+              source.write_text(original)
+          if not all_ok:
+              raise SystemExit('mutation controls did not preserve their required outcomes')
           PY
-          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/original-child
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('tools/throughput/tests.c')
-          text = path.read_text()
-          start = text.index('        /* Restrict only this child so buffered report writes fail at close. */')
-          end = text.index('\n    }\n#endif', start)
-          new = '''        struct rlimit saved = {0}, limit = {0};
-                  int got = getrlimit(RLIMIT_FSIZE, &saved);
-                  int get_error = got ? errno : 0;
-                  int signal_error = 0, limit_status = -2, limit_error = 0;
-                  int comparison = -2, comparison_error = 0, restored = -2, restore_error = 0;
-                  if (got == 0)
-                  {
-                      limit = saved;
-                      limit.rlim_cur = 1;
-                      if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR) signal_error = errno;
-                      if (!signal_error)
-                      {
-                          limit_status = setrlimit(RLIMIT_FSIZE, &limit);
-                          limit_error = limit_status ? errno : 0;
-                      }
-                      if (!signal_error && limit_status == 0)
-                      {
-                          errno = 0;
-                          comparison = tp_compare(argv[3]);
-                          comparison_error = errno;
-                      }
-                      restored = setrlimit(RLIMIT_FSIZE, &saved);
-                      restore_error = restored ? errno : 0;
-                  }
-                  clearerr(stdout);
-                  clearerr(stderr);
-                  fprintf(stderr, "SUMMARY_WRITE_PROBE get=%d get_errno=%d soft=%ju hard=%ju signal_errno=%d set=%d set_errno=%d compare=%d compare_errno=%d restore=%d restore_errno=%d\\n",
-                          got, get_error, (uintmax_t)saved.rlim_cur, (uintmax_t)saved.rlim_max,
-                          signal_error, limit_status, limit_error, comparison, comparison_error, restored, restore_error);
-                  result = got == 0 && !signal_error && limit_status == 0 && comparison == 2 && restored == 0 ? 0 : 1;'''
-          path.write_text(text[:start] + new + text[end:])
-          PY
-          git diff --check
-          git diff -- tools/throughput/tests.c > build/issue-2116/diagnostic.patch
-          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/throughput/tests.c tools/throughput/shared.c -lm -o build/issue-2116/diagnostic-child
-      - name: Record every fixed-population outcome
-        shell: bash
-        run: |
-          set -euo pipefail
-          for mode in original-child diagnostic-child; do
-            root="$PWD/build/issue-2116/$mode-root"
-            set +e
-            "build/issue-2116/$mode" "$root" > "build/issue-2116/$mode.log" 2>&1
-            status=$?
-            set -e
-            printf 'PROBE_POPULATION mode=%s children=256 exit=%s\n' "$mode" "$status" | tee -a build/issue-2116/outcomes.txt
-            grep -E 'TEST failure|THROUGHPUT_INTEGRATION_TEST|SUMMARY_WRITE_PROBE' "build/issue-2116/$mode.log" || true
-            if test -f "$root/summary-write-failure.log"; then
-              printf '\nLAST_CHILD_LOG mode=%s\n' "$mode"
-              cat "$root/summary-write-failure.log"
-              printf '\nEND_CHILD_LOG\n'
-            fi
-          done
+          git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-2116-${{ matrix.os }}-${{ github.run_id }}
+          name: issue-2116-mutation-${{ matrix.os }}-${{ github.run_id }}
           path: build/issue-2116
           retention-days: 7
           if-no-files-found: error
