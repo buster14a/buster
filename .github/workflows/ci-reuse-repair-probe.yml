@@ -1,0 +1,35 @@
+name: Main CI reuse repair probe
+on:
+  push:
+    branches: [codex/2134-bind-reuse-finalization]
+permissions:
+  contents: read
+jobs:
+  regressions:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Preserve exact source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reuse-repair"
+          git rev-parse HEAD > "$RUNNER_TEMP/reuse-repair/revision.txt"
+          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/reuse-repair/source.tar.gz"
+      - name: Run existing reuse regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/main_ci_reuse_test.py -v 2>&1 | tee "$RUNNER_TEMP/reuse-repair/tests.log"
+      - name: Retain pinned source and test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reuse-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reuse-repair/
+          if-no-files-found: error
+          retention-days: 7
