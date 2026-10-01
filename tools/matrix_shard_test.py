@@ -1360,7 +1360,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
                 if job == "test":
-                    self.assertIn("\n    needs: lint\n", text)
+                    self.assertIn("\n    needs: [lint, reuse]\n", text)
                 else:
                     # Only the cheap main-push reuse decision may gate these lanes.
                     self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])

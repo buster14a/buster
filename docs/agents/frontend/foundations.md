@@ -916,8 +916,9 @@ float/double/long double rows (signed zeros, subnormal, infinite and NaN
 halves, projection controls) in every native allocator at O0/O2. Imaginary
 constants remain outside parse-side integer constant expressions
 (`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets; `_Bool` bit-field stores fail canonical validation
-independently of this conversion.
+not folded to real targets. Boolean bit-field accesses use an unsigned raw
+integer storage unit; canonical validation admits that unit at the recorded
+field access size even when the layout did not narrow it.
 
 ## ABI decomposition ownership
 
