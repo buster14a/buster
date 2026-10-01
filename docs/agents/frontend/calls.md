@@ -159,6 +159,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   aligned float/integer records in both directions with the configured host
   compiler and available Linux GCC, including register exhaustion, aggregate
   returns and variadic access in every native allocator/frontend form.
+  The direct SysV variadic reader consumes live ABI parts in registers while
+  retaining the complete aligned storage image in the overflow area. A record
+  containing only ignored fields has zero transport parts and currently hits
+  the frontend's unsupported zero-part signature gate; the LLVM negative
+  fixture pins that earlier refusal and absence of a produced artifact.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.

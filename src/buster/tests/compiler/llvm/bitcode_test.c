@@ -659,11 +659,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             if (mode != 3)
             {
-                BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE);
-                BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && emitted.llvm_bitcode.bytes.length == 0);
-                String8 diagnostic = mode == 4 ? S8("aggregate variadic arguments") :
-                                     target == 3 && mode == 6 ? S8("SysV aggregate register layout") : S8("aggregate function ABI");
-                BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+                // A SysV record containing only ignored padding has no
+                // transport parts. The frontend's unsupported zero-part
+                // signature gate now refuses it before LLVM emission.
+                bool ignored_padding = target == 3 && mode == 6;
+                CompilerDriverError expected = ignored_padding ? COMPILER_DRIVER_ERROR_ANALYSIS : COMPILER_DRIVER_ERROR_LLVM_BITCODE;
+                BUSTER_TEST_RAW(arguments, emitted.error == expected, emitted.diagnostic);
+                BUSTER_TEST(arguments, !emitted.has_llvm_bitcode && !emitted.llvm_bitcode.success && emitted.llvm_bitcode.bytes.length == 0);
+                String8 diagnostic = ignored_padding
+                    ? S8("C IR lowering does not yet support the parameter or return value types of function 'take_padding'")
+                    : mode == 4 ? S8("aggregate variadic arguments") : S8("aggregate function ABI");
+                BUSTER_TEST_RAW(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH, emitted.diagnostic);
             }
             else
             {
