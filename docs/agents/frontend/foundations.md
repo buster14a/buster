@@ -4,6 +4,21 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Logical constant eligibility
+
+`c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
+left operand of `&&` and `||`. A known right-hand zero/one may predict the result,
+but does not prove that a live call or volatile read is eligible for constant
+treatment. `__builtin_constant_p(effect() && 0)` and the corresponding `|| 1`
+query therefore return zero without evaluating their operands. Proven left
+short circuits (`0 && effect()` and `1 || effect()`) still return one.
+
+`c_test_logical_constant_predicates` checks result bits and absence of emitted
+effects across six target layouts and both frontend forms. Its embedded runtime
+fixture checks direct/comma/volatile queries, short-circuit controls, and
+exactly-once ordinary/choose-expression fallbacks in every native allocator.
+Truth conversion of places and operand preparation retain their separate owners.
+
 ## Direct local SSA (GitHub #34)
 
 `c_ir_ssa_*` in `c_gen.c` constructs pruned canonical block-argument SSA for
@@ -331,6 +346,22 @@ without facts for identical bitcode and diagnostics.
   live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
+- Constant truth queries distinguish invalid, unknown, known false and known
+  true. `c_ir_constant_truth` materializes scalar places, preserves unknown
+  reads, and decays arrays/functions to addresses. Boolean casts, negation,
+  logical operators, conditional selection and static assertions consume that
+  checked result; they never interpret UNKNOWN as zero. Volatile/atomic reads
+  cannot use read-only storage as a constant certificate. Arithmetic and
+  comparison folding also materialize scalar places before reading payloads.
+  Unknown binary results retain comparison, promotion and pointer-operation
+  result types so an unselected conditional arm still supplies its C type.
+  `c_ir_type_name_prefix` preserves volatile pointees, including qualifiers
+  interspersed with primitive type words, before constructing cast pointers;
+  each pointer level retains its own volatile/atomic access qualification.
+  `c_test_constant_scalar_truth` checks constant initializers, unevaluated
+  predicate bits/effects, diagnostics and native execution (#1225).
+  Its static const initializer cases use the existing GNU folding extension;
+  ISO integer-constant-expression admission keeps its separate checks.
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
@@ -885,8 +916,9 @@ float/double/long double rows (signed zeros, subnormal, infinite and NaN
 halves, projection controls) in every native allocator at O0/O2. Imaginary
 constants remain outside parse-side integer constant expressions
 (`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets; `_Bool` bit-field stores fail canonical validation
-independently of this conversion.
+not folded to real targets. Boolean bit-field accesses use an unsigned raw
+integer storage unit; canonical validation admits that unit at the recorded
+field access size even when the layout did not narrow it.
 
 ## ABI decomposition ownership
 

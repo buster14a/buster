@@ -1,0 +1,102 @@
+{
+  "applicability": {
+    "profile_sha256": "3386834d15d3b8360e20cf6f5308619daaad9b5d06cdecbd079336c24a2c4804",
+    "revision": "d7c9d5f825b8fbd5778f0e064236ae4996d04277",
+    "source_identity_sha256": "4dd922a9acd6ccf96e97e5caf8ebc752c3c2a606549826d79261034046a636e6",
+    "tree": "a3a04f9fa98bd94ed9d9566d9503a01a8ba9da79"
+  },
+  "approval": {
+    "approved_by": "davidgmbb",
+    "reference": "https://github.com/buster14a/buster/issues/36#issuecomment-5928278832"
+  },
+  "confirmatory_attempts": 64,
+  "confirmatory_jobs": {
+    "first_job_id": "120",
+    "last_job_id": "9999"
+  },
+  "current_job": {
+    "equivalence_band": {
+      "lower": "0.98",
+      "upper": "1.02"
+    },
+    "pairs_per_round": 60,
+    "runtime_rows": "U=R"
+  },
+  "family_alpha": "0.05",
+  "family_size": 42,
+  "limits": {
+    "cross-root.peak_rss_bytes.block_shift": "0.0063",
+    "cross-root.peak_rss_bytes.linear_drift": "0.000021",
+    "cross-root.peak_rss_bytes.order_effect": "0.017",
+    "cross-root.peak_rss_bytes.pair_resolution": "0.032",
+    "cross-root.peak_rss_bytes.path_effect": "0.016",
+    "cross-root.peak_rss_bytes.serial_effect": "0.3",
+    "cross-root.peak_rss_bytes.variant_effect": "0.016",
+    "cross-root.wall_time_ns.block_shift": "0.028",
+    "cross-root.wall_time_ns.linear_drift": "0.0005",
+    "cross-root.wall_time_ns.order_effect": "0.029",
+    "cross-root.wall_time_ns.pair_resolution": "1.4",
+    "cross-root.wall_time_ns.path_effect": "0.042",
+    "cross-root.wall_time_ns.serial_effect": "0.3",
+    "cross-root.wall_time_ns.variant_effect": "0.042",
+    "immutable.peak_rss_bytes.block_shift": "0.0063",
+    "immutable.peak_rss_bytes.linear_drift": "0.000038",
+    "immutable.peak_rss_bytes.order_effect": "0.017",
+    "immutable.peak_rss_bytes.pair_resolution": "0.032",
+    "immutable.peak_rss_bytes.path_effect": "0.013",
+    "immutable.peak_rss_bytes.serial_effect": "0.3",
+    "immutable.peak_rss_bytes.variant_effect": "0.013",
+    "immutable.wall_time_ns.block_shift": "0.011",
+    "immutable.wall_time_ns.linear_drift": "0.0002",
+    "immutable.wall_time_ns.order_effect": "0.041",
+    "immutable.wall_time_ns.pair_resolution": "1.2",
+    "immutable.wall_time_ns.path_effect": "0.057",
+    "immutable.wall_time_ns.serial_effect": "0.45",
+    "immutable.wall_time_ns.variant_effect": "0.057",
+    "same-root-rebuild.peak_rss_bytes.block_shift": "0.0069",
+    "same-root-rebuild.peak_rss_bytes.linear_drift": "0.000021",
+    "same-root-rebuild.peak_rss_bytes.order_effect": "0.012",
+    "same-root-rebuild.peak_rss_bytes.pair_resolution": "0.031",
+    "same-root-rebuild.peak_rss_bytes.path_effect": "0.0081",
+    "same-root-rebuild.peak_rss_bytes.serial_effect": "0.3",
+    "same-root-rebuild.peak_rss_bytes.variant_effect": "0.0081",
+    "same-root-rebuild.wall_time_ns.block_shift": "0.014",
+    "same-root-rebuild.wall_time_ns.linear_drift": "0.00087",
+    "same-root-rebuild.wall_time_ns.order_effect": "0.033",
+    "same-root-rebuild.wall_time_ns.pair_resolution": "1.3",
+    "same-root-rebuild.wall_time_ns.path_effect": "0.025",
+    "same-root-rebuild.wall_time_ns.serial_effect": "0.3",
+    "same-root-rebuild.wall_time_ns.variant_effect": "0.025"
+  },
+  "pilot_attempts": [
+    {
+      "attempt": "83",
+      "job_id": "82"
+    },
+    {
+      "attempt": "92",
+      "job_id": "91"
+    },
+    {
+      "attempt": "101",
+      "job_id": "100"
+    },
+    {
+      "attempt": "110",
+      "job_id": "109"
+    },
+    {
+      "attempt": "119",
+      "job_id": "118"
+    }
+  ],
+  "policy_id": "buster-zen5-aa-eligibility-v1",
+  "quantile": "0.90",
+  "schema": "buster-zen5-aa-protocol-v1",
+  "stationarity": {
+    "alpha": "0.05",
+    "permutations": 100000,
+    "seed": 4260881
+  },
+  "version": 1
+}
