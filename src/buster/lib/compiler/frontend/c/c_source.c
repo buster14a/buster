@@ -21,7 +21,8 @@
 //   c_preprocess_site_location                 recovery (CSourceSite in c.h)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
-//   c_translate_source                         phase-1/2 translation with
+//   c_source_allocation_plan, c_translate_source checked source bounds and
+//                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
 //   c_source_metrics_add,                      the SOURCE table counters and
@@ -968,18 +969,47 @@ bool c_test_translate_plain_run_paths_agree(String8 source)
 }
 #endif
 
+// Validate the source size before constructing any source-derived allocation
+// count or reading the source pointer. Rejected plans leave the output alone.
+BUSTER_C_INTERNAL bool c_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
+{
+    bool valid = length <= C_SOURCE_MAXIMUM_LENGTH;
+    if (valid)
+    {
+        // All additions follow the u32 source bound. These compile-time
+        // checks also keep the corresponding arena byte products in u64.
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 2 <= UINT64_MAX / sizeof(IrSourceCheckpoint));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 2 <= UINT64_MAX / sizeof(u32));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 17 <= UINT64_MAX / sizeof(CToken));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 1 <= (UINT64_MAX - BUSTER_MB(1)) / (2 * sizeof(CDiagnostic)));
+        *plan = (CSourceAllocationPlan){
+            .translated_capacity = length + 1,
+            .checkpoint_capacity = length + 2,
+        };
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
+{
+    return c_source_allocation_plan(length, plan);
+}
+#endif
+
 // force_scalar keeps the byte-at-a-time run loop as the whole implementation,
 // which is what c_lex_reference lexes through so the differential gate
 // compares the chunk fast path against it.
-BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
+BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar,
+                                                      CSourceAllocationPlan const* plan)
 {
     CTranslatedSource result = {0};
-    if (source.length <= UINT32_MAX - 2)
+    if (plan)
     {
-        char8* translated = space ? c_space_allocate(space, source.length + 1) : arena_allocate(arena, char8, source.length + 1);
+        char8* translated = space ? c_space_allocate(space, plan->translated_capacity) : arena_allocate(arena, char8, plan->translated_capacity);
         result.translated_offset = space ? c_space_offset(space, translated) : 0;
-        IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, source.length + 2);
-        u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
+        IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, plan->checkpoint_capacity);
+        u32* checkpoint_offsets = arena_allocate(arena, u32, plan->checkpoint_capacity);
         u32 checkpoint_count = 0;
         u64 input = 0;
         u64 output = 0;
@@ -3091,9 +3121,33 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
 BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
 {
     CLexResult result = {0};
+    CSourceAllocationPlan plan;
     if (arena && (!source.length || source.pointer))
     {
-        CTranslatedSource translated = c_translate_source(arena, space, source, force_scalar);
+        bool source_supported = c_source_allocation_plan(source.length, &plan);
+        if (source_supported && space)
+        {
+            // Each include shares the same u32 spelling offsets. A source
+            // may fit by itself while the preceding spellings leave too
+            // little representable space for its copy and terminator.
+            source_supported = space->used <= UINT32_MAX && plan.translated_capacity <= UINT32_MAX - space->used;
+        }
+        if (!source_supported)
+        {
+            // Preserve a small, well-formed EOF stream for preprocessing's
+            // frame walk, but never let an unread source appear successful.
+            // The empty spelling/checkpoint owns the include diagnostic's
+            // map offset without inspecting the caller's source pointer.
+            c_source_allocation_plan(0, &plan);
+        }
+        CTranslatedSource translated = c_translate_source(arena, source_supported ? space : 0, source_supported ? source : (String8){0}, force_scalar, &plan);
+        if (!source_supported && space)
+        {
+            // Reuse the previous spelling's final byte as the empty source's
+            // location anchor; a full spelling space cannot allocate even
+            // another terminator. No token spelling reads this empty range.
+            translated.translated_offset = space->used ? (u32)BUSTER_MIN(space->used - 1, (u64)UINT32_MAX - 1) : 0;
+        }
         result.translated_source = translated.source;
         result.spelling_base = space ? space->base : translated.source.pointer;
         result.checkpoints = translated.checkpoints;
@@ -3105,10 +3159,25 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         // One token per byte bounds the stream including the end marker exactly as
         // the scalar loop needs; sixteen more absorb the tail rows of the emitter's
         // full-width interleaved stores, which the next window overwrites.
-        u64 token_capacity = translated.source.length + 1 + 16;
+        u64 token_capacity = source_supported ? translated.source.length + 17 : 1;
         result.tokens = arena_allocate(arena, CToken, token_capacity);
         result.token_shapes = arena_allocate(arena, CTokenShape, token_capacity);
-        if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
+        if (!source_supported)
+        {
+            c_token_push(&result, translated, 0, 0, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+            result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+            result.diagnostic_count = 1;
+            IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
+            C_DIAGNOSTIC_RESERVATION_CENSUS(LEX, 1);
+            result.diagnostics[0] = (CDiagnostic){
+                .message = source.length > C_SOURCE_MAXIMUM_LENGTH ? S8("C source exceeds the 4294967293-byte translation limit")
+                                                                   : S8("C source exceeds the remaining 32-bit spelling-offset space"),
+                .location = c_lex_local_location(&result, 0),
+                .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                .severity = C_DIAGNOSTIC_ERROR,
+            };
+        }
+        else if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
         {
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
             if (diagnostic_bytes <= (UINT64_MAX - BUSTER_MB(1)) / 2)
@@ -3175,6 +3244,14 @@ BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, St
 {
     return c_lex_dispatch(arena, space, source, false);
 }
+
+#if BUSTER_INCLUDE_TESTS
+CLexResult c_test_lex_include_source(Arena* arena, String8 source)
+{
+    CSpellingSpace space = c_space_local(arena, 1024);
+    return c_lex_space(arena, &space, source);
+}
+#endif
 
 CLexResult c_lex(Arena* arena, String8 source)
 {
@@ -10492,7 +10569,34 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
 {
     C_CENSUS_PHASE_BEGIN(PREPROCESS);
-    CPreprocessResult result = c_preprocess_run(arena, source, options);
+    CPreprocessResult result;
+    CSourceAllocationPlan plan;
+    if (arena && !c_source_allocation_plan(source.length, &plan))
+    {
+        // Reject before phase setup and any source-derived capacity sums.
+        // A sentinel length is sufficient to exercise this path: no byte of
+        // the source is read and no source-sized storage is requested.
+        result = (CPreprocessResult){
+            .target = options.target,
+            .dialect = options.dialect < C_PREPROCESS_DIALECT_COUNT ? options.dialect : C_PREPROCESS_DIALECT_GNU17,
+        };
+        result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+        *result.detail = (CPreprocessDetail){
+            .data_layout = target_data_layout_is_valid(options.data_layout) ? options.data_layout : target_data_layout(options.target),
+        };
+        result.files = arena_allocate(arena, String8, 1);
+        result.files[0] = string_duplicate_arena(arena, options.source_path.length ? options.source_path : S8("."), false);
+        result.file_count = 1;
+        result.diagnostic_capacity = 1;
+        result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+        C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, 1);
+        c_preprocess_diagnostic_push(arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                                     S8("C source exceeds the 4294967293-byte translation limit"));
+    }
+    else
+    {
+        result = c_preprocess_run(arena, source, options);
+    }
     C_CENSUS_PHASE_END();
     return result;
 }

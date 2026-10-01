@@ -8214,6 +8214,98 @@ BUSTER_GLOBAL_LOCAL bool c_test_source_region_equal(IrSourceRegion left, IrSourc
            left.kind == right.kind && left.origin_plus_one == right.origin_plus_one;
 }
 
+// Exercise rejected sentinel lengths without materializing their imaginary
+// source bytes, and query the exact standalone translation allocation bound.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_size_limit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CSourceAllocationPlan plan = {0};
+    BUSTER_TEST(arguments, c_test_source_allocation_plan(0, &plan));
+    BUSTER_TEST(arguments, plan.translated_capacity == 1 && plan.checkpoint_capacity == 2);
+    BUSTER_TEST(arguments, c_test_source_allocation_plan((u64)UINT32_MAX - 2, &plan));
+    BUSTER_TEST(arguments, plan.translated_capacity == (u64)UINT32_MAX - 1);
+    BUSTER_TEST(arguments, plan.checkpoint_capacity == UINT32_MAX);
+    CSourceAllocationPlan accepted = plan;
+    u64 rejected_lengths[] = {(u64)UINT32_MAX - 1, UINT32_MAX, (u64)UINT32_MAX + 1, UINT64_MAX};
+    char8 sentinel = 'x';
+    for (u32 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(rejected_lengths); length_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Arena* arena = temporary.arena;
+        BUSTER_TEST(arguments, !c_test_source_allocation_plan(rejected_lengths[length_index], &plan));
+        BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
+        // Only one real byte exists. A rejected length must never inspect
+        // it, its imaginary tail, or allocate storage scaled by that tail.
+        String8 source = {.pointer = &sentinel, .length = rejected_lengths[length_index]};
+        u64 position = arena->position;
+        CLexResult lexed[] = {c_lex(arena, source), c_lex_reference(arena, source), c_test_lex_include_source(arena, source)};
+        BUSTER_TEST(arguments, arena->position - position < BUSTER_KB(16));
+        for (u32 lexer_index = 0; lexer_index < BUSTER_ARRAY_LENGTH(lexed); lexer_index += 1)
+        {
+            CLexResult* lex = lexed + lexer_index;
+            if (BUSTER_REQUIRE(arguments, lex->token_count == 1 && lex->tokens))
+            {
+                BUSTER_TEST(arguments, lex->tokens[0].kind == C_TOKEN_END_OF_FILE);
+            }
+            if (BUSTER_REQUIRE(arguments, lex->diagnostic_count == 1 && lex->diagnostics))
+            {
+                CDiagnostic diagnostic = lex->diagnostics[0];
+                BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE && diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == 1 && diagnostic.location.offset == 0);
+                BUSTER_TEST(arguments, diagnostic.location.map_offset == lex->translated_offset);
+                BUSTER_STRING_TEST(arguments, diagnostic.message, S8("C source exceeds the 4294967293-byte translation limit"));
+            }
+        }
+        position = arena->position;
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.source_path = S8("oversized-root.c"), .target = target_native});
+        BUSTER_TEST(arguments, arena->position - position < BUSTER_KB(4));
+        BUSTER_TEST(arguments, preprocess.error_count == 1 && preprocess.warning_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == 0 && !preprocess.recovery && !preprocess.symbols);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 1 && preprocess.diagnostics))
+        {
+            CDiagnostic diagnostic = preprocess.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE && diagnostic.severity == C_DIAGNOSTIC_ERROR);
+            BUSTER_TEST(arguments, diagnostic.location.file == 0 && diagnostic.location.line == 1 && diagnostic.location.column == 1);
+            if (BUSTER_REQUIRE(arguments, preprocess.file_count == 1 && preprocess.files))
+            {
+                BUSTER_STRING_TEST(arguments, preprocess.files[0], S8("oversized-root.c"));
+            }
+        }
+        scratch_end(temporary);
+    }
+    // The standalone translation limit remains accepted by the plan, while
+    // a shared include has to leave room for its pre-existing spellings.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CLexResult lex = c_test_lex_include_source(temporary.arena, (String8){.pointer = &sentinel, .length = (u64)UINT32_MAX - 2});
+        if (BUSTER_REQUIRE(arguments, lex.diagnostic_count == 1 && lex.diagnostics))
+        {
+            BUSTER_TEST(arguments, lex.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE);
+            BUSTER_STRING_TEST(arguments, lex.diagnostics[0].message, S8("C source exceeds the remaining 32-bit spelling-offset space"));
+        }
+        scratch_end(temporary);
+    }
+    String8 controls[] = {S8(""), S8("int value = 3;\n")};
+    for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(controls); control += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CLexResult direct = c_lex(temporary.arena, controls[control]);
+        CLexResult include = c_test_lex_include_source(temporary.arena, controls[control]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, controls[control], (CPreprocessOptions){.target = target_native});
+        BUSTER_TEST(arguments, direct.diagnostic_count == 0 && include.diagnostic_count == 0);
+        BUSTER_TEST(arguments, direct.token_count == include.token_count && direct.token_count > 0);
+        BUSTER_TEST(arguments, preprocess.error_count == 0 && preprocess.diagnostic_count == 0 && preprocess.token_count > 0);
+        for (u64 token = 0; token < BUSTER_MIN(direct.token_count, include.token_count); token += 1)
+        {
+            BUSTER_TEST(arguments, direct.tokens[token].kind == include.tokens[token].kind);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(direct.spelling_base, direct.tokens[token]), c_token_spelling(include.spelling_base, include.tokens[token]));
+        }
+        scratch_end(temporary);
+    }
+    BUSTER_TEST(arguments, sentinel == 'x');
+    return result;
+}
+
 // Exercise the production ordering primitive directly. The ordinal stored in
 // source proves both permutation preservation and stable ordering of ties;
 // every other field must travel with that ordinal, including borrowed pointers.
@@ -29530,6 +29622,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
     BUSTER_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_size_limit);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_publication);
