@@ -81,8 +81,8 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 176951,
-      "sha256": "358891a165a2e4bdd853e8bccfedb2f86d74a2d93145e571b6a1280867f96802"
+      "bytes": 168531,
+      "sha256": "14d9866ad7fb9abe1c36823672278ef0d56bb8535d0a78b012809042899da8b8"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
@@ -136,8 +136,8 @@
     },
     {
       "source": "src/buster/lib/os.h",
-      "bytes": 32667,
-      "sha256": "3d1a8c67edc79ce2c24e17cd0722b65936fafbfea53923f7995b5d985f844e4b"
+      "bytes": 32622,
+      "sha256": "9923027ac1c25aca627be7feb0f2dae8c397a5a0e37840e68b7ff6ec99cec9f7"
     },
     {
       "source": "src/buster/lib/os_internal.h",
