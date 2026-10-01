@@ -230,7 +230,11 @@ fixture as well as compiling both architectures.
   when no call in the function returns twice: a `longjmp` can re-enter the frame
   at a row no machine edge reaches. Address-taken, volatile-tainted,
   inline-assembly, variadic, outgoing-argument and unproven-form objects keep
-  storage of their own. Debug records may name slots but never decide layout.
+  storage of their own. With an optional `stack_slot_memory_flags` array, only
+  `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is
+  unknown and keeps dedicated storage. An absent array preserves manual
+  fixtures' existing reuse subject to the other lifetime and ownership guards.
+  Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent

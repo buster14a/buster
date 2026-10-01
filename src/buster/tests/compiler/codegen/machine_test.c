@@ -3043,6 +3043,136 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
                                reused.stack_slot_offsets[0] == reused.stack_slot_offsets[3]);
     BUSTER_TEST(arguments, reused.stack_slot_offsets[2] != reused.stack_slot_offsets[0]);
     BUSTER_TEST(arguments, reused.frame_size < dedicated.frame_size);
+
+    // Absent certificates preserve manual fixtures' existing reuse. A present
+    // array admits only NONVOLATILE objects; zero is unknown, not permission.
+    u8 slot_memory_flags[4];
+    for (u32 control = 0; control < 3; control += 1)
+    {
+        for (u32 slot = 0; slot < slot_count; slot += 1)
+        {
+            slot_memory_flags[slot] = (u8)(control == 2 ? 0u : MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
+        }
+        function.stack_slot_memory_flags = control == 0 ? 0 : slot_memory_flags;
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            MachineStackPlacement certified =
+                mode == 0 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+            BUSTER_TEST(arguments, certified.valid && certified.stack_slot_offsets != 0);
+            if (certified.valid && certified.stack_slot_offsets)
+            {
+                if (control == 2)
+                {
+                    for (u32 first = 0; first < slot_count; first += 1)
+                    {
+                        for (u32 second = first + 1u; second < slot_count; second += 1)
+                        {
+                            BUSTER_TEST(arguments, certified.stack_slot_offsets[first] != certified.stack_slot_offsets[second]);
+                        }
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, certified.stack_slot_offsets[0] == certified.stack_slot_offsets[1] &&
+                                               certified.stack_slot_offsets[0] == certified.stack_slot_offsets[3]);
+                    BUSTER_TEST(arguments, certified.stack_slot_offsets[2] != certified.stack_slot_offsets[0]);
+                }
+            }
+        }
+    }
+
+    // Join the actual selector's certificate producer to both placement modes.
+    // Each volatile span taints one otherwise-shareable object's entire slot,
+    // while the other two disjoint objects may still share their storage.
+    u32 volatile_slots[] = {0, 1, 3};
+    u32 volatile_rows[] = {1, 3, 6};
+    IrInstruction certificate_instructions[] = {{.volatile_access = true}, {0}};
+    IrFunction certificate_source = {.instructions = certificate_instructions,
+                                     .instruction_count = BUSTER_ARRAY_LENGTH(certificate_instructions)};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(volatile_slots); variant += 1)
+    {
+        u32 volatile_slot = volatile_slots[variant];
+        u32 first_certified = volatile_slots[(variant + 1u) % BUSTER_ARRAY_LENGTH(volatile_slots)];
+        u32 second_certified = volatile_slots[(variant + 2u) % BUSTER_ARRAY_LENGTH(volatile_slots)];
+        MachineLineMark certificate_marks[] = {{.row = volatile_rows[variant], .instruction = 0},
+                                               {.row = volatile_rows[variant] + 2u, .instruction = 1}};
+        function.line_marks = certificate_marks;
+        function.line_mark_count = BUSTER_ARRAY_LENGTH(certificate_marks);
+        machine_selection_certify_stack_memory(arena, &function, &certificate_source);
+        BUSTER_TEST(arguments, function.stack_slot_memory_flags != 0);
+        if (function.stack_slot_memory_flags)
+        {
+            for (u32 slot = 0; slot < slot_count; slot += 1)
+            {
+                BUSTER_TEST(arguments, function.stack_slot_memory_flags[slot] ==
+                                           (slot == volatile_slot ? 0u : MACHINE_STACK_SLOT_MEMORY_NONVOLATILE));
+            }
+            BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+            BUSTER_TEST(arguments, machine_schedule_memory_access(&function, function.instructions + volatile_rows[variant]).kind ==
+                                       MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                MachineStackPlacement mixed =
+                    mode == 0 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+                BUSTER_TEST(arguments, mixed.valid && mixed.stack_slot_offsets != 0);
+                if (mixed.valid && mixed.stack_slot_offsets)
+                {
+                    for (u32 slot = 0; slot < slot_count; slot += 1)
+                    {
+                        if (slot != volatile_slot)
+                        {
+                            BUSTER_TEST(arguments, mixed.stack_slot_offsets[volatile_slot] != mixed.stack_slot_offsets[slot]);
+                        }
+                    }
+                    BUSTER_TEST(arguments, mixed.stack_slot_offsets[first_certified] == mixed.stack_slot_offsets[second_certified]);
+                    BUSTER_TEST(arguments, mixed.stack_slot_offsets[2] != mixed.stack_slot_offsets[first_certified]);
+                }
+            }
+            BUSTER_TEST(arguments, certificate_instructions[0].volatile_access && function.stack_slot_memory_flags[volatile_slot] == 0);
+        }
+    }
+
+    // Two volatile source spans must not share even though their row ranges
+    // are disjoint. This exposes the old zero-means-shareable polarity.
+    IrInstruction volatile_pair_instructions[] = {{.volatile_access = true}, {.volatile_access = true}, {0}};
+    IrFunction volatile_pair_source = {.instructions = volatile_pair_instructions,
+                                      .instruction_count = BUSTER_ARRAY_LENGTH(volatile_pair_instructions)};
+    MachineLineMark volatile_pair_marks[] = {{.row = 1, .instruction = 0},
+                                            {.row = 3, .instruction = 1},
+                                            {.row = 5, .instruction = 2}};
+    function.line_marks = volatile_pair_marks;
+    function.line_mark_count = BUSTER_ARRAY_LENGTH(volatile_pair_marks);
+    machine_selection_certify_stack_memory(arena, &function, &volatile_pair_source);
+    BUSTER_TEST(arguments, function.stack_slot_memory_flags != 0);
+    if (function.stack_slot_memory_flags)
+    {
+        BUSTER_TEST(arguments, function.stack_slot_memory_flags[0] == 0 && function.stack_slot_memory_flags[1] == 0 &&
+                                   function.stack_slot_memory_flags[2] == MACHINE_STACK_SLOT_MEMORY_NONVOLATILE &&
+                                   function.stack_slot_memory_flags[3] == MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            MachineStackPlacement volatile_pair =
+                mode == 0 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+            BUSTER_TEST(arguments, volatile_pair.valid && volatile_pair.stack_slot_offsets != 0);
+            if (volatile_pair.valid && volatile_pair.stack_slot_offsets)
+            {
+                for (u32 first = 0; first < slot_count; first += 1)
+                {
+                    for (u32 second = first + 1u; second < slot_count; second += 1)
+                    {
+                        BUSTER_TEST(arguments, volatile_pair.stack_slot_offsets[first] != volatile_pair.stack_slot_offsets[second]);
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, volatile_pair_instructions[0].volatile_access && volatile_pair_instructions[1].volatile_access &&
+                                   function.stack_slot_memory_flags[0] == 0 && function.stack_slot_memory_flags[1] == 0);
+    }
+    function.line_marks = 0;
+    function.line_mark_count = 0;
+    function.stack_slot_memory_flags = 0;
     function.returns_twice_absence_certified = false;
     MachineStackPlacement uncertified = machine_fast_placement_build(arena, &function);
     BUSTER_TEST(arguments, uncertified.valid && uncertified.stack_slot_offsets[0] != uncertified.stack_slot_offsets[1]);
