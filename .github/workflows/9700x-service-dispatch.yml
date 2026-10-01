@@ -130,12 +130,17 @@ jobs:
       BQ_RECIPE: ${{ inputs.recipe }}
       BQ_JOB_TIMEOUT_SECONDS: 7200
     steps:
-      # Reviewed allowlist: recipe -> service runtime budget in seconds. Each
-      # budget must equal the broker's fixed RuntimeMaxSec, so the wait never
-      # gives up before the service itself would stop the job. The service
-      # finalization allowance covers the TERM/KILL escalation, stage cleanup,
-      # workspace removal, bundle publication and one bounded client poll.
-      # Admission must end early enough that the full wait fits in the job.
+      # Reviewed allowlist: recipe -> service runtime budget in seconds. Both
+      # recipes wait for the broker's fixed RuntimeMaxSec, which bounds the
+      # outer unit from its start. zen5-calibration-v1 also enforces its own
+      # profile budget-seconds (2700), but that clock starts inside the unit,
+      # after materialization, so waiting only that long could give up on a
+      # job the service still runs. The service finalization allowance covers
+      # materialization, the TERM/KILL escalation, stage cleanup, workspace
+      # removal, bundle publication and one bounded client poll. The wait
+      # starts at admission, so a job queued behind another can still outlive
+      # it; the result stays retrievable. Admission must end early enough that
+      # the full wait fits in the job.
       - name: Select the reviewed recipe and its result-wait budget
         id: budget
         shell: bash

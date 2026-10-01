@@ -331,10 +331,15 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   Its `recipe` input chooses from a reviewed allowlist
   (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
   the installed service still serves only its compiled registry, which today
-  admits only the one-pair `validate-buster-v1` smoke recipe. That recipe is
+  serves the one-pair `validate-buster-v1` smoke recipe and the
+  `zen5-calibration-v1` (#426) A/A calibration capture (one revision named
+  twice; see `tools/bench_service/README.md`). A service installed before
+  this registry refuses zen5 until the operator reinstalls service, broker and
+  gate together from protected main. The smoke recipe is
   not the former stage-1 diagnostic, an A/A qualification, or a performance
-  verdict. The result wait comes from the selected recipe's reviewed budget
-  and is capped by the job timeout; see
+  verdict, and the calibration capture never authorizes A/B. The result wait
+  is the broker's `RuntimeMaxSec` plus a finalization allowance and is capped
+  by the job timeout; see
   [`tools/bench_service/deploy/VALIDATE_BUSTER_V1.md`](../../tools/bench_service/deploy/VALIDATE_BUSTER_V1.md).
   Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
   manual approval step: a per-attempt `authorize` job and the `submit` job
@@ -527,6 +532,15 @@ require its output hash to match the ordinary compiler, and retain raw
 metrics. These calling-thread counters do not aggregate persistent lanes,
 time appends, or cover every operand decoder. They do not establish a
 Zen 5 speedup, live memory reduction, or whole-pipeline cost.
+
+## Whole-compiler work ledger
+
+The same diagnostic build also writes `work.*` counters: exact, mechanism-grouped
+work counts (re-derived queries, rollback snapshots, whole-table per-query
+work, literal decoding, interning, target-table preparation, machine records,
+output bytes) and per-phase minor-fault and arena rows. Use them to rank and
+prove removed work, never as timing evidence; see [the work ledger](../work-ledger.md)
+for the key contract and the frozen-corpus runner under `tools/work_ledger/`.
 
 ## Object assembly-printer scaling
 

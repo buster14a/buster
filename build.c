@@ -29,6 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
+//   bench_service_zen5_*                        served zen5-calibration-v1 recipe (tools/bench_service/zen5_recipe.c)
 //   bench_service_broker_add                    Linux broker, static entry/payload gates and regression probes
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
@@ -37,6 +38,10 @@
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
+// The allocation-census harness builds this driver with
+// BUSTER_BENCH_ALLOCATIONS=1, but the work ledger's storage lives in the
+// compiler's ir.c, which the driver does not include (work_ledger.h).
+#define BUSTER_WORK_LEDGER 0
 // TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
 // drivers can opt into the existing lane gang with test_differential --jobs.
 #if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
@@ -87,6 +92,9 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_PRODUCTION_PROFILE,
@@ -39225,6 +39233,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
     return result;
 }
 
+#include "tools/bench_service/zen5_recipe.c"
+
 #if BUSTER_LINUX
 typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
 struct BenchServiceRecipeTestFixture
@@ -40155,6 +40165,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 }
 #endif
 
+#include "tools/bench_service/zen5_recipe_test.c"
+
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 {
     native_foundation_tool_add(arena, arguments, true);
@@ -40439,6 +40451,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE] = S8_INITIALIZER("bench_service_zen5_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE] = S8_INITIALIZER("bench_service_zen5_capture"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_zen5_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
@@ -40593,6 +40608,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
+            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE ||
+            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
@@ -41544,6 +41561,21 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = recipe_self_test_arguments.length ?
                      bench_service_recipe_materialized_self_test(arena, recipe_self_test_arguments) :
                      bench_service_recipe_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE:
+        {
+            result = bench_service_zen5_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE:
+        {
+            result = bench_service_zen5_capture_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST:
+        {
+            result = bench_service_zen5_recipe_self_test(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:

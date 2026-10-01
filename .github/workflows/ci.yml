@@ -297,53 +297,42 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
-        # Thirteen suites include native fixture builds and process launches.
+        # Native fixture builds and process launches; see docs/ci-bootstrap-wrapper.md.
         # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
         # exhausted 120s in run 35934837738 despite passing suite summaries.
         timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          workflow_tools_started=$SECONDS
-          run_suite() {
-            local suite=$1 log=$2 started=$SECONDS status
-            printf 'SUITE_START path=%s at=%s\n' "$suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/$log"; then
-              printf 'SUITE_END path=%s result=success elapsed_seconds=%s at=%s\n' \
-                "$suite" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            else
-              status=$?
-              printf 'SUITE_END path=%s result=failure status=%s elapsed_seconds=%s at=%s\n' \
-                "$suite" "$status" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              return "$status"
-            fi
-          }
-          run_suite tests/ci_tools_test.py workflow-tools.log
-          run_suite tools/ci_admission_test.py ci-admission.log
-          run_suite tools/main_ci_reuse_test.py main-ci-reuse.log
-          run_suite tools/ci_zig_test.py zig-installer-test.log
-          run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log
-          run_suite tools/ci_android_sdk_test.py android-sdk-installer-test.log
-          run_suite tools/analyzer_selection_test.py analyzer-selection.log
-          run_suite tools/coverage_manifest_test.py coverage-manifest.log
-          run_suite tools/matrix_shard_test.py matrix-shard.log
-          run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
-          run_suite tools/native_producer_profile_test.py native-producer-profile.log
-          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
-          run_suite tools/ci_llvm_test.py llvm-installer-test.log
-          run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
-          run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
-          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
-          run_suite tools/ci_native_observation_test.py native-observation-test.log
-          run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
-          run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
-          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
+          # Independent suites share three lanes, slowest first (#2021).
+          suites=(
+            tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
+            tools/coverage_manifest_test.py=coverage-manifest.log
+            tools/matrix_shard_test.py=matrix-shard.log
+            tests/ci_tools_test.py=workflow-tools.log
+            tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
+            tools/ci_matrix_phases_test.py=matrix-phases-test.log
+            tools/ci_native_observation_test.py=native-observation-test.log
+            tools/native_target_compatibility_test.py=native-target-compatibility.log
+            tools/ci_admission_test.py=ci-admission.log
+            tools/main_ci_reuse_test.py=main-ci-reuse.log
+            tools/ci_zig_test.py=zig-installer-test.log
+            tools/ci_zig_cache_test.py=zig-cache-policy-test.log
+            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
+            tools/analyzer_selection_test.py=analyzer-selection.log
+            tools/differential_ci_policy_test.py=differential-ci-policy.log
+            tools/native_producer_profile_test.py=native-producer-profile.log
+            tools/ci_llvm_test.py=llvm-installer-test.log
+            tools/ci_configure_evidence_test.py=configure-evidence-test.log
+            tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
+            tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
+            tools/github_ci_time_test.py=ci-queue-timing-test.log
+            tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
+          )
           if [[ '${{ matrix.os }}' == macos ]]; then
-            run_suite tools/ci_runner_resources_test.py runner-resources-test.log
+            suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
           fi
-          printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
-            "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          "$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
@@ -361,7 +350,11 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          else
+            "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          fi
 
       - name: Install mold
         id: mold

@@ -240,6 +240,28 @@ struct OsTestThreadLivenessState
 
 // Parks until released so the caller can observe the process while this thread
 // is provably still running.
+// A created thread compiles like the main thread (driver test gangs, the
+// -fcompile-jobs lanes), so it must hold a frame far beyond Apple's 512 KiB
+// secondary-thread default. Touch one byte per page of a 2 MiB frame.
+#define OS_TEST_THREAD_STACK_FRAME_BYTES BUSTER_MB(2)
+#define OS_TEST_THREAD_STACK_PAGE_BYTES 4096
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_large_frame(void* argument)
+{
+    u64* checksum = (u64*)argument;
+    volatile u8 frame[OS_TEST_THREAD_STACK_FRAME_BYTES];
+    for (u64 offset = 0; offset < OS_TEST_THREAD_STACK_FRAME_BYTES; offset += OS_TEST_THREAD_STACK_PAGE_BYTES)
+    {
+        frame[offset] = (u8)(offset / OS_TEST_THREAD_STACK_PAGE_BYTES);
+    }
+    u64 sum = 0;
+    for (u64 offset = 0; offset < OS_TEST_THREAD_STACK_FRAME_BYTES; offset += OS_TEST_THREAD_STACK_PAGE_BYTES)
+    {
+        sum += frame[offset];
+    }
+    *checksum = sum;
+}
+
 BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
 {
     OsTestThreadLivenessState* state = (OsTestThreadLivenessState*)argument;
@@ -2384,6 +2406,23 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_thread_join(thread));
             BUSTER_TEST(arguments, os_is_only_live_thread());
             BUSTER_TEST(arguments, liveness.worker_saw_only_live_thread == 0);
+        }
+
+        u64 frame_checksum = 0;
+        u64 expected_checksum = 0;
+        for (u64 page = 0; page < OS_TEST_THREAD_STACK_FRAME_BYTES / OS_TEST_THREAD_STACK_PAGE_BYTES; page += 1)
+        {
+            expected_checksum += (u8)page;
+        }
+        OsThreadHandle* large_frame = os_thread_create((ThreadCreateOptions){
+            .callback = &os_test_thread_large_frame,
+            .argument = &frame_checksum,
+        });
+        BUSTER_TEST(arguments, large_frame != 0);
+        if (large_frame)
+        {
+            BUSTER_TEST(arguments, os_thread_join(large_frame));
+            BUSTER_TEST(arguments, frame_checksum == expected_checksum);
         }
 #endif
     }

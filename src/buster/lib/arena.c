@@ -18,6 +18,13 @@ void arena_test_fail_next_reserve(void)
     arena_fail_next_reserve = true;
 }
 
+BUSTER_GLOBAL_LOCAL bool arena_test_release_fill;
+
+void arena_test_fill_releases(bool enabled)
+{
+    arena_test_release_fill = enabled;
+}
+
 void arena_test_fail_next_commit(void)
 {
     arena_fail_next_commit = true;
@@ -177,6 +184,8 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     bool result = true;
     if (decommit_start < decommit_end)
     {
+        // Pages handed back to the OS carry no released-range poison with them.
+        BUSTER_ARENA_UNPOISON((u8*)arena + decommit_start, decommit_end - decommit_start);
         result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
         if (result)
         {
@@ -201,6 +210,40 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
 #endif
     }
     return result;
+}
+
+u64 arena_release_to_position(Arena* arena, u64 position)
+{
+    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= arena->position);
+    u64 result = arena->position - position;
+#if BUSTER_INCLUDE_TESTS
+    if (arena_test_release_fill)
+    {
+        // Alignment padding and earlier nested releases inside the range are
+        // not addressable to AddressSanitizer; the fill is, until re-poisoned.
+        BUSTER_ARENA_UNPOISON((u8*)arena + position, result);
+        memset((u8*)arena + position, ARENA_TEST_RELEASE_FILL, result);
+    }
+#endif
+    BUSTER_ARENA_POISON((u8*)arena + position, result);
+    arena_set_position_unchecked(arena, position);
+    return result;
+}
+
+void arena_retire(Arena* arena, u64 retained_size)
+{
+    BUSTER_VALIDATE(retained_size <= arena->reserved_size - arena_minimum_position);
+    u64 retained = arena_minimum_position + retained_size;
+    if (arena->os_position > retained)
+    {
+        // Decommit moves the cursor to its boundary, so the cursor visits the
+        // retained edge first and returns to the start afterwards; the dirty
+        // mark then covers exactly the retained prefix.
+        arena_set_position(arena, retained);
+        BUSTER_VALIDATE(arena_set_position_and_decommit(arena, retained));
+    }
+    arena_set_position(arena, arena_minimum_position);
+    BUSTER_VALIDATE(arena_destroy(arena, 1));
 }
 
 BUSTER_GLOBAL_LOCAL ArenaCreation arena_creation_parameters(ArenaCreation original)
@@ -299,6 +342,9 @@ bool arena_destroy(Arena* arena, u64 count)
     count = count == 0 ? 1 : count;
     u64 reserved_size = arena->reserved_size;
     bool result;
+    // A released range stays poisoned until the next allocation reaches it;
+    // neither a pooled reuse nor a later mapping at this address may inherit it.
+    BUSTER_ARENA_UNPOISON((u8*)arena + arena_minimum_position, BUSTER_MAX(arena_dirty_position(arena), arena->os_position) - arena_minimum_position);
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
         arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
