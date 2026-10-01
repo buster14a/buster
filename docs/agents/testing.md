@@ -208,6 +208,13 @@
   receipt distinguishes this path from direct shutdown and the already-Shutdown
   timeout reconciliation; `ios/hosted_signing_budget_test.py` covers both the
   successful and fail-closed cases.
+- Android SDK setup uses `tools/ci_android_sdk.py` with three bounded attempts.
+  Each attempt requests only structurally missing or invalid packages, keeping
+  valid preinstalled packages and packages completed by an earlier attempt.
+  Detailed `sdkmanager` output and initial package validation are retained in
+  the mobile artifact. Every required package is validated after each attempt;
+  a nonzero installer status or invalid package still fails setup. Run
+  `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
