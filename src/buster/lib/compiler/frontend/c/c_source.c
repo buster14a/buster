@@ -3338,7 +3338,11 @@ BUSTER_C_INTERNAL CLexResult c_source_cache_copy(Arena* arena, CSpellingSpace* s
 {
     CLexResult result = *source;
     u64 size = source->translated_source.length + 1;
-    char8* text = space ? c_space_allocate(space, size) : arena_allocate(arena, char8, size);
+    // Preserve the cold spelling reservation and subsequent offsets even when
+    // CRLF folding or splicing shrank the translated text. Retained templates
+    // themselves stay compact; only the current spelling space uses raw size.
+    u64 capacity = space ? source->metrics.bytes + 1 : size;
+    char8* text = space ? c_space_allocate(space, capacity) : arena_allocate(arena, char8, size);
     memcpy(text, source->translated_source.pointer, size);
     result.translated_source.pointer = text;
     result.translated_offset = space ? c_space_offset(space, text) : 0;
