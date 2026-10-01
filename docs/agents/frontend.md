@@ -34,6 +34,15 @@ bytes. Lexical aliases, hard links, followed symbolic links and case aliases on
 case-insensitive filesystems therefore share one suppression record. Builtin
 headers and Android APK assets remain in their normalized path namespaces.
 
+The driver passes the supplying root descriptor's identity through
+`CPreprocessOptions.source_identity`, so root `#pragma once` and self-imports
+share the include key, including physical aliases. An in-memory caller leaves
+that identity invalid and keeps its own path namespace; preprocessing never
+opens the root path to infer an identity for different supplied bytes. Imports
+suppress any previously entered identity, while ordinary unguarded includes
+still repeat. The root comparison is lazy, avoiding a once table allocation for
+an include-free source.
+
 The first resolved spelling remains the diagnostic/source-map spelling and the
 per-path metrics key; canonical identity never rewrites user-facing paths. The
 open-addressed table stays at most half full, diagnoses invalid identity or

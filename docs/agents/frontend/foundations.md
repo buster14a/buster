@@ -254,6 +254,21 @@ without facts for identical bitcode and diagnostics.
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  Ordinary newline runs before a following `(` join the current source
+  batch, so direct names, object aliases and replacement tails find their
+  argument list across whitespace. Directive lines retain their ordered batch
+  boundary. Builtin `__LINE__` uses its invocation stamp, including an argument
+  on a later line of that batch.
+  `_Pragma`/`__pragma` push/pop macro effects execute at the expansion cursor
+  before following tokens, and are consumed there to prevent argument reuse
+  from replaying them. Pack markers retain their output-token positions.
+  ENABLE tasks own definition generations rather than just names: a restored
+  different definition can expand inside an older replacement. A pop snapshots
+  only suspended invocations whose definition it changes, and restores the
+  generation's disabled state from active ENABLE tasks without consuming them.
+  `c_macro_conditional_tests` checks these boundaries against literal token
+  expectations, independent hosted Clang/GCC preprocessors and both frontend
+  lowering forms.
   A non-builtin definition without `#` or `##` is written straight into its
   reserved batch by `c_macro_produce_plain_tasks` (exact size from
   `plain_count` and per-parameter use counts); builtins, stringify and paste

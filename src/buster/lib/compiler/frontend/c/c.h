@@ -11,6 +11,7 @@
 // assertions are reserved for internal invariants.
 
 #include <buster/lib/arena.h>
+#include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
 #include <buster/lib/compiler/frontend/c/c_census.h>
@@ -533,6 +534,9 @@ struct CPreprocessOptions
     String8* include_paths;
     String8* system_include_paths;
     String8 source_path;
+    // Identity of the descriptor that supplied source, when available.
+    // In-memory callers retain the path namespace by leaving this invalid.
+    FileIdentity source_identity;
     Target target;
     TargetDataLayout data_layout;
     u32 macro_operation_count;
