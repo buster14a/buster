@@ -20,6 +20,22 @@ SCRIPT = Path(__file__).with_name("ci_runner_resources.py")
 
 
 class RunnerResourceTests(unittest.TestCase):
+    def test_signal_handler_only_records_stop_request(self):
+        stop_event = mock.Mock()
+        stop_event.set.side_effect = AssertionError("signal handler must not acquire a lock")
+        with mock.patch.object(resources, "STOP", stop_event):
+            resources.stop(signal.SIGTERM, None)
+            self.assertIs(resources.STOP, True)
+        stop_event.set.assert_not_called()
+
+    def test_wait_interval_observes_stop_within_poll_bound(self):
+        request_stop = lambda _seconds: resources.stop(signal.SIGTERM, None)
+        with mock.patch.object(resources, "STOP", False), \
+             mock.patch.object(resources.time, "monotonic", side_effect=[0, 1]), \
+             mock.patch.object(resources.time, "sleep", side_effect=request_stop) as sleep:
+            resources.wait_interval(30)
+        sleep.assert_called_once_with(resources.STOP_POLL_SECONDS)
+
     def test_tree_excludes_unrelated_processes_and_sampler_subtree(self):
         listing = """100 1 2.0 1000 bash
 110 100 30.5 4000 /usr/bin/clang
